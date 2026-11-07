@@ -125,6 +125,7 @@ struct Seen {
     freezes: Vec<FreezeRequest>,
     died: Vec<Died>,
     wards: Vec<wards::WardStruck>,
+    blasts: Vec<engine_world::WorldImpulse>,
 }
 
 fn snapshot(scene: Res<SceneRes>, q: Query<(Entity, &GlobalTransform, &Body)>) {
@@ -150,7 +151,9 @@ fn collect(
     mut freezes: MessageReader<FreezeRequest>,
     mut died: MessageReader<Died>,
     mut struck: MessageReader<wards::WardStruck>,
+    mut blasts: MessageReader<engine_world::WorldImpulse>,
 ) {
+    seen.blasts.extend(blasts.read().copied());
     seen.wards.extend(struck.read().copied());
     seen.cues.extend(cues.read().cloned());
     seen.freezes.extend(freezes.read().copied());
@@ -2911,5 +2914,391 @@ fn the_shield_hall_breaks_one_shield_and_sends_bolts_back_from_the_other() {
     assert_eq!(perfect, 2, "lane 3's two perfect blocks");
     assert!(broke >= 1, "lane 4's shield broke");
     assert!(soaked > 5, "the fire shield soaked the flame jet");
+    assert!(most < 4000, "{most}");
+}
+
+fn cataclysm_now(app: &mut App) -> serde_json::Value {
+    call_api(&mut app.world, "magic.cataclysm", json!({})).unwrap()
+}
+
+fn damage_to(app: &App, e: Entity) -> f32 {
+    app.world
+        .resource::<Seen>()
+        .damage
+        .iter()
+        .filter(|d| d.target == e)
+        .map(|d| d.amount)
+        .sum()
+}
+
+fn named_count(app: &mut App, name: &str) -> usize {
+    let mut q = app.world.query::<&Name>();
+    q.iter(&app.world).filter(|n| n.as_str() == name).count()
+}
+
+fn meteor() -> SpellDesign {
+    SpellDesign::new(&["stone"], CastType::Rain).named("Meteor")
+}
+
+/// Step until `done` (or `secs` pass); the seconds it took.
+fn run_until(app: &mut App, secs: f32, mut done: impl FnMut(&mut App) -> bool) -> Option<f32> {
+    for i in 0..(secs * 60.0) as usize {
+        app.update();
+        if done(app) {
+            return Some(i as f32 / 60.0);
+        }
+    }
+    None
+}
+
+#[test]
+fn a_meteor_falls_on_its_ring_and_blasts_friend_and_foe_into_a_crater() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 22.0), Mastery::Expert);
+    // A friend of the caster's beside the dummy it aims at: Cataclysm spares no one.
+    let friend = mage(&mut app, DVec3::new(1.6, 0.0, 0.8), Mastery::Adept);
+    app.world.entity_mut(friend).insert(Body(0.5));
+    let foe = dummy(&mut app, DVec3::new(0.0, 0.0, 0.0));
+    let edge = dummy(&mut app, DVec3::new(-3.0, 0.0, 0.0));
+    let far = dummy(&mut app, DVec3::new(14.0, 0.0, 0.0));
+    let barrel = app
+        .world
+        .spawn((
+            Name::new("Barrel"),
+            Transform::from_translation(DVec3::new(0.0, 0.0, -2.2)),
+            RigidBody {
+                kind: BodyKind::Dynamic,
+                mass_kg: Some(40.0),
+                ..Default::default()
+            },
+        ))
+        .id();
+    run(&mut app, 0.1);
+    cast(&mut app, me, meteor(), Aim::Entity(foe));
+    // The ring is on the ground at the dummy's feet before the rock comes down.
+    let seen_at = run_until(&mut app, 3.0, |a| {
+        cataclysm_now(a)["meteors"].as_array().unwrap().len() == 1
+    })
+    .expect("a meteor in the sky");
+    let now = cataclysm_now(&mut app);
+    let m = &now["meteors"][0];
+    let lands: Vec<f64> = serde_json::from_value(m["lands_at"].clone()).unwrap();
+    assert!(
+        lands[0].abs() < 0.1 && lands[1].abs() < 0.05 && lands[2].abs() < 0.1,
+        "{m}"
+    );
+    let eta = m["eta_s"].as_f64().unwrap();
+    assert!((1.2..1.7).contains(&eta), "it falls for 1.2-1.7 s: {eta}");
+    let at: Vec<f64> = serde_json::from_value(m["at"].clone()).unwrap();
+    assert!(
+        at[1] > 45.0 && at[2] < -15.0,
+        "from high, beyond the target: {at:?}"
+    );
+    let size = m["size_m"].as_f64().unwrap();
+    let blast = m["blast_m"].as_f64().unwrap();
+    assert!(
+        (0.7..1.6).contains(&size) && blast > 2.0 * size,
+        "{size} {blast}"
+    );
+    assert_eq!(named_count(&mut app, "Meteor mark"), 1);
+    assert!(hits_on(&app, foe).is_empty(), "nothing before it lands");
+    // It lands.
+    let landed = run_until(&mut app, 2.0, |a| {
+        !cataclysm_now(a)["craters"].as_array().unwrap().is_empty()
+    })
+    .expect("a crater");
+    println!("seen at {seen_at:.2}s, landed {landed:.2}s later; size {size}, blast {blast}");
+    assert!((landed as f64 - eta).abs() < 0.15, "{landed} {eta}");
+    run(&mut app, 0.1);
+    // Friend and foe were struck, the dummy in the middle hardest; the far one not at all.
+    let (hit_foe, hit_edge, hit_friend) = (
+        damage_to(&app, foe),
+        damage_to(&app, edge),
+        damage_to(&app, friend),
+    );
+    println!("damage: foe {hit_foe}, edge {hit_edge}, friend {hit_friend}");
+    assert!(hit_foe > 0.0 && hit_friend > 0.0 && hit_edge > 0.0);
+    assert!(hit_foe > hit_edge * 1.3, "falloff: {hit_foe} {hit_edge}");
+    assert!(hits_on(&app, far).is_empty() && damage_to(&app, far) == 0.0);
+    // Thrown off their feet near the middle, not at the edge.
+    assert!(app.world.get::<cataclysm::Knocked>(foe).is_some());
+    assert!(app.world.get::<cataclysm::Knocked>(edge).is_none());
+    // The barrel flies out and up.
+    let imp = app
+        .world
+        .resource::<Seen>()
+        .impulses
+        .iter()
+        .find(|i| i.entity == barrel)
+        .copied()
+        .expect("the barrel is thrown");
+    assert!(
+        imp.impulse.y > 100.0 && imp.impulse.z < -50.0,
+        "{:?}",
+        imp.impulse
+    );
+    // The world felt it: a blast with energy enough to break things.
+    let w = app
+        .world
+        .resource::<Seen>()
+        .blasts
+        .iter()
+        .find(|b| b.source == Some(me))
+        .copied()
+        .expect("a WorldImpulse");
+    assert!(w.energy_j > 1.0e5 && w.radius > blast as f32, "{w:?}");
+    // The crater: a rim of rock, the boulder in it, hot debris; the ring is gone.
+    let c = &cataclysm_now(&mut app)["craters"][0];
+    assert!(c["heat"].as_f64().unwrap() > 0.9, "{c}");
+    assert!(named_count(&mut app, "Crater rim") >= 9);
+    assert!(named_count(&mut app, "Meteor debris") >= 5);
+    run(&mut app, 0.5);
+    assert_eq!(named_count(&mut app, "Meteor mark"), 0);
+    // The dummy gets up again; the boulder cools over ten seconds.
+    run(&mut app, 1.2);
+    assert!(app.world.get::<cataclysm::Knocked>(foe).is_none());
+    run(&mut app, 9.0);
+    let c = &cataclysm_now(&mut app)["craters"][0];
+    assert!(c["heat"].as_f64().unwrap() < 0.05, "{c}");
+}
+
+#[test]
+fn a_safeguarded_meteor_spares_friends() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 22.0), Mastery::Expert);
+    let friend = mage(&mut app, DVec3::new(1.0, 0.0, 0.0), Mastery::Adept);
+    app.world.entity_mut(friend).insert(Body(0.5));
+    let foe = dummy(&mut app, DVec3::new(-1.0, 0.0, 0.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        meteor().with(Modifier::Safeguard),
+        Aim::Point(DVec3::ZERO),
+    );
+    run(&mut app, 3.0);
+    assert!(damage_to(&app, foe) > 0.0);
+    assert_eq!(damage_to(&app, friend), 0.0);
+}
+
+#[test]
+fn a_masters_swarm_drops_five_meteors_one_after_another() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 24.0), Mastery::Master);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        meteor().with(Modifier::Split { count: 5 }),
+        Aim::Point(DVec3::ZERO),
+    );
+    let mut most = 0;
+    let mut etas = Vec::new();
+    for _ in 0..(5.0 * 60.0) as usize {
+        app.update();
+        let now = cataclysm_now(&mut app);
+        let ms = now["meteors"].as_array().unwrap();
+        most = most.max(ms.len());
+        if ms.len() == 5 && etas.is_empty() {
+            etas = ms.iter().map(|m| m["eta_s"].as_f64().unwrap()).collect();
+        }
+    }
+    let now = cataclysm_now(&mut app);
+    let craters = now["craters"].as_array().unwrap();
+    println!(
+        "most in the sky {most}; etas {etas:?}; craters {}",
+        craters.len()
+    );
+    assert_eq!(craters.len(), 5, "five landed");
+    assert_eq!(most, 5, "all five were in the sky at once");
+    etas.sort_by(f64::total_cmp);
+    assert!(etas[4] - etas[0] > 1.2, "one after another: {etas:?}");
+    // Spread round the aim, not on one spot.
+    let spots: Vec<Vec<f64>> = craters
+        .iter()
+        .map(|c| serde_json::from_value(c["at"].clone()).unwrap())
+        .collect();
+    let apart = spots
+        .iter()
+        .flat_map(|a| spots.iter().map(move |b| (a[0] - b[0]).hypot(a[2] - b[2])))
+        .fold(0.0, f64::max);
+    assert!(apart > 2.5, "{spots:?}");
+}
+
+#[test]
+fn a_ward_takes_a_meteor_and_nothing_under_it_is_hurt() {
+    let mut app = app();
+    let warden = mage(&mut app, DVec3::new(0.0, 0.0, 0.0), Mastery::Master);
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, 24.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 1;
+    let inside = dummy(&mut app, DVec3::new(1.0, 0.0, 0.5));
+    // The dummy is the warden's (it would be spared by the dome otherwise).
+    cast(
+        &mut app,
+        warden,
+        SpellDesign::new(&["ward"], CastType::Area),
+        Aim::Point(DVec3::ZERO),
+    );
+    run(&mut app, 0.6);
+    assert_eq!(barriers(&mut app).len(), 1);
+    cast(
+        &mut app,
+        foe,
+        meteor(),
+        Aim::Point(DVec3::new(0.5, 0.0, 0.0)),
+    );
+    run(&mut app, 3.0);
+    let seen = app.world.resource::<Seen>();
+    assert!(seen.wards.iter().any(|w| w.barrier), "the dome was struck");
+    assert_eq!(damage_to(&app, warden), 0.0);
+    assert_eq!(damage_to(&app, inside), 0.0);
+    assert!(
+        cataclysm_now(&mut app)["craters"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "it burst on the dome: no crater under it"
+    );
+}
+
+#[test]
+fn a_fault_line_runs_throws_who_stands_on_it_and_shakes_again() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 0.0), Mastery::Adept);
+    let on = dummy(&mut app, DVec3::new(0.2, 0.0, -7.0));
+    let late = dummy(&mut app, DVec3::new(-0.2, 0.0, -15.0));
+    let off = dummy(&mut app, DVec3::new(4.0, 0.0, -7.0));
+    let crate_e = app
+        .world
+        .spawn((
+            Name::new("Crate"),
+            Transform::from_translation(DVec3::new(0.0, 0.0, -11.0)),
+            RigidBody {
+                kind: BodyKind::Dynamic,
+                mass_kg: Some(30.0),
+                ..Default::default()
+            },
+        ))
+        .id();
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["stone"], CastType::Wave).named("Fault line"),
+        Aim::Point(DVec3::new(0.0, 0.0, -20.0)),
+    );
+    let started = run_until(&mut app, 2.0, |a| {
+        !cataclysm_now(a)["faults"].as_array().unwrap().is_empty()
+    })
+    .expect("a crack");
+    let f = cataclysm_now(&mut app)["faults"][0].clone();
+    let len = f["length_m"].as_f64().unwrap();
+    assert!((16.0..19.0).contains(&len), "it runs its whole length: {f}");
+    let end: Vec<f64> = serde_json::from_value(f["end"].clone()).unwrap();
+    assert!(
+        end[2] < -15.0 && end[0].abs() < 1.0,
+        "toward the aim: {end:?}"
+    );
+    // The front runs: it reaches the first dummy before the second.
+    let t_on = run_until(&mut app, 2.0, |a| !hits_on(a, on).is_empty()).expect("on is hit");
+    assert!(hits_on(&app, late).is_empty(), "not yet");
+    assert!(
+        app.world.get::<cataclysm::Knocked>(on).is_some(),
+        "thrown down"
+    );
+    let t_late = run_until(&mut app, 2.0, |a| !hits_on(a, late).is_empty()).expect("late is hit");
+    println!("crack at {started:.2}s; on +{t_on:.2}s, late +{t_late:.2}s; {f}");
+    assert!((0.35..0.9).contains(&t_late), "14 m/s: 8 m in {t_late}");
+    assert_eq!(hits_on(&app, on).len(), 1, "once as the crack passes");
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .impulses
+            .iter()
+            .any(|i| i.entity == crate_e && i.impulse.y > 0.0),
+        "the crate is tossed"
+    );
+    // The aftershock bursts along the whole line and hits both again.
+    run(&mut app, 1.3);
+    assert!(cataclysm_now(&mut app)["faults"][0]["aftershock"] == json!(true));
+    assert_eq!(hits_on(&app, on).len(), 2);
+    assert_eq!(hits_on(&app, late).len(), 2);
+    assert!(hits_on(&app, off).is_empty(), "4 m off the line");
+    assert!(hits_on(&app, me).is_empty(), "not its caster");
+    assert!(named_count(&mut app, "Fault slab") >= 30);
+    // It closes and is gone.
+    run(&mut app, 4.0);
+    assert!(
+        cataclysm_now(&mut app)["faults"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(named_count(&mut app, "Fault slab"), 0);
+}
+
+#[test]
+fn the_cataclysm_hall_drops_a_meteor_a_swarm_and_runs_two_fault_lines() {
+    let mut app = app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Cataclysm;
+        hall.restart = true;
+    }
+    let mut landed: Vec<(f32, f64, f64)> = Vec::new();
+    let mut faults_seen: Vec<(f32, u64)> = Vec::new();
+    let mut shocks: Vec<(f32, u64)> = Vec::new();
+    let mut most = 0;
+    let mut craters_before = 0;
+    let steps = (demo::cataclysm::PERIOD * 60.0) as usize;
+    for i in 0..steps {
+        app.update();
+        let t = i as f32 / 60.0;
+        let now = cataclysm_now(&mut app);
+        let craters = now["craters"].as_array().unwrap();
+        if craters.len() > craters_before {
+            for c in &craters[craters_before..] {
+                landed.push((
+                    t,
+                    c["at"][0].as_f64().unwrap(),
+                    c["at"][2].as_f64().unwrap(),
+                ));
+            }
+        }
+        craters_before = craters.len();
+        for f in now["faults"].as_array().unwrap() {
+            let id = f["id"].as_u64().unwrap();
+            if !faults_seen.iter().any(|(_, x)| *x == id) {
+                faults_seen.push((t, id));
+                println!("fault at {t:.2}: {f}");
+            }
+            if f["aftershock"] == json!(true) && !shocks.iter().any(|(_, x)| *x == id) {
+                shocks.push((t, id));
+            }
+        }
+        most = most.max(app.world.entities().len());
+    }
+    for (t, x, z) in &landed {
+        println!("crater at {t:.2}s ({x:.1}, {z:.1})");
+    }
+    println!(
+        "faults {faults_seen:?}; aftershocks {shocks:?}; entities at most {most}, now {}",
+        app.world.entities().len()
+    );
+    let lane = |x: f64| demo::art::LANES.iter().position(|l| (l - x).abs() <= 3.0);
+    assert_eq!(landed.iter().filter(|c| lane(c.1) == Some(3)).count(), 1);
+    assert_eq!(landed.iter().filter(|c| lane(c.1) == Some(4)).count(), 5);
+    assert_eq!(faults_seen.len(), 2);
+    assert_eq!(shocks.len(), 2);
+    // Everything is gone again by the period's end.
+    let now = cataclysm_now(&mut app);
+    println!("at the end: {now}");
+    assert!(now["faults"].as_array().unwrap().is_empty());
     assert!(most < 4000, "{most}");
 }

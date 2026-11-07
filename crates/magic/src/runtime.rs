@@ -203,6 +203,8 @@ pub struct Rainfall {
     pub age: f32,
     pub duration: f32,
     pub dropped: u32,
+    /// The caster's line, flat: meteors (Rain + stone) come in along it.
+    pub toward: Vec3,
 }
 
 /// One thing a carrier reached this step, applied in order by `hits::apply_hits`.
@@ -276,6 +278,8 @@ pub struct MagicQueue {
     pub travels: Vec<crate::space::Travel>,
     /// Grips to start (kinesis.rs).
     pub grips: Vec<crate::kinesis::Grip>,
+    /// Meteors to drop and fault lines to open (cataclysm.rs).
+    pub cataclysm: Vec<crate::cataclysm::NewCataclysm>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -891,6 +895,7 @@ pub fn release(
                 age: -c.delay,
                 duration: c.duration.max(0.5),
                 dropped: 0,
+                toward: flat,
             }));
         }
         CastType::OnSelf | CastType::Touch | CastType::Imbue => {
@@ -951,6 +956,15 @@ pub fn release(
         }
         CastType::Wave => {
             let start = ground_below(queries, body + (flat * 1.5).as_dvec3(), &exclude);
+            // Wave + stone splits the ground instead: a fault line runs (cataclysm.rs).
+            if spell.payload.fault {
+                queue.cataclysm.push(crate::cataclysm::NewCataclysm::Fault {
+                    cast: info.clone(),
+                    start,
+                    dir: flat,
+                });
+                return;
+            }
             queue.spawns.push(Spawn::Field(
                 Field {
                     wave: Some((flat, c.speed, c.range)),
@@ -2163,6 +2177,21 @@ pub fn tick_rain(
             let a = roll(seed, 11) * std::f32::consts::TAU;
             let d = roll(seed, 12).sqrt() * c.radius;
             let ground = r.center + DVec3::new((a.cos() * d) as f64, 0.0, (a.sin() * d) as f64);
+            // Rain + stone drops meteors: the first right on the aim, the rest of a swarm round
+            // it (cataclysm.rs).
+            if spell.payload.meteor_m > 0.0 {
+                queue
+                    .cataclysm
+                    .push(crate::cataclysm::NewCataclysm::Meteor {
+                        cast: CastInfo {
+                            seed: r.cast.seed.wrapping_add(i * 104_729),
+                            ..r.cast.clone()
+                        },
+                        ground: if i == 0 { r.center } else { ground },
+                        toward: r.toward,
+                    });
+                continue;
+            }
             let high = ground + DVec3::new(-3.0, 16.0 + 4.0 * roll(seed, 13) as f64, 2.0);
             let vel = (ground - high).as_vec3().normalize_or(Vec3::NEG_Y) * c.speed;
             queue.spawns.push(Spawn::Missile(
@@ -2738,6 +2767,7 @@ pub fn follow_world_shift(
     }
     for mut r in &mut q.p5() {
         r.center = s.point(r.center);
+        r.toward = s.direction(r.toward);
     }
     for mut a in &mut q.p6() {
         a.last_pos = a.last_pos.map(|p| s.point(p));

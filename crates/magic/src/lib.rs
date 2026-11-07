@@ -34,6 +34,7 @@
 
 pub mod api;
 pub mod caster;
+pub mod cataclysm;
 pub mod combine;
 pub mod compile;
 pub mod crafter;
@@ -171,6 +172,10 @@ impl Plugin for MagicPlugin {
                         runtime::tick_beams,
                         runtime::tick_chains,
                         runtime::tick_rain,
+                        cataclysm::spawn_cataclysm,
+                        cataclysm::fall_meteors,
+                        cataclysm::run_faults,
+                        cataclysm::apply_blasts,
                     )
                         .chain(),
                     kinesis::guard_rings,
@@ -196,6 +201,7 @@ impl Plugin for MagicPlugin {
                     walls::rise_walls,
                     stone::raise_stone,
                     summon::settle_rubble,
+                    cataclysm::tend_cataclysm,
                 )
                     .chain()
                     .in_set(MagicSet::Hits),
@@ -207,7 +213,11 @@ impl Plugin for MagicPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (runtime::follow_world_shift, summon::follow_world_shift)
+                (
+                    runtime::follow_world_shift,
+                    summon::follow_world_shift,
+                    cataclysm::follow_world_shift,
+                )
                     .in_set(WorldShiftSet::Apply)
                     .before(runtime::sync_transforms),
             );
@@ -216,6 +226,7 @@ impl Plugin for MagicPlugin {
         wards::register(app);
         space::register(app);
         kinesis::register(app);
+        cataclysm::register(app);
         demo::build(app);
     }
 }

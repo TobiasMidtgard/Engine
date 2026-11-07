@@ -98,6 +98,10 @@ pub struct Payload {
     /// A ward cast as a cone is a shield held before the caster (wards.rs): how long an NPC's or
     /// the hall's cast holds it up (the spell bar holds it while the key is down). 0: not one.
     pub shield_secs: f32,
+    /// A stone rain is a meteor (cataclysm.rs): the falling rock's size across, m (0: not one).
+    pub meteor_m: f32,
+    /// A stone wave is a fault line (cataclysm.rs): a crack runs along the ground.
+    pub fault: bool,
     /// Time scale factor and seconds.
     pub time: Option<(f32, f32)>,
     /// Blink distance, m (space.rs: to the aim point, never further).
@@ -284,6 +288,13 @@ fn compile_inner(
         c => c,
     };
     let size = ctx.power.size();
+    // Stone falling from the sky or splitting the ground (Cataclysm, cataclysm.rs).
+    let stone = w
+        .ingredients
+        .iter()
+        .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Stone)));
+    let meteor = stone && cast == CastType::Rain;
+    let fault = stone && cast == CastType::Wave;
     let mods = &design.modifiers;
     let factor = |f: &dyn Fn(&Modifier) -> Option<f32>| -> f32 {
         mods.iter().filter_map(f).product::<f32>().max(0.05)
@@ -313,6 +324,8 @@ fn compile_inner(
         CastType::Lob => (17.0, 32.0, 0.2 * shape, 1.0, 0.0, 0.0),
         CastType::Beam => (0.0, 22.0, 0.12 * shape, 0.0, 2.5, 0.1),
         CastType::Cone => (0.0, 7.0 * shape.sqrt(), 0.0, 0.0, 0.0, 0.0),
+        // A fault line's crack runs at 14 m/s and throws what stands within 1.4 m of it.
+        CastType::Wave if fault => (14.0, 18.0, 1.4, 0.0, 0.0, 0.0),
         CastType::Wave => (11.0, 20.0, 1.6 * shape, 0.0, 0.0, 0.0),
         CastType::Wall => (0.0, 20.0, 4.0 * shape, 0.0, 8.0, 0.5),
         CastType::Area => (0.0, 30.0, 3.0 * shape, 0.0, 0.0, 0.5),
@@ -320,6 +333,8 @@ fn compile_inner(
         CastType::Rune => (0.0, 20.0, 1.6 * shape, 0.0, 60.0, 0.0),
         CastType::Orbit => (2.6, 0.0, 0.14 * shape, 0.0, 10.0, 0.0),
         CastType::Chain => (0.0, 20.0, 0.0, 0.0, 0.0, 0.0),
+        // Meteors come down at 42 m/s, one per split, scattered over a few metres.
+        CastType::Rain if meteor => (42.0, 40.0, 1.5 + 1.5 * shape, 0.0, 0.0, 0.0),
         CastType::Rain => (22.0, 30.0, 5.0 * shape, 1.0, 2.5, 0.0),
         CastType::Touch => (0.0, 2.2, 0.4, 0.0, 0.0, 0.0),
         // A link that works every quarter second for 4 s (or while held), and snaps when
@@ -336,6 +351,7 @@ fn compile_inner(
     .unwrap_or(1);
     let count = match cast {
         CastType::Orbit => 3 * split.max(1),
+        CastType::Rain if meteor => split.max(1),
         CastType::Rain => (10.0 * size_k * size_k * split as f32).round() as u32,
         _ => split.max(1),
     };
@@ -388,6 +404,9 @@ fn compile_inner(
             && design.has(|m| matches!(m, Modifier::Duration { .. }))
         {
             4.0 * duration_k
+        } else if meteor {
+            // A swarm's rocks come down one after another, 0.45 s apart.
+            0.45 * (count.max(1) - 1) as f32 + 0.01
         } else {
             duration * duration_k
         },
@@ -440,6 +459,16 @@ fn compile_inner(
     } else {
         0.0
     };
+    // Rock from the sky or the ground's split strikes as a blow on top of any element: more
+    // per mana than Evocation's (the design's Cataclysm), shared between a swarm's rocks.
+    let damage = damage
+        + if meteor {
+            ctx.power.damage() * 1.8 * spread * if dark { 1.5 } else { 1.0 }
+        } else if fault {
+            ctx.power.damage() * 0.9 * if dark { 1.5 } else { 1.0 }
+        } else {
+            0.0
+        };
     let mut statuses: Vec<(Status, f32)> = w.elements.iter().map(|e| (e.status(), 1.0)).collect();
     if w.authored && w.elements.len() > 1 {
         for (s, n) in reaction.statuses {
@@ -508,6 +537,13 @@ fn compile_inner(
         } else {
             0.0
         },
+        // Near 0.8 m across for an Adept's rock, 1 m for an Expert's, 1.5 m for an Ascended's.
+        meteor_m: if meteor {
+            (0.6 + 0.5 * size).clamp(0.7, 3.0) * size_k.sqrt()
+        } else {
+            0.0
+        },
+        fault,
         time,
         blink_m: if has(&|k| matches!(k, EffectKind::Blink { .. })) {
             (8.0 * size.sqrt() * range_k).clamp(3.0, 60.0)

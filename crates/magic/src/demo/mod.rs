@@ -22,6 +22,7 @@
 //! | `spells_portal` | doors through space: a warden opens a portal on the floor and its other end down the hall, fires bolts through it into a dummy beyond, a storm beam bends through it, a push shoves a crate through, and a mage blinks off the dais twice and recalls back along its path ([`portal`], [`crate::space`]) |
 //! | `spells_kinesis` | telekinesis: a stone torn out of the floor and launched (then a burning one), a barrel and a crate lifted and thrown, a bolt caught in the air and thrown on, a loose dummy hurled down the hall, and a ring of torn stones that stops bolts and is flung at a dummy ([`kinesis`], [`crate::kinesis`]) |
 //! | `spells_shield` | shields you hold: one under a fire barrage cracks, flickers and shatters (its holder staggers), then regrows after a second; another raised just in time sends bolts back at the battle mage who cast them, then holds a fire shield into a flame jet ([`shield`], [`crate::wards`]) |
+//! | `spells_cataclysm` | Cataclysm: a burning meteor on a dummy among crates (its ring, the fall, the blast, a burning crater that cools), a Master's swarm of five, and fault lines that run down a lane throwing its dummies, then burst again ([`cataclysm`], [`crate::cataclysm`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -29,6 +30,7 @@
 //! The mages only cast while a camera is within 160 m, so the hall costs nothing elsewhere.
 
 pub mod art;
+pub mod cataclysm;
 pub mod craft;
 pub mod duel;
 pub mod kinesis;
@@ -234,6 +236,17 @@ pub const VIEWS: &[DemoView] = &[
         // The barrage has cracked lane 4's shield; lane 3's second bolt is on its way back.
         warmup: 5.0,
     },
+    DemoView {
+        key: "spells_cataclysm",
+        name: "Cataclysm: a burning meteor, a swarm of five and fault lines that throw dummies",
+        // High on the dais behind lane 3, down the hall with the sky above it: the meteors
+        // come down out of it toward the camera.
+        eye: [3.0, 6.2, 18.5],
+        target: [3.0, 3.4, -10.0],
+        hour: 16.6,
+        // Lane 3's meteor has struck: its crater burning, the swarm's rings pulsing far off.
+        warmup: 4.6,
+    },
 ];
 
 /// What the hall is running.
@@ -258,10 +271,11 @@ pub enum Program {
     Portal,
     Kinesis,
     Shield,
+    Cataclysm,
 }
 
 impl Program {
-    pub const ALL: [Program; 17] = [
+    pub const ALL: [Program; 18] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -279,6 +293,7 @@ impl Program {
         Program::Portal,
         Program::Kinesis,
         Program::Shield,
+        Program::Cataclysm,
     ];
 
     pub fn key(self) -> &'static str {
@@ -300,6 +315,7 @@ impl Program {
             Program::Portal => "spells_portal",
             Program::Kinesis => "spells_kinesis",
             Program::Shield => "spells_shield",
+            Program::Cataclysm => "spells_cataclysm",
         }
     }
 
@@ -336,6 +352,8 @@ impl Program {
             Program::Kinesis => 16.0,
             // Both shields are down and the battle mages stand fresh each period.
             Program::Shield => 16.0,
+            // Every crater has sunk and every crack closed before the next period's.
+            Program::Cataclysm => cataclysm::PERIOD,
         }
     }
 
@@ -889,6 +907,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
         Program::Portal => portal::lanes(),
         Program::Kinesis => kinesis::lanes(),
         Program::Shield => shield::lanes(),
+        Program::Cataclysm => cataclysm::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -1089,6 +1108,7 @@ fn setup_program(
         // next program's fire. Without vfx or fire the calls just fail.
         commands.queue(crate::wards::clear);
         commands.queue(crate::space::clear);
+        commands.queue(crate::cataclysm::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -1303,6 +1323,9 @@ fn setup_program(
     if program == Program::Shield {
         shield::spawn_props(&mut commands, origin);
     }
+    if program == Program::Cataclysm {
+        cataclysm::spawn_props(&mut commands, origin);
+    }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
             let base = origin + DVec3::new(*x, FLOOR, 0.0);
@@ -1427,6 +1450,7 @@ fn run_hall(
             | Program::Portal
             | Program::Kinesis
             | Program::Shield
+            | Program::Cataclysm
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
