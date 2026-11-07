@@ -2957,6 +2957,263 @@ fn box_blur(px: &[[f32; 4]], s: usize, r: usize) -> Vec<[f32; 4]> {
     pass(&pass(px, true), false)
 }
 
+/// Pixels per side of the cell paintings card outlines are found in ([`cell_outline`]).
+const OUTLINE_CELL_PX: u32 = 128;
+
+/// The outline of what atlas cell `cell` (of the leaf atlas, or with `mass` of the mass atlas)
+/// paints, for a card to cover only that: a convex polygon inside the cell with at most
+/// `corners` corners around every texel the painting covers at all, grown by a margin for its
+/// mip levels. Cell coordinates, x right and y down, counter-clockwise in (x, y). A card drawn
+/// as the whole cell paid its pixel shader for every texel, though a spray covers 11-31% of
+/// its cell (2026-11-07). Persson's particle trimming (GPU Pro 6) weighs the corners: more cut
+/// more empty pixels but cost vertices. `None` for one-image textures and for cells the
+/// outline would barely trim. Painted once per kind, cell and atlas and kept.
+pub fn cell_outline(
+    kind: LeafKind,
+    cell: usize,
+    seed: u64,
+    mass: bool,
+    corners: usize,
+) -> Option<std::sync::Arc<Vec<Vec2>>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Key = (LeafKind, usize, u64, bool, usize);
+    type Outlines = HashMap<Key, Option<Arc<Vec<Vec2>>>>;
+    static CACHE: OnceLock<Mutex<Outlines>> = OnceLock::new();
+    if !kind.is_atlas() {
+        return None;
+    }
+    let cell = cell % (ATLAS_CELLS * ATLAS_CELLS) as usize;
+    let key = (kind, cell, seed, mass, corners);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(found) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return found.clone();
+    }
+    let min_px = if kind.is_needles() { 1.0 } else { 0.0 };
+    let canvas = if mass {
+        mass_cell(kind, cell, OUTLINE_CELL_PX, seed, min_px)
+    } else {
+        paint_cell(kind, cell, OUTLINE_CELL_PX, seed, min_px)
+    };
+    // Needles are painted at least a pixel wide in every mip level (8 pixel cells at the
+    // least): their coverage spreads further out than level 0's.
+    let margin = if kind.is_needles() { 0.04 } else { 0.02 };
+    let outline = outline_of(&canvas, margin, corners).map(Arc::new);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, outline.clone());
+    outline
+}
+
+/// The trimmed outline of a painted cell ([`cell_outline`]).
+fn outline_of(canvas: &Canvas, margin: f32, corners: usize) -> Option<Vec<Vec2>> {
+    let s = canvas.size as usize;
+    let px = 1.0 / s as f32;
+    // The covered texels' outer corners: each row's first and last covered texel suffice.
+    let mut pts = Vec::new();
+    for y in 0..s {
+        let row = &canvas.px[y * s..(y + 1) * s];
+        let (Some(first), Some(last)) = (
+            row.iter().position(|p| p[3] > 0.0),
+            row.iter().rposition(|p| p[3] > 0.0),
+        ) else {
+            continue;
+        };
+        for x in [first, last + 1] {
+            for yy in [y, y + 1] {
+                pts.push(Vec2::new(x as f32 * px, yy as f32 * px));
+            }
+        }
+    }
+    let hull = convex_hull(pts);
+    if hull.len() < 3 {
+        return None;
+    }
+    // The grown outline's sides, each a line the painting lies wholly on one side of.
+    let grown = grow_polygon(&reduce_polygon(hull, 20), margin);
+    let n = grown.len();
+    let sides: Vec<(Vec2, Vec2)> = (0..n).map(|i| (grown[i], grown[(i + 1) % n])).collect();
+    // The cell cut by the few of them leaving the smallest polygon with `corners` corners or
+    // fewer: it stays inside the cell (beyond it a card would show its neighbor's painting),
+    // and draws with as many triangles as the cell's quad when `corners` is four. Every set
+    // of up to `corners` sides is tried (a few thousand cuts of a small polygon).
+    let cell = vec![Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y];
+    let mut best = (1.0f32, cell.clone());
+    let mut pick = Vec::with_capacity(corners);
+    try_cuts(&cell, &sides, 0, corners, corners, &mut pick, &mut best);
+    // Barely smaller than the cell: the whole cell's quad draws it about as cheaply.
+    (best.0 < 0.85).then_some(best.1)
+}
+
+/// Cut `poly` by every set of up to `left` more of `sides` from `from` on, keeping in `best`
+/// the smallest result with at most `corners` corners ([`outline_of`]).
+fn try_cuts(
+    poly: &[Vec2],
+    sides: &[(Vec2, Vec2)],
+    from: usize,
+    left: usize,
+    corners: usize,
+    pick: &mut Vec<usize>,
+    best: &mut (f32, Vec<Vec2>),
+) {
+    if poly.len() >= 3 && poly.len() <= corners {
+        let area = polygon_area(poly);
+        if area < best.0 {
+            *best = (area, poly.to_vec());
+        }
+    }
+    if left == 0 {
+        return;
+    }
+    for i in from..sides.len() {
+        let (a, b) = sides[i];
+        let cut = clip_half(poly, a, b);
+        if cut.len() < 3 || polygon_area(&cut) >= best.0 {
+            continue;
+        }
+        pick.push(i);
+        try_cuts(&cut, sides, i + 1, left - 1, corners, pick, best);
+        pick.pop();
+    }
+}
+
+/// The part of convex polygon `p` left of the line from `a` to `b` (Sutherland-Hodgman), with
+/// corners closer than a hair merged.
+fn clip_half(p: &[Vec2], a: Vec2, b: Vec2) -> Vec<Vec2> {
+    let side = |v: Vec2| cross3(a, b, v);
+    let mut out: Vec<Vec2> = Vec::with_capacity(p.len() + 1);
+    let n = p.len();
+    for i in 0..n {
+        let (u, v) = (p[i], p[(i + 1) % n]);
+        let (su, sv) = (side(u), side(v));
+        if sv >= 0.0 {
+            if su < 0.0 {
+                out.push(u + (v - u) * (su / (su - sv)));
+            }
+            out.push(v);
+        } else if su >= 0.0 {
+            out.push(u + (v - u) * (su / (su - sv)));
+        }
+    }
+    out.dedup_by(|x, y| x.distance(*y) < 1e-5);
+    if out.len() > 1 && out[0].distance(out[out.len() - 1]) < 1e-5 {
+        out.pop();
+    }
+    out
+}
+
+/// Twice the signed area of triangle `a b c` (positive counter-clockwise in x right, y up).
+fn cross3(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+    (b - a).perp_dot(c - a)
+}
+
+/// The convex hull of `pts`, counter-clockwise (Andrew's monotone chain).
+fn convex_hull(mut pts: Vec<Vec2>) -> Vec<Vec2> {
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let mut hull: Vec<Vec2> = Vec::with_capacity(pts.len() + 1);
+    for pass in 0..2 {
+        let start = hull.len();
+        let ordered: Box<dyn Iterator<Item = &Vec2>> = if pass == 0 {
+            Box::new(pts.iter())
+        } else {
+            Box::new(pts.iter().rev())
+        };
+        for &p in ordered {
+            while hull.len() >= start + 2
+                && cross3(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+/// Area of a simple polygon.
+fn polygon_area(p: &[Vec2]) -> f32 {
+    let n = p.len();
+    (0..n)
+        .map(|i| p[i].perp_dot(p[(i + 1) % n]))
+        .sum::<f32>()
+        .abs()
+        * 0.5
+}
+
+/// Where the lines through `a` along `da` and through `b` along `db` cross: `a + da * t`,
+/// with `t` and the other line's parameter.
+fn line_cross(a: Vec2, da: Vec2, b: Vec2, db: Vec2) -> Option<(f32, f32)> {
+    let d = da.perp_dot(db);
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let w = b - a;
+    Some((w.perp_dot(db) / d, w.perp_dot(da) / d))
+}
+
+/// A convex counter-clockwise polygon with at most `k` corners containing `hull`: edges are dropped one by one, extending their neighbors to meet,
+/// each time the one adding the least area (Aggarwal et al.'s minimal enclosing k-gon,
+/// greedily).
+fn reduce_polygon(mut hull: Vec<Vec2>, k: usize) -> Vec<Vec2> {
+    while hull.len() > k {
+        let n = hull.len();
+        let mut best: Option<(usize, Vec2, f32)> = None;
+        for i in 0..n {
+            let (a, b, c, d) = (
+                hull[(i + n - 1) % n],
+                hull[i],
+                hull[(i + 1) % n],
+                hull[(i + 2) % n],
+            );
+            // Extend a→b past b and d→c past c.
+            let Some((t, u)) = line_cross(a, b - a, d, c - d) else {
+                continue;
+            };
+            if t < 1.0 || u < 1.0 {
+                continue;
+            }
+            let q = a + (b - a) * t;
+            let added = cross3(b, q, c).abs() * 0.5;
+            if best.is_none_or(|(_, _, area)| added < area) {
+                best = Some((i, q, added));
+            }
+        }
+        let Some((i, q, _)) = best else {
+            break;
+        };
+        hull[i] = q;
+        hull.remove((i + 1) % n);
+    }
+    hull
+}
+
+/// A convex counter-clockwise polygon with every edge moved `d` outward.
+fn grow_polygon(p: &[Vec2], d: f32) -> Vec<Vec2> {
+    let n = p.len();
+    let edge = |i: usize| {
+        let (a, b) = (p[i], p[(i + 1) % n]);
+        let dir = (b - a).normalize_or_zero();
+        // Outward of a counter-clockwise polygon: to the right of each edge.
+        (a + Vec2::new(dir.y, -dir.x) * d, dir)
+    };
+    (0..n)
+        .map(|i| {
+            let (a, da) = edge((i + n - 1) % n);
+            let (b, db) = edge(i);
+            match line_cross(a, da, b, db) {
+                Some((t, _)) => a + da * t,
+                None => b,
+            }
+        })
+        .collect()
+}
+
 /// Paint a leaf texture (color and alpha only; see [`leaf_textures`] for the normal map).
 pub fn leaf_texture(kind: LeafKind, size: u32, seed: u64) -> Image {
     leaf_textures(kind, size, seed).color
@@ -2965,6 +3222,76 @@ pub fn leaf_texture(kind: LeafKind, size: u32, seed: u64) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card's outline holds everything its cell draws, in every level of the leaf and mass
+    /// atlases the crowns use, in four corners, and trims most cells by a quarter or more.
+    #[test]
+    fn card_outlines_hold_the_painting_and_trim_the_cell() {
+        let mut areas = Vec::new();
+        for kind in [
+            LeafKind::Broad,
+            LeafKind::Small,
+            LeafKind::Lobed,
+            LeafKind::Oval,
+            LeafKind::Round,
+            LeafKind::Pinnate,
+            LeafKind::LongNeedles,
+            LeafKind::ShortNeedles,
+            LeafKind::SoftNeedles,
+            LeafKind::Palm,
+            LeafKind::Palmate,
+        ] {
+            let seed = 7;
+            for (mass, img) in [
+                (false, leaf_textures(kind, 512, seed).color),
+                (true, mass_textures(kind, 256, seed).color),
+            ] {
+                let levels = std::iter::once((img.width, &img.data)).chain(
+                    img.mips
+                        .iter()
+                        .enumerate()
+                        .map(|(m, d)| (img.width >> (m + 1), d)),
+                );
+                let corners = 4;
+                let outlines: Vec<_> = (0..4)
+                    .map(|c| cell_outline(kind, c, seed, mass, corners))
+                    .collect();
+                for (size, data) in levels.take(4) {
+                    let cs = size / ATLAS_CELLS;
+                    for y in 0..size {
+                        for x in 0..size {
+                            let a = data[((y * size + x) * 4 + 3) as usize] as f32 / 255.0;
+                            if a < ALPHA_CUTOFF {
+                                continue;
+                            }
+                            let c = ((y / cs) * ATLAS_CELLS + x / cs) as usize;
+                            let Some(o) = &outlines[c] else { continue };
+                            let q = Vec2::new(
+                                ((x % cs) as f32 + 0.5) / cs as f32,
+                                ((y % cs) as f32 + 0.5) / cs as f32,
+                            );
+                            let inside = (0..o.len())
+                                .all(|i| cross3(o[i], o[(i + 1) % o.len()], q) >= -1e-4);
+                            assert!(
+                                inside,
+                                "{kind:?} mass {mass} cell {c} texel {x},{y} of {size}"
+                            );
+                        }
+                    }
+                }
+                for o in outlines.iter().flatten() {
+                    assert!(o.len() <= corners, "{kind:?} {}", o.len());
+                    areas.push(polygon_area(o));
+                }
+            }
+        }
+        let mean = areas.iter().sum::<f32>() / areas.len() as f32;
+        assert!(areas.len() > 60, "{} cells trimmed", areas.len());
+        // 0.65 of the leaf atlas's cells and 0.71 of the mass atlas's, with four corners
+        // (2026-11-07).
+        assert!(mean < 0.75, "outlines cover {mean} of their cells");
+        println!("{} outlines, mean area {mean:.2}", areas.len());
+    }
 
     #[test]
     fn leaf_textures_have_cutouts_and_keep_coverage_in_mips() {

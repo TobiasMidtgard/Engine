@@ -22,7 +22,7 @@ use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, noise, smoothstep};
 
 use super::bark::{self, BarkKind, CUT_VERTEX_WOOD, layout};
 use super::fungi::{self, Host, host_fungus};
-use super::textures::{CLUSTER_CELL, LeafKind, atlas_cell, kind_of};
+use super::textures::{CLUSTER_CELL, LeafKind, atlas_cell, atlas_seed, kind_of};
 use super::{MeshBuilder, rgb};
 use crate::species::{BarkStyle, LeafStyle, PlantForm, PlantSpecies};
 
@@ -1789,6 +1789,12 @@ const DISTANT_KEEP: f32 = 0.45;
 /// one does with about a seventh of the cards.
 const DISTANT_CARD_SCALE: f32 = 2.4;
 
+/// Corners of a mid or far card's outline ([`super::textures::cell_outline`]): four, the
+/// quad's own two triangles. Tighter outlines of six and eight corners (clipped to the cell,
+/// up to eight to ten) drew the forest trail's view with 13-17 M triangles instead of 8 M and
+/// cost the VM more in the prepass and scene than they saved in pixels (2026-11-07).
+const CARD_CORNERS: usize = 4;
+
 /// Emit one card: near cards are a 3×3 grid, folded along the twig and drooping toward the
 /// tip; mid and far ones a flat quad. Both faces share the bent crown normals.
 fn emit_card(
@@ -1796,6 +1802,7 @@ fn emit_card(
     c: &Card,
     shading: &Shading,
     kind: LeafKind,
+    atlas: u64,
     detail: Detail,
     grid: (u32, u32),
 ) {
@@ -1820,30 +1827,6 @@ fn emit_card(
     // side of a spray facing away from the light stays dark (it glows only by translucency),
     // and no face is lit with a normal pointing away from whoever sees it (which would turn
     // it white with grazing reflections).
-    let mut grid_pts = Vec::with_capacity((cols * rows) as usize);
-    for r in 0..rows {
-        let t = r as f32 / (rows - 1) as f32;
-        for k in 0..cols {
-            let s = k as f32 / (cols - 1) as f32 - 0.5;
-            // A mid card is the near one's chord: drooping to the same tip, halfway into
-            // its fold.
-            let bend = match detail {
-                Detail::Near => c.droop * l * t * t + c.fold * w * s.abs(),
-                Detail::Mid => c.droop * l * t * t + c.fold * w * s.abs() * 0.5,
-                Detail::Far | Detail::Distant => 0.0,
-            };
-            let p = start + g * (l * t) + u * (w * s) - n * bend;
-            let su = if c.mirror { 0.5 - s } else { s + 0.5 };
-            let uv = Vec2::new(
-                uv0.x + (uv1.x - uv0.x) * su,
-                uv0.y + (uv1.y - uv0.y) * (1.0 - t),
-            );
-            let (normal, ao) = shading.at(p, c.clump);
-            // The twig end of a spray sits deeper in the foliage than its tip.
-            let inner = if c.centered { 1.0 } else { 0.84 + 0.2 * t };
-            grid_pts.push((p, uv, normal, (c.tint * (ao * inner)).extend(1.0)));
-        }
-    }
     // Needle brushes are tufts all round their shoot rather than flat leaves, so a card of
     // them shades with its clump as a whole and only the strongest turns away are pushed back.
     let min_dot = if kind.is_needles() { -0.2 } else { 0.25 };
@@ -1855,6 +1838,72 @@ fn emit_card(
             v
         }
     };
+    // A point of the card, `s` across (-0.5..0.5) and `t` along it (0 at the twig).
+    let point = |s: f32, t: f32| {
+        // A mid card is the near one's chord: drooping to the same tip, halfway into its fold.
+        let bend = match detail {
+            Detail::Near => c.droop * l * t * t + c.fold * w * s.abs(),
+            Detail::Mid => c.droop * l * t * t + c.fold * w * s.abs() * 0.5,
+            Detail::Far | Detail::Distant => 0.0,
+        };
+        let p = start + g * (l * t) + u * (w * s) - n * bend;
+        let su = if c.mirror { 0.5 - s } else { s + 0.5 };
+        let uv = Vec2::new(
+            uv0.x + (uv1.x - uv0.x) * su,
+            uv0.y + (uv1.y - uv0.y) * (1.0 - t),
+        );
+        let (normal, ao) = shading.at(p, c.clump);
+        // The twig end of a spray sits deeper in the foliage than its tip.
+        let inner = if c.centered { 1.0 } else { 0.84 + 0.2 * t };
+        (p, uv, normal, (c.tint * (ao * inner)).extend(1.0))
+    };
+    // Mid and far cards cover only their painting's outline rather than the whole cell: about
+    // two thirds (mid) and four fifths (far) of the pixels for the same picture.
+    let outline = far
+        .then(|| {
+            let mass = matches!(detail, Detail::Far | Detail::Distant);
+            super::textures::cell_outline(kind, c.cell, atlas, mass, CARD_CORNERS)
+        })
+        .flatten();
+    let mut grid_pts = Vec::with_capacity((cols * rows) as usize);
+    if let Some(outline) = &outline {
+        // Cell (x across, y down the texture) to the card's (s, t).
+        let st: Vec<Vec2> = outline
+            .iter()
+            .map(|q| Vec2::new(if c.mirror { 0.5 - q.x } else { q.x - 0.5 }, 1.0 - q.y))
+            .collect();
+        // Front faces counter-clockwise in (s, t), as the grid's are.
+        let area: f32 = (0..st.len())
+            .map(|i| st[i].perp_dot(st[(i + 1) % st.len()]))
+            .sum();
+        let order: Vec<usize> = if area >= 0.0 {
+            (0..st.len()).collect()
+        } else {
+            (0..st.len()).rev().collect()
+        };
+        for side in [n, -n] {
+            let first = b.vertices.len() as u32;
+            for &i in &order {
+                let (p, uv, normal, color) = point(st[i].x, st[i].y);
+                b.vertex(p, hemisphere(normal, side), uv, color);
+            }
+            for i in 1..order.len() as u32 - 1 {
+                if side == n {
+                    b.tri(first, first + i, first + i + 1);
+                } else {
+                    b.tri(first, first + i + 1, first + i);
+                }
+            }
+        }
+        return;
+    }
+    for r in 0..rows {
+        let t = r as f32 / (rows - 1) as f32;
+        for k in 0..cols {
+            let s = k as f32 / (cols - 1) as f32 - 0.5;
+            grid_pts.push(point(s, t));
+        }
+    }
     for side in [n, -n] {
         let first = b.vertices.len() as u32;
         for &(p, uv, normal, color) in &grid_pts {
@@ -1894,10 +1943,12 @@ fn leaf_steps(sp: &PlantSpecies) -> &'static [f32] {
 
 /// A crown's leaf cards as one mesh (`lod`: only the far cards, drawn larger), and thinned
 /// copies of it keeping each share in `steps`.
+#[allow(clippy::too_many_arguments)]
 fn crown_meshes(
     cards: &[Card],
     shading: &Shading,
     kind: LeafKind,
+    atlas: u64,
     detail: Detail,
     grid: (u32, u32),
     steps: &[f32],
@@ -1912,11 +1963,11 @@ fn crown_meshes(
         }
     };
     for (i, c) in cards.iter().enumerate().filter(|(i, c)| shown(*i, c)) {
-        emit_card(&mut full, c, shading, kind, detail, grid);
+        emit_card(&mut full, c, shading, kind, atlas, detail, grid);
         let keep = engine_core::math::hash01(i as i64, 0, 0, 0x1eaf_fa11);
         for (b, &share) in thin.iter_mut().zip(steps) {
             if keep < share {
-                emit_card(b, c, shading, kind, detail, grid);
+                emit_card(b, c, shading, kind, atlas, detail, grid);
             }
         }
     }
@@ -1940,8 +1991,8 @@ fn hero_crown(
     seed: u64,
 ) -> Option<engine_render::Mesh> {
     use super::textures::{
-        ATLAS_CELLS, HERO_CELLS, HERO_PETIOLE_Y, HERO_TWIG_CELL, atlas_seed, hero_cell,
-        hero_leaf_frame, hero_leaf_rect, spray_layout,
+        ATLAS_CELLS, HERO_CELLS, HERO_PETIOLE_Y, HERO_TWIG_CELL, hero_cell, hero_leaf_frame,
+        hero_leaf_rect, spray_layout,
     };
     let atlas = atlas_seed(style);
     let layouts: Vec<_> = (0..(ATLAS_CELLS * ATLAS_CELLS) as usize)
@@ -2326,7 +2377,15 @@ fn assemble(
             trunk_shape.roughen_vertices(&mut b.vertices);
         }
         add_branches(&mut b, sp, branches, h, detail, seed, &shading);
-        let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, detail, crowns.grid, steps);
+        let (f, thin) = crown_meshes(
+            &crowns.cards,
+            &shading,
+            kind,
+            atlas_seed(sp.shape.leaf),
+            detail,
+            crowns.grid,
+            steps,
+        );
         if lod {
             out.wood_lod = Some(b.finish());
             out.foliage_lod = Some(f);
@@ -2347,6 +2406,7 @@ fn assemble(
         &crowns.cards,
         &shading,
         kind,
+        atlas_seed(sp.shape.leaf),
         Detail::Distant,
         crowns.grid,
         steps,
@@ -3421,7 +3481,8 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     for detail in [Detail::Near, Detail::Mid, Detail::Far] {
         let mut b = MeshBuilder::new();
         add_branches(&mut b, sp, &cr.branches, h, detail, seed, &shading);
-        let (f, thin) = crown_meshes(&cr.cards, &shading, kind, detail, cr.grid, steps);
+        let atlas = atlas_seed(sh.leaf);
+        let (f, thin) = crown_meshes(&cr.cards, &shading, kind, atlas, detail, cr.grid, steps);
         if detail == Detail::Far {
             out.wood_lod = Some(b.finish());
             out.foliage_lod = Some(f);
@@ -3438,7 +3499,16 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         }
     }
     // Far off a shrub is its leaves alone.
-    let (f, thin) = crown_meshes(&cr.cards, &shading, kind, Detail::Distant, cr.grid, steps);
+    let atlas = atlas_seed(sh.leaf);
+    let (f, thin) = crown_meshes(
+        &cr.cards,
+        &shading,
+        kind,
+        atlas,
+        Detail::Distant,
+        cr.grid,
+        steps,
+    );
     out.foliage_distant = Some(f);
     out.foliage_distant_thin = thin;
     out
