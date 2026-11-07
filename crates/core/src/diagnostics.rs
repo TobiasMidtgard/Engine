@@ -110,6 +110,13 @@ pub const PROCESS_RAM_MB: &str = "process.ram_mb";
 
 /// The process's resident memory (RAM it holds now: the working set on Windows), MB.
 pub fn process_ram_mb() -> Option<f64> {
+    // memory-stats 1.2 on Linux decides between /proc/self/smaps and statm on its first call,
+    // and a second thread calling in the middle of that reads statm with a page size of 0
+    // (0 MB). The first call runs alone.
+    static FIRST: std::sync::Once = std::sync::Once::new();
+    FIRST.call_once(|| {
+        memory_stats::memory_stats();
+    });
     memory_stats::memory_stats().map(|m| m.physical_mem as f64 / (1024.0 * 1024.0))
 }
 
