@@ -525,3 +525,61 @@ fn a_movement_backend_takes_only_the_bodies_it_controls() {
         "the backend's bodies are left alone"
     );
 }
+
+/// One walk round a wall, with the path searched beside the frame or at once; where the
+/// fighter is every step, the step it first had a path round, and that path.
+fn walk_round_a_wall(beside: bool) -> (Vec<DVec3>, usize, Vec<DVec3>) {
+    let mut app = app();
+    app.world.resource_mut::<NpcSettings>().paths_beside = Some(beside);
+    wall(
+        &mut app,
+        DVec3::new(0.0, 1.5, 0.0),
+        Vec3::new(5.0, 1.5, 0.3),
+    );
+    let me = fighter(
+        &mut app,
+        DVec3::new(0.0, 0.0, -6.0),
+        Vec3::Z,
+        Faction::ENEMY,
+        NpcSkills::default(),
+        NpcWeapon::default(),
+    );
+    // One step to set it up, then the order.
+    app.update();
+    app.world.get_mut::<NpcBrain>(me).unwrap().order = Some(NpcOrder::MoveTo {
+        at: DVec3::new(0.0, 0.0, 6.0),
+    });
+    let mut at = Vec::new();
+    let mut first: Option<(usize, Vec<DVec3>)> = None;
+    for step in 0..60 * 8 {
+        app.update();
+        at.push(app.world.get::<Transform>(me).unwrap().translation);
+        if first.is_none()
+            && let Some(nav) = app.world.get::<NavAgent>(me)
+            && nav.path.len() > 1
+        {
+            first = Some((step, nav.path.clone()));
+        }
+    }
+    let (step, path) = first.expect("no path round the wall");
+    (at, step, path)
+}
+
+#[test]
+fn a_path_searched_beside_the_frame_is_the_same_path_a_step_later() {
+    let (inline, inline_step, inline_path) = walk_round_a_wall(false);
+    let (beside, beside_step, beside_path) = walk_round_a_wall(true);
+    // The search answers one step later, with the same waypoints.
+    assert_eq!(beside_step, inline_step + 1);
+    assert_eq!(beside_path, inline_path);
+    // Both walk round the wall and get there.
+    let goal = DVec3::new(0.0, 0.0, 6.0);
+    for (name, at) in [("inline", &inline), ("beside", &beside)] {
+        let end = *at.last().unwrap();
+        assert!(end.distance(goal) < 1.5, "{name}: ended at {end}");
+        assert!(
+            at.iter().all(|p| p.x.abs() > 5.0 || p.z.abs() > 0.5),
+            "{name}: walked through the wall"
+        );
+    }
+}

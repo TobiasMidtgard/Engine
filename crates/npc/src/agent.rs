@@ -668,6 +668,11 @@ pub struct NpcSettings {
     /// need to be drawn by it: their body size (so held weapons meet the hands), a grip, armour
     /// and team colours.
     pub character_looks: bool,
+    /// Fighters' path searches run beside the frame and are answered the next step (`Some(true)`)
+    /// or at once (`Some(false)`). `None` decides by the run: beside in play, at once in tests
+    /// and plain headless runs (`nav::off_the_step`).
+    /// `ENGINE_NPC_PATHS=beside|inline` overrides it (A/B runs).
+    pub paths_beside: Option<bool>,
 }
 
 impl Default for NpcSettings {
@@ -683,6 +688,7 @@ impl Default for NpcSettings {
             ally_revive_health: 0.4,
             ally_revive_range: 20.0,
             character_looks: false,
+            paths_beside: None,
         }
     }
 }

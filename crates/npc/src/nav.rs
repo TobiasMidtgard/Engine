@@ -13,8 +13,9 @@
 //! * Chunks are rebuilt when the world model changes (colliders appear or move, terrain is
 //!   edited), and only where someone asks for a path, so it scales to planet-sized maps.
 
+use bevy_platform::collections::HashMap;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::{Arc, Mutex};
 
@@ -63,6 +64,17 @@ impl Hasher for ChunkHasher {
 }
 
 type ChunkMap = HashMap<(i32, i32), Chunk, BuildHasherDefault<ChunkHasher>>;
+
+/// Whether NPC work may finish beside the fixed step (on the async pool, a step or more later)
+/// rather than at once: in play (a real clock, off the frame) and in headless runs that ask
+/// for the game's way (`ENGINE_OFF_FRAME=always`). Tests (a manual clock, no headless flag)
+/// and plain headless runs do it at once, so a run is the same every time. With no
+/// `EngineConfig` (a bare app) it follows the clock alone.
+pub(crate) fn off_the_step(config: Option<&EngineConfig>, time: &Time) -> bool {
+    config.is_none_or(|c| c.off_frame())
+        && (config.is_some_and(|c| c.headless)
+            || matches!(time.source(), engine_core::time::TimeSource::Realtime))
+}
 
 /// Navigation settings (one grid for every agent of roughly human size).
 #[derive(Resource, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -735,6 +747,27 @@ impl<'a> NavCtx<'a> {
         max_cells: usize,
     ) -> PathStatus {
         let _span = tracing::info_span!("find path").entered();
+        match self.plan_path(from, to, extra_cost, out, max_cells) {
+            PathPlan::Done(status) => status,
+            PathPlan::Search(search) => {
+                let wear = self.wear.map(|w| &*w.0);
+                search.run(extra_cost, wear, out)
+            }
+        }
+    }
+
+    /// The part of [`find_path_within`](Self::find_path_within) that needs the grid: the
+    /// straight-walk shortcut (its answer is in `out` at once) and the search window copied out
+    /// of the chunks. The search itself ([`PathSearch::run`]) owns what it reads, so it can run
+    /// beside the frame (`brain`'s paths, engine-design/fixed-step-beside-frame.md) or here.
+    pub(crate) fn plan_path(
+        &mut self,
+        from: DVec3,
+        to: DVec3,
+        extra_cost: &mut dyn FnMut(DVec3) -> f32,
+        out: &mut Vec<DVec3>,
+        max_cells: usize,
+    ) -> PathPlan {
         out.clear();
         let s = self.grid.settings;
         let start = self.cell_of(from);
@@ -745,11 +778,11 @@ impl<'a> NavCtx<'a> {
         // Most trips in open ground are a straight walk: skip the search for those.
         if !worn && let Some(h) = self.straight_walk(from, to, extra_cost) {
             out.push(DVec3::new(to.x, h, to.z));
-            return PathStatus::Complete;
+            return PathPlan::Done(PathStatus::Complete);
         }
         let win = self.window(start, goal, 24);
         let Some(mut si) = win.idx(start.0, start.1) else {
-            return PathStatus::Failed;
+            return PathPlan::Done(PathStatus::Failed);
         };
         if !win.walk[si] || (win.h[si] - from.y).abs() > 1.2 {
             // Standing next to a wall (inside the clearance margin): start from the nearest
@@ -772,7 +805,7 @@ impl<'a> NavCtx<'a> {
             }
             match best {
                 Some((_, i)) => si = i,
-                None => return PathStatus::Failed,
+                None => return PathPlan::Done(PathStatus::Failed),
             }
         }
         let goal_in = (
@@ -781,6 +814,145 @@ impl<'a> NavCtx<'a> {
         );
         let clamped = goal_in != goal;
         let gi = win.idx(goal_in.0, goal_in.1).unwrap();
+        PathPlan::Search(PathSearch {
+            settings: s,
+            win,
+            to,
+            si,
+            gi,
+            clamped,
+            worn,
+            peak,
+            max_cells,
+        })
+    }
+
+    /// If one can walk straight from `from` to `to` over free cells (walkable, connected, no
+    /// extra cost, with clearance either side), the height of the goal cell.
+    fn straight_walk(
+        &mut self,
+        from: DVec3,
+        to: DVec3,
+        extra_cost: &mut dyn FnMut(DVec3) -> f32,
+    ) -> Option<f64> {
+        let s = self.grid.settings;
+        let (a, b) = (self.cell_of(from), self.cell_of(to));
+        let (dx, dz) = (b.0 - a.0, b.1 - a.1);
+        let n = dx.abs().max(dz.abs()) * 2;
+        if n > s.max_window {
+            return None;
+        }
+        // The chunks along the line: the start's and the goal's are built now, of the others
+        // only those whose ground is ready; a line over ground not worked out yet isn't
+        // walked (the search after it stops short there, see `window`).
+        let key = |c: (i32, i32)| (c.0.div_euclid(CHUNK), c.1.div_euclid(CHUNK));
+        let mut keys = vec![key(a), key(b)];
+        for k in 0..=n.max(1) {
+            let t = k as f32 / n.max(1) as f32;
+            let x = (a.0 as f32 + 0.5 + dx as f32 * t).floor() as i32;
+            let z = (a.1 as f32 + 0.5 + dz as f32 * t).floor() as i32;
+            for c in [(x - 1, z - 1), (x + 1, z + 1)] {
+                if keys.last() != Some(&key(c)) {
+                    keys.push(key(c));
+                }
+            }
+        }
+        self.ensure_keys_within(keys.clone(), PATH_COLD_CHUNKS);
+        if keys.iter().any(|k| !self.grid.chunks.contains_key(k)) {
+            return None;
+        }
+        let (h0, ok) = self.cell(a.0, a.1);
+        if !ok || (h0 - from.y).abs() > 1.2 {
+            return None;
+        }
+        let len = ((dx * dx + dz * dz) as f32).sqrt().max(1e-3);
+        let (px, pz) = (-(dz as f32) / len, dx as f32 / len);
+        let mut prev = (a, h0);
+        for k in 1..=n.max(1) {
+            let t = k as f32 / n.max(1) as f32;
+            for off in [-0.35f32, 0.35, 0.0] {
+                let x = (a.0 as f32 + 0.5 + dx as f32 * t + px * off).floor() as i32;
+                let z = (a.1 as f32 + 0.5 + dz as f32 * t + pz * off).floor() as i32;
+                let (h, ok) = self.cell(x, z);
+                if !ok {
+                    return None;
+                }
+                if off == 0.0 && (x, z) != prev.0 {
+                    let diagonal = x != prev.0.0 && z != prev.0.1;
+                    let limit = if diagonal {
+                        s.max_step * 1.42
+                    } else {
+                        s.max_step
+                    } as f64;
+                    if (h - prev.1).abs() > limit {
+                        return None;
+                    }
+                    let (cx, cz) = self.cell_center(x, z);
+                    if extra_cost(DVec3::new(cx, h, cz)) != 0.0 {
+                        return None;
+                    }
+                    prev = ((x, z), h);
+                }
+            }
+        }
+        (prev.0 == b && (to.y - prev.1).abs() < 1.0).then_some(prev.1)
+    }
+}
+
+/// What [`NavCtx::plan_path`] decided: answered already (in its `out`), or a search to run.
+pub(crate) enum PathPlan {
+    Done(PathStatus),
+    Search(PathSearch),
+}
+
+/// A path search over a window copied out of the grid ([`NavCtx::plan_path`]): it owns
+/// everything it reads, so it can run off the main thread.
+pub(crate) struct PathSearch {
+    settings: NavSettings,
+    win: Window,
+    to: DVec3,
+    /// Start and goal cells in the window (the goal clamped into it).
+    si: usize,
+    gi: usize,
+    clamped: bool,
+    /// Worn ground in reach (and the most worn), see [`NavCtx::wear_peak`].
+    worn: bool,
+    peak: f32,
+    max_cells: usize,
+}
+
+impl PathSearch {
+    /// The window's world bounds (X/Z min and max corners).
+    pub(crate) fn bounds(&self) -> (DVec2, DVec2) {
+        let c = self.settings.cell as f64;
+        let w = &self.win;
+        (
+            DVec2::new(w.x0 as f64 * c, w.z0 as f64 * c),
+            DVec2::new((w.x0 + w.w) as f64 * c, (w.z0 + w.d) as f64 * c),
+        )
+    }
+
+    /// Search the window (A*, then string pulling), writing waypoints to `out`. `extra_cost`
+    /// and `wear` are those of [`NavCtx::find_path_within`].
+    pub(crate) fn run(
+        self,
+        extra_cost: &mut dyn FnMut(DVec3) -> f32,
+        wear: Option<&dyn engine_world::WearQuery>,
+        out: &mut Vec<DVec3>,
+    ) -> PathStatus {
+        let PathSearch {
+            settings: s,
+            win,
+            to,
+            si,
+            gi,
+            clamped,
+            worn,
+            peak,
+            max_cells,
+        } = self;
+        out.clear();
+        let center = |x: i32, z: i32| cell_center(&s, x, z);
         let n = (win.w * win.d) as usize;
         let mut g = vec![f32::INFINITY; n];
         let mut parent = vec![u32::MAX; n];
@@ -790,14 +962,14 @@ impl<'a> NavCtx<'a> {
         // What a step onto each cell costs per meter before its extra cost: 1, or less on
         // worn ground.
         let mut tread = if worn { vec![f32::NAN; n] } else { Vec::new() };
-        let wear = self.wear.filter(|_| worn);
-        let mut tread_at = |ctx: &Self, i: usize| -> f32 {
+        let wear = wear.filter(|_| worn);
+        let mut tread_at = |i: usize| -> f32 {
             let Some(wear) = wear else {
                 return 1.0;
             };
             if tread[i].is_nan() {
                 let (x, z) = ((i as i32) % win.w + win.x0, (i as i32) / win.w + win.z0);
-                let (cx, cz) = ctx.cell_center(x, z);
+                let (cx, cz) = center(x, z);
                 tread[i] = 1.0 - WORN_DISCOUNT * wear.wear(DVec3::new(cx, win.h[i], cz));
             }
             tread[i]
@@ -875,7 +1047,7 @@ impl<'a> NavCtx<'a> {
                     }
                 }
                 if extra[j].is_nan() {
-                    let (cx, cz) = self.cell_center(win.x0 + nx, win.z0 + nz);
+                    let (cx, cz) = center(win.x0 + nx, win.z0 + nz);
                     extra[j] = extra_cost(DVec3::new(cx, win.h[j], cz)).max(0.0);
                 }
                 if !extra[j].is_finite() {
@@ -887,7 +1059,7 @@ impl<'a> NavCtx<'a> {
                     1.0
                 } * s.cell;
                 let climb = (win.h[j] - win.h[i]).abs() as f32;
-                let cost = g[i] + (step + climb) * (tread_at(self, j) + extra[j]);
+                let cost = g[i] + (step + climb) * (tread_at(j) + extra[j]);
                 if cost < g[j] {
                     g[j] = cost;
                     parent[j] = i as u32;
@@ -912,9 +1084,9 @@ impl<'a> NavCtx<'a> {
         cells.push(si);
         cells.reverse();
         // String pulling: skip waypoints while a straight walk stays on connected cells.
-        let to_world = |ctx: &Self, i: usize| {
+        let to_world = |i: usize| {
             let (x, z) = ((i as i32) % win.w + win.x0, (i as i32) / win.w + win.z0);
-            let (cx, cz) = ctx.cell_center(x, z);
+            let (cx, cz) = center(x, z);
             DVec3::new(cx, win.h[i], cz)
         };
         // Shortcuts may not cross cells that cost more than the cells the path used.
@@ -924,10 +1096,10 @@ impl<'a> NavCtx<'a> {
                 path_cost = path_cost.max(extra[c]);
             }
         }
-        let mut cost_at = |ctx: &Self, i: usize| -> f32 {
+        let mut cost_at = |i: usize| -> f32 {
             if extra[i].is_nan() {
                 let (x, z) = ((i as i32) % win.w + win.x0, (i as i32) / win.w + win.z0);
-                let (cx, cz) = ctx.cell_center(x, z);
+                let (cx, cz) = center(x, z);
                 extra[i] = extra_cost(DVec3::new(cx, win.h[i], cz)).max(0.0);
             }
             extra[i]
@@ -936,33 +1108,27 @@ impl<'a> NavCtx<'a> {
         let mut k = 1;
         while k < cells.len() {
             if k + 1 < cells.len()
-                && self.straight(
-                    &win,
-                    cells[anchor],
-                    cells[k + 1],
-                    s.max_step,
-                    &mut |ctx, i| cost_at(ctx, i) <= path_cost + 0.05,
-                )
+                && straight(&win, cells[anchor], cells[k + 1], s.max_step, &mut |i| {
+                    cost_at(i) <= path_cost + 0.05
+                })
                 // On worn ground a shortcut must also cost no more than the path it skips
                 // (or string pulling would cut the worn path's bends off).
                 && (!worn || {
                     let (a, b) = (cells[anchor], cells[k + 1]);
-                    let line = self.line_cost(&win, a, b, &mut |ctx, i| {
-                        tread_at(ctx, i) + cost_at(ctx, i)
-                    });
+                    let line = line_cost(&s, &win, a, b, &mut |i| tread_at(i) + cost_at(i));
                     line <= (g[b] - g[a]) * 1.02 + 0.05
                 })
             {
                 k += 1;
                 continue;
             }
-            out.push(to_world(self, cells[k]));
+            out.push(to_world(cells[k]));
             anchor = k;
             k += 1;
         }
         if reached && !clamped {
             // Finish at the exact goal when it's on the goal cell's level.
-            let last = to_world(self, gi);
+            let last = to_world(gi);
             if (to.y - last.y).abs() < 1.0 {
                 if let Some(l) = out.last_mut() {
                     *l = DVec3::new(to.x, last.y, to.z);
@@ -976,7 +1142,7 @@ impl<'a> NavCtx<'a> {
         }
         // A goal just inside a wall's clearance (a cover spot, a mate lying by a wall): the
         // path ends on the nearest free cell, and the last step goes on to the goal itself.
-        let last = to_world(self, end);
+        let last = to_world(end);
         let short = DVec2::new(to.x - last.x, to.z - last.z).length();
         if !clamped && short <= 1.0 && (to.y - last.y).abs() < 0.5 {
             out.push(DVec3::new(to.x, last.y, to.z));
@@ -984,150 +1150,82 @@ impl<'a> NavCtx<'a> {
         }
         PathStatus::Partial
     }
-
-    /// If one can walk straight from `from` to `to` over free cells (walkable, connected, no
-    /// extra cost, with clearance either side), the height of the goal cell.
-    fn straight_walk(
-        &mut self,
-        from: DVec3,
-        to: DVec3,
-        extra_cost: &mut dyn FnMut(DVec3) -> f32,
-    ) -> Option<f64> {
-        let s = self.grid.settings;
-        let (a, b) = (self.cell_of(from), self.cell_of(to));
-        let (dx, dz) = (b.0 - a.0, b.1 - a.1);
-        let n = dx.abs().max(dz.abs()) * 2;
-        if n > s.max_window {
-            return None;
-        }
-        // The chunks along the line: the start's and the goal's are built now, of the others
-        // only those whose ground is ready; a line over ground not worked out yet isn't
-        // walked (the search after it stops short there, see `window`).
-        let key = |c: (i32, i32)| (c.0.div_euclid(CHUNK), c.1.div_euclid(CHUNK));
-        let mut keys = vec![key(a), key(b)];
-        for k in 0..=n.max(1) {
-            let t = k as f32 / n.max(1) as f32;
-            let x = (a.0 as f32 + 0.5 + dx as f32 * t).floor() as i32;
-            let z = (a.1 as f32 + 0.5 + dz as f32 * t).floor() as i32;
-            for c in [(x - 1, z - 1), (x + 1, z + 1)] {
-                if keys.last() != Some(&key(c)) {
-                    keys.push(key(c));
-                }
-            }
-        }
-        self.ensure_keys_within(keys.clone(), PATH_COLD_CHUNKS);
-        if keys.iter().any(|k| !self.grid.chunks.contains_key(k)) {
-            return None;
-        }
-        let (h0, ok) = self.cell(a.0, a.1);
-        if !ok || (h0 - from.y).abs() > 1.2 {
-            return None;
-        }
-        let len = ((dx * dx + dz * dz) as f32).sqrt().max(1e-3);
-        let (px, pz) = (-(dz as f32) / len, dx as f32 / len);
-        let mut prev = (a, h0);
-        for k in 1..=n.max(1) {
-            let t = k as f32 / n.max(1) as f32;
-            for off in [-0.35f32, 0.35, 0.0] {
-                let x = (a.0 as f32 + 0.5 + dx as f32 * t + px * off).floor() as i32;
-                let z = (a.1 as f32 + 0.5 + dz as f32 * t + pz * off).floor() as i32;
-                let (h, ok) = self.cell(x, z);
-                if !ok {
-                    return None;
-                }
-                if off == 0.0 && (x, z) != prev.0 {
-                    let diagonal = x != prev.0.0 && z != prev.0.1;
-                    let limit = if diagonal {
-                        s.max_step * 1.42
-                    } else {
-                        s.max_step
-                    } as f64;
-                    if (h - prev.1).abs() > limit {
-                        return None;
-                    }
-                    let (cx, cz) = self.cell_center(x, z);
-                    if extra_cost(DVec3::new(cx, h, cz)) != 0.0 {
-                        return None;
-                    }
-                    prev = ((x, z), h);
-                }
-            }
-        }
-        (prev.0 == b && (to.y - prev.1).abs() < 1.0).then_some(prev.1)
-    }
-
-    /// What walking straight between window cells `a` and `b` costs, with `per_m` the cost
-    /// per meter of a cell (sampled along the center line, climbs left out).
-    fn line_cost(
-        &self,
-        win: &Window,
-        a: usize,
-        b: usize,
-        per_m: &mut dyn FnMut(&Self, usize) -> f32,
-    ) -> f32 {
-        let (ax, az) = ((a as i32) % win.w, (a as i32) / win.w);
-        let (bx, bz) = ((b as i32) % win.w, (b as i32) / win.w);
-        let (dx, dz) = (bx - ax, bz - az);
-        let n = dx.abs().max(dz.abs()) * 2;
-        if n == 0 {
-            return 0.0;
-        }
-        let len = ((dx * dx + dz * dz) as f32).sqrt() * self.grid.settings.cell;
-        let mut sum = 0.0;
-        for k in 1..=n {
-            let t = (k as f32 - 0.5) / n as f32;
-            let x = (ax as f32 + 0.5 + dx as f32 * t).floor() as i32;
-            let z = (az as f32 + 0.5 + dz as f32 * t).floor() as i32;
-            sum += per_m(self, (z * win.w + x) as usize);
-        }
-        len * sum / n as f32
-    }
-
-    /// Can one walk straight between window cells `a` and `b` (every crossed cell walkable
-    /// and connected to the previous one)?
-    fn straight(
-        &self,
-        win: &Window,
-        a: usize,
-        b: usize,
-        step: f32,
-        allowed: &mut dyn FnMut(&Self, usize) -> bool,
-    ) -> bool {
-        let (ax, az) = ((a as i32) % win.w, (a as i32) / win.w);
-        let (bx, bz) = ((b as i32) % win.w, (b as i32) / win.w);
-        let (dx, dz) = (bx - ax, bz - az);
-        let n = dx.abs().max(dz.abs()) * 2;
-        if n == 0 {
-            return true;
-        }
-        let mut prev = a;
-        for k in 1..=n {
-            let t = k as f32 / n as f32;
-            // Sample at the center line and half a cell to either side (clearance).
-            for off in [-0.35f32, 0.0, 0.35] {
-                let len = ((dx * dx + dz * dz) as f32).sqrt();
-                let (px, pz) = (-(dz as f32) / len * off, dx as f32 / len * off);
-                let x = (ax as f32 + 0.5 + dx as f32 * t + px).floor() as i32;
-                let z = (az as f32 + 0.5 + dz as f32 * t + pz).floor() as i32;
-                if x < 0 || z < 0 || x >= win.w || z >= win.d {
-                    return false;
-                }
-                let i = (z * win.w + x) as usize;
-                if !win.walk[i] || !allowed(self, i) {
-                    return false;
-                }
-                if off == 0.0 {
-                    if i != prev && !win.connected(prev, i, step, true) {
-                        return false;
-                    }
-                    prev = i;
-                }
-            }
-        }
-        true
-    }
 }
 
+fn cell_center(s: &NavSettings, x: i32, z: i32) -> (f64, f64) {
+    let c = s.cell as f64;
+    ((x as f64 + 0.5) * c, (z as f64 + 0.5) * c)
+}
+
+/// What walking straight between window cells `a` and `b` costs, with `per_m` the cost
+/// per meter of a cell (sampled along the center line, climbs left out).
+fn line_cost(
+    s: &NavSettings,
+    win: &Window,
+    a: usize,
+    b: usize,
+    per_m: &mut dyn FnMut(usize) -> f32,
+) -> f32 {
+    let (ax, az) = ((a as i32) % win.w, (a as i32) / win.w);
+    let (bx, bz) = ((b as i32) % win.w, (b as i32) / win.w);
+    let (dx, dz) = (bx - ax, bz - az);
+    let n = dx.abs().max(dz.abs()) * 2;
+    if n == 0 {
+        return 0.0;
+    }
+    let len = ((dx * dx + dz * dz) as f32).sqrt() * s.cell;
+    let mut sum = 0.0;
+    for k in 1..=n {
+        let t = (k as f32 - 0.5) / n as f32;
+        let x = (ax as f32 + 0.5 + dx as f32 * t).floor() as i32;
+        let z = (az as f32 + 0.5 + dz as f32 * t).floor() as i32;
+        sum += per_m((z * win.w + x) as usize);
+    }
+    len * sum / n as f32
+}
+
+/// Can one walk straight between window cells `a` and `b` (every crossed cell walkable
+/// and connected to the previous one)?
+fn straight(
+    win: &Window,
+    a: usize,
+    b: usize,
+    step: f32,
+    allowed: &mut dyn FnMut(usize) -> bool,
+) -> bool {
+    let (ax, az) = ((a as i32) % win.w, (a as i32) / win.w);
+    let (bx, bz) = ((b as i32) % win.w, (b as i32) / win.w);
+    let (dx, dz) = (bx - ax, bz - az);
+    let n = dx.abs().max(dz.abs()) * 2;
+    if n == 0 {
+        return true;
+    }
+    let mut prev = a;
+    for k in 1..=n {
+        let t = k as f32 / n as f32;
+        // Sample at the center line and half a cell to either side (clearance).
+        for off in [-0.35f32, 0.0, 0.35] {
+            let len = ((dx * dx + dz * dz) as f32).sqrt();
+            let (px, pz) = (-(dz as f32) / len * off, dx as f32 / len * off);
+            let x = (ax as f32 + 0.5 + dx as f32 * t + px).floor() as i32;
+            let z = (az as f32 + 0.5 + dz as f32 * t + pz).floor() as i32;
+            if x < 0 || z < 0 || x >= win.w || z >= win.d {
+                return false;
+            }
+            let i = (z * win.w + x) as usize;
+            if !win.walk[i] || !allowed(i) {
+                return false;
+            }
+            if off == 0.0 {
+                if i != prev && !win.connected(prev, i, step, true) {
+                    return false;
+                }
+                prev = i;
+            }
+        }
+    }
+    true
+}
 impl TacticalWorld {
     /// [`TacticalWorld::stacked_height`] with a caller-owned scratch buffer.
     pub fn stacked_height_scratch(
@@ -1222,6 +1320,7 @@ const WARM_JOBS: usize = 4;
 /// single step. The ground under a chunk (the slow part on real terrain) is sampled on the
 /// async pool and the chunk finished here a step or more later; without a pool, one chunk is
 /// built a step.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn warm_nav(
     mut grid: ResMut<NavGrid>,
     world: Res<TacticalWorld>,
@@ -1229,6 +1328,7 @@ pub(crate) fn warm_nav(
     water: Res<Water>,
     agents: Query<&Transform, (With<crate::agent::Npc>, Without<crate::rest::Resting>)>,
     config: Option<Res<EngineConfig>>,
+    time: Res<Time>,
 ) {
     if ground.is_changed() {
         grid.ground_jobs.clear();
@@ -1248,9 +1348,9 @@ pub(crate) fn warm_nav(
             grid.ground_ready.insert(key, g);
         }
     }
-    // Headless runs (tests, tools) build a chunk a step on this thread: a pool's answer
-    // arrives in whichever step the machine's load allows, and the routes with it.
-    let pool = AsyncComputeTaskPool::try_get().filter(|_| config.is_none_or(|c| c.off_frame()));
+    // On the pool a chunk's ground comes in when its worker is done, which varies run to run:
+    // tests and plain headless runs build it here, a chunk a step, the same every run.
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| off_the_step(config.as_deref(), &time));
     grid.warming = pool.is_some();
     let mut ctx = grid.ctx(&world, &ground, &water);
     // Finish one chunk whose ground is ready (its obstacles and clearance are quick), one
@@ -1281,7 +1381,9 @@ pub(crate) fn warm_nav(
         .iter()
         .copied()
         .find(|k| ctx.grid.ground_ready.contains_key(k));
-    if let Some(key) = ready.or_else(|| ctx.grid.ground_ready.keys().copied().find(near_one)) {
+    // (The lowest key, not the map's first: which chunk is built first decides paths.)
+    let near_ready = || ctx.grid.ground_ready.keys().copied().filter(near_one).min();
+    if let Some(key) = ready.or_else(near_ready) {
         if ctx.grid.chunks.contains_key(&key) {
             ctx.grid.ground_ready.remove(&key);
         } else {
@@ -1362,6 +1464,7 @@ pub(crate) fn warm_nav(
 mod tests {
     use super::*;
     use crate::world_model::{Obstacle, ObstacleShape};
+    use bevy_platform::collections::HashSet;
     use engine_world::{WaterQuery, WaterSample, WearQuery};
     use std::sync::Arc;
 
@@ -1496,12 +1599,7 @@ mod tests {
         assert!(ctx.grid.ground_ready.is_empty(), "used by the rebuild");
         // A change to the ground far off keeps what is kept here.
         let far = (DVec2::new(200.0, 200.0), DVec2::new(208.0, 208.0));
-        world.update(
-            &std::collections::HashSet::new(),
-            Vec::new(),
-            &[far],
-            &ground,
-        );
+        world.update(&HashSet::default(), Vec::new(), &[far], &ground);
         world.update(&replaced, vec![w(1)], &[], &ground);
         let mut ctx = grid.ctx(&world, &ground, &water);
         assert_eq!(
@@ -1512,12 +1610,7 @@ mod tests {
         let _ = ctx.sample(p);
         // A change to the ground itself keeps nothing.
         let region = (DVec2::new(0.0, 0.0), DVec2::new(8.0, 8.0));
-        world.update(
-            &std::collections::HashSet::new(),
-            Vec::new(),
-            &[region],
-            &ground,
-        );
+        world.update(&HashSet::default(), Vec::new(), &[region], &ground);
         let ctx = grid.ctx(&world, &ground, &water);
         assert!(ctx.grid.chunks.is_empty());
         assert!(ctx.grid.ground_ready.is_empty());
@@ -1580,6 +1673,71 @@ mod tests {
             ctx.grid.chunks_built, built,
             "nothing left to build one by one"
         );
+    }
+
+    #[test]
+    fn a_search_run_on_another_thread_answers_as_one_run_here() {
+        // A wall, a fire and a worn trail: every part of the search has something to read.
+        let world = TacticalWorld::from_obstacles(
+            vec![wall(
+                1,
+                DVec3::new(0.0, 2.0, 0.0),
+                Vec3::new(6.0, 2.0, 0.3),
+                Quat::IDENTITY,
+            )],
+            &Ground::default(),
+        );
+        let fire = |p: DVec3| {
+            if (p.x - 8.0).abs() < 2.0 && p.z.abs() < 2.0 {
+                f32::INFINITY
+            } else {
+                0.0
+            }
+        };
+        let wear = GroundWear(Arc::new(Trail(vec![
+            DVec3::new(-12.0, 0.0, -6.0),
+            DVec3::new(-9.0, 0.0, 0.0),
+            DVec3::new(-12.0, 0.0, 6.0),
+        ])));
+        let (ground, water) = (Ground::default(), Water::default());
+        let pairs = [
+            (DVec3::new(0.0, 0.0, -5.0), DVec3::new(0.0, 0.0, 5.0)),
+            (DVec3::new(-12.0, 0.0, -8.0), DVec3::new(-12.0, 0.0, 8.0)),
+            (DVec3::new(4.0, 0.0, -4.0), DVec3::new(11.0, 0.0, 3.0)),
+            (DVec3::new(-3.0, 0.0, 0.2), DVec3::new(3.0, 0.0, -0.2)),
+        ];
+        let mut searched = 0;
+        for (from, to) in pairs {
+            let mut here_grid = NavGrid::default();
+            let mut here = Vec::new();
+            let status = here_grid
+                .ctx(&world, &ground, &water)
+                .worn(Some(&wear))
+                .find_path(from, to, &mut { fire }, &mut here);
+            let mut grid = NavGrid::default();
+            let mut ctx = grid.ctx(&world, &ground, &water).worn(Some(&wear));
+            let mut there = Vec::new();
+            let there_status = match ctx.plan_path(from, to, &mut { fire }, &mut there, usize::MAX)
+            {
+                PathPlan::Done(s) => s,
+                PathPlan::Search(search) => {
+                    searched += 1;
+                    let wear = wear.0.clone();
+                    let (s, path) = std::thread::spawn(move || {
+                        let mut path = Vec::new();
+                        let s = search.run(&mut { fire }, Some(&*wear), &mut path);
+                        (s, path)
+                    })
+                    .join()
+                    .unwrap();
+                    there = path;
+                    s
+                }
+            };
+            assert_eq!(status, there_status, "{from} -> {to}");
+            assert_eq!(here, there, "{from} -> {to}");
+        }
+        assert!(searched >= 3, "only {searched} pairs needed a search");
     }
 
     #[test]

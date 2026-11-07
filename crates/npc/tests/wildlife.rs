@@ -217,6 +217,62 @@ fn a_wolf_pack_runs_prey_down_and_feeds() {
     }
 }
 
+/// Where every animal of a hunt is, second by second, over `secs`.
+fn hunt_track(secs: usize, busy: bool) -> Vec<Vec<[u64; 3]>> {
+    // Threads that keep every core busy: work the pool finishes late must not change the hunt.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let burners: Vec<_> = (0..if busy { 8 } else { 0 })
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut x = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+    let mut app = app();
+    app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.0;
+    let mut all = herd(&mut app, Species::Deer, DVec3::new(0.0, 0.0, 0.0), 3, 1);
+    all.extend(herd(
+        &mut app,
+        Species::Wolf,
+        DVec3::new(0.0, 0.0, -45.0),
+        3,
+        2,
+    ));
+    for &w in &all[3..] {
+        app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+    }
+    let mut track = Vec::new();
+    for _ in 0..secs {
+        app.update_n(60);
+        track.push(
+            all.iter()
+                .map(|&e| pos(&app, e).to_array().map(f64::to_bits))
+                .collect(),
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for b in burners {
+        let _ = b.join();
+    }
+    track
+}
+
+#[test]
+fn a_hunt_runs_bit_for_bit_the_same() {
+    // The pack's hunt failed once in CI's busy debug shard and never here: what a run does
+    // may not depend on map order (random per map) or on when pool work comes in.
+    let calm = hunt_track(90, false);
+    let busy = hunt_track(90, true);
+    for (s, (a, b)) in calm.iter().zip(&busy).enumerate() {
+        assert_eq!(a, b, "the hunt went another way by {} s", s + 1);
+    }
+}
+
 #[test]
 fn birds_take_off_together() {
     let mut app = app();

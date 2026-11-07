@@ -21,7 +21,7 @@
 //!   alert deer warn the herd, and one bird taking off lifts the whole flock; a deer with a
 //!   wolf at its heels zigzags; wolves give a charging boar room.
 
-use std::collections::HashMap;
+use bevy_platform::collections::HashMap;
 
 use engine_core::math::hash_u64;
 use engine_core::prelude::*;

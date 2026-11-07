@@ -7,7 +7,7 @@
 //! later id) changes nothing. Bodies spawned on the same spot of the same kind get different
 //! seeds, in spawn order. Insert a `Seed` yourself to choose one.
 
-use std::collections::HashMap;
+use bevy_platform::collections::HashMap;
 
 use engine_core::prelude::*;
 
