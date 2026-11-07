@@ -26,7 +26,7 @@ pub const WARDEN: usize = 1;
 pub const BLINKER: usize = 3;
 /// Where the blinker blinks to, in turn (x, z): off the dais into the open floor between the
 /// two ends, in the camera's view.
-pub const BLINKS: [[f64; 2]; 2] = [[1.0, 5.0], [-1.5, 0.5]];
+pub const BLINKS: [[f64; 2]; 2] = [[0.0, 4.5], [-1.5, 0.5]];
 /// An end's size, m (a plain portal's).
 pub const SIZE: [f32; 2] = [1.4, 2.4];
 /// How far each lane's dummy stands beyond the far end, m, and the crate in front of the near
@@ -108,6 +108,9 @@ pub(super) fn lanes() -> Vec<Lane> {
         ..lane(SpellDesign::default())
     };
     let fire = || d(&["fire"], CastType::Bolt).named("Fire bolt");
+    // The crate's middle: a push at the crate itself flies at chest height, over it.
+    let [cx, cz] = crate_spot();
+    let into_crate = AimAt::At(cx, FLOOR + 0.38, cz);
     let blink = || d(&["blink"], CastType::OnSelf).named("Blink");
     let recall = || d(&["recall"], CastType::OnSelf).named("Recall");
     let mut warden = vec![
@@ -138,7 +141,7 @@ pub(super) fn lanes() -> Vec<Lane> {
         casts(vec![cast(
             8.2,
             d(&["push"], CastType::Bolt).named("Push"),
-            AimAt::Focus,
+            into_crate,
         )]),
         casts(blinks),
         casts(Vec::new()),

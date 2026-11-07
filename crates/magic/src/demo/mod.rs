@@ -202,11 +202,11 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_portal",
         name: "Portals: bolts, a beam and a crate through a door in space; a blink and a recall",
-        // On the warden's line of fire, just in front of it and a little above: its bolts fly
-        // past the camera into the near end 7 m away, and through the opening you see them
+        // Over the warden's line of fire, just in front of it and 1.3 m above: its bolts fly
+        // in under the camera into the near end 7 m away, and through the opening you see them
         // strike the dummy beyond the far end, in the middle of the view. The far end from
         // behind down the hall, the blinker's path between the two.
-        eye: [-8.2, 2.6, 8.3],
+        eye: [-8.2, 3.4, 8.3],
         target: [-2.5, 1.2, -1.5],
         hour: 16.6,
         // A bolt in flight out of the far end, the blinker mid-path.
