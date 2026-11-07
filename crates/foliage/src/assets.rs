@@ -533,8 +533,9 @@ pub fn ensure_species_visuals(
                 todo.into_iter()
                     .map(|(i, sp)| Job::Meshes(i, Box::new(sp), bone_wind)),
             );
+            // (No task pools: a test or a tool, which bakes here and now.)
             match AsyncComputeTaskPool::try_get().filter(|_| loading.background) {
-                Some(pool) => {
+                Some(_) => {
                     let slot = Arc::new(Mutex::new(None));
                     let out = slot.clone();
                     // In play the bake runs beside the frame: leave it two cores, or a bake on
@@ -542,13 +543,20 @@ pub fn ensure_species_visuals(
                     // flight on a 4-core VM logged a spruce upload, 0.0 ms of work on its own,
                     // "taking" 155 ms beside a 1 s frame). Behind a loading screen take them all.
                     let spare = if screen.is_some() { 0 } else { 2 };
-                    pool.spawn(async move {
+                    // On a thread of its own, not on the async pool: the bake only waits for
+                    // its workers (seconds, minutes on 4 cores), and a pool thread waiting with
+                    // it holds up every job beside the frame queued behind it (water's lake
+                    // depths waited 133 s at the arena, VM, with the pool's one thread here).
+                    let run = move || {
                         let baked = bake(jobs, spare);
                         if let Ok(mut s) = out.lock() {
                             *s = Some(baked);
                         }
-                    })
-                    .detach();
+                    };
+                    std::thread::Builder::new()
+                        .name("foliage bake".into())
+                        .spawn(run)
+                        .expect("a thread for the foliage bake");
                     state.bake = Some(slot);
                 }
                 None => state.ready.extend(bake(jobs, 0)),
