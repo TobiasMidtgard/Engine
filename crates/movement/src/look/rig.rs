@@ -1752,7 +1752,9 @@ impl Animator {
         if w.mantle > 1e-3
             && let Some((top, _)) = self.ledge
         {
-            p.blend(&mantle_arms(top, torso), w.mantle, Channels::Arms);
+            // (Letting go once the edge is down at the hips.)
+            let hold = smooth(0.1, 0.5, top.y);
+            p.blend(&mantle_arms(top, torso), w.mantle * hold, Channels::Arms);
         }
         if w.vault > 1e-3
             && let Some(v) = self.vault
@@ -2162,30 +2164,56 @@ fn wall_run(speed: f32, phase: f32, side: f32, distance: f32) -> Pose {
 
 /// Climbing onto a ledge whose top is at `top` (character space).
 fn mantle(top: Vec3, rising: bool) -> Pose {
+    // One continuous climb-up, driven by how high the ledge still is above the feet (research:
+    // pull, press, knee, stand; Uncharted's and AC's climb-ups read as these four beats):
+    // - pull (ledge 2.0..1.4 m up): upright under the hands, legs hanging, the lead knee
+    //   starting to come up;
+    // - press (1.45..0.95): chest over the edge, the torso pitched forward, the lead knee up
+    //   with its sole against the wall;
+    // - knee (1.25..0.45): the lead foot comes up past the edge and onto the top, the
+    //   trailing leg below with its toes on the wall;
+    // - stand (stepping over, or under 0.35): up on the lead leg, the trailing foot coming up.
     let mut p = Pose::BIND;
-    let ledge_y = top.y;
-    let z = top.z.min(-0.15);
-    p.pelvis = v3(0.0, 0.92, 0.05);
-    p.spine = pitch(0.35);
-    p.chest = pitch(0.25);
-    p.head = pitch(-0.3);
-    if rising {
-        p.ankle = [
-            v3(-0.12, (ledge_y - 0.75).max(0.1) + 0.2, 0.18),
-            v3(0.13, (ledge_y - 0.45).max(0.2), -0.05),
-        ];
-        p.foot = [pitch(0.6), pitch(0.3)];
-        p.knee = [v3(-0.2, 0.2, -1.0), v3(0.2, 0.4, -1.0)];
-    } else {
-        p.pelvis = v3(0.0, 0.88, -0.05);
-        p.ankle = [
-            v3(-0.12, ledge_y.max(0.0) + ANKLE_HEIGHT, z + 0.1),
-            v3(0.13, (ledge_y - 0.3).max(0.1) + 0.15, 0.25),
-        ];
-        p.foot = [Quat::IDENTITY, pitch(0.6)];
-        p.knee = [v3(-0.1, 0.3, -1.0), v3(0.25, -0.2, -1.0)];
-        p.spine = pitch(0.45);
-    }
+    let h = top.y;
+    let wall = top.z.min(-0.15);
+    let a = ANKLE_HEIGHT;
+    let press = smooth(1.45, 0.95, h);
+    let knee = smooth(1.25, 0.45, h);
+    let stand = if rising { smooth(0.4, 0.05, h) } else { 1.0 };
+    p.pelvis = v3(
+        0.0,
+        0.92 - 0.06 * knee * (1.0 - stand),
+        lerp(0.08, 0.02, stand),
+    );
+    p.pelvis_rot = pitch(0.3 * press * (1.0 - stand));
+    p.spine = pitch(lerp(-0.05, 0.45, press) * (1.0 - 0.6 * stand));
+    p.chest = pitch(lerp(-0.08, 0.3, press) * (1.0 - 0.7 * stand));
+    p.neck = pitch(-0.1 * press);
+    p.head = pitch(lerp(-0.35, -0.1, press));
+    // Lead (right) leg: hanging, knee up with the sole on the wall, then the foot on the top.
+    let hang_r = v3(0.12, a + 0.1, wall + 0.2);
+    let wall_r = v3(0.14, (h - 0.55).max(a + 0.15), wall + 0.08);
+    let top_r = v3(0.14, h.max(0.0) + a, wall - 0.12);
+    // (Up past the edge first, then in over it: the foot never cuts the corner.)
+    let k = knee.max(stand);
+    let below = hang_r.lerp(wall_r, press);
+    let lead = v3(
+        lerp(below.x, top_r.x, k),
+        lerp(below.y, top_r.y, smooth(0.0, 0.6, k)) + 0.08 * (k * PI).sin(),
+        lerp(below.z, top_r.z, smooth(0.45, 1.0, k)),
+    );
+    // Trailing (left) leg: hanging below, toes on the wall as the body rises, up beside the
+    // lead foot at the end.
+    let hang_l = v3(-0.12, a + 0.02, wall + 0.22);
+    let wall_l = v3(-0.12, (h - 1.15).max(a), wall + 0.1);
+    let beside = v3(-0.13, h.max(0.0) + a + 0.12 * (1.0 - stand), wall - 0.05);
+    let trail = hang_l.lerp(wall_l, press).lerp(beside, stand);
+    p.ankle = [trail, lead];
+    p.foot = [
+        pitch(lerp(0.5, 0.0, stand)),
+        pitch(lerp(lerp(0.4, -0.3, press), 0.0, knee.max(stand))),
+    ];
+    p.knee = [v3(-0.15, 0.1, -1.0), v3(0.2, lerp(0.1, 0.6, press), -1.0)];
     p
 }
 
@@ -2815,10 +2843,12 @@ fn wall_arms(p: &mut Pose, side: f32) {
     p.elbow = [v3(-0.3, -0.5, 0.8), v3(0.3, -0.5, 0.8)];
 }
 
-/// Hands on the ledge whose top is at `top` (character space).
+/// Hands on the ledge whose top is at `top` (character space): pulling, then pressing down
+/// with the elbows back as the edge passes the chest, letting go once the feet are up.
 fn mantle_arms(top: Vec3, torso: Xf) -> Pose {
     let mut p = Pose::BIND;
     let z = top.z.min(-0.12) + 0.04;
+    let press = smooth(1.45, 0.95, top.y);
     p.sword = sword(
         v3(0.24, top.y + 0.05, z),
         v3(0.35, -0.5, 0.8),
@@ -2830,9 +2860,10 @@ fn mantle_arms(top: Vec3, torso: Xf) -> Pose {
     );
     p.follow_l = 0.0;
     p.curl_l = 0.05;
+    // Pulling: the elbows out and down; pressing: back along the body.
     p.elbow = [
-        torso.rot * v3(-0.8, -0.3, 0.6),
-        torso.rot * v3(0.8, -0.3, 0.6),
+        torso.rot * v3(-0.8, -0.3, 0.6).lerp(v3(-0.35, 0.1, 1.0), press),
+        torso.rot * v3(0.8, -0.3, 0.6).lerp(v3(0.35, 0.1, 1.0), press),
     ];
     p
 }
@@ -3251,6 +3282,36 @@ mod tests {
             }
             assert!(planted >= 3, "{planted} over {top}");
         }
+    }
+
+    #[test]
+    fn a_climb_up_pulls_presses_kneels_and_stands_without_jumps() {
+        let mut last: Option<[Xf; BONES]> = None;
+        let mut lead_on_top = false;
+        for i in 0..=40 {
+            let h = 2.0 - i as f32 * 0.05;
+            let top = v3(0.0, h, -0.38);
+            let bones = solve(&mantle(top, true));
+            for b in [Bone::FootL, Bone::FootR, Bone::ShinL, Bone::ShinR] {
+                let p = bones[b.index()].pos;
+                // Below the top, nothing goes into the wall.
+                if p.y < h - 0.05 {
+                    assert!(p.z > top.z - 0.02, "{b:?} in the wall at h {h}: {p}");
+                }
+            }
+            if let Some(prev) = last {
+                for b in [Bone::Pelvis, Bone::FootL, Bone::FootR, Bone::Head] {
+                    let d = bones[b.index()].pos.distance(prev[b.index()].pos);
+                    assert!(d < 0.12, "{b:?} jumps {d} at h {h}");
+                }
+            }
+            if h < 0.6 {
+                let f = bones[Bone::FootR.index()].pos;
+                lead_on_top |= f.z < top.z && (f.y - h).abs() < 0.2;
+            }
+            last = Some(bones);
+        }
+        assert!(lead_on_top, "the lead foot steps onto the top");
     }
 
     #[test]
