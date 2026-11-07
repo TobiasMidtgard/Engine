@@ -43,6 +43,7 @@ pub mod dials;
 pub mod effects;
 pub mod growth;
 pub mod hits;
+pub mod kinesis;
 pub mod looks;
 pub mod meet;
 pub mod player;
@@ -137,6 +138,8 @@ impl Plugin for MagicPlugin {
                     player::flash_refused,
                     space::travel,
                     space::pass_gates,
+                    kinesis::grip,
+                    kinesis::fly_hurled,
                 )
                     .chain()
                     .in_set(MagicSet::Cast),
@@ -153,6 +156,7 @@ impl Plugin for MagicPlugin {
                     crafter::tend_altars,
                     player::write_hud,
                     tether::draw_tethers,
+                    kinesis::draw_grips,
                 )
                     .chain(),
             )
@@ -168,6 +172,7 @@ impl Plugin for MagicPlugin {
                         runtime::tick_rain,
                     )
                         .chain(),
+                    kinesis::guard_rings,
                     meet::meet_spells,
                     undead::raise_dead,
                     summon::run_minions,
@@ -209,6 +214,7 @@ impl Plugin for MagicPlugin {
         crafter::register(app);
         wards::register(app);
         space::register(app);
+        kinesis::register(app);
         demo::build(app);
     }
 }

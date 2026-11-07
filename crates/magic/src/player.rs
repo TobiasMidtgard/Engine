@@ -99,6 +99,10 @@ impl Hold {
         if design.has(|m| matches!(m, Modifier::Charge { .. })) {
             return Hold::Charge;
         }
+        // A grip holds what it takes while the key is down and throws it on release.
+        if design.effects.iter().any(|k| k == "grip") {
+            return Hold::Channel;
+        }
         match design.cast {
             CastType::Beam | CastType::Aura | CastType::Orbit | CastType::Tether => Hold::Channel,
             CastType::Area
@@ -270,7 +274,7 @@ pub fn starter_spells() -> Vec<(SpellDesign, Option<Growth>)> {
             None,
         ),
         (d(&["fire"], CastType::Beam).named("Flame jet"), None),
-        (d(&["stone"], CastType::Bolt).named("Stone grip"), None),
+        (d(&["grip"], CastType::Bolt).named("Telekinesis"), None),
         (d(&["heal"], CastType::OnSelf).named("Mend"), None),
     ]
 }
@@ -424,6 +428,7 @@ pub fn drive_spell_bars(
         Option<&Casting>,
     )>,
     mut beams: Query<&mut BeamCast>,
+    mut grips: Query<&mut crate::kinesis::Grip>,
     mut requests: MessageWriter<CastRequest>,
     mut queue: ResMut<MagicQueue>,
 ) {
@@ -487,6 +492,21 @@ pub fn drive_spell_bars(
                             } else {
                                 // Let go (or out of mana): it ends now, however long it had.
                                 b.duration = b.duration.min(end);
+                            }
+                        }
+                        // A grip holds while the key is down, aimed with the crosshair, and
+                        // throws when it comes up.
+                        for mut g in &mut grips {
+                            if g.cast.caster != Some(e) || g.done.is_some() {
+                                continue;
+                            }
+                            if let Some(p) = target {
+                                g.aim = Aim::Point(p);
+                            }
+                            if going {
+                                g.duration = g.duration.max(g.age + CHANNEL_GRACE_SECS);
+                            } else {
+                                g.duration = g.duration.min(g.age);
                             }
                         }
                         bar.held = going.then_some(held);
@@ -752,6 +772,11 @@ mod tests {
         assert_eq!(holds[2], Hold::Place, "a pillar is placed");
         assert_eq!(holds[3], Hold::Tap, "chain lightning fires at once");
         assert_eq!(holds[5], Hold::Channel, "a flame jet is channelled");
+        assert_eq!(
+            holds[6],
+            Hold::Channel,
+            "telekinesis holds while the key is down"
+        );
         assert_eq!(holds[7], Hold::Tap, "a self heal fires at once");
     }
 

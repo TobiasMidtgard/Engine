@@ -105,6 +105,19 @@ pub struct Payload {
     pub portal_m: [f32; 2],
     /// Seconds of its path a recall rewinds (0: not a recall; space.rs).
     pub recall_secs: f32,
+    /// The heaviest thing a grip lifts, kg (0: not a grip; kinesis.rs): half the cast's energy
+    /// lifts it 3 m and throws it at 20 m/s.
+    pub grip_kg: f32,
+    /// Energy that throws what a grip holds, J: a light thing flies at up to 38 m/s, a heavy
+    /// one slower.
+    pub throw_j: f32,
+    /// How long a grip holds before it throws when nobody holds the spell (an NPC's or the
+    /// hall's cast); a ring of torn stones circles this long.
+    pub grip_secs: f32,
+    /// How far a grip reaches for something to hold, m.
+    pub grip_m: f32,
+    /// A thrown thing's blow at 20 m/s for a 40 kg crate (the spell's damage scale).
+    pub grip_damage: f32,
     pub veil_secs: f32,
     pub fear_secs: f32,
     pub calm_secs: f32,
@@ -468,6 +481,9 @@ fn compile_inner(
         }
         + reaction.drain;
     let fire = w.elements.contains(&Element::Fire);
+    // A grip's energy: what it can lift and how hard it throws (kinesis.rs).
+    let gripping = has(&|k| matches!(k, EffectKind::Grip));
+    let grip_j = ctx.power.energy_j as f32 * strength;
     let payload = Payload {
         damage,
         damage_kind: damage_kind(&w),
@@ -502,6 +518,29 @@ fn compile_inner(
         },
         recall_secs: if has(&|k| matches!(k, EffectKind::Recall)) {
             (3.0 * duration_k).clamp(1.0, 6.0)
+        } else {
+            0.0
+        },
+        grip_kg: if gripping {
+            crate::kinesis::heaviest_kg(grip_j)
+        } else {
+            0.0
+        },
+        throw_j: if gripping { 0.5 * grip_j } else { 0.0 },
+        grip_secs: if !gripping {
+            0.0
+        } else if cast == CastType::Orbit {
+            (8.0 * duration_k).clamp(2.0, 40.0)
+        } else {
+            (2.2 * duration_k).clamp(0.6, 12.0)
+        },
+        grip_m: if gripping {
+            (12.0 * range_k).clamp(4.0, 40.0)
+        } else {
+            0.0
+        },
+        grip_damage: if gripping {
+            ctx.power.damage() * strength
         } else {
             0.0
         },

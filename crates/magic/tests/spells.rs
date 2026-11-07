@@ -2344,3 +2344,323 @@ fn the_portal_hall_opens_its_pair_and_sends_bolts_through() {
     };
     assert!(!hits_on(&app, target).is_empty(), "bolts through the door");
 }
+
+// ------------------------------------------------------------------------------ kinesis
+
+/// Turns on the stand-in's motion: dynamic bodies move by their velocity under gravity and
+/// impulses, and stop on the ground.
+#[derive(Resource)]
+struct Integrate;
+
+fn integrate(
+    time: Res<Time>,
+    gravity: Res<engine_world::Gravity>,
+    mut q: Query<(
+        &mut Transform,
+        &RigidBody,
+        &mut engine_world::physics::Velocity,
+    )>,
+    mut impulses: MessageReader<ApplyImpulse>,
+) {
+    let dt = time.delta_secs();
+    for imp in impulses.read() {
+        if let Ok((_, rb, mut v)) = q.get_mut(imp.entity) {
+            v.linear += imp.impulse / rb.mass_kg.unwrap_or(60.0);
+        }
+    }
+    for (mut t, rb, mut v) in &mut q {
+        if rb.kind != BodyKind::Dynamic {
+            continue;
+        }
+        v.linear += gravity.at(t.translation) * rb.gravity_scale * dt;
+        t.translation += (v.linear * dt).as_dvec3();
+        if t.translation.y < 0.0 {
+            t.translation.y = 0.0;
+            v.linear.y = v.linear.y.max(0.0);
+            v.linear *= 1.0 - (8.0 * dt).min(1.0);
+        }
+    }
+}
+
+fn moving_app() -> App {
+    let mut app = app();
+    app.world.insert_resource(Integrate);
+    app.add_systems(
+        FixedUpdate,
+        integrate
+            .run_if(resource_exists::<Integrate>)
+            .in_set(SimSet::Physics),
+    );
+    app
+}
+
+fn loose_crate(app: &mut App, at: DVec3, kg: f32) -> Entity {
+    app.world
+        .spawn((
+            Name::new("Crate"),
+            Transform::from_translation(at),
+            RigidBody {
+                kind: BodyKind::Dynamic,
+                mass_kg: Some(kg),
+                ..Default::default()
+            },
+            Collider {
+                shape: ColliderShape::Cuboid {
+                    half_extents: Vec3::splat(0.375),
+                },
+                density: 500.0,
+                ..Default::default()
+            },
+            engine_world::physics::Velocity::default(),
+        ))
+        .id()
+}
+
+fn kinesis(app: &mut App) -> serde_json::Value {
+    call_api(&mut app.world, "magic.kinesis", json!({})).unwrap()
+}
+
+fn grip() -> SpellDesign {
+    SpellDesign::new(&["grip"], CastType::Bolt)
+}
+
+fn pos(app: &App, e: Entity) -> DVec3 {
+    app.world.get::<Transform>(e).unwrap().translation
+}
+
+#[test]
+fn a_grip_lifts_a_crate_to_the_hand_and_throws_it_at_a_dummy() {
+    let mut app = moving_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let crate_e = loose_crate(&mut app, DVec3::new(0.3, 0.375, -5.0), 16.0);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -14.0));
+    run(&mut app, 0.1);
+    cast(&mut app, me, grip(), Aim::Entity(d));
+    run(&mut app, 1.4);
+    let k = kinesis(&mut app);
+    let held = &k["grips"][0]["held"][0];
+    assert_eq!(held["id"], json!(crate_e.to_bits()), "{k}");
+    assert_eq!(held["kind"], json!("body"));
+    // It floats before the hand: up off the floor, a couple of metres out.
+    let p = pos(&app, crate_e);
+    assert!(p.y > 1.0 && p.z < -1.0 && p.z > -3.5, "held at {p:?}");
+    assert!(app.world.get::<kinesis::Gripped>(crate_e).is_some());
+    // The time is up: it flies at the dummy and hits it by its weight and speed.
+    run(&mut app, 2.0);
+    let hit = app
+        .world
+        .resource::<Seen>()
+        .damage
+        .iter()
+        .find(|h| h.target == d && h.source == Some(me))
+        .cloned()
+        .expect("the crate hits the dummy");
+    assert!(hit.amount > 20.0 && hit.impulse.z < 0.0, "{hit:?}");
+    assert!(app.world.get::<kinesis::Gripped>(crate_e).is_none());
+    assert_eq!(
+        app.world.get::<RigidBody>(crate_e).unwrap().gravity_scale,
+        1.0,
+        "gravity back"
+    );
+}
+
+#[test]
+fn a_crate_too_heavy_to_lift_drags_along_the_floor() {
+    let mut app = moving_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Apprentice);
+    app.world.get_mut::<MagicCaster>(me).unwrap().level = 3.0;
+    let crate_e = loose_crate(&mut app, DVec3::new(0.0, 0.0, -6.0), 80.0);
+    run(&mut app, 0.1);
+    cast(&mut app, me, grip(), Aim::Entity(crate_e));
+    run(&mut app, 1.6);
+    let k = kinesis(&mut app);
+    assert_eq!(k["grips"][0]["held"][0]["too_heavy"], json!(true), "{k}");
+    let p = pos(&app, crate_e);
+    assert!(p.y < 0.2, "never lifted: {p:?}");
+    assert!(p.z > -5.5, "dragged toward the caster: {p:?}");
+}
+
+#[test]
+fn a_grip_catches_a_bolt_and_throws_it_back() {
+    let mut app = moving_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, -24.0), Mastery::Ascended1);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 2;
+    app.world.entity_mut(foe).insert(Body(0.5));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        foe,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(me),
+    );
+    // The grip comes up while the bolt is on its way.
+    run(&mut app, 0.45);
+    cast(&mut app, me, grip(), Aim::Entity(foe));
+    run(&mut app, 1.0);
+    let k = kinesis(&mut app);
+    assert_eq!(k["grips"][0]["held"][0]["kind"], json!("missile"), "{k}");
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .damage
+            .iter()
+            .all(|h| h.target != me),
+        "caught before it struck"
+    );
+    // Held, then thrown back: it is the gripper's now and burns its first caster.
+    run(&mut app, 3.0);
+    let back = hits_on(&app, foe);
+    assert!(!back.is_empty(), "the bolt went back");
+    let mut q = app.world.query::<&runtime::Missile>();
+    assert!(
+        q.iter(&app.world)
+            .all(|m| m.cast.caster == Some(me) || m.spent.is_some())
+    );
+}
+
+#[test]
+fn with_nothing_in_reach_a_grip_tears_a_stone_out_of_the_ground() {
+    let mut app = moving_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -20.0));
+    run(&mut app, 0.1);
+    cast(&mut app, me, grip(), Aim::Entity(d));
+    run(&mut app, 0.8);
+    let mut q = app.world.query_filtered::<Entity, With<kinesis::Torn>>();
+    let stone = q.iter(&app.world).next().expect("a torn stone");
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .cues
+            .iter()
+            .any(|c| matches!(c, SpellCue::Mark { .. })),
+        "it leaves a scar"
+    );
+    run(&mut app, 0.7);
+    let p = pos(&app, stone);
+    assert!(p.y > 0.9, "it rises to the hand: {p:?}");
+    run(&mut app, 2.5);
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .damage
+            .iter()
+            .any(|h| h.target == d && h.source == Some(me)),
+        "and flies at the dummy"
+    );
+}
+
+#[test]
+fn a_ring_of_torn_stones_stops_a_bolt_and_flies_at_the_aim() {
+    let mut app = moving_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, -14.0), Mastery::Ascended1);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 2;
+    run(&mut app, 0.1);
+    let ring =
+        SpellDesign::new(&["grip"], CastType::Orbit).with(Modifier::Duration { factor: 0.5 });
+    cast(&mut app, me, ring, Aim::Entity(foe));
+    run(&mut app, 1.0);
+    let k = kinesis(&mut app);
+    assert_eq!(k["grips"][0]["ring"], json!(true));
+    let stones = k["grips"][0]["held"].as_array().unwrap().len();
+    assert!(stones >= 5, "{k}");
+    // Bolts at the ring's middle stop on its stones.
+    for _ in 0..3 {
+        cast(
+            &mut app,
+            foe,
+            SpellDesign::new(&["fire"], CastType::Bolt),
+            Aim::Point(DVec3::new(0.0, 1.2, 0.0)),
+        );
+        run(&mut app, 0.7);
+    }
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .damage
+            .iter()
+            .all(|h| h.target != me),
+        "the ring took them"
+    );
+    // Its time up, it flies at the foe.
+    run(&mut app, 4.0);
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .damage
+            .iter()
+            .any(|h| h.target == foe && h.source == Some(me)),
+        "stones flung at the aim"
+    );
+}
+
+#[test]
+fn a_grip_lifts_a_creature_helpless_and_flings_it() {
+    let mut app = moving_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let wolf = app
+        .world
+        .spawn((
+            Name::new("Wolf"),
+            Transform::from_translation(DVec3::new(0.0, 0.0, -6.0)),
+            Vitality::new(300.0),
+            engine_world::physics::CharacterController::default(),
+            MagicCaster {
+                side: 3,
+                ..MagicCaster::new(5.0, Mastery::Novice)
+            },
+        ))
+        .id();
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        grip(),
+        Aim::Point(DVec3::new(0.0, 0.0, -16.0)),
+    );
+    run(&mut app, 1.2);
+    let p = pos(&app, wolf);
+    assert!(p.y > 0.4, "lifted off its feet: {p:?}");
+    assert!(
+        app.world.get::<Statuses>(wolf).is_some_and(|s| s.rooted),
+        "helpless while held"
+    );
+    run(&mut app, 3.0);
+    assert!(pos(&app, wolf).z < -7.0, "flung toward the aim");
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .damage
+            .iter()
+            .any(|h| h.target == wolf && h.kind == engine_world::DamageKind::Fall),
+        "it lands hard"
+    );
+}
+
+#[test]
+fn the_spell_bar_holds_a_grip_while_the_key_is_down_and_throws_on_release() {
+    let mut app = moving_app();
+    let me = weaver(&mut app, DVec3::ZERO);
+    let crate_e = loose_crate(&mut app, DVec3::new(0.0, 0.375, -4.0), 16.0);
+    run(&mut app, 0.1);
+    let eye = DVec3::new(0.5, 2.0, 3.0);
+    let at = DVec3::new(0.0, 0.4, -4.0);
+    // Slot 7 is telekinesis.
+    aim_input(&mut app, me, eye, at, |i| i.press(6));
+    run(&mut app, 5.0);
+    let k = kinesis(&mut app);
+    assert_eq!(
+        k["grips"][0]["held"][0]["thrown"],
+        json!(false),
+        "held past its own time: {k}"
+    );
+    assert!(pos(&app, crate_e).y > 0.8);
+    // Aim off to the side and let go: it flies that way.
+    let side = DVec3::new(-12.0, 1.0, -4.0);
+    aim_input(&mut app, me, eye, side, |i| i.release(6));
+    run(&mut app, 0.6);
+    let p = pos(&app, crate_e);
+    assert!(p.x < -2.0, "thrown where the crosshair was: {p:?}");
+}

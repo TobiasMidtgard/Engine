@@ -274,6 +274,8 @@ pub struct MagicQueue {
     pub gate_pulses: Vec<Entity>,
     /// Blinks and recalls to start (space.rs).
     pub travels: Vec<crate::space::Travel>,
+    /// Grips to start (kinesis.rs).
+    pub grips: Vec<crate::kinesis::Grip>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -746,6 +748,18 @@ pub fn release(
             return;
         }
     }
+    // A grip takes hold of something along its aim (or tears a stone out of the ground), or
+    // as an orbit tears a ring of stones round its caster (kinesis.rs).
+    if p.grip_kg > 0.0 {
+        queue.grips.push(crate::kinesis::Grip::new(
+            info.clone(),
+            match target {
+                Some(t) => Aim::Entity(t),
+                None => Aim::Point(aim_point),
+            },
+        ));
+        return;
+    }
     // A ward cast as an area is a dome, as a wall a row of panels (wards.rs); one that also
     // heals still heals inside it.
     if spell.payload.ward > 0.0 && matches!(spell.cast, CastType::Area | CastType::Wall) {
@@ -1037,7 +1051,7 @@ pub fn fly_missiles(
     time: Res<Time>,
     gravity: Res<Gravity>,
     queries: Res<PhysicsQueries>,
-    mut missiles: Query<(Entity, &mut Missile, &mut SpellPos)>,
+    mut missiles: Query<(Entity, &mut Missile, &mut SpellPos), Without<crate::kinesis::Caught>>,
     creatures: Query<(Entity, &GlobalTransform, Allegiance, Option<&Vitality>), CreatureFilter>,
     anchors: Query<&GlobalTransform>,
     mut hits: ResMut<HitQueue>,

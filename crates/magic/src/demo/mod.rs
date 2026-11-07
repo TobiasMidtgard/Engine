@@ -20,6 +20,7 @@
 //! | `spells_dead` | the dead rise: three necromancers raise skeleton warriors, a storm skeletal mage and a fallen student as a thrall against three students' golem, fire elemental and fire bolts |
 //! | `spells_ward` | wards you can see: a warden's dome over three students stops a fire barrage until it shatters, a frost shell takes fire double, a storm shell shocks the skeletons that strike it, then a ward wall goes up ([`crate::wards`]) |
 //! | `spells_portal` | doors through space: a warden opens a portal on the floor and its other end down the hall, fires bolts through it into a dummy beyond, a storm beam bends through it, a push shoves a crate through, and a mage blinks off the dais twice and recalls back along its path ([`portal`], [`crate::space`]) |
+//! | `spells_kinesis` | telekinesis: a stone torn out of the floor and launched (then a burning one), a barrel and a crate lifted and thrown, a bolt caught in the air and thrown on, a loose dummy hurled down the hall, and a ring of torn stones that stops bolts and is flung at a dummy ([`kinesis`], [`crate::kinesis`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -29,6 +30,7 @@
 pub mod art;
 pub mod craft;
 pub mod duel;
+pub mod kinesis;
 pub mod player;
 pub mod portal;
 
@@ -212,6 +214,14 @@ pub const VIEWS: &[DemoView] = &[
         // A bolt in flight out of the far end, the blinker mid-path.
         warmup: 4.3,
     },
+    DemoView {
+        key: "spells_kinesis",
+        name: "Telekinesis: stones torn from the floor, a crate thrown, a bolt caught, a ring of stones",
+        eye: [1.8, 7.4, 17.0],
+        target: [1.8, 0.2, -2.5],
+        hour: 16.6,
+        warmup: 4.4,
+    },
 ];
 
 /// What the hall is running.
@@ -234,10 +244,11 @@ pub enum Program {
     Craft,
     Ward,
     Portal,
+    Kinesis,
 }
 
 impl Program {
-    pub const ALL: [Program; 15] = [
+    pub const ALL: [Program; 16] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -253,6 +264,7 @@ impl Program {
         Program::Craft,
         Program::Ward,
         Program::Portal,
+        Program::Kinesis,
     ];
 
     pub fn key(self) -> &'static str {
@@ -272,6 +284,7 @@ impl Program {
             Program::Craft => "spells_craft",
             Program::Ward => "spells_ward",
             Program::Portal => "spells_portal",
+            Program::Kinesis => "spells_kinesis",
         }
     }
 
@@ -304,6 +317,8 @@ impl Program {
             Program::Ward => 15.0,
             // The pair stands 15 s and is gone before the next period opens another.
             Program::Portal => 16.0,
+            // The ring is flung by 15.5 s; its stones and the thrown props reset each period.
+            Program::Kinesis => 16.0,
         }
     }
 
@@ -855,6 +870,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
             ]
         }
         Program::Portal => portal::lanes(),
+        Program::Kinesis => kinesis::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -1018,6 +1034,7 @@ fn setup_program(
             With<Rainfall>,
             With<Minion>,
             With<Rubble>,
+            With<crate::kinesis::Grip>,
         )>,
     >,
 ) {
@@ -1257,6 +1274,9 @@ fn setup_program(
     if program == Program::Portal {
         portal::spawn_props(&mut commands, origin);
     }
+    if program == Program::Kinesis {
+        kinesis::spawn_props(&mut commands, origin);
+    }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
             let base = origin + DVec3::new(*x, FLOOR, 0.0);
@@ -1360,7 +1380,12 @@ fn run_hall(
     }
     if matches!(
         hall.program,
-        Program::Shaping | Program::Summon | Program::Dead | Program::Ward | Program::Portal
+        Program::Shaping
+            | Program::Summon
+            | Program::Dead
+            | Program::Ward
+            | Program::Portal
+            | Program::Kinesis
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;

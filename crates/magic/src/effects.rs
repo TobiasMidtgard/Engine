@@ -41,6 +41,9 @@ pub enum EffectKind {
     Portal,
     /// The caster slides back along the last seconds of its path (space.rs).
     Recall,
+    /// Take hold of a thing or a creature with force, hold it before the hand and throw it
+    /// where the caster aims (kinesis.rs).
+    Grip,
     /// Unseen: perception skips the target.
     Veil,
     /// Light that reveals and blinds.
@@ -91,6 +94,7 @@ impl EffectDef {
             EffectKind::Blink { .. } => Dials::pole(Pole::Far, 1.0),
             EffectKind::Portal => Dials::pole(Pole::Far, 1.0) + Dials::pole(Pole::Form, 0.4),
             EffectKind::Recall => Dials::pole(Pole::Far, 0.6) + Dials::pole(Pole::Slow, 0.6),
+            EffectKind::Grip => Dials::pole(Pole::Pull, 0.7) + Dials::pole(Pole::Form, 0.3),
             EffectKind::Veil => Dials::pole(Pole::Veil, 1.0),
             EffectKind::Light => Dials::pole(Pole::Heat, 0.3) + Dials::pole(Pole::Reveal, 0.8),
             EffectKind::Fear => Dials::pole(Pole::Reveal, 0.4) + Dials::pole(Pole::Cold, 0.2),
@@ -269,6 +273,15 @@ pub const EFFECTS: &[EffectDef] = &[
         Subclass::Shaping,
         EffectKind::Recall,
         "Slide back along the path you took in the last three seconds, whole again.",
+    ),
+    def(
+        "grip",
+        "Telekinesis",
+        Subclass::Shaping,
+        EffectKind::Grip,
+        "Take hold of a thing with force: it comes to your hand and floats there while you hold \
+         the spell; let go and it flies where you aim. With nothing in reach it tears a stone \
+         out of the ground.",
     ),
     // Vitalism: healing and wards.
     def(
