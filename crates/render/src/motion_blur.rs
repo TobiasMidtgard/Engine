@@ -155,7 +155,7 @@ impl MotionBlurPass {
                 },
             )
         };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("motion blur"),
             entries: &[
                 layout_entry(

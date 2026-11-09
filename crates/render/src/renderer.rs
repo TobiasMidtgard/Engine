@@ -661,7 +661,11 @@ impl ViewState {
             meter,
             volumetrics,
             lens: Default::default(),
-            subsurface: None,
+            // Made with the other pipelines when they are warmed up, not on the frame skin first
+            // shows (play's first frame, or an extra view's).
+            subsurface: shared
+                .warm_pipelines
+                .then(|| crate::subsurface::SubsurfacePass::new(shared)),
             perf,
             shadow_cache: Default::default(),
             previous: None,

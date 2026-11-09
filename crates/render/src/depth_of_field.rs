@@ -247,7 +247,7 @@ impl DofPass {
                 },
             )
         };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("depth of field"),
             entries: &[
                 layout_entry(
@@ -706,13 +706,12 @@ pub(crate) fn post_pipeline(
     layout: &wgpu::BindGroupLayout,
     formats: &[wgpu::TextureFormat],
 ) -> wgpu::RenderPipeline {
-    let pipeline_layout = shared
-        .device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(label),
-            bind_group_layouts: &[Some(layout)],
-            immediate_size: 0,
-        });
+    // Through the shared cache: a second view (an editor split, a portal) compiles nothing.
+    let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
     let targets: Vec<Option<wgpu::ColorTargetState>> = formats
         .iter()
         .map(|&format| {
@@ -723,29 +722,27 @@ pub(crate) fn post_pipeline(
             })
         })
         .collect();
-    shared
-        .device
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some(vs),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some(fs),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        })
+    shared.render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some(vs),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(fs),
+            compilation_options: Default::default(),
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 #[cfg(test)]
