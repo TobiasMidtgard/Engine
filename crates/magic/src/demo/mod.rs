@@ -269,11 +269,12 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_blades",
         name: "Spellblades: a phalanx, spirit blades, glintblades and a bladefall against burning dead",
-        // From the floor's far left, across it toward the dais: the students' plinths on the
-        // left, the burning dead coming in from the right, the phalanx over lane 2's head and
-        // the spirit blades fencing mid-floor.
-        eye: [-2.6, 3.0, -2.6],
-        target: [-2.6, 1.4, 8.5],
+        // In among it, from the dead's side of the floor at a little over head height: the
+        // burning dead rising close on the left, lanes 1 and 2 on their plinths to the right
+        // with the phalanx over lane 2's head, the spirit blades fencing and the bladefalls
+        // coming down between them.
+        eye: [1.5, 2.2, 2.0],
+        target: [-0.5, 1.5, 9.0],
         hour: 16.6,
         // The phalanx loosing at the first of the dead, the spirit blades at them.
         warmup: 6.4,

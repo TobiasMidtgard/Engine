@@ -226,6 +226,17 @@ impl Imbued {
     pub fn left(&self) -> f32 {
         (self.secs - self.age).max(0.0)
     }
+
+    /// What putting it out takes: the pieces wearing its look, and the materials its weapon
+    /// pieces had before (for a body that falls with it, whose pieces go on as rubble).
+    pub fn put_out(&self) -> (Vec<Entity>, Vec<(Entity, MaterialRef)>) {
+        let on = self
+            .drawn
+            .as_ref()
+            .map(|(on, _)| on.clone())
+            .unwrap_or_default();
+        (on, self.restore.clone())
+    }
 }
 
 /// A light that rides an imbued body's hand.

@@ -4272,6 +4272,27 @@ fn an_imbue_sets_its_casters_creatures_alight_and_their_cuts_burn() {
     // The api lists them.
     let v = call_api(&mut app.world, "magic.blades", json!({})).unwrap();
     assert!(v["imbued"].as_array().unwrap().len() > skeletons.len());
+    // One falls: its blade goes on as plain bones on the floor, the fire out with it.
+    let (e, m) = minions(&mut app)
+        .into_iter()
+        .find(|(e, _)| app.world.get::<blades::Imbued>(*e).is_some())
+        .expect("an imbued skeleton still standing");
+    app.world.get_mut::<Vitality>(e).unwrap().health = 0.0;
+    run(&mut app, 0.3);
+    assert!(app.world.get::<summon::Minion>(e).is_none(), "it fell");
+    let still_burning = m
+        .parts
+        .iter()
+        .filter(|p| {
+            app.world
+                .get::<engine_render::MeshRenderer>(**p)
+                .is_some_and(|r| {
+                    matches!(&r.material, engine_render::MaterialRef::Inline(mat)
+                        if mat.emissive_strength >= blades::IMBUE_GLOW)
+                })
+        })
+        .count();
+    assert_eq!(still_burning, 0, "a fallen skeleton's blade stops burning");
 }
 
 #[test]
@@ -4471,7 +4492,7 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
     assert_eq!(count("phalanx"), 10, "two phalanxes of five");
     assert_eq!(count("spirit"), 2);
     assert_eq!(count("bound"), 1);
-    assert_eq!(count("bladefall"), 40, "two bladefalls of twenty");
+    assert_eq!(count("bladefall"), 60, "three bladefalls of twenty");
     assert!(most_stuck >= 15, "{most_stuck}");
     assert!(most_imbued >= 6, "{most_imbued}");
     assert!(spirit_cuts >= 4, "{spirit_cuts}");

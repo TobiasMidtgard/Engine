@@ -8,16 +8,20 @@
 //! * Lane 2 raises a Greatblade phalanx (2.4 s): five glintstone-blue swords in an arch over its
 //!   head that loose themselves, one after another, at whatever of the dead comes within 9 m.
 //! * Lane 1 calls two Spirit blades (3.0 s) that fly out and fence with the skeletons from either
-//!   flank, cutting from a new angle each time; the dead strike back and can shatter them.
-//! * Lane 0 drops a frost Bladefall down the line of the dead (4.4 s): twenty pale swords fall
-//!   point first one after another across the floor and stand in it; then it throws fans of
-//!   three Glintblades at the golem (6.6 and 8.2 s), each breaking into shards where it strikes.
+//!   flank, cutting from a new angle each time; the dead strike back and can shatter them. Then
+//!   it drops a frost Bladefall down the line of the dead (4.4 s): twenty pale swords fall point
+//!   first one after another across the floor and stand in it.
+//! * Lane 0, far out on the left of the line, throws fans of three Glintblades at the golem (6.6
+//!   and 8.2 s), each breaking into shards where it strikes.
 //! * Four more skeletons climb out (9.4 to 10.6 s) and are imbued with fire again; lane 2 takes a
 //!   Bound blade in its hand (10.4 s) and raises a second phalanx (12.2 s), lane 1 drops another
-//!   bladefall on them (12.6 s) and lane 0 throws more glintblades (15 and 17 s).
+//!   bladefall on them (12.6 s) and lane 0 throws more glintblades (15 s).
+//! * A third wave (a golem and three skeletons, 14.6 to 15.8 s) burns too; the second phalanx
+//!   looses at it, glintblades go at its golem (16.6 and 18.4 s) and a last bladefall comes down
+//!   on it (19.6 s). It is gone before the period ends.
 //!
-//! The dead rise mid-floor before the necromancers' plinths (x 0.5 to 4), so the whole fight
-//! stays in the stop's one picture.
+//! The dead rise mid-floor between the two sides (x -0.6 to 2.8, z 5.8 to 7.4), so the whole
+//! fight stays in the stop's one picture.
 
 use super::{AimAt, Cast, Lane, d};
 use crate::design::{CastType, Modifier, SpellDesign};
@@ -25,8 +29,8 @@ use crate::schools::Mastery;
 
 /// When the program starts in its period, s.
 pub const START: f32 = 0.2;
-/// Seconds between periods: the first dead last 21.6 s, the second 12.6 s, and the blades are
-/// gone (or cleared) by the end.
+/// Seconds between periods: the first dead last 21.6 s, the second 12.6 s, the third 7.8 s, and
+/// the blades are gone (or cleared) by the end.
 pub const PERIOD: f32 = 24.0;
 
 /// The necromancers' fire on their creatures' weapons (and their own hands).
@@ -83,6 +87,20 @@ fn late_raise() -> SpellDesign {
         .named("Raise skeleton")
 }
 
+/// The third wave, raised at 14.6 to 15.8 s, gone before the next period.
+fn last_raise() -> SpellDesign {
+    d(&["raise"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.13 })
+        .named("Raise skeleton")
+}
+
+/// The third wave's golem.
+fn last_golem() -> SpellDesign {
+    d(&["stone"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.13 })
+        .named("Stone golem")
+}
+
 fn golem() -> SpellDesign {
     d(&["stone"], CastType::Summon)
         .with(Modifier::Duration { factor: 0.36 })
@@ -104,44 +122,54 @@ pub(super) fn lanes() -> Vec<Lane> {
         casts,
     };
     vec![
+        // Lane 0 stands far out on the left of the line: its glintblades fly into the picture.
         of(vec![
-            cast(4.4, bladefall(), AimAt::Foe),
             cast(6.6, glintblades(), AimAt::Golem),
             cast(8.2, glintblades(), AimAt::Golem),
             cast(15.0, glintblades(), AimAt::Foe),
-            cast(17.0, glintblades(), AimAt::Foe),
+            cast(16.6, glintblades(), AimAt::Golem),
+            cast(18.4, glintblades(), AimAt::Golem),
         ]),
         of(vec![
             cast(3.0, spirit_blades(), AimAt::Floor(-6.0, 6.5)),
+            cast(4.4, bladefall(), AimAt::Foe),
             cast(12.6, bladefall(), AimAt::Foe),
+            cast(19.6, bladefall(), AimAt::Foe),
         ]),
         of(vec![
             cast(2.4, phalanx(), AimAt::Foe),
             cast(10.4, bound_blade(), AimAt::Foe),
             cast(12.2, phalanx(), AimAt::Foe),
         ]),
-        // The dead rise mid-floor before the necromancers' plinths, near enough to the
-        // students that the whole fight stays in one picture.
+        // The dead rise mid-floor before the plinths, between the two sides, near enough to
+        // the camera that the whole fight stays in one picture.
         of(vec![
-            cast(0.0, golem(), AimAt::Floor(3.0, 6.6)),
+            cast(0.0, golem(), AimAt::Floor(1.8, 7.0)),
             cast(1.8, fire_weapon(), AimAt::Foe),
+            cast(14.6, last_golem(), AimAt::Floor(1.6, 7.2)),
+            cast(16.2, fire_weapon(), AimAt::Foe),
         ]),
         of(vec![
-            cast(0.1, raise(), AimAt::Floor(1.4, 6.0)),
-            cast(0.7, raise(), AimAt::Floor(0.6, 4.4)),
-            cast(1.3, raise(), AimAt::Floor(2.6, 4.6)),
+            cast(0.1, raise(), AimAt::Floor(0.4, 6.2)),
+            cast(0.7, raise(), AimAt::Floor(-0.6, 6.0)),
+            cast(1.3, raise(), AimAt::Floor(1.2, 5.8)),
             cast(2.0, fire_weapon(), AimAt::Foe),
-            cast(10.0, late_raise(), AimAt::Floor(2.6, 6.4)),
-            cast(10.6, late_raise(), AimAt::Floor(1.2, 7.2)),
+            cast(10.0, late_raise(), AimAt::Floor(1.2, 6.6)),
+            cast(10.6, late_raise(), AimAt::Floor(0.0, 7.2)),
             cast(11.6, fire_weapon(), AimAt::Foe),
+            cast(15.0, last_raise(), AimAt::Floor(0.6, 6.4)),
+            cast(16.4, fire_weapon(), AimAt::Foe),
         ]),
         of(vec![
-            cast(0.2, raise(), AimAt::Floor(4.0, 5.4)),
-            cast(0.8, raise(), AimAt::Floor(3.6, 4.0)),
+            cast(0.2, raise(), AimAt::Floor(2.4, 6.6)),
+            cast(0.8, raise(), AimAt::Floor(2.8, 7.4)),
             cast(2.2, fire_weapon(), AimAt::Foe),
-            cast(9.4, late_raise(), AimAt::Floor(0.8, 5.0)),
-            cast(10.2, late_raise(), AimAt::Floor(3.4, 4.6)),
+            cast(9.4, late_raise(), AimAt::Floor(-0.4, 6.2)),
+            cast(10.2, late_raise(), AimAt::Floor(2.0, 6.0)),
             cast(11.8, fire_weapon(), AimAt::Foe),
+            cast(15.4, last_raise(), AimAt::Floor(2.4, 6.6)),
+            cast(15.8, last_raise(), AimAt::Floor(-0.2, 6.6)),
+            cast(16.6, fire_weapon(), AimAt::Foe),
         ]),
     ]
 }
@@ -174,5 +202,9 @@ mod tests {
         }
         let late = compile(&late_raise(), ctx).unwrap();
         assert!(late.carrier.duration > 8.0 && 11.0 + late.carrier.duration < PERIOD);
+        for s in [last_raise(), last_golem()] {
+            let s = compile(&s, ctx).unwrap();
+            assert!(s.carrier.duration > 6.0 && 16.0 + s.carrier.duration < PERIOD);
+        }
     }
 }

@@ -1019,6 +1019,7 @@ pub fn run_minions(
         Option<&Statuses>,
         Option<&crate::status::Afflictions>,
         Has<crate::minds::Commanded>,
+        Option<&crate::blades::Imbued>,
     )>,
     bodies: Query<(Entity, &GlobalTransform, &Vitality, Allegiance)>,
     creatures: Query<
@@ -1043,7 +1044,7 @@ pub fn run_minions(
     // A creature held by Command isn't its holder's to retire.
     let mut kept: Vec<(Option<Entity>, MinionKind, f32, Entity, Mastery)> = minions
         .iter()
-        .filter(|(_, m, .., held)| m.age < m.life && !held)
+        .filter(|(_, m, .., held, _)| m.age < m.life && !held)
         .map(|(e, m, ..)| (m.cast.caster, m.kind, m.age, e, m.cast.spell.mastery))
         .collect();
     kept.sort_by(|a, b| a.2.total_cmp(&b.2));
@@ -1074,7 +1075,7 @@ pub fn run_minions(
         .filter(|(_, m, ..)| m.kind.walks() && !matches!(m.act, Act::Rise { .. }))
         .map(|(e, m, ..)| (e, m.pos, body_radius(m.kind, m.size)))
         .collect();
-    for (e, mut m, mut tf, vit, local, statuses, afflictions, _) in &mut minions {
+    for (e, mut m, mut tf, vit, local, statuses, afflictions, _, imbued) in &mut minions {
         let dt = time.delta_for(local);
         m.age += dt;
         if retire.contains(&e) {
@@ -1082,6 +1083,20 @@ pub fn run_minions(
         }
         let down = vit.is_some_and(|v| v.down());
         if down || m.age >= m.life {
+            if let Some(im) = imbued {
+                // Its weapon's fire goes out with it: the fists or blade go on as plain rubble.
+                let (on, restore) = im.put_out();
+                for p in on {
+                    queue.looks.push(LookCmd::Stop { entity: p });
+                }
+                commands.queue(move |world: &mut World| {
+                    for (p, m) in restore {
+                        if let Some(mut r) = world.get_mut::<MeshRenderer>(p) {
+                            r.material = m;
+                        }
+                    }
+                });
+            }
             fall(e, &m, &tf, &parts, &mut commands, &mut queue);
             continue;
         }
