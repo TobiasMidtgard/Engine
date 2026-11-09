@@ -151,6 +151,11 @@ pub enum MindKind {
     Calm,
     /// Unseen by perception.
     Veil,
+    /// Fight for the side `side` (a `Faction` id): its foes become the target's foes, its
+    /// members its friends, until the effect ends.
+    Command { side: u32 },
+    /// Attack whoever is nearest, friend or foe.
+    Frenzy,
 }
 
 /// Act on a mind for `secs`. NPC AI implements it; spells send it.
