@@ -94,11 +94,28 @@ pub const MODELS: &[ModelKey] = &[
     "barrel",
     "lamp_post",
     "plot",
+    "wheat_cell",
+    "hedge_4",
+    "fence_4",
+    "walker_0_0",
+    "walker_0_1",
+    "walker_0_2",
+    "walker_1_0",
+    "walker_1_1",
+    "walker_1_2",
+    "walker_2_0",
+    "walker_2_1",
+    "walker_2_2",
 ];
+
+/// Which of a model's three variants a building with this seed gets.
+pub fn variant(seed: u64) -> usize {
+    (h01(seed, 1) * 3.0) as usize % 3
+}
 
 /// The pieces a building is drawn with (without its moving parts).
 pub fn look(kind: Kind, tier: Tier, seed: u64) -> Vec<Piece> {
-    let v = (h01(seed, 1) * 3.0) as usize % 3;
+    let v = variant(seed);
     let (w, d) = kind.def().size;
     let (hw, hd) = (
         w as f32 * CELL_M as f32 * 0.5,
@@ -186,19 +203,7 @@ pub fn look(kind: Kind, tier: Tier, seed: u64) -> Vec<Piece> {
             } else {
                 out.push(Piece::at("barn", yard + v3(0.5, 0.0, -6.5)).yaw(PI * 0.5));
             }
-            // Fence round the whole lot.
-            let mut x = -hw + 0.3;
-            while x < hw - 3.0 {
-                out.push(Piece::at("fence_6", v3(x + 3.0, 0.0, -hd + 0.3)));
-                out.push(Piece::at("fence_6", v3(x + 3.0, 0.0, hd - 0.3)));
-                x += 6.0;
-            }
-            let mut z = -hd + 0.3;
-            while z < hd - 3.0 {
-                out.push(Piece::at("fence_6", v3(-hw + 0.3, 0.0, z + 3.0)).yaw(PI * 0.5));
-                out.push(Piece::at("fence_6", v3(hw - 0.3, 0.0, z + 3.0)).yaw(PI * 0.5));
-                z += 6.0;
-            }
+            // The hedge or fence round the lot is drawn with the farm's fields (fields.rs).
             let in_yard = |p: Vec3| p.x < yard.x + 7.5 && p.z > yard.z - 11.0;
             match kind {
                 Kind::SheepFarm => {
@@ -2078,6 +2083,104 @@ fn plot() -> Parts {
     p.finish()
 }
 
+/// A 4 m square of standing wheat: five rows of crossed blade cards, ears paler on top.
+fn wheat_cell() -> Parts {
+    let mut p = Parts::default();
+    let stalk = hexc(0xc89a48);
+    let ear = hexc(0xe8c878);
+    for r in 0..5 {
+        let z = -1.6 + r as f32 * 0.8;
+        let mut x = -2.0 + (r % 2) as f32 * 0.2;
+        let mut k = r * 7;
+        while x < 2.0 {
+            let h = 0.8 + 0.25 * ((k * 37 % 13) as f32 / 13.0);
+            for a in [0.5f32, -0.5] {
+                let d = v3(a.sin(), 0.0, a.cos()) * 0.42;
+                let b = v3(x, 0.0, z);
+                // Stalks to two thirds, ears above.
+                let m = Vec3::Y * h * 0.62;
+                p.quad(
+                    Mat::Crop,
+                    b - d,
+                    b + d,
+                    b + d + m,
+                    b - d + m,
+                    stalk.with_w(1.0),
+                );
+                let t = Vec3::Y * h;
+                p.quad(
+                    Mat::Crop,
+                    b - d + m,
+                    b + d + m,
+                    b + d * 0.8 + t,
+                    b - d * 0.8 + t,
+                    ear.with_w(1.0),
+                );
+            }
+            x += 0.45;
+            k += 1;
+        }
+    }
+    p.finish()
+}
+
+/// A 4 m run of hedgerow: lumpy leafy boxes on a low bank.
+fn hedge_4() -> Parts {
+    let mut p = Parts::default();
+    let green = hexc(0x3c5e2a);
+    p.cuboid(
+        Mat::Clay,
+        v3(-2.05, -0.3, -0.55),
+        v3(2.05, 0.15, 0.55),
+        shade(Vec4::ONE, 0.55),
+        false,
+    );
+    for k in 0..4 {
+        let x = -1.5 + k as f32 * 1.0;
+        let h = 1.05 + 0.25 * ((k * 5 % 3) as f32 / 3.0);
+        let w = 0.45 + 0.08 * ((k * 3 % 2) as f32);
+        p.cuboid(
+            Mat::Leaf,
+            v3(x - 0.62, 0.05, -w),
+            v3(x + 0.62, h, w),
+            shade(green, 0.9 + 0.06 * k as f32),
+            false,
+        );
+    }
+    p.ground_occlusion(0.4, 1.0);
+    p.finish()
+}
+
+/// A 4 m run of post-and-rail paddock fence.
+fn fence_4() -> Parts {
+    let mut p = Parts::default();
+    let col = hexc(0x8a7a66);
+    for x in [-2.0, 0.0] {
+        p.beam(
+            Mat::Timber,
+            v3(x, -0.3, 0.0),
+            v3(x + 0.05, 1.1, 0.0),
+            0.12,
+            col,
+        );
+    }
+    p.beam(
+        Mat::Timber,
+        v3(-2.0, 0.95, 0.0),
+        v3(2.0, 0.9, 0.0),
+        0.08,
+        col,
+    );
+    p.beam(
+        Mat::Timber,
+        v3(-2.0, 0.5, 0.0),
+        v3(2.0, 0.52, 0.0),
+        0.08,
+        col,
+    );
+    p.finish()
+}
+
 /// Build one model by key.
 pub fn build_model(key: ModelKey) -> Parts {
     match key {
@@ -2114,7 +2217,10 @@ pub fn build_model(key: ModelKey) -> Parts {
         "barrel" => barrel(),
         "lamp_post" => lamp_post(),
         "plot" => plot(),
-        _ => Parts::default(),
+        "wheat_cell" => wheat_cell(),
+        "hedge_4" => hedge_4(),
+        "fence_4" => fence_4(),
+        _ => crate::walkers::build(key).unwrap_or_default(),
     }
 }
 

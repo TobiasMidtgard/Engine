@@ -17,6 +17,8 @@ use crate::island;
 pub enum Occ {
     Building(Entity),
     Road,
+    /// A farm's field: blocks buildings, but a road may be laid across it.
+    Field(Entity),
 }
 
 /// Every occupied cell.
@@ -29,6 +31,11 @@ pub struct Grid {
 impl Grid {
     pub fn is_free(&self, c: IVec2) -> bool {
         !self.cells.contains_key(&c)
+    }
+
+    /// Free, or only a field (a road may go there).
+    pub fn is_open(&self, c: IVec2) -> bool {
+        matches!(self.cells.get(&c), None | Some(Occ::Field(_)))
     }
 
     pub fn is_road(&self, c: IVec2) -> bool {

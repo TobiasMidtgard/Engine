@@ -26,16 +26,25 @@ pub enum Craft {
     Airship,
     /// Mail biplane, 9 m span.
     Biplane,
+    /// Three-masted full-rigged clipper, 62 m: the fastest thing under sail.
+    Clipper,
+    /// Side-wheel paddle steamer, 42 m: the island ferry.
+    PaddleSteamer,
+    /// Floatplane, 13 m span: lands on the water at any harbour.
+    Seaplane,
 }
 
 impl Craft {
-    pub const ALL: [Craft; 6] = [
+    pub const ALL: [Craft; 9] = [
         Craft::Schooner,
         Craft::Steamer,
         Craft::Smack,
         Craft::Barque,
         Craft::Airship,
         Craft::Biplane,
+        Craft::Clipper,
+        Craft::PaddleSteamer,
+        Craft::Seaplane,
     ];
 
     pub fn name(self) -> &'static str {
@@ -46,6 +55,9 @@ impl Craft {
             Craft::Barque => "Trader's barque",
             Craft::Airship => "Cargo airship",
             Craft::Biplane => "Mail biplane",
+            Craft::Clipper => "Clipper",
+            Craft::PaddleSteamer => "Paddle steamer",
+            Craft::Seaplane => "Seaplane",
         }
     }
 
@@ -58,6 +70,9 @@ impl Craft {
             Craft::Barque => 12.0,
             Craft::Airship => 30.0,
             Craft::Biplane => 55.0,
+            Craft::Clipper => 19.0,
+            Craft::PaddleSteamer => 12.0,
+            Craft::Seaplane => 45.0,
         }
     }
 
@@ -70,6 +85,9 @@ impl Craft {
             Craft::Barque => (3, 40),
             Craft::Airship => (2, 25),
             Craft::Biplane => (0, 0),
+            Craft::Clipper => (3, 45),
+            Craft::PaddleSteamer => (2, 25),
+            Craft::Seaplane => (0, 0),
         }
     }
 
@@ -82,11 +100,22 @@ impl Craft {
             Craft::Barque => 22.0,
             Craft::Airship => 48.0,
             Craft::Biplane => 3.5,
+            Craft::Clipper => 31.0,
+            Craft::PaddleSteamer => 21.0,
+            Craft::Seaplane => 5.0,
         }
     }
 
     pub fn flies(self) -> bool {
-        matches!(self, Craft::Airship | Craft::Biplane)
+        matches!(self, Craft::Airship | Craft::Biplane | Craft::Seaplane)
+    }
+
+    /// Carries canvas (heels to the wind).
+    pub fn sails(self) -> bool {
+        matches!(
+            self,
+            Craft::Schooner | Craft::Barque | Craft::Smack | Craft::Clipper
+        )
     }
 
     pub fn from_name(s: &str) -> Option<Craft> {
@@ -920,7 +949,424 @@ pub fn craft_model(c: Craft) -> Parts {
         Craft::Barque => barque(),
         Craft::Airship => airship(),
         Craft::Biplane => biplane(),
+        Craft::Clipper => clipper(),
+        Craft::PaddleSteamer => paddle_steamer(),
+        Craft::Seaplane => seaplane(),
     }
+}
+
+/// A clipper: long, narrow and sharp, black topsides over copper, three tall raked masts
+/// with four square sails each, staysails and a spanker.
+pub fn clipper() -> Parts {
+    let mut p = Parts::default();
+    let (len, beam) = (62.0, 10.5);
+    hull(
+        &mut p,
+        Mat::Paint,
+        len,
+        beam,
+        4.2,
+        2.4,
+        1.6,
+        hexc(0x15171a),
+        hexc(0x8a5a32),
+        0.4,
+    );
+    // Gilt strake and a white-painted bulwark line.
+    p.cuboid(
+        Mat::Paint,
+        v3(-29.0, 2.0, -0.02),
+        v3(29.0, 2.25, 0.02),
+        hexc(0xc8a040),
+        false,
+    );
+    let deck = 2.2;
+    // Bowsprit and jib boom, steeply steeved.
+    p.rod(
+        Mat::Timber,
+        v3(28.0, 3.0, 0.0),
+        v3(44.0, 6.4, 0.0),
+        0.28,
+        8,
+        Vec4::ONE,
+    );
+    let masts = [(17.0, 42.0), (2.0, 46.0), (-13.0, 38.0)];
+    for (i, (x, h)) in masts.into_iter().enumerate() {
+        mast(&mut p, x, deck, h, 0.48);
+        shrouds(&mut p, x, deck, h, beam);
+        let w = if i == 1 { 18.0 } else { 16.0 };
+        // Course, topsail, topgallant, royal: narrowing up the mast.
+        square_sail(&mut p, x, deck + h * 0.36, w, 8.0);
+        square_sail(&mut p, x, deck + h * 0.56, w * 0.84, 7.0);
+        square_sail(&mut p, x, deck + h * 0.74, w * 0.66, 5.4);
+        square_sail(&mut p, x, deck + h * 0.89, w * 0.5, 3.8);
+        if i == 2 {
+            gaff_sail(
+                &mut p,
+                Mat::Canvas,
+                x - 0.4,
+                deck + 3.0,
+                deck + h * 0.42,
+                11.0,
+                1.2,
+            );
+        }
+    }
+    // Headsails from the jib boom to the foremast.
+    for k in 0..3 {
+        let tip = v3(44.0 - k as f32 * 5.0, 6.4 - k as f32 * 1.0, 0.0);
+        jib(
+            &mut p,
+            Mat::Canvas,
+            tip,
+            v3(17.2, deck + 42.0 * (0.92 - k as f32 * 0.13), 0.0),
+            v3(23.0 - k as f32 * 2.0, deck + 4.0 + k as f32 * 2.0, 0.7),
+        );
+    }
+    // Deckhouse and a raised poop.
+    p.cuboid(
+        Mat::Planks,
+        v3(-6.0, deck - 0.2, -2.2),
+        v3(-1.0, deck + 2.2, 2.2),
+        hexc(0xe0d4b0),
+        false,
+    );
+    p.cuboid(
+        Mat::Planks,
+        v3(-31.0, deck - 0.2, -3.6),
+        v3(-22.0, deck + 1.4, 3.6),
+        hexc(0x2a2018),
+        false,
+    );
+    p.finish()
+}
+
+/// A side-wheel paddle steamer: a long white saloon deck, two paddle boxes amidships, a tall
+/// black funnel with a red band, a walking beam. The wheels turn separately
+/// ([`paddle_wheel`]).
+pub fn paddle_steamer() -> Parts {
+    let mut p = Parts::default();
+    let (len, beam) = (42.0, 7.4);
+    hull(
+        &mut p,
+        Mat::Paint,
+        len,
+        beam,
+        2.0,
+        2.0,
+        2.6,
+        hexc(0x1a1c1e),
+        hexc(0x6a2418),
+        0.3,
+    );
+    let deck = 1.9;
+    // Sponsons out to the paddle boxes and the boxes themselves: half drums with a fan of
+    // painted rays on the outer face.
+    p.cuboid(
+        Mat::Paint,
+        v3(-9.0, deck - 0.3, -6.6),
+        v3(9.0, deck, 6.6),
+        hexc(0x1a1c1e),
+        true,
+    );
+    for s in [-1.0f32, 1.0] {
+        let z0 = s * 3.9;
+        let z1 = s * 6.0;
+        let (zlo, zhi) = (z0.min(z1), z0.max(z1));
+        let n = 10;
+        for k in 0..n {
+            let a0 = PI * k as f32 / n as f32;
+            let a1 = PI * (k + 1) as f32 / n as f32;
+            let r = 3.6;
+            let (x0, y0) = (r * a0.cos(), deck - 0.6 + r * a0.sin());
+            let (x1, y1) = (r * a1.cos(), deck - 0.6 + r * a1.sin());
+            // Curved top.
+            p.quad(
+                Mat::Paint,
+                v3(x0, y0, zlo),
+                v3(x1, y1, zlo),
+                v3(x1, y1, zhi),
+                v3(x0, y0, zhi),
+                Vec4::ONE,
+            );
+            // Outer face: a fan of rays, alternately white and ochre.
+            let col = if k % 2 == 0 {
+                Vec4::ONE
+            } else {
+                hexc(0xc8a040)
+            };
+            let zf = if s > 0.0 { zhi } else { zlo };
+            p.tri(
+                Mat::Paint,
+                v3(0.0, deck - 0.6, zf),
+                v3(x0, y0, zf),
+                v3(x1, y1, zf),
+                col,
+            );
+        }
+    }
+    // Saloon deck house, white with windows, and an upper promenade with a rail.
+    p.cuboid(
+        Mat::Paint,
+        v3(-17.0, deck, -3.0),
+        v3(12.0, deck + 2.6, 3.0),
+        hexc(0xf0ece0),
+        false,
+    );
+    for k in 0..14 {
+        let x = -15.5 + k as f32 * 2.0;
+        if x.abs() < 3.5 {
+            continue;
+        }
+        for z in [-3.02f32, 3.02] {
+            p.quad(
+                Mat::Window,
+                v3(x - 0.45, deck + 1.0, z),
+                v3(x + 0.45, deck + 1.0, z),
+                v3(x + 0.45, deck + 2.0, z),
+                v3(x - 0.45, deck + 2.0, z),
+                Vec4::ONE,
+            );
+        }
+    }
+    p.cuboid(
+        Mat::Planks,
+        v3(-17.5, deck + 2.6, -3.4),
+        v3(12.5, deck + 2.8, 3.4),
+        hexc(0xc8a878),
+        true,
+    );
+    for z in [-3.3f32, 3.3] {
+        p.beam(
+            Mat::Iron,
+            v3(-17.0, deck + 3.7, z),
+            v3(12.0, deck + 3.7, z),
+            0.06,
+            hexc(0xe8e4d8),
+        );
+    }
+    // Wheelhouse between the boxes.
+    p.cuboid(
+        Mat::Paint,
+        v3(-1.6, deck + 2.8, -1.4),
+        v3(1.6, deck + 5.0, 1.4),
+        hexc(0xf0ece0),
+        false,
+    );
+    p.cuboid(
+        Mat::Paint,
+        v3(-1.8, deck + 5.0, -1.6),
+        v3(1.8, deck + 5.2, 1.6),
+        hexc(0x2a2a2a),
+        true,
+    );
+    // Tall funnel forward of the wheels, black with a red band.
+    p.cylinder(
+        Mat::Paint,
+        v3(5.0, deck + 2.8, 0.0),
+        0.85,
+        0.8,
+        11.0,
+        14,
+        hexc(0x1e1e1e),
+        false,
+    );
+    p.cylinder(
+        Mat::Paint,
+        v3(5.0, deck + 11.0, 0.0),
+        0.82,
+        0.81,
+        1.2,
+        14,
+        hexc(0xa82a1e),
+        false,
+    );
+    // Walking beam on its A-frame.
+    p.beam(
+        Mat::Iron,
+        v3(-3.0, deck + 2.8, 0.0),
+        v3(-1.0, deck + 8.0, 0.0),
+        0.25,
+        hexc(0x2a2a2a),
+    );
+    p.beam(
+        Mat::Iron,
+        v3(1.0, deck + 2.8, 0.0),
+        v3(-1.0, deck + 8.0, 0.0),
+        0.25,
+        hexc(0x2a2a2a),
+    );
+    p.beam(
+        Mat::Iron,
+        v3(-5.0, deck + 8.2, 0.0),
+        v3(3.0, deck + 7.8, 0.0),
+        0.35,
+        hexc(0x2a2a2a),
+    );
+    // Flagstaff and a short foremast.
+    mast(&mut p, 15.0, deck, 12.0, 0.22);
+    p.rod(
+        Mat::Timber,
+        v3(-20.5, deck, 0.0),
+        v3(-21.5, deck + 6.0, 0.0),
+        0.08,
+        5,
+        Vec4::ONE,
+    );
+    p.finish()
+}
+
+/// One pair of paddle wheels on their shaft (axis along Z, origin on the shaft).
+pub fn paddle_wheel() -> Parts {
+    let mut p = Parts::default();
+    let r = 3.0;
+    let red = hexc(0x8a2418);
+    for s in [-1.0f32, 1.0] {
+        let zc = s * 4.95;
+        // Two rims and the floats between them.
+        for dz in [-0.65f32, 0.65] {
+            let n = 16;
+            for k in 0..n {
+                let a0 = TAU * k as f32 / n as f32;
+                let a1 = TAU * (k + 1) as f32 / n as f32;
+                p.beam(
+                    Mat::Iron,
+                    v3(r * a0.cos(), r * a0.sin(), zc + dz),
+                    v3(r * a1.cos(), r * a1.sin(), zc + dz),
+                    0.12,
+                    red,
+                );
+            }
+        }
+        for k in 0..12 {
+            let a = TAU * k as f32 / 12.0;
+            let (c, sn) = (a.cos(), a.sin());
+            p.beam(Mat::Iron, v3(0.0, 0.0, zc), v3(c * r, sn * r, zc), 0.1, red);
+            // A float: a board across the wheel near the rim.
+            let mut b = Parts::default();
+            b.cuboid(
+                Mat::Planks,
+                v3(-0.08, -0.45, -0.7),
+                v3(0.08, 0.45, 0.7),
+                hexc(0x5a4030),
+                true,
+            );
+            p.add_parts(
+                &b,
+                Mat4::from_rotation_translation(
+                    Quat::from_rotation_z(a),
+                    v3(c * (r - 0.4), sn * (r - 0.4), zc),
+                ),
+            );
+        }
+    }
+    p.rod(
+        Mat::Iron,
+        v3(0.0, 0.0, -5.8),
+        v3(0.0, 0.0, 5.8),
+        0.2,
+        8,
+        hexc(0x2a2a2a),
+    );
+    p.finish()
+}
+
+/// A floatplane: a high-winged monoplane on two long floats, silver with a blue band.
+pub fn seaplane() -> Parts {
+    let mut p = Parts::default();
+    let silver = hexc(0xc8ccd0);
+    let blue = hexc(0x2a4a8a);
+    p.lathe_x(
+        Mat::Paint,
+        &[
+            (-5.2, 0.05),
+            (-4.4, 0.25),
+            (-1.0, 0.7),
+            (1.8, 0.85),
+            (3.0, 0.8),
+            (3.4, 0.4),
+            (3.5, 0.05),
+        ],
+        12,
+        |x, _| {
+            if (-0.6..0.2).contains(&x) {
+                blue
+            } else {
+                silver
+            }
+        },
+    );
+    // Radial engine cowl and propeller disc stand-in.
+    p.cylinder(
+        Mat::Iron,
+        v3(3.4, -0.0, 0.0),
+        0.9,
+        0.9,
+        0.01,
+        12,
+        hexc(0x2a2a2a),
+        true,
+    );
+    // High wing on struts.
+    p.cuboid(
+        Mat::Paint,
+        v3(0.0, 1.05, -6.6),
+        v3(2.0, 1.2, 6.6),
+        silver,
+        true,
+    );
+    for z in [-2.6f32, 2.6] {
+        p.beam(
+            Mat::Iron,
+            v3(0.6, -0.5, z * 0.3),
+            v3(0.9, 1.05, z),
+            0.07,
+            hexc(0x3a3a3a),
+        );
+    }
+    // Two floats on struts.
+    for z in [-1.6f32, 1.6] {
+        let mut f = Parts::default();
+        f.lathe_x(
+            Mat::Paint,
+            &[
+                (-3.2, 0.05),
+                (-2.4, 0.3),
+                (0.5, 0.42),
+                (2.6, 0.35),
+                (3.6, 0.08),
+            ],
+            8,
+            |_, _| silver,
+        );
+        p.add_parts(&f, Mat4::from_translation(v3(0.2, -2.2, z)));
+        for x in [-0.6f32, 1.6] {
+            p.beam(
+                Mat::Iron,
+                v3(x, -1.9, z),
+                v3(x * 0.6, -0.5, z * 0.25),
+                0.07,
+                hexc(0x3a3a3a),
+            );
+        }
+    }
+    // Tail.
+    p.cuboid(
+        Mat::Paint,
+        v3(-5.1, 0.2, -2.0),
+        v3(-4.2, 0.28, 2.0),
+        silver,
+        true,
+    );
+    p.quad(
+        Mat::Paint,
+        v3(-5.2, 0.25, 0.0),
+        v3(-4.2, 0.25, 0.0),
+        v3(-4.7, 1.9, 0.0),
+        v3(-5.2, 2.0, 0.0),
+        blue,
+    );
+    p.finish()
 }
 
 /// A two-wheeled horse cart with a load of crates (origin on the road, front +X).

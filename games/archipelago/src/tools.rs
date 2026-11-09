@@ -192,7 +192,7 @@ pub fn input(world: &mut World) {
             if buttons.just_pressed(MouseButton::Left) {
                 let hit = camera::pick(world).map(|h| grid::cell_of(h.x, h.z));
                 let e = hit.and_then(|c| match building_at(world, c) {
-                    Some(Occ::Building(e)) => Some(e),
+                    Some(Occ::Building(e) | Occ::Field(e)) => Some(e),
                     _ => None,
                 });
                 select(world, e);
@@ -232,7 +232,7 @@ pub fn input(world: &mut World) {
                         build::demolish(world, e);
                     }
                     Some(Occ::Road) => build::remove_road(world, c),
-                    None => {}
+                    Some(Occ::Field(_)) | None => {}
                 }
             }
         }
@@ -305,7 +305,7 @@ fn preview(world: &mut World, tool: Tool) -> Option<Preview> {
             let g = world.resource::<Grid>();
             let ok = cells
                 .iter()
-                .all(|c| g.is_road(*c) || (g.is_free(*c) && grid::cell_roadable(*c)));
+                .all(|c| g.is_road(*c) || (g.is_open(*c) && grid::cell_roadable(*c)));
             let n = cells.iter().filter(|c| !g.is_road(**c)).count();
             let msg = format!(
                 "Road: drag to lay {n} cells for {} coins.",
@@ -321,7 +321,7 @@ fn preview(world: &mut World, tool: Tool) -> Option<Preview> {
                     .map(|b| grid::footprint(b.kind, b.origin, b.rot))
                     .unwrap_or_default(),
                 Some(Occ::Road) => vec![c],
-                None => vec![],
+                Some(Occ::Field(_)) | None => vec![],
             };
             Some((
                 cells,

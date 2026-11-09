@@ -334,6 +334,7 @@ pub fn spawn_vessel(
     let altitude = match craft {
         Craft::Airship => 170.0 + (seed % 5) as f32 * 12.0,
         Craft::Biplane => 260.0 + (seed % 7) as f32 * 20.0,
+        Craft::Seaplane => 140.0 + (seed % 5) as f32 * 15.0,
         _ => 0.0,
     };
     let v = Vessel {
@@ -364,11 +365,15 @@ pub fn spawn_vessel(
             Craft::Steamer => 4.8,
             Craft::Barque => 4.5,
             Craft::Schooner => 3.5,
+            Craft::Clipper => 5.2,
+            Craft::PaddleSteamer => 6.6,
             _ => 1.8,
         };
         e.insert(engine_water::WaterInteractor::new(beam).with_length(craft.half_length()));
     }
-    e.id()
+    let id = e.id();
+    crate::effects::add_riders(world, id, craft);
+    id
 }
 
 /// Plan the next leg for vessels that finished one, and handle moorings.
@@ -648,7 +653,7 @@ pub fn sail(world: &mut World) {
             let mid = (hb + hs + hp + hst) * 0.25;
             let pitch = ((hb - hs) / (2.0 * hl as f64)).atan() as f32;
             let roll = ((hp - hst) / 5.0).atan() as f32 * 0.6;
-            let heel = if matches!(v.craft, Craft::Schooner | Craft::Barque | Craft::Smack) {
+            let heel = if v.craft.sails() {
                 0.06 * (v.speed / v.craft.speed())
             } else {
                 0.0
@@ -711,10 +716,19 @@ pub fn spawn_traffic(world: &mut World) {
         let t = 0.2 + 0.18 * i as f64;
         let at = *a + (*b - *a) * t;
         let d = *b - *a;
+        // Barques of the free traders, and clippers racing through on the long run.
+        let (craft, name) = if i % 2 == 1 {
+            (
+                Craft::Clipper,
+                ["Cutty Wren", "Sea Witch of Tarn"][i / 2].to_string(),
+            )
+        } else {
+            (Craft::Barque, format!("Free trader {}", i / 2 + 1))
+        };
         let e = spawn_vessel(
             world,
-            Craft::Barque,
-            &format!("Free trader {}", i + 1),
+            craft,
+            &name,
             DVec3::new(at.x, 0.0, at.y),
             (-d.y).atan2(d.x) as f32,
             None,
@@ -753,21 +767,60 @@ pub fn spawn_traffic(world: &mut World) {
             v.speed = v.craft.speed();
         }
     }
+    // Seaplanes hopping low between the home island, Brannsey and Little Tarn.
+    for (i, order) in [[0usize, 1, 4], [0, 4, 3]].into_iter().enumerate() {
+        let pts: Vec<DVec3> = order
+            .iter()
+            .map(|&k| DVec3::new(isles[k].center.x, 0.0, isles[k].center.y))
+            .collect();
+        let start = pts[i % pts.len()] + DVec3::new(300.0, 150.0, -200.0);
+        let e = spawn_vessel(
+            world,
+            Craft::Seaplane,
+            ["Kestrel", "Tern"][i],
+            start,
+            1.0 + i as f32 * 2.5,
+            None,
+            Roam::Loop {
+                points: Arc::new(pts),
+            },
+            740 + i as u64,
+        );
+        if let Some(mut v) = world.get_mut::<Vessel>(e) {
+            v.doing = Doing::Lingering(0.1);
+            v.speed = v.craft.speed();
+        }
+    }
 }
 
-/// Give each new airship its four turning propellers.
+/// Give each new airship its four turning propellers and each paddle steamer its wheels.
 pub fn spin_props(world: &mut World) {
     let mut add = Vec::new();
     let mut q = world.query_filtered::<(Entity, &Vessel), Without<PropsSet>>();
     for (e, v) in q.iter(world) {
-        if v.craft == Craft::Airship {
-            add.push(e);
+        if matches!(v.craft, Craft::Airship | Craft::PaddleSteamer) {
+            add.push((e, v.craft));
         }
     }
     let Some(art) = world.get_resource::<Art>().cloned() else {
         return;
     };
-    for e in add {
+    for (e, craft) in add {
+        if craft == Craft::PaddleSteamer {
+            let base = Transform::from_translation(DVec3::new(-0.0, 1.3, 0.0));
+            for p in spawn_model(world, &art, &art.paddles.clone(), base, true) {
+                world.entity_mut(p).insert(Spin {
+                    base,
+                    axis: Vec3::Z,
+                    rate: -1.7,
+                    angle: 0.0,
+                    on: Some(e),
+                    driven_by: None,
+                });
+            }
+            world.entity_mut(e).insert(PropsSet);
+            continue;
+        }
         for (x, z) in [(-14.0, 7.5), (-14.0, -7.5), (5.0, 8.5), (5.0, -8.5)] {
             let base = Transform::from_translation(DVec3::new(x - 2.75, -10.5 * 0.65, z));
             for p in spawn_model(world, &art, &art.props.clone(), base, false) {

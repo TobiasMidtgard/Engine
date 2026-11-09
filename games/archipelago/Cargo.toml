@@ -16,3 +16,4 @@ engine_water.workspace = true
 engine_weather.workspace = true
 engine_foliage.workspace = true
 engine_ui.workspace = true
+engine_vfx.workspace = true

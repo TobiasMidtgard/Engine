@@ -17,6 +17,8 @@ mod build;
 mod camera;
 mod defs;
 mod draw;
+mod effects;
+mod fields;
 mod fleet;
 mod grid;
 mod hud;
@@ -25,10 +27,12 @@ mod island;
 mod logistics;
 mod looks;
 mod sim;
+mod streets;
 mod tools;
 mod tour;
 mod town;
 mod vessels;
+mod walkers;
 mod world;
 
 use engine::prelude::*;
@@ -65,6 +69,7 @@ pub fn add_game(app: &mut App) {
             engine_weather::WeatherPlugin,
             engine_foliage::FoliagePlugin,
             engine_ui::UiPlugin,
+            engine_vfx::VfxPlugin,
         ))
         .init_resource::<grid::Grid>()
         .init_resource::<sim::Economy>()
@@ -72,6 +77,8 @@ pub fn add_game(app: &mut App) {
         .init_resource::<build::Changed>()
         .init_resource::<build::Forest>()
         .init_resource::<draw::Drawn>()
+        .init_resource::<streets::Streets>()
+        .init_resource::<walkers::Walkers>()
         .init_resource::<fleet::SeaChart>()
         .init_resource::<fleet::Routes>()
         .init_resource::<tools::Tool>()
@@ -81,19 +88,27 @@ pub fn add_game(app: &mut App) {
             Update,
             (
                 camera::control,
+                camera::simulation_reach,
                 hud::read_actions,
                 tools::input,
                 town::upgrade_looks,
                 build::refresh,
                 draw::redraw_buildings,
-                logistics::dispatch_carts,
-                logistics::drive_carts,
+                streets::redraw_streets,
+                effects::tend_plumes,
+                (
+                    logistics::dispatch_carts,
+                    logistics::drive_carts,
+                    walkers::walk,
+                )
+                    .chain(),
                 fleet::launch_smacks,
                 fleet::plan_legs,
                 fleet::sail,
                 fleet::spin_props,
                 draw::spin_parts,
                 draw::follow_bodies,
+                effects::follow_riders,
                 tools::ghost,
                 hud::update_data,
             )
@@ -104,6 +119,7 @@ pub fn add_game(app: &mut App) {
 
 /// Build the art, the islands, the start and the view.
 fn setup(world: &mut World) {
+    effects::register(world);
     let art = draw::make_art(world);
     let m = &art.mats;
     use art::Mat;

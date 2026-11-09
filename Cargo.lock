@@ -162,6 +162,7 @@ dependencies = [
  "engine_foliage",
  "engine_terrain",
  "engine_ui",
+ "engine_vfx",
  "engine_water",
  "engine_weather",
  "serde",

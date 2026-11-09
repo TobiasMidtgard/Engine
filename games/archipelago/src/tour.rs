@@ -27,6 +27,7 @@ struct View {
     aim: Aim,
     /// Offset from the aim, meters (x, z).
     shift: (f64, f64),
+    /// Camera yaw; for a craft, relative to its heading (0 broadside to port, π/2 off the bow).
     yaw: f32,
     dist: f32,
     pitch_deg: Option<f32>,
@@ -73,14 +74,29 @@ fn views() -> Vec<View> {
         View {
             pitch_deg: Some(18.0),
             clean: true,
-            ..v("airship", Aim::Craft(Craft::Airship), 2.6, 260.0)
+            ..v("airship", Aim::Craft(Craft::Airship), 0.7, 260.0)
         },
         View {
             pitch_deg: Some(22.0),
             clean: true,
-            ..v("steamer", Aim::Craft(Craft::Steamer), 1.9, 150.0)
+            ..v("steamer", Aim::Craft(Craft::Steamer), 2.3, 150.0)
         },
         v("northmoor", Aim::Island(3), 4.4, 1300.0),
+        View {
+            pitch_deg: Some(16.0),
+            clean: true,
+            ..v("clipper", Aim::Craft(Craft::Clipper), 2.2, 190.0)
+        },
+        View {
+            pitch_deg: Some(20.0),
+            clean: true,
+            ..v("paddle", Aim::Craft(Craft::PaddleSteamer), 0.45, 110.0)
+        },
+        View {
+            pitch_deg: Some(12.0),
+            clean: true,
+            ..v("seaplane", Aim::Craft(Craft::Seaplane), 2.1, 45.0)
+        },
     ]
 }
 
@@ -109,6 +125,17 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
         }
         Aim::At(x, z) => DVec3::new(*x, 0.0, *z),
     })
+}
+
+/// The heading of the craft a view follows (0 for other views).
+fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
+    let Aim::Craft(c) = aim else {
+        return 0.0;
+    };
+    let mut q = world.query::<&Vessel>();
+    q.iter(world)
+        .find(|v| v.craft == *c)
+        .map_or(0.0, |v| v.heading)
 }
 
 /// Frames until the terrain's patches and the foliage are in, at most `cap_s` wall seconds.
@@ -189,11 +216,12 @@ pub fn run(mut app: App, only: Option<&str>) {
             engine::core::log::warn!("tour: nothing to aim {} at", view.key);
             continue;
         };
+        let heading = craft_heading(&mut app.world, &view.aim);
         {
             let mut q = app.world.query::<&mut StrategyCam>();
             if let Some(mut cam) = q.iter_mut(&mut app.world).next() {
                 cam.goal_focus = DVec3::new(p.x + view.shift.0, p.y, p.z + view.shift.1);
-                cam.goal_yaw = view.yaw;
+                cam.goal_yaw = view.yaw + heading;
                 cam.goal_dist = view.dist;
                 cam.pitch_override = view.pitch_deg.map(f32::to_radians);
                 cam.free_height = matches!(view.aim, Aim::Craft(_));
@@ -220,6 +248,21 @@ pub fn run(mut app: App, only: Option<&str>) {
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
             return;
+        }
+        if let Some(d) = app
+            .world
+            .get_resource::<engine::core::diagnostics::Diagnostics>()
+        {
+            let g = |k: &str| d.get(k).unwrap_or(-1.0);
+            engine::core::log::info!(
+                "tour: vfx effects {} emitters {} resting {} pool {} drawn {} skipped {}",
+                g("vfx.effects"),
+                g("vfx.emitters"),
+                g("vfx.resting"),
+                g("vfx.pool_used"),
+                g("vfx.drawn_emitters"),
+                g("vfx.skipped_emitters")
+            );
         }
         let path = format!("{out}/{}.png", view.key);
         match capture_now(&mut app.world, &path) {

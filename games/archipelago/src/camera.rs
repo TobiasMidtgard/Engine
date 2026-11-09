@@ -74,6 +74,17 @@ impl StrategyCam {
 
 /// Input and glide.
 #[allow(clippy::too_many_arguments)]
+/// Keep everything on screen simulated: smoke, wakes and other effects rest beyond the
+/// engine's simulation range of the camera, which a strategy view is always far from.
+pub fn simulation_reach(mut range: ResMut<engine::world::SimulationRange>, q: Query<&StrategyCam>) {
+    if let Some(cam) = q.iter().next() {
+        let want = (cam.dist as f64 * 2.2).max(500.0);
+        if (range.active_m - want).abs() > 1.0 {
+            range.active_m = want;
+        }
+    }
+}
+
 pub fn control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,

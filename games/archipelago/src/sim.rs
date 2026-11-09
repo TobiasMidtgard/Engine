@@ -37,6 +37,7 @@ pub enum Status {
     NoRoad,
     Full,
     NoTrees,
+    NoFields,
     Paused,
 }
 
@@ -49,6 +50,7 @@ impl Status {
             Status::NoRoad => "No road to a harbour",
             Status::Full => "Store full: carts are busy",
             Status::NoTrees => "No trees in reach",
+            Status::NoFields => "No room for fields",
             Status::Paused => "Paused",
         }
     }
@@ -332,8 +334,12 @@ pub fn step(
             p.efficiency = 0.0;
             continue;
         }
-        if b.kind == Kind::Woodcutter && p.site < 0.05 {
-            p.status = Status::NoTrees;
+        if p.site < 0.05 {
+            p.status = if b.kind == Kind::Woodcutter {
+                Status::NoTrees
+            } else {
+                Status::NoFields
+            };
             p.efficiency = 0.0;
             continue;
         }
@@ -349,12 +355,7 @@ pub fn step(
                 continue;
             }
         }
-        let site = if b.kind == Kind::Woodcutter {
-            p.site
-        } else {
-            1.0
-        };
-        p.efficiency = staff * site;
+        p.efficiency = staff * p.site;
         p.status = if staff < 0.99 {
             Status::NoWorkers
         } else {

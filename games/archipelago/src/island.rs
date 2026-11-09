@@ -27,6 +27,11 @@ pub struct Island {
     pub fertility: Fertility,
     /// Forest share of the land, 0..1.
     pub woods: f64,
+    /// The island (by index) its settlement's harbour faces, if it has one: the coast there is
+    /// kept gentle and the land behind it flat enough for a town.
+    pub settle_toward: Option<usize>,
+    /// How far that calm ground reaches from the harbour, meters.
+    pub settle_m: f64,
 }
 
 /// The map. The home island is first and sits at the world origin.
@@ -38,7 +43,7 @@ pub fn islands() -> &'static [Island] {
                 name: "Haverholm",
                 center: DVec2::new(0.0, 0.0),
                 radius: 820.0,
-                hills_m: 38.0,
+                hills_m: 70.0,
                 cliff_dir: 1.9,
                 cliff_share: 0.3,
                 seed: 11,
@@ -48,12 +53,14 @@ pub fn islands() -> &'static [Island] {
                     ..Default::default()
                 },
                 woods: 0.42,
+                settle_toward: Some(1),
+                settle_m: 430.0,
             },
             Island {
                 name: "Brannsey",
                 center: DVec2::new(2350.0, -1250.0),
                 radius: 560.0,
-                hills_m: 22.0,
+                hills_m: 34.0,
                 cliff_dir: 0.6,
                 cliff_share: 0.2,
                 seed: 23,
@@ -63,12 +70,14 @@ pub fn islands() -> &'static [Island] {
                     ..Default::default()
                 },
                 woods: 0.25,
+                settle_toward: Some(0),
+                settle_m: 300.0,
             },
             Island {
                 name: "Skerryvale",
                 center: DVec2::new(-2150.0, -1500.0),
                 radius: 420.0,
-                hills_m: 30.0,
+                hills_m: 62.0,
                 cliff_dir: 4.0,
                 cliff_share: 0.35,
                 seed: 37,
@@ -78,12 +87,14 @@ pub fn islands() -> &'static [Island] {
                     ..Default::default()
                 },
                 woods: 0.5,
+                settle_toward: Some(0),
+                settle_m: 240.0,
             },
             Island {
                 name: "Northmoor",
                 center: DVec2::new(-1300.0, 2250.0),
                 radius: 640.0,
-                hills_m: 55.0,
+                hills_m: 125.0,
                 cliff_dir: 2.6,
                 cliff_share: 0.4,
                 seed: 41,
@@ -93,17 +104,21 @@ pub fn islands() -> &'static [Island] {
                     ..Default::default()
                 },
                 woods: 0.55,
+                settle_toward: Some(0),
+                settle_m: 300.0,
             },
             Island {
                 name: "Little Tarn",
                 center: DVec2::new(1750.0, 1650.0),
                 radius: 260.0,
-                hills_m: 26.0,
+                hills_m: 58.0,
                 cliff_dir: 5.2,
                 cliff_share: 0.6,
                 seed: 53,
                 fertility: Fertility::default(),
                 woods: 0.7,
+                settle_toward: None,
+                settle_m: 0.0,
             },
         ]
     })
@@ -119,6 +134,34 @@ fn smooth(e0: f64, e1: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Where `isle`'s settlement meets the sea (roughly: the coast toward the island it trades
+/// with), if it has one.
+pub fn settle_spot(isle: &Island) -> Option<DVec2> {
+    let t = isle.settle_toward?;
+    let dir = (islands()[t].center - isle.center).normalize();
+    Some(isle.center + dir * isle.radius * 0.92)
+}
+
+/// 1 on the calm ground around `isle`'s settlement, 0 beyond `reach` times its calm radius.
+fn calm(isle: &Island, x: f64, z: f64, reach: f64) -> f64 {
+    let Some(spot) = settle_spot(isle) else {
+        return 0.0;
+    };
+    let d = (DVec2::new(x, z) - spot).length();
+    let r = isle.settle_m * reach;
+    smooth(r, r * 0.55, d)
+}
+
+/// Big lobes of the coastline at bearing `a`: peninsulas where positive, bights where negative.
+fn lobes(isle: &Island, a: f64) -> f64 {
+    let mut sum = 0.0;
+    for k in 2..=5u64 {
+        let phase = ((isle.seed * 7919 + k * 104_729) % 10_007) as f64 * 0.618_034;
+        sum += (0.26 / k as f64) * (k as f64 * a + phase).cos();
+    }
+    sum
+}
+
 /// "Inland-ness" of a point for one island: 0 at the coast, 1 at the middle, negative at sea
 /// (−1 about one radius out).
 fn inland(isle: &Island, x: f64, z: f64) -> f64 {
@@ -128,13 +171,23 @@ fn inland(isle: &Island, x: f64, z: f64) -> f64 {
         return 1.0 - r;
     }
     let s = isle.seed;
-    // Coastline: bays and headlands from warped noise around the island.
+    let wild = 1.0 - calm(isle, x, z, 1.0);
+    // Coastline: lobes (peninsulas and bights), then bays and headlands from warped noise.
+    let lobe = lobes(isle, d.y.atan2(d.x)) * wild;
     let warp = fbm2(x / 520.0, z / 520.0, s, 3, 2.0, 0.5) as f64 * 0.34
         + fbm2(x / 140.0, z / 140.0, s + 1, 3, 2.1, 0.5) as f64 * 0.07;
-    1.0 - (r + warp)
+    // Coves: narrow inlets where a noise field crosses zero, only in the outer band and only
+    // on some stretches of coast.
+    let n = fbm2(x / 340.0, z / 340.0, s + 11, 3, 2.0, 0.5) as f64;
+    let channel = (1.0 - n.abs() * 4.0).max(0.0).powi(2);
+    let stretch = smooth(-0.15, 0.15, perlin2(x / 800.0, z / 800.0, s + 12) as f64);
+    let band = smooth(0.45, 0.8, r) * smooth(1.25, 1.0, r);
+    let cove = 0.4 * channel * stretch * band * wild;
+    1.0 - r * (1.0 - lobe) - warp - cove
 }
 
-/// Cliff strength 0..1 along this island's coast at the bearing of `(x, z)`.
+/// Cliff strength 0..1 along this island's coast at `(x, z)`: one long run of cliffs facing
+/// `cliff_dir`, and the tips of headlands, but never at the settlement.
 fn cliff(isle: &Island, x: f64, z: f64) -> f64 {
     let d = DVec2::new(x, z) - isle.center;
     let a = d.y.atan2(d.x);
@@ -144,48 +197,63 @@ fn cliff(isle: &Island, x: f64, z: f64) -> f64 {
     }
     let half = isle.cliff_share * std::f64::consts::PI;
     let wobble = perlin2(x / 260.0, z / 260.0, isle.seed + 5) as f64 * 0.35;
-    smooth(half, half * 0.55, off.abs() + wobble * half)
+    let run = smooth(half, half * 0.55, off.abs() + wobble * half);
+    let headland = smooth(0.06, 0.16, lobes(isle, a));
+    run.max(headland * 0.85) * (1.0 - calm(isle, x, z, 1.25))
 }
 
 /// Height of one island's ground (or its sea bed), meters.
 fn island_height(isle: &Island, x: f64, z: f64) -> f64 {
     let t = inland(isle, x, z);
     let s = isle.seed;
+    let c = cliff(isle, x, z);
     if t < 0.0 {
         // Sea bed: a shelf, then down to the open sea.
         let shelf = -1.5 - 9.0 * smooth(0.0, 0.08, -t);
-        let deep = OPEN_SEA_M + 4.0 * perlin2(x / 900.0, z / 900.0, s + 9) as f64;
-        let c = cliff(isle, x, z);
+        let deep = open_sea(x, z);
         // Under cliffs the bed drops away fast; elsewhere a sandy shelf runs out.
-        let k = smooth(0.0, 0.55 - 0.4 * c, -t);
+        let k = smooth(0.0, 0.55 - 0.45 * c, -t);
         return shelf + (deep - shelf) * k;
     }
-    let c = cliff(isle, x, z);
-    // Beach then a low bank up to the plateau; cliffs instead rise in a few meters.
-    let beach_w = 0.07 * (1.0 - c) + 0.008 * c;
+    // Beach then a low bank up to the plateau; cliffs instead rise sheer from the water.
+    let beach_w = 0.07 * (1.0 - c) + 0.006 * c;
     let beach = 1.6 * smooth(0.0, beach_w * 0.6, t);
-    let bank_top = 6.0 + 10.0 * c;
+    // Cliff tops are high downs that settle back into the rolling land further in.
+    let bank_top = 5.0 + 24.0 * c * smooth(0.4, 0.08, t);
     let bank = bank_top * smooth(beach_w * 0.5, beach_w + 0.05 * (1.0 - c) + 0.01, t);
-    // Gentle rolling land: what towns are built on.
-    let roll = fbm2(x / 380.0, z / 380.0, s + 2, 3, 2.0, 0.5) as f64 * 2.4;
+    // Rolling land: what towns are built on; calmer near the settlement.
+    let town = calm(isle, x, z, 1.35);
+    let roll = fbm2(x / 380.0, z / 380.0, s + 2, 3, 2.0, 0.5) as f64 * (4.0 - 2.4 * town);
     let land = smooth(0.02, 0.12, t);
-    // Hills toward the middle where the hill mask says so.
+    // Hills where the hill mask says so, ridged, and a high middle on every island.
     let mask = smooth(
-        0.05,
-        0.45,
-        fbm2(x / 700.0, z / 700.0, s + 3, 2, 2.0, 0.5) as f64 + 0.15,
+        0.0,
+        0.4,
+        fbm2(x / 700.0, z / 700.0, s + 3, 2, 2.0, 0.5) as f64 + 0.2,
     );
     let ridge = {
         let n = fbm2(x / 260.0, z / 260.0, s + 4, 4, 2.05, 0.5) as f64;
         (1.0 - n.abs() * 1.6).max(0.0).powi(2)
     };
-    let hills = isle.hills_m * mask * smooth(0.18, 0.62, t) * (0.35 + 0.65 * ridge);
+    // The high middle follows plain distance (warped), not the lobed coast, so it has no
+    // creases running out to the headlands.
+    let rr = (DVec2::new(x, z) - isle.center).length() / isle.radius
+        + fbm2(x / 450.0, z / 450.0, s + 6, 3, 2.0, 0.5) as f64 * 0.3;
+    let crown = smooth(0.8, 0.1, rr) * (0.6 + 0.4 * ridge);
+    let hills = isle.hills_m
+        * (mask * smooth(0.15, 0.6, t) * (0.3 + 0.7 * ridge) * 0.75 + 0.45 * crown)
+        * (1.0 - town);
     bank.max(beach) + land * (roll + hills)
+}
+
+/// The sea floor away from the islands.
+fn open_sea(x: f64, z: f64) -> f64 {
+    OPEN_SEA_M + 3.0 * perlin2(x / 1500.0, z / 1500.0, 99) as f64
 }
 
 /// World height of the ground or sea bed at world `(x, z)`, meters (sea level 0).
 pub fn height(x: f64, z: f64) -> f64 {
-    let mut h = OPEN_SEA_M + 3.0 * perlin2(x / 1500.0, z / 1500.0, 99) as f64;
+    let mut h = open_sea(x, z);
     for isle in islands() {
         let d2 = (DVec2::new(x, z) - isle.center).length_squared();
         if d2 > (isle.radius * 3.2).powi(2) {
@@ -309,15 +377,55 @@ mod tests {
 
     #[test]
     fn the_home_island_has_flat_land_for_a_town() {
+        let spot = settle_spot(&islands()[0]).unwrap();
+        let inland_dir = (islands()[0].center - spot).normalize();
+        let mid = spot + inland_dir * 260.0;
         let mut flat = 0;
         for j in -40..40 {
             for i in -40..40 {
-                let (x, z) = (i as f64 * 8.0, j as f64 * 8.0);
+                let (x, z) = (mid.x + i as f64 * 8.0, mid.y + j as f64 * 8.0);
                 if height(x, z) > 2.0 && slope(x, z, 4.0) < 0.08 {
                     flat += 1;
                 }
             }
         }
         assert!(flat > 2500, "only {flat} flat samples");
+    }
+
+    /// A shaded relief of the whole map for eyeballing the coastlines:
+    /// `ISLE_MAP=/tmp/map.ppm cargo test -p archipelago island::tests::relief -- --ignored`.
+    #[test]
+    #[ignore]
+    fn relief() {
+        let Ok(path) = std::env::var("ISLE_MAP") else {
+            return;
+        };
+        let (n, half) = (900usize, 3600.0);
+        let mut out = format!("P6 {n} {n} 255\n").into_bytes();
+        for j in 0..n {
+            for i in 0..n {
+                let x = -half + 2.0 * half * i as f64 / n as f64;
+                let z = -half + 2.0 * half * j as f64 / n as f64;
+                let h = height(x, z);
+                let shade = ((height(x - 4.0, z - 4.0) - h) * 0.25).clamp(-0.5, 0.5);
+                let c = if h < 0.0 {
+                    let d = (-h / 40.0).min(1.0);
+                    [
+                        40.0 + 90.0 * (1.0 - d),
+                        90.0 + 100.0 * (1.0 - d),
+                        150.0 + 70.0 * (1.0 - d),
+                    ]
+                } else if h < 2.0 {
+                    [220.0, 205.0, 160.0]
+                } else {
+                    let k = (h / 120.0).min(1.0);
+                    [90.0 + 120.0 * k, 140.0 + 40.0 * k, 70.0 + 110.0 * k]
+                };
+                for v in c {
+                    out.push((v * (1.0 + shade)).clamp(0.0, 255.0) as u8);
+                }
+            }
+        }
+        std::fs::write(path, out).unwrap();
     }
 }

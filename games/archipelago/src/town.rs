@@ -79,7 +79,7 @@ pub fn join_to_roads(world: &mut World, e: Entity) -> bool {
     let mut from: std::collections::HashMap<IVec2, IVec2> = Default::default();
     let mut q = VecDeque::new();
     for c in ring {
-        if g.is_free(c) && grid::cell_roadable(c) {
+        if g.is_open(c) && grid::cell_roadable(c) {
             seen.insert(c);
             q.push_back(c);
         }
@@ -95,7 +95,7 @@ pub fn join_to_roads(world: &mut World, e: Entity) -> bool {
                 goal = Some(c);
                 break;
             }
-            if !seen.contains(&nc) && g.is_free(nc) && grid::cell_roadable(nc) {
+            if !seen.contains(&nc) && g.is_open(nc) && grid::cell_roadable(nc) {
                 seen.insert(nc);
                 from.insert(nc, c);
                 q.push_back(nc);
@@ -317,6 +317,32 @@ fn street_inland(world: &mut World, harbour: Entity, len_cells: i32) -> DVec2 {
     grid::cell_center(c - back)
 }
 
+/// Woodcutters at the edges of the woods nearest `town` on `isle`, at least 90 m apart.
+fn woodcutters_near(world: &mut World, isle: usize, town: DVec2, n: usize) {
+    let mut spots: Vec<DVec2> = Vec::new();
+    for j in -40..=40 {
+        for i in -40..=40 {
+            let p = town + DVec2::new(i as f64, j as f64) * 16.0;
+            if island::island_at(p.x, p.y) == Some(isle) && island::woods(p.x, p.y) > 0.55 {
+                spots.push(p);
+            }
+        }
+    }
+    spots.sort_by_key(|p| ((*p - town).length() * 10.0) as i64);
+    let mut cut: Vec<DVec2> = Vec::new();
+    for p in spots {
+        if cut.len() >= n {
+            break;
+        }
+        if cut.iter().any(|q| (*q - p).length() < 90.0) {
+            continue;
+        }
+        if place_near(world, Kind::Woodcutter, p, 4, true).is_some() {
+            cut.push(p);
+        }
+    }
+}
+
 /// Build the whole start. Called once, after the art exists.
 pub fn build_start(world: &mut World) {
     let started = std::time::Instant::now();
@@ -358,29 +384,7 @@ pub fn build_start(world: &mut World) {
             boats += 1;
         }
     }
-    // Woodcutters at the edges of the woods nearest the town.
-    let mut spots: Vec<DVec2> = Vec::new();
-    for j in -40..=40 {
-        for i in -40..=40 {
-            let p = town + DVec2::new(i as f64, j as f64) * 16.0;
-            if island::island_at(p.x, p.y) == Some(home) && island::woods(p.x, p.y) > 0.55 {
-                spots.push(p);
-            }
-        }
-    }
-    spots.sort_by_key(|p| ((*p - town).length() * 10.0) as i64);
-    let mut cut: Vec<DVec2> = Vec::new();
-    for p in spots {
-        if cut.len() >= 4 {
-            break;
-        }
-        if cut.iter().any(|q| (*q - p).length() < 90.0) {
-            continue;
-        }
-        if place_near(world, Kind::Woodcutter, p, 4, true).is_some() {
-            cut.push(p);
-        }
-    }
+    woodcutters_near(world, home, town, 4);
     // Spread round the inland side of the town: `a` from 0 to 2π sweeps 200° about the way
     // inland.
     let inland = isles[home].center - town;
@@ -412,14 +416,11 @@ pub fn build_start(world: &mut World) {
         );
         fill_houses(world, village, 100.0, 20, Tier::Labourers);
         fill_houses(world, village, 130.0, 4, Tier::Fisherfolk);
-        for (a, r) in [(0.5, 170.0), (1.6, 190.0), (2.6, 200.0)] {
-            place_near(
-                world,
-                Kind::GrainFarm,
-                village + DVec2::new(f64::cos(a), f64::sin(a)) * r,
-                40,
-                true,
-            );
+        // Farms out on the open land behind the village, where their fields have room.
+        let inland = (isles[1].center - village).normalize();
+        let out = |a: f64, r: f64| village + DVec2::from_angle(a).rotate(inland) * r;
+        for (a, r) in [(-0.8, 240.0), (0.05, 300.0), (0.85, 250.0)] {
+            place_near(world, Kind::GrainFarm, out(a, r), 40, true);
         }
         place_near(
             world,
@@ -449,14 +450,8 @@ pub fn build_start(world: &mut World) {
             20,
             true,
         );
-        for (a, r) in [(3.7, 180.0), (4.5, 190.0)] {
-            place_near(
-                world,
-                Kind::HopFarm,
-                village + DVec2::new(f64::cos(a), f64::sin(a)) * r,
-                40,
-                true,
-            );
+        for (a, r) in [(-1.35, 190.0), (1.4, 200.0)] {
+            place_near(world, Kind::HopFarm, out(a, r), 40, true);
         }
         place_near(
             world,
@@ -465,13 +460,7 @@ pub fn build_start(world: &mut World) {
             25,
             true,
         );
-        place_near(
-            world,
-            Kind::Woodcutter,
-            village + DVec2::new(160.0, -160.0),
-            30,
-            true,
-        );
+        woodcutters_near(world, 1, village, 1);
     }
     // --- Northmoor: sheep, timber and an airship mast.
     let n_harbour = harbour_toward(world, 3, isles[0].center);
@@ -685,6 +674,7 @@ pub fn build_start(world: &mut World) {
             (Craft::Schooner, "Kittiwake"),
             (Craft::Schooner, "Maud Ellen"),
             (Craft::Schooner, "Good Intent"),
+            (Craft::PaddleSteamer, "PS Haverholm Belle"),
         ],
         &[
             (Craft::Steamer, "SS Brannock"),
@@ -818,6 +808,34 @@ pub mod tests {
             tiers[b.island][h.tier.index()] += 1;
         }
         eprintln!("houses by island and tier at the start: {tiers:?}");
+        // Every farm got most of the fields it wants.
+        let mut farms = Vec::new();
+        for (b, f) in w
+            .query::<(&Building, Option<&crate::fields::Fields>)>()
+            .iter(&w)
+        {
+            if crate::fields::is_farm(b.kind) {
+                let have = f.map_or(0, |f| f.0.len());
+                farms.push(format!(
+                    "{:?}@{}: {have}/{}",
+                    b.kind,
+                    b.island,
+                    crate::fields::wanted(b.kind)
+                ));
+                assert!(
+                    have * 10 >= crate::fields::wanted(b.kind) * 6,
+                    "{:?}@{} has only {have} field cells",
+                    b.kind,
+                    b.island
+                );
+            }
+        }
+        eprintln!("farm fields: {farms:?}");
+        let plumes = w.query::<&crate::effects::Plume>().iter(&w).count();
+        let riders = w.query::<&crate::effects::Riding>().iter(&w).count();
+        let houses = w.query::<&House>().iter(&w).count();
+        eprintln!("plumes {plumes} (houses {houses}), riders {riders}");
+        assert!(plumes < houses + 20, "{plumes} plumes for {houses} houses");
         let masts = w
             .query::<&Building>()
             .iter(&w)

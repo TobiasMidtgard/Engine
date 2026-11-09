@@ -58,6 +58,7 @@ pub fn register(app: &mut App) {
             let carts = world.query::<&crate::logistics::Cart>().iter(world).count();
             let vessels = world.query::<&Vessel>().iter(world).count();
             let rows = world.resource::<crate::draw::Drawn>().rows;
+            let walkers = crate::walkers::count(world);
             let art_triangles: usize = world.get_resource::<crate::draw::Art>().map_or(0, |a| a.triangles.values().sum());
             Ok(json!({
                 "coins": econ.coins.round(),
@@ -67,6 +68,7 @@ pub fn register(app: &mut App) {
                 "houses": {"fisherfolk": houses[0], "labourers": houses[1]},
                 "workshops_working": working,
                 "carts": carts,
+                "walkers": walkers,
                 "vessels": vessels,
                 "instanced_rows": rows,
                 "art_triangles": art_triangles,
@@ -165,7 +167,7 @@ pub fn register(app: &mut App) {
         "Open a trade route between harbours (or airship masts, for aircraft) and put a ship or aircraft on it.",
         r#"{"name": "Wool run", "craft": "schooner", "vessel": "Sea Lark", "stops": [{"at": 1, "load": ["wool"], "unload": []}, {"at": 7, "load": [], "unload": ["wool"]}]}"#,
         |world, args| {
-            let craft = args["craft"].as_str().and_then(Craft::from_name).ok_or("craft: schooner, steamer, smack, barque, airship or biplane")?;
+            let craft = args["craft"].as_str().and_then(Craft::from_name).ok_or("craft: schooner, steamer, smack, barque, clipper, paddle_steamer, airship, biplane or seaplane")?;
             let goods = |v: &Value| -> Result<Vec<Good>, String> {
                 v.as_array()
                     .into_iter()

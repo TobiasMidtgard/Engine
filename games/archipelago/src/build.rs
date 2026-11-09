@@ -94,7 +94,7 @@ pub fn flush_paint(world: &mut World) {
     }
 }
 
-fn paint_cells(world: &mut World, cells: &[IVec2], surface: &'static str) {
+pub(crate) fn paint_cells(world: &mut World, cells: &[IVec2], surface: &'static str) {
     if let Some(mut hold) = world.get_resource_mut::<PaintHold>() {
         hold.0.extend(cells.iter().map(|c| (*c, surface)));
         return;
@@ -116,7 +116,7 @@ fn paint_cells(world: &mut World, cells: &[IVec2], surface: &'static str) {
     }
 }
 
-fn clear_trees(world: &mut World, cells: &[IVec2]) {
+pub(crate) fn clear_trees(world: &mut World, cells: &[IVec2]) {
     let mut gone = Vec::new();
     {
         let mut forest = world.resource_mut::<Forest>();
@@ -136,7 +136,7 @@ pub fn place_road(world: &mut World, c: IVec2, charge: bool) -> Result<(), Strin
     if world.resource::<Grid>().is_road(c) {
         return Ok(());
     }
-    if !world.resource::<Grid>().is_free(c) {
+    if !world.resource::<Grid>().is_open(c) {
         return Err("Something already stands there.".into());
     }
     if !grid::cell_roadable(c) {
@@ -150,13 +150,15 @@ pub fn place_road(world: &mut World, c: IVec2, charge: bool) -> Result<(), Strin
         }
         econ.coins -= cost;
     }
+    crate::fields::release_cell(world, c);
     {
         let mut g = world.resource_mut::<Grid>();
         g.cells.insert(c, Occ::Road);
         g.roads.insert(c);
     }
     clear_trees(world, &[c]);
-    paint_cells(world, &[c], "gravel");
+    paint_cells(world, &[c], "dirt");
+    crate::streets::mark(world, c);
     world.resource_mut::<Changed>().any = true;
     Ok(())
 }
@@ -287,6 +289,11 @@ pub fn place(
     if kind == Kind::Market {
         spawn_stalls(world, entity, origin, rot, base_y);
     }
+    crate::fields::claim(world, entity);
+    crate::effects::add_plumes(world, entity);
+    if matches!(kind, Kind::Market | Kind::Harbour | Kind::Chapel) {
+        crate::streets::mark_all(world);
+    }
     world.resource_mut::<Drawn>().dirty = true;
     Ok(entity)
 }
@@ -300,6 +307,10 @@ pub fn demolish(world: &mut World, e: Entity) {
     let Some(b) = world.get::<Building>(e).cloned() else {
         return;
     };
+    crate::fields::release_all(world, e);
+    if matches!(b.kind, Kind::Market | Kind::Harbour | Kind::Chapel) {
+        crate::streets::mark_all(world);
+    }
     {
         let mut g = world.resource_mut::<Grid>();
         for c in grid::footprint(b.kind, b.origin, b.rot) {
@@ -331,6 +342,7 @@ pub fn remove_road(world: &mut World, c: IVec2) {
     };
     if removed {
         paint_cells(world, &[c], "grass");
+        crate::streets::mark(world, c);
         world.resource_mut::<Changed>().any = true;
     }
 }
@@ -492,10 +504,10 @@ pub fn refresh(world: &mut World) {
     // Woodcutters: wooded cells in reach that nothing stands on (the trees planted there
     // follow the same woods field).
     let grid_cells: HashSet<IVec2> = world.resource::<Grid>().cells.keys().copied().collect();
-    let mut q = world.query::<(&Building, &mut Producer)>();
-    for (b, mut p) in q.iter_mut(world) {
+    let mut q = world.query::<(&Building, &mut Producer, Option<&crate::fields::Fields>)>();
+    for (b, mut p, fields) in q.iter_mut(world) {
         if b.kind != Kind::Woodcutter {
-            p.site = 1.0;
+            p.site = crate::fields::share(b.kind, fields);
             continue;
         }
         let r = b.kind.def().reach;

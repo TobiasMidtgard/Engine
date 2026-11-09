@@ -25,6 +25,7 @@ pub struct Art {
     pub crafts: HashMap<Craft, Model>,
     pub sails: Model,
     pub props: Model,
+    pub paddles: Model,
     pub cart: Model,
     /// Triangles per model, for the budget test and the perf panel.
     pub triangles: HashMap<String, usize>,
@@ -62,6 +63,7 @@ pub fn make_art(world: &mut World) -> Art {
     }
     let sails = upload(world, mill_sails());
     let props = upload(world, airship_props());
+    let paddles = upload(world, crate::vessels::paddle_wheel());
     let cart = upload(world, cart());
     engine::core::log::info!(
         "archipelago art: {} models in {:.2} s",
@@ -74,6 +76,7 @@ pub fn make_art(world: &mut World) -> Art {
         crafts: craft_models,
         sails,
         props,
+        paddles,
         cart,
         triangles,
     }
@@ -221,12 +224,17 @@ pub fn spin_parts(
     mut q: Query<(&mut Spin, &mut Transform), Without<Body>>,
     bodies: Query<&Transform, With<Body>>,
     producers: Query<&crate::sim::Producer>,
+    vessels: Query<&crate::fleet::Vessel>,
 ) {
     let dt = time.delta_secs() * econ.speed.min(2.0);
     for (mut s, mut t) in &mut q {
-        let k = s.driven_by.map_or(1.0, |e| {
+        let mut k = s.driven_by.map_or(1.0, |e| {
             producers.get(e).map_or(0.0, |p| p.efficiency.max(0.15))
         });
+        // Propellers and paddle wheels turn with the way the craft is making.
+        if let Some(v) = s.on.and_then(|e| vessels.get(e).ok()) {
+            k *= (v.speed / v.craft.speed()).clamp(0.08, 1.0);
+        }
         s.angle = (s.angle + s.rate * dt * k) % std::f32::consts::TAU;
         let local = Transform {
             rotation: s.base.rotation * Quat::from_axis_angle(s.axis, s.angle),
