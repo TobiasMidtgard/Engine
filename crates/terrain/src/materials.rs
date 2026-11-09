@@ -29,7 +29,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Number of ground materials (texture array layers).
-pub const MATERIAL_COUNT: usize = 9;
+pub const MATERIAL_COUNT: usize = 15;
+
+/// Number of material classes the shader weighs (`MAT_COUNT` in terrain.wgsl): the first nine
+/// layers. The rest are scan variants of a class ([`GroundMaterial::class`]), drawn in its
+/// place where the ground calls for them (pine needles under conifers, scree below cliffs).
+pub const CLASS_COUNT: usize = 9;
 
 /// A ground material. The value is its texture array layer and its index in the shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +58,20 @@ pub enum GroundMaterial {
     Gravel,
     /// Cast concrete slabs with pores, stains and joints.
     Concrete,
+    // ---- Scan variants (fields-and-forests row T2): each stands in for a class where the
+    // ground calls for it, and without its scan it bakes as that class, so nothing changes.
+    /// Needle litter, cones and twigs under conifers (variant of the forest floor).
+    ForestNeedles,
+    /// Moss carpets in wet, shaded hollows (variant of grass).
+    Moss,
+    /// Layered sedimentary rock on bedded cliffs (variant of rock).
+    LayeredRock,
+    /// Coarse angular scree below cliffs and on alpine slopes (variant of gravel).
+    Scree,
+    /// Rounded river cobbles on banks (variant of soil).
+    RiverCobble,
+    /// Wet, rippled sand along the waterline (variant of sand).
+    WetSand,
 }
 
 impl GroundMaterial {
@@ -67,7 +86,27 @@ impl GroundMaterial {
         GroundMaterial::Sand,
         GroundMaterial::Gravel,
         GroundMaterial::Concrete,
+        GroundMaterial::ForestNeedles,
+        GroundMaterial::Moss,
+        GroundMaterial::LayeredRock,
+        GroundMaterial::Scree,
+        GroundMaterial::RiverCobble,
+        GroundMaterial::WetSand,
     ];
+
+    /// The class a material belongs to: itself for the first [`CLASS_COUNT`], the class it
+    /// stands in for otherwise.
+    pub fn class(self) -> GroundMaterial {
+        match self {
+            GroundMaterial::ForestNeedles => GroundMaterial::ForestFloor,
+            GroundMaterial::Moss => GroundMaterial::Grass,
+            GroundMaterial::LayeredRock => GroundMaterial::Rock,
+            GroundMaterial::Scree => GroundMaterial::Gravel,
+            GroundMaterial::RiverCobble => GroundMaterial::Soil,
+            GroundMaterial::WetSand => GroundMaterial::Sand,
+            m => m,
+        }
+    }
 
     /// Short lowercase name.
     pub fn name(self) -> &'static str {
@@ -81,13 +120,19 @@ impl GroundMaterial {
             GroundMaterial::Sand => "sand",
             GroundMaterial::Gravel => "gravel",
             GroundMaterial::Concrete => "concrete",
+            GroundMaterial::ForestNeedles => "forest_needles",
+            GroundMaterial::Moss => "moss",
+            GroundMaterial::LayeredRock => "layered_rock",
+            GroundMaterial::Scree => "scree",
+            GroundMaterial::RiverCobble => "river_cobble",
+            GroundMaterial::WetSand => "wet_sand",
         }
     }
 
     /// Meters of ground one texture tile covers. Powers of two, so patterns stay put across
     /// the renderer's 4096 m camera tiles (`tiling_pos`).
     pub fn tile_m(self) -> f32 {
-        match self {
+        match self.class() {
             GroundMaterial::Grass | GroundMaterial::Soil | GroundMaterial::Gravel => 2.0,
             GroundMaterial::Rock => 8.0,
             _ => 4.0,
@@ -104,6 +149,12 @@ impl GroundMaterial {
             GroundMaterial::Rock => ("rock_face", 4.0),
             GroundMaterial::Sand => ("aerial_beach_01", 4.0),
             GroundMaterial::Gravel => ("gravel_floor_02", 2.0),
+            GroundMaterial::ForestNeedles => ("forrest_ground_03", 2.0),
+            GroundMaterial::Moss => ("moss_ground", 1.0),
+            GroundMaterial::LayeredRock => ("dark_rock_02", 4.0),
+            GroundMaterial::Scree => ("gray_rocks", 2.0),
+            GroundMaterial::RiverCobble => ("dry_river_pebbles", 2.0),
+            GroundMaterial::WetSand => ("damp_sand", 2.0),
             // The snow scans' dirty prints repeat into a visible grid; procedural snow tiles
             // cleanly.
             GroundMaterial::Snow | GroundMaterial::Concrete => return None,
@@ -112,7 +163,8 @@ impl GroundMaterial {
     }
 }
 
-/// A CC0 photo-scanned texture set (Poly Haven, 2K): `<folder>/<slug>/<slug>_{diff, nor_gl,
+/// A CC0 photo-scanned texture set (Poly Haven, or an ambientCG zip that fetch-assets unpacks
+/// into the same names), 2K: `<folder>/<slug>/<slug>_{diff, nor_gl,
 /// arm, disp}_2k.jpg`, where the folder is usually `<asset root>/fetched/terrain`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Scan {
@@ -125,6 +177,8 @@ pub struct Scan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialSource {
     Procedural,
+    /// A scan variant without its scan: a copy of its class.
+    Class,
     /// Built from this scan.
     Scanned(&'static str),
 }
@@ -233,10 +287,24 @@ pub fn bake(size: u32, scans: Option<&Path>) -> BakedMaterials {
                         })
                         .ok()
                 });
-                *slot = Some(scanned.unwrap_or_else(|| bake_one(material, size as usize)));
+                // A variant without its scan is a copy of its class (below).
+                *slot = scanned.or_else(|| {
+                    (material.class() == material).then(|| bake_one(material, size as usize))
+                });
             });
         }
     });
+    for (k, material) in GroundMaterial::ALL.iter().enumerate() {
+        if results[k].is_none() {
+            let class = results[material.class() as usize]
+                .as_ref()
+                .map(|f| Finished {
+                    source: MaterialSource::Class,
+                    ..f.clone()
+                });
+            results[k] = class;
+        }
+    }
     let mut out = BakedMaterials {
         size,
         mip_count: size.trailing_zeros() + 1,
@@ -258,6 +326,7 @@ pub fn bake(size: u32, scans: Option<&Path>) -> BakedMaterials {
 
 /// Bake one material: its height, albedo and roughness, then the derived maps and mips.
 pub fn bake_one(material: GroundMaterial, size: usize) -> Finished {
+    let material = material.class();
     let mut l = Layer::new(
         size,
         material.tile_m(),
@@ -273,12 +342,13 @@ pub fn bake_one(material: GroundMaterial, size: usize) -> Finished {
         GroundMaterial::Sand => sand(&mut l),
         GroundMaterial::Gravel => gravel(&mut l),
         GroundMaterial::Concrete => concrete(&mut l),
+        _ => unreachable!("a class"),
     };
     finish(l, cavity, material.tile_m())
 }
 
 /// One baked material: mips of both textures and its averages.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Finished {
     pub albedo_height: Vec<Vec<u8>>,
     pub normal_rough_ao: Vec<Vec<u8>>,
@@ -1670,6 +1740,13 @@ mod tests {
         let k = GroundMaterial::Gravel as usize;
         assert_eq!(baked.sources[k], MaterialSource::Scanned(scan.slug));
         assert_eq!(baked.scanned(), 1, "only gravel has files");
+        // Scree, gravel's variant, has no files: it is a copy of the gravel scan, so it draws
+        // exactly as gravel does.
+        let scree = GroundMaterial::Scree as usize;
+        assert_eq!(GroundMaterial::Scree.class(), GroundMaterial::Gravel);
+        assert_eq!(baked.sources[scree], MaterialSource::Class);
+        assert_eq!(baked.albedo_height[scree], baked.albedo_height[k]);
+        assert_eq!(baked.stats.len(), MATERIAL_COUNT);
         assert_eq!(baked.stats[k].tile_m, scan.tile_m);
         let s = baked.stats[k];
         // sRGB 188 is about 0.5 linear.

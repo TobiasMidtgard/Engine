@@ -1,0 +1,191 @@
+# Owner: CC0 scans thread (scan library for Foliage to adopt; see engine-design/megascans.md).
+# Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- scans`.
+# Zips (`unpack = "pbr"`) unpack next to themselves as <folder>_{diff,nor_gl,arm,disp}_2k.jpg, and
+# atlases with an opacity map as <folder>_diff_2k.png with the opacity in alpha.
+
+# ---- Bark (scan layout, square tiles unless noted)
+
+# Oak: deeply fissured bark with moss (1 x 2 m, not square).
+[[file]]
+path = "scans/bark/jolcham_oak_bark_01/jolcham_oak_bark_01_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/jolcham_oak_bark_01/jolcham_oak_bark_01_diff_2k.jpg"
+sha256 = "2eb8d1e79a64827ad70b20bc80bec2171494a442310099ac88d15970a46e6c5f"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/jolcham_oak_bark_01"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/jolcham_oak_bark_01/jolcham_oak_bark_01_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/jolcham_oak_bark_01/jolcham_oak_bark_01_nor_gl_2k.jpg"
+sha256 = "f0c17caeafb7aad681e7a376e754ed1593a6bf61acc0bc71a45d9850f29e2ae3"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/jolcham_oak_bark_01"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/jolcham_oak_bark_01/jolcham_oak_bark_01_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/jolcham_oak_bark_01/jolcham_oak_bark_01_arm_2k.jpg"
+sha256 = "81a8da5f51e92c5d82248800bb1860720c68338bf54d2505086ce2cb479aa0f5"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/jolcham_oak_bark_01"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/jolcham_oak_bark_01/jolcham_oak_bark_01_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/jolcham_oak_bark_01/jolcham_oak_bark_01_disp_2k.jpg"
+sha256 = "42ef3801d43309a15f69c3c6c515d8577eb14763e367c204e1663cd0894e809f"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/jolcham_oak_bark_01"
+author = "Charlotte Baglioni"
+
+
+# Spruce stand-in: fir bark photogrammetry (no CC0 spruce scan exists).
+[[file]]
+path = "scans/bark/spruce_bark/Bark014_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=Bark014_2K-JPG.zip"
+sha256 = "2ae21b265b55512521b0c1f161ebaa5bbc9867d8e47327974027d38fb711d7eb"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/Bark014"
+unpack = "pbr"
+
+# Beech stand-in: smooth gray-green bark with moss.
+[[file]]
+path = "scans/bark/beech_bark/Bark011_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=Bark011_2K-JPG.zip"
+sha256 = "b869a754664b635f4baca14aeabcc23252f6d23f59d77774642fd4eb8659bf3a"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/Bark011"
+unpack = "pbr"
+
+# Aspen stand-in: light smooth bark.
+[[file]]
+path = "scans/bark/aspen_bark/Bark005_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=Bark005_2K-JPG.zip"
+sha256 = "8d48cc49ed3f1a655455ae2e746a8a1cfdd6447562d8127fd89f82acff527a96"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/Bark005"
+unpack = "pbr"
+
+# Hazel stand-in: smooth thin bark with lichen.
+[[file]]
+path = "scans/bark/chinese_hackberry_bark/chinese_hackberry_bark_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/chinese_hackberry_bark/chinese_hackberry_bark_diff_2k.jpg"
+sha256 = "cd2480dfb768cde70a480b93f13a0b94913ca452cc93ac41d04fc253a3af52be"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/chinese_hackberry_bark"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/chinese_hackberry_bark/chinese_hackberry_bark_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/chinese_hackberry_bark/chinese_hackberry_bark_nor_gl_2k.jpg"
+sha256 = "43cac4758cea838b054daac646306c1dfaddf01a76fe6219761b27b3354d628a"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/chinese_hackberry_bark"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/chinese_hackberry_bark/chinese_hackberry_bark_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/chinese_hackberry_bark/chinese_hackberry_bark_arm_2k.jpg"
+sha256 = "a2e62c60502c781c0710ab8e2d4b201e2eaca07613b1326776ca15b512f88fd5"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/chinese_hackberry_bark"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/chinese_hackberry_bark/chinese_hackberry_bark_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/chinese_hackberry_bark/chinese_hackberry_bark_disp_2k.jpg"
+sha256 = "8dc49a57a86f5f354f8a0c98d9e1b23a3c882c5c9269716b68b134116912b6f7"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/chinese_hackberry_bark"
+author = "Charlotte Baglioni"
+
+
+# Palm trunk.
+[[file]]
+path = "scans/bark/palm_bark/palm_bark_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/palm_bark/palm_bark_diff_2k.jpg"
+sha256 = "5be19ff60fef0cbddb4381e345a76fdeabcc184d643efbf55f0b34ec687cf480"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/palm_bark"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/palm_bark/palm_bark_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/palm_bark/palm_bark_nor_gl_2k.jpg"
+sha256 = "03aec0241647d43f3d14a7596bb54ba2d43d1f4cd3a28b5a880b4abd9bf08161"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/palm_bark"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/palm_bark/palm_bark_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/palm_bark/palm_bark_arm_2k.jpg"
+sha256 = "656708dc3a5c7c6551240252c116cda5d9be3e9a52ce08c5f34cc8e88a67e484"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/palm_bark"
+author = "Charlotte Baglioni"
+
+[[file]]
+path = "scans/bark/palm_bark/palm_bark_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/palm_bark/palm_bark_disp_2k.jpg"
+sha256 = "15717e8751e4f32949bb5a8916a47655016fff80ff767e8f1973abe8c9420558"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/palm_bark"
+author = "Charlotte Baglioni"
+
+
+# ---- Leaf atlases (ambientCG; color with opacity in alpha, DirectX normals flipped to OpenGL)
+
+# Green oak leaves, spring (photogrammetry).
+[[file]]
+path = "scans/leaves/oak_leaves/LeafSet016_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=LeafSet016_2K-JPG.zip"
+sha256 = "70993c9ff7a002ec78cab759fe153d37f2918463c3c320c3b963e524cee877b3"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/LeafSet016"
+unpack = "pbr"
+
+# Light green broadleaf (photogrammetry).
+[[file]]
+path = "scans/leaves/broadleaf_light/LeafSet024_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=LeafSet024_2K-JPG.zip"
+sha256 = "5e750c97b02717b94284128704039563acdd40e3b01a2b4a852c08eff61f5621"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/LeafSet024"
+unpack = "pbr"
+
+# Maple leaves, green to orange (multi-angle).
+[[file]]
+path = "scans/leaves/maple_leaves/LeafSet027_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=LeafSet027_2K-JPG.zip"
+sha256 = "5179fa43eec246c4694d2fa41d82c4e9c433133842996aa7fdf7a049a9c9bf91"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/LeafSet027"
+unpack = "pbr"
+
+# Ivy (photometric stereo).
+[[file]]
+path = "scans/leaves/ivy_leaves/LeafSet029_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=LeafSet029_2K-JPG.zip"
+sha256 = "39aeed0076cb1ee01c72e493a0429b59b7d706edfc167e06b849537f7844a9fe"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/LeafSet029"
+unpack = "pbr"
+
+# Lawn grass blades (photometric stereo).
+[[file]]
+path = "scans/leaves/grass_blades/Foliage008_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=Foliage008_2K-JPG.zip"
+sha256 = "63db9df717e86b507c7a1416b21342d0ee3f48aa41fd1c19a5454f1fab6b581d"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/Foliage008"
+unpack = "pbr"
+
+# Conifer needles (approximated, not a scan: the only CC0 needle atlas).
+[[file]]
+path = "scans/leaves/needles/LeafSet019_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=LeafSet019_2K-JPG.zip"
+sha256 = "3b2b26b9120fa29b495714f6f496ac6c51066cf0bd4bd453dd2bf587987480b5"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/LeafSet019"
+unpack = "pbr"

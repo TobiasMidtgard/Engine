@@ -566,6 +566,27 @@ fn views() -> Vec<View> {
             sun: (200.0, 30.0),
             ..BASE
         },
+        // Scan variants at eye height (CC0 scans thread): scree and layered rock below the
+        // bedded cliffs, wet sand at the waterline.
+        View {
+            name: "scan_scree",
+            eye: DVec3::new(-12_250.0, 0.0, -22_000.0),
+            target: DVec3::new(-12_330.0, 0.0, -21_975.0),
+            above_ground: Some(3.0),
+            target_above_ground: Some(0.0),
+            sun: (175.0, 28.0),
+            ..BASE
+        },
+        View {
+            name: "scan_waterline",
+            eye: DVec3::new(-7_000.0, 0.0, 12_500.0),
+            target: DVec3::new(-17_000.0, 0.0, 20_000.0),
+            shore: Some(14.0),
+            above_ground: Some(1.8),
+            target_above_ground: Some(-30.0),
+            sun: (255.0, 25.0),
+            ..BASE
+        },
         View {
             name: "woods_cold_aerial",
             eye: DVec3::new(-1_000.0, 0.0, -19_700.0),

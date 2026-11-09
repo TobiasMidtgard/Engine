@@ -10,8 +10,9 @@
 //!   opacity map, as leaf atlases do), `<slug>_nor_gl_<res>.jpg` (OpenGL normal, +Y up; DirectX
 //!   normals are flipped), `<slug>_arm_<res>.jpg` (R occlusion, G roughness, B metalness, glTF
 //!   order; missing maps are white, mid-rough and black) and `<slug>_disp_<res>.jpg` (height).
-//!   `<slug>` is the name of the folder the archive sits in and `<res>` comes from the image
-//!   width (`1k`, `2k`, `4k`, `8k`).
+//!   `<slug>` is the name of the folder the archive sits in and `<res>` is the resolution the
+//!   archive's name gives (`Bark011_2K-JPG.zip` → `2k`, whatever the shape of its images), or
+//!   else the images' longer side (`1k`, `2k`, `4k`, `8k`).
 //!
 //! The outputs are made from the pinned archive by fixed code, so they are not pinned
 //! themselves; a marker file next to the archive records which archive and mode made them,
@@ -24,7 +25,7 @@ use std::path::{Component, Path, PathBuf};
 use image::{DynamicImage, GrayImage, ImageBuffer, ImageEncoder, Rgb, RgbImage, RgbaImage};
 
 /// Bumped when the outputs of an unpack mode change, so existing folders are redone.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// The `unpack` modes an entry may name.
 pub const UNPACK_MODES: &[&str] = &["zip", "pbr"];
@@ -94,9 +95,19 @@ pub fn map_kind(file_name: &str) -> Option<MapKind> {
     kind(&last_two).or_else(|| kind(last))
 }
 
-/// The resolution word of the scan layout names for an image `width` texels wide.
-fn resolution_word(width: u32) -> String {
-    match width {
+/// The resolution an archive's name gives (`Moss001_2K-JPG.zip` → `2k`), if any.
+fn named_resolution(archive: &Path) -> Option<String> {
+    let stem = archive.file_stem()?.to_str()?.to_ascii_lowercase();
+    stem.split(['_', '-', ' ', '.'])
+        .find(|w| {
+            w.len() >= 2 && w.ends_with('k') && w[..w.len() - 1].bytes().all(|b| b.is_ascii_digit())
+        })
+        .map(str::to_string)
+}
+
+/// The resolution word of the scan layout names for an image whose longer side is `side`.
+fn resolution_word(side: u32) -> String {
+    match side {
         0..=1536 => "1k".into(),
         1537..=3072 => "2k".into(),
         3073..=6144 => "4k".into(),
@@ -141,7 +152,7 @@ pub fn unpack(archive: &Path, sha256: &str, mode: &str) -> Result<Vec<String>, S
                 .and_then(|s| s.to_str())
                 .ok_or("a pbr archive needs a folder of its own to name the set")?
                 .to_string();
-            write_pbr(&mut zip, &dir, &slug)?
+            write_pbr(&mut zip, &dir, &slug, named_resolution(archive))?
         }
         other => return Err(format!("unknown unpack mode {other:?}")),
     };
@@ -234,12 +245,13 @@ fn write_pbr<R: io::Read + io::Seek>(
     zip: &mut zip::ZipArchive<R>,
     dir: &Path,
     slug: &str,
+    res: Option<String>,
 ) -> Result<Vec<String>, String> {
     let maps = read_maps(zip)?;
     let get = |k: MapKind| maps.iter().find(|(kind, _)| *kind == k).map(|(_, i)| i);
     let color = get(MapKind::Color).ok_or("the archive has no color map")?;
     let (w, h) = (color.width(), color.height());
-    let res = resolution_word(w);
+    let res = res.unwrap_or_else(|| resolution_word(w.max(h)));
     let name = |map: &str, ext: &str| format!("{slug}_{map}_{res}.{ext}");
     let mut written = Vec::new();
 
@@ -481,7 +493,7 @@ mod tests {
                 mask.put_pixel(x, y, Rgb([255, 255, 255]));
             }
         }
-        let archive = dir.join("LeafSet001_1K-JPG.zip");
+        let archive = dir.join("leaves.zip");
         write_zip(
             &archive,
             &[

@@ -204,3 +204,185 @@ url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor_02/g
 sha256 = "0fdfd2961efadaba61e65c2a2557f17cdeb34c0b49b5ce82bef4824618be499f"
 license = "CC0-1.0"
 source = "https://polyhaven.com/a/gravel_floor_02"
+
+# ---- Scan variants (fields-and-forests row T2, `GroundMaterial::class`): each stands in for
+# its class where the ground calls for it. Added by the CC0 scans thread, 2026-11-09.
+
+# Pine needle litter (terrain forest_needles, under conifers).
+[[file]]
+path = "terrain/forrest_ground_03/forrest_ground_03_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_03/forrest_ground_03_diff_2k.jpg"
+sha256 = "187a8e33773473939c0e85b5e10ae94eb9e8d91463ab8b74e122d833d2d84dc6"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_03"
+author = "Rob Tuytel"
+
+[[file]]
+path = "terrain/forrest_ground_03/forrest_ground_03_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_03/forrest_ground_03_nor_gl_2k.jpg"
+sha256 = "dcc26b4fd27a8e1f1f14558214fbaf1d68a61d9b569eee805793498e4b30098c"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_03"
+author = "Rob Tuytel"
+
+[[file]]
+path = "terrain/forrest_ground_03/forrest_ground_03_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_03/forrest_ground_03_arm_2k.jpg"
+sha256 = "1833458cb36e03ab3a4024b6c330f9e1ef6191d9fd841e1b59634267516a7a3c"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_03"
+author = "Rob Tuytel"
+
+[[file]]
+path = "terrain/forrest_ground_03/forrest_ground_03_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_03/forrest_ground_03_disp_2k.jpg"
+sha256 = "306710e18fb0bd35ef74ee5931d3781373ea5c870409b2084b5da0801cd23da5"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_03"
+author = "Rob Tuytel"
+
+
+# Moss carpet, ambientCG photogrammetry zip, unpacked into the scan layout (terrain moss).
+[[file]]
+path = "terrain/moss_ground/Moss001_2K-JPG.zip"
+url = "https://ambientcg.com/get?file=Moss001_2K-JPG.zip"
+sha256 = "647be620484507af3a0b09da5bdea068882a009ff51732c05231feca6a8bd103"
+license = "CC0-1.0"
+source = "https://ambientcg.com/a/Moss001"
+unpack = "pbr"
+
+# Dark stratified rock in layered plates (terrain layered_rock, bedded cliffs).
+[[file]]
+path = "terrain/dark_rock_02/dark_rock_02_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock_02/dark_rock_02_diff_2k.jpg"
+sha256 = "da78fb6dd90414ada98f6e1627aca6bc1acb480c8bce7aabfbde8e3beb666a71"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dark_rock_02"
+author = "Amal Kumar"
+
+[[file]]
+path = "terrain/dark_rock_02/dark_rock_02_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock_02/dark_rock_02_nor_gl_2k.jpg"
+sha256 = "37710c782598f158e07310dcbd3a8a89247d31255e6f21136707f66c3653bdec"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dark_rock_02"
+author = "Amal Kumar"
+
+[[file]]
+path = "terrain/dark_rock_02/dark_rock_02_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock_02/dark_rock_02_arm_2k.jpg"
+sha256 = "e34aa572f0c578eadbf9d812ad514a22775880c7b19a6b98e979d99474fccbb5"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dark_rock_02"
+author = "Amal Kumar"
+
+[[file]]
+path = "terrain/dark_rock_02/dark_rock_02_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dark_rock_02/dark_rock_02_disp_2k.jpg"
+sha256 = "65cf6d7072bfabab4736d165e986c4ae6e0cb2789be1babbb55618bf010779ea"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dark_rock_02"
+author = "Amal Kumar"
+
+
+# Angular gray rocks (terrain scree, below cliffs).
+[[file]]
+path = "terrain/gray_rocks/gray_rocks_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_diff_2k.jpg"
+sha256 = "01de284f33b6c075386aea11f053df4f64cd4a42cb39e6d14d6adcc22d021ffa"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gray_rocks"
+author = "Dimitrios Savva"
+
+[[file]]
+path = "terrain/gray_rocks/gray_rocks_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_nor_gl_2k.jpg"
+sha256 = "750c5a74138c33314643e32ade98f429b10ee323eef89091b7796e1aed70a3bd"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gray_rocks"
+author = "Dimitrios Savva"
+
+[[file]]
+path = "terrain/gray_rocks/gray_rocks_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_arm_2k.jpg"
+sha256 = "d272d949e55e720c4b91bff46eed8553af1e2402128a121899a758e2116aa1bf"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gray_rocks"
+author = "Dimitrios Savva"
+
+[[file]]
+path = "terrain/gray_rocks/gray_rocks_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gray_rocks/gray_rocks_disp_2k.jpg"
+sha256 = "280331078f0aa01b63d95d052b96e46b1937ba1dcc40f3ffd982a9162f6882af"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gray_rocks"
+author = "Dimitrios Savva"
+
+
+# Rounded river stones (terrain river_cobble, banks).
+[[file]]
+path = "terrain/dry_river_pebbles/dry_river_pebbles_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_river_pebbles/dry_river_pebbles_diff_2k.jpg"
+sha256 = "f3d3b581bffc78be28b1eb4b73101bff574841944fb6867be901b3bc03d1bda7"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_river_pebbles"
+author = "Amal Kumar"
+
+[[file]]
+path = "terrain/dry_river_pebbles/dry_river_pebbles_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_river_pebbles/dry_river_pebbles_nor_gl_2k.jpg"
+sha256 = "d92c80789c6bfc07a5139832a1c4c26014bbb4754b579a1559b3e04efdfd8ad2"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_river_pebbles"
+author = "Amal Kumar"
+
+[[file]]
+path = "terrain/dry_river_pebbles/dry_river_pebbles_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_river_pebbles/dry_river_pebbles_arm_2k.jpg"
+sha256 = "6a8bda9f85511b20427d86eab51cf27ccf5f3c28613668f21bc3bf3c518d8872"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_river_pebbles"
+author = "Amal Kumar"
+
+[[file]]
+path = "terrain/dry_river_pebbles/dry_river_pebbles_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_river_pebbles/dry_river_pebbles_disp_2k.jpg"
+sha256 = "3feb42c26546c6937a8a238e558e21a09ed8f0b6139fd9dac96a207ecd9f5714"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_river_pebbles"
+author = "Amal Kumar"
+
+
+# Damp rippled sand (terrain wet_sand, the waterline).
+[[file]]
+path = "terrain/damp_sand/damp_sand_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/damp_sand/damp_sand_diff_2k.jpg"
+sha256 = "31225a161db73c919a2e6bb780d0e9b16df77a8f4d13cfb9d0ed815093b43483"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/damp_sand"
+author = "eye-candy.xyz"
+
+[[file]]
+path = "terrain/damp_sand/damp_sand_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/damp_sand/damp_sand_nor_gl_2k.jpg"
+sha256 = "cac8c7c14656a7acafd33ea980ff45b3956adac20420a26429a8b51df9922727"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/damp_sand"
+author = "eye-candy.xyz"
+
+[[file]]
+path = "terrain/damp_sand/damp_sand_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/damp_sand/damp_sand_arm_2k.jpg"
+sha256 = "0c176d6ddbe6ad884d7fdf6563867aadeaf927fe644f2e78e98b52749f5f276c"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/damp_sand"
+author = "eye-candy.xyz"
+
+[[file]]
+path = "terrain/damp_sand/damp_sand_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/damp_sand/damp_sand_disp_2k.jpg"
+sha256 = "f3f24e7d4f4b565ff2320a5735a9b98131be442058c821e4692de1f49e1d1c46"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/damp_sand"
+author = "eye-candy.xyz"
+

@@ -32,7 +32,9 @@ fn main() {
         let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         [v[0] / l, v[1] / l, v[2] / l]
     };
-    let mut sheet = image::RgbImage::new((n as u32 / 2) * 3, (n as u32 / 2) * 3);
+    // Four columns, one swatch per material.
+    let rows = GroundMaterial::ALL.len().div_ceil(4) as u32;
+    let mut sheet = image::RgbImage::new((n as u32 / 2) * 4, (n as u32 / 2) * rows);
     for (k, m) in GroundMaterial::ALL.iter().enumerate() {
         let a = &baked.albedo_height[k][0];
         let b = &baked.normal_rough_ao[k][0];
@@ -66,8 +68,8 @@ fn main() {
             height.put_pixel(x, y, image::Luma([a[i * 4 + 3]]));
             if x % 2 == 0 && y % 2 == 0 {
                 let (sx, sy) = (
-                    (k as u32 % 3) * size / 2 + x / 2,
-                    (k as u32 / 3) * size / 2 + y / 2,
+                    (k as u32 % 4) * size / 2 + x / 2,
+                    (k as u32 / 4) * size / 2 + y / 2,
                 );
                 sheet.put_pixel(sx, sy, *lit.get_pixel(x, y));
             }

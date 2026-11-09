@@ -77,7 +77,7 @@ struct Print {
 
 // Must match `MaterialsGpu` in render.rs.
 struct Materials {
-    info: array<vec4<f32>, 18>,  // per material: (mean albedo, tile m), (mean roughness, mean occlusion, height m, 0)
+    info: array<vec4<f32>, 30>,  // per layer: (mean albedo, tile m), (mean roughness, mean occlusion, height m, 0)
     flags: vec4<f32>,            // textures ready
 };
 @group(1) @binding(5) var<uniform> mats: Materials;
@@ -99,6 +99,37 @@ const M_SAND: u32 = 6u;
 const M_GRAVEL: u32 = 7u;
 const M_CONCRETE: u32 = 8u;
 const MAT_COUNT: u32 = 9u;
+// Scan variants (layers 9.., `materials::GroundMaterial::class`): a class draws one of these
+// instead of its own layer where the ground calls for it. Without its scan a variant is a copy
+// of its class, so the swap shows nothing.
+const L_NEEDLES: u32 = 9u;   // forest floor under conifers
+const L_MOSS: u32 = 10u;     // grass in wet, shaded hollows
+const L_LAYERED: u32 = 11u;  // rock on bedded cliffs
+const L_SCREE: u32 = 12u;    // gravel below cliffs and on alpine slopes
+const L_COBBLE: u32 = 13u;   // soil on river banks
+const L_WET_SAND: u32 = 14u; // sand along the waterline
+const NO_LAYER: u32 = 99u;
+
+fn variant_layer(i: u32) -> u32 {
+    switch (i) {
+        case 0u: { return L_MOSS; }
+        case 1u: { return L_NEEDLES; }
+        case 2u: { return L_COBBLE; }
+        case 4u: { return L_LAYERED; }
+        case 6u: { return L_WET_SAND; }
+        case 7u: { return L_SCREE; }
+        default: { return NO_LAYER; }
+    }
+}
+
+// Each class's share of its variant at this pixel, 0..1 (set in `fs_main` before sampling).
+var<private> mat_variant: array<f32, 9>;
+
+// The layer a class mostly draws from here.
+fn layer_of(i: u32) -> u32 {
+    let v = variant_layer(i);
+    return select(i, v, v != NO_LAYER && mat_variant[i] > 0.5);
+}
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -1643,20 +1674,20 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
 // Rock at three scales: faces and buttresses at 64× the tile for mountainsides kilometers
 // away (skipped up close, where the terrain's own shape takes over), blocks at 8×, then the
 // close-up texture.
-fn sample_rock(tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+fn sample_rock(l: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
     if ((TERRAIN_OFF & 2u) != 0u) {
-        return sample_triplanar(M_ROCK, tp, n, dp1, dp2, pixel, 1.0);
+        return sample_triplanar(l, tp, n, dp1, dp2, pixel, 1.0);
     }
-    var huge = mat_mean(M_ROCK, n);
+    var huge = mat_mean(l, n);
     if (pixel > 0.1) {
-        huge = sample_triplanar(M_ROCK, tp, n, dp1, dp2, pixel, 64.0);
+        huge = sample_triplanar(l, tp, n, dp1, dp2, pixel, 64.0);
         let keep = smoothstep(0.1, 0.5, pixel);
         huge.normal = normalize(mix(n, huge.normal, keep));
         huge.detail = mix(vec3<f32>(1.0), huge.detail, keep);
     }
-    let big = sample_triplanar(M_ROCK, tp, huge.normal, dp1, dp2, pixel, 8.0);
-    let near = sample_triplanar(M_ROCK, tp, big.normal, dp1, dp2, pixel, 1.0);
-    let mean_occl = max(mats.info[M_ROCK * 2u + 1u].y, 0.3);
+    let big = sample_triplanar(l, tp, huge.normal, dp1, dp2, pixel, 8.0);
+    let near = sample_triplanar(l, tp, big.normal, dp1, dp2, pixel, 1.0);
+    let mean_occl = max(mats.info[l * 2u + 1u].y, 0.3);
     var m = near;
     m.detail = sqrt(huge.detail * big.detail) * near.detail;
     m.height = mix(big.height, near.height, 0.6);
@@ -1664,11 +1695,50 @@ fn sample_rock(tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixe
     return m;
 }
 
-fn sample_ground(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+// Class `i` drawn from layer `l` (itself or its scan variant).
+fn sample_layer(i: u32, l: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
     if (i == M_ROCK) {
-        return sample_rock(tp, n, dp1, dp2, pixel);
+        return sample_rock(l, tp, n, dp1, dp2, pixel);
     }
-    return sample_planar(i, tp, n, dp1, dp2, pixel);
+    return sample_planar(l, tp, n, dp1, dp2, pixel);
+}
+
+// A variant's own color against its class's: the palette color of the class times this is
+// the variant's (greener moss, redder needles, darker wet sand, grayer cobbles), kept partway
+// toward the palette so planets still color it. 1 for a variant without its scan.
+fn variant_tint(i: u32, l: u32) -> vec3<f32> {
+    let mv = mats.info[l * 2u].rgb;
+    let mc = max(mats.info[i * 2u].rgb, vec3<f32>(1e-3));
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    // Most of the change in brightness, a third of the change in hue.
+    let lr = max(dot(mv, luma), 1e-4) / max(dot(mc, luma), 1e-4);
+    let hue = (mv / mc) / lr;
+    return clamp(pow(lr, 0.6) * pow(hue, vec3<f32>(0.35)), vec3<f32>(0.5), vec3<f32>(1.8));
+}
+
+// Class `i` at a pixel: its own layer, its scan variant, or across the narrow border between
+// them both, blended by height (the taller texel wins, so moss and needles creep over the
+// ground they meet instead of fading into it).
+fn sample_ground(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+    let vl = variant_layer(i);
+    let v = select(0.0, mat_variant[i], vl != NO_LAYER);
+    if (v <= 0.02) {
+        return sample_layer(i, i, tp, n, dp1, dp2, pixel);
+    }
+    var b = sample_layer(i, vl, tp, n, dp1, dp2, pixel);
+    b.detail *= variant_tint(i, vl);
+    if (v >= 0.98) {
+        return b;
+    }
+    let a = sample_layer(i, i, tp, n, dp1, dp2, pixel);
+    let t = smoothstep(0.35, 0.65, v + (b.height - a.height) * 0.35);
+    var m: MatSample;
+    m.detail = mix(a.detail, b.detail, t);
+    m.height = mix(a.height, b.height, t);
+    m.normal = normalize(mix(a.normal, b.normal, t));
+    m.roughness = mix(a.roughness, b.roughness, t);
+    m.occlusion = mix(a.occlusion, b.occlusion, t);
+    return m;
 }
 
 // ---- Parallax relief near the eye (parallax occlusion mapping: Tatarchuk 2006; the
@@ -1698,7 +1768,8 @@ struct ReliefLayer {
     weight: f32,
 };
 
-fn relief_layer(i: u32, tp: vec3<f32>, weight: f32) -> ReliefLayer {
+fn relief_layer(cls: u32, tp: vec3<f32>, weight: f32) -> ReliefLayer {
+    let i = layer_of(cls);
     let tile = mat_tile(i);
     let uv = tp.xz / tile;
     let k = pnoise3(vec3<f32>(uv * 0.25, f32(i) * 7.31), 4096.0 / tile * 0.25) * 8.0;
@@ -2295,6 +2366,29 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     col[M_SOIL] *= bare_v;
     col[M_SAND] *= bare_v;
     col[M_GRAVEL] *= bare_v;
+
+    // ---- Scan variants (fields-and-forests row T2): where a class draws its variant layer.
+    // Borders are narrow and wander with the noise, so few pixels sample both layers.
+    let vn = (patch_v - 0.5) * 0.5 + (mid_v - 0.5) * 0.3 * clump_fade + (detail_n - 0.5) * 0.15 * fine_fade;
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        mat_variant[i] = 0.0;
+    }
+    // Needle litter, cones and twigs where the woods are conifers.
+    mat_variant[M_FOREST] = smoothstep(0.42, 0.58, needle + vn * 0.6);
+    // Moss carpets in wet hollows, on cool and temperate ground.
+    mat_variant[M_GRASS] = smoothstep(0.68, 0.8, moisture + wet_bias * 0.6 + gully * 0.3 + vn)
+        * (1.0 - smoothstep(18.0, 26.0, temp_c)) * vegetation;
+    // Rounded cobbles on river banks.
+    mat_variant[M_SOIL] = smoothstep(0.45, 0.6, in.water.z + vn * 0.5) * vegetation;
+    // Layered sedimentary rock in beds a few dozen meters thick between massive ones, warped
+    // with the land like the cliffs' bedding.
+    let rock_bed = sin((altitude + (macro_v - 0.5) * 24.0) * 0.09 + variety * 6.0);
+    mat_variant[M_ROCK] = smoothstep(0.2, 0.4, rock_bed + vn * 0.25);
+    // Angular scree on natural slopes below cliffs; painted gravel (paths, yards) stays gravel.
+    mat_variant[M_GRAVEL] = smoothstep(0.25, 0.45, scree + vn * 0.2) * saturate(1.0 - pw[9] * 4.0);
+    // Wet, darker sand along the waterline.
+    mat_variant[M_SAND] = (1.0 - smoothstep(beach_top * 0.12, beach_top * 0.3, beach_h + vn * beach_top * 0.2))
+        * step(-1.0, coast_alt) * vegetation;
 
     // ---- Parallax relief within a few meters (pixels under about 3–8 mm).
     let relief_k = (1.0 - smoothstep(0.003, 0.008, tex_pixel)) * (1.0 - far) * mats.flags.x
