@@ -487,6 +487,8 @@ impl Afflictions {
             rooted: self.rooted > 0.0,
             staggered: self.staggered > 0.0,
             shielding: self.shielding > 0.0,
+            // Magic eases this in and out from its veil affliction.
+            veil: 0.0,
         }
     }
 }

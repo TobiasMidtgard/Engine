@@ -131,6 +131,11 @@ pub struct Statuses {
     pub staggered: bool,
     /// Holding a shield up: anim raises the off hand, movement walks 30% slower.
     pub shielding: bool,
+    /// Veiled (invisible), 0 seen .. 1 gone, eased in and out by magic. The character and
+    /// animation renderers fade the body with all it wears and holds, its hair and its shadow,
+    /// by a dithered or refractive fade rather than plain alpha, stopping at about 0.6 when
+    /// seen by its own player or side; perception treats it as unseen (`MindKind::Veil`).
+    pub veil: f32,
 }
 
 /// Present while a module draws and sounds spells from [`SpellLook`], [`SpellCue`] and
