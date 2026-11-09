@@ -20,6 +20,5 @@ tracing.workspace = true
 taffy = { version = "0.14", default-features = false, features = ["std", "flexbox", "grid", "taffy_tree", "content_size"] }
 cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
 resvg = { version = "0.48", default-features = false }
-
-[dev-dependencies]
 image.workspace = true
+

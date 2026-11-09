@@ -1,4 +1,4 @@
-//! Embeds every SVG under `assets/icons` and `assets/portraits` so built-in icons work without
+//! Embeds every SVG under `assets/icons`, `assets/frames` and `assets/portraits` so built-in icons work without
 //! files on disk. Portraits are named `portrait:<file stem>`.
 
 use std::fmt::Write;
@@ -9,7 +9,7 @@ fn main() {
     let mut out = String::from(
         "/// Built-in SVG sources: (name, svg).\npub const BUILTIN_SVGS: &[(&str, &str)] = &[\n",
     );
-    for (dir, prefix) in [("icons", ""), ("portraits", "portrait:")] {
+    for (dir, prefix) in [("icons", ""), ("frames", ""), ("portraits", "portrait:")] {
         let path = root.join(dir);
         println!("cargo:rerun-if-changed={}", path.display());
         let Ok(entries) = std::fs::read_dir(&path) else {

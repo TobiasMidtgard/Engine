@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 24" width="240" height="24"><defs><linearGradient id="br" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#fbe7a8"/><stop offset=".35" stop-color="#d9ad55"/><stop offset=".7" stop-color="#a87a2c"/><stop offset="1" stop-color="#6e4a16"/></linearGradient>
+<radialGradient id="ros" cx=".38" cy=".34" r=".75"><stop offset="0" stop-color="#fff3c8"/><stop offset=".35" stop-color="#e2b65d"/><stop offset=".8" stop-color="#8f6421"/><stop offset="1" stop-color="#4a300c"/></radialGradient>
+<radialGradient id="gem" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#9ee7f0"/><stop offset=".45" stop-color="#2b8fa3"/><stop offset="1" stop-color="#0c3440"/></radialGradient></defs>
+<path d="M10 12 L92 12" stroke="#1c1105" stroke-width="3.2" stroke-linecap="round"/>
+<path d="M10 12 L92 12" stroke="url(#br)" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 6 106 6 C110 6 111 10 108.5 11.2 C106 12.4 104 10 106 9" fill="none" stroke="#1c1105" stroke-width="3.6" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 6 106 6 C110 6 111 10 108.5 11.2 C106 12.4 104 10 106 9" fill="none" stroke="url(#br)" stroke-width="1.8" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 18 106 18 C110 18 111 14 108.5 12.8" fill="none" stroke="#1c1105" stroke-width="3.6" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 18 106 18 C110 18 111 14 108.5 12.8" fill="none" stroke="url(#br)" stroke-width="1.8" stroke-linecap="round"/><g transform="translate(240,0) scale(-1,1)">
+<path d="M10 12 L92 12" stroke="#1c1105" stroke-width="3.2" stroke-linecap="round"/>
+<path d="M10 12 L92 12" stroke="url(#br)" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 6 106 6 C110 6 111 10 108.5 11.2 C106 12.4 104 10 106 9" fill="none" stroke="#1c1105" stroke-width="3.6" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 6 106 6 C110 6 111 10 108.5 11.2 C106 12.4 104 10 106 9" fill="none" stroke="url(#br)" stroke-width="1.8" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 18 106 18 C110 18 111 14 108.5 12.8" fill="none" stroke="#1c1105" stroke-width="3.6" stroke-linecap="round"/>
+<path d="M92 12 C98 12 101 18 106 18 C110 18 111 14 108.5 12.8" fill="none" stroke="url(#br)" stroke-width="1.8" stroke-linecap="round"/></g><path d="M120 3 L129 12 L120 21 L111 12 Z" fill="url(#ros)" stroke="#1c1105" stroke-width="1.6"/><circle cx="120" cy="12" r="3" fill="url(#gem)" stroke="#2a1806" stroke-width=".8"/></svg>

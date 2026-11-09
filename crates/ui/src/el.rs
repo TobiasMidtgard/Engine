@@ -60,6 +60,9 @@ pub struct El {
     /// Mirror the icon horizontally.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub icon_flip: bool,
+    /// Fill the box with the icon (cropping it) instead of fitting it inside.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub icon_cover: bool,
     /// Action sent when clicked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_click: Option<String>,
@@ -183,6 +186,12 @@ impl El {
 
     pub fn icon_tint(mut self, c: Color) -> Self {
         self.icon_tint = Some(c);
+        self
+    }
+
+    /// Fill the box with the icon, cropping what doesn't fit (backgrounds, avatars).
+    pub fn icon_cover(mut self, cover: bool) -> Self {
+        self.icon_cover = cover;
         self
     }
 
@@ -349,6 +358,7 @@ fn spawn_one(
             name: icon.clone(),
             tint: el.icon_tint,
             flip_x: el.icon_flip,
+            cover: el.icon_cover,
             ..Default::default()
         });
     }

@@ -18,6 +18,7 @@ include!(concat!(env!("OUT_DIR"), "/builtin_svgs.rs"));
 pub struct IconLibrary {
     sources: HashMap<String, Arc<str>>,
     parsed: HashMap<String, Option<Arc<usvg::Tree>>>,
+    pictures: HashMap<String, Arc<image::RgbaImage>>,
 }
 
 impl Default for IconLibrary {
@@ -29,6 +30,7 @@ impl Default for IconLibrary {
         Self {
             sources,
             parsed: HashMap::new(),
+            pictures: HashMap::new(),
         }
     }
 }
@@ -40,17 +42,23 @@ impl IconLibrary {
             .map_err(|e| format!("The SVG for icon \"{name}\" doesn't parse: {e}."))?;
         self.sources.insert(name.to_string(), Arc::from(svg));
         self.parsed.remove(name);
+        self.pictures.remove(name);
         Ok(())
     }
 
     /// Whether an icon with this name exists.
     pub fn contains(&self, name: &str) -> bool {
-        self.sources.contains_key(name)
+        self.sources.contains_key(name) || self.pictures.contains_key(name)
     }
 
     /// All icon names, sorted.
     pub fn names(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.sources.keys().map(String::as_str).collect();
+        let mut v: Vec<&str> = self
+            .sources
+            .keys()
+            .chain(self.pictures.keys())
+            .map(String::as_str)
+            .collect();
         v.sort_unstable();
         v
     }
@@ -79,9 +87,26 @@ impl IconLibrary {
 
     /// Aspect ratio (width / height) of an icon.
     pub fn aspect(&mut self, name: &str) -> Option<f32> {
+        let (w, h) = self.size(name)?;
+        Some(w / h)
+    }
+
+    /// Natural size of an icon: its SVG size (viewBox units) or a picture's pixels.
+    pub fn size(&mut self, name: &str) -> Option<(f32, f32)> {
+        if let Some(img) = self.pictures.get(name) {
+            return Some((img.width() as f32, img.height() as f32));
+        }
         let t = self.tree(name)?;
         let s = t.size();
-        Some(s.width() / s.height())
+        Some((s.width(), s.height()))
+    }
+
+    /// Add or replace a raster picture (straight-alpha sRGB RGBA8), drawn like an icon:
+    /// screenshots, painted backgrounds, photos in a codex.
+    pub fn add_picture(&mut self, name: &str, image: image::RgbaImage) {
+        self.sources.remove(name);
+        self.parsed.remove(name);
+        self.pictures.insert(name.to_string(), Arc::new(image));
     }
 
     /// Rasterize `name` to fit `w`×`h` (aspect kept). Returns the bitmap size and straight-alpha
@@ -93,6 +118,24 @@ impl IconLibrary {
         h: u32,
         flip: bool,
     ) -> Option<(u32, u32, Vec<u8>)> {
+        if let Some(img) = self.pictures.get(name) {
+            let (iw, ih) = (img.width() as f32, img.height() as f32);
+            let s = (w as f32 / iw).min(h as f32 / ih);
+            let (pw, ph) = (
+                (iw * s).round().max(1.0) as u32,
+                (ih * s).round().max(1.0) as u32,
+            );
+            let mut out = image::imageops::resize(
+                img.as_ref(),
+                pw,
+                ph,
+                image::imageops::FilterType::Triangle,
+            );
+            if flip {
+                image::imageops::flip_horizontal_in_place(&mut out);
+            }
+            return Some((pw, ph, out.into_raw()));
+        }
         let tree = self.tree(name)?;
         let size = tree.size();
         let s = (w as f32 / size.width()).min(h as f32 / size.height());

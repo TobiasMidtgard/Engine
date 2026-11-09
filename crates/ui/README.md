@@ -58,6 +58,40 @@ Toasts (`ui.notify`) and tooltips sit on their own layers.
 Every call has a summary and an example in the registry (`ui.screens` also lists screen kinds
 with example arguments), so an AI agent can drive the whole UI as a player would.
 
+## Look: shapes, materials, motion and kits
+
+Panels can look like objects, not flat rectangles (research and the reference games:
+`engine-design/ui-overhaul.md` in the project files):
+
+- `Style.corner_shape`: `Round`, `Chamfer`, `Scoop` or `Notch`; fill, border, shadows and
+  bevel follow the shape (SDFs in `ui.wgsl`).
+- `Style.material`: a procedural surface over the fill (`Paper`, `Wood`, `Leather`, `Metal`,
+  `Lacquer`, `Linen`, `Stone`) with strength, grain size and seed.
+- `Style.bevel` (raised or sunken rim lit from the top left, engraved hairline),
+  `Style.inset_shadow` (wells, pressed buttons), `Style.shadow2` (a second, wide drop shadow).
+- `Style.frame`: a nine-slice frame cut from any icon (SVG or picture). `assets/frames` ships
+  `frame_brass`, `frame_brass_thin`, `frame_brass_selected`, `ornament_divider` and
+  `medallion_ring` (drawn by `make_frames.py`).
+- `Style.sheen`: a band of light sweeping across selected or rare things.
+- `Style.ease` (`Out`, `InOut`, `Back`, `Spring`) for timed transitions and `Style.enter`
+  (`Enter::rise`, `slide`, `pop`, with `.delay` for staggered rows) for entrances.
+- Fonts: `Style.font_family` inherits down the tree, `Theme.font_family` sets the body face,
+  `[serif]` switches to the display face in markup. Built in: Inter, "Harbour Serif" (bold,
+  black, small caps) and Alegreya Sans.
+- `IconLibrary::add_picture`: raster pictures (backgrounds, photos) drawn like icons.
+- `kit::brass`: an industrial-era kit of classes and builders (lacquer plates with brass
+  frames, parchment cards and tooltips, cartouche, tiles, enamel medallions and badges, number
+  wells, meters, dividers, labels, brass buttons). `kit::brass::install(&mut theme)` adds it.
+  Archipelago's HUD is built from it.
+
+`cargo run -p engine_ui --example kit -- <dir> [width] [height] [backdrop.png]` renders a
+strategy HUD made from the kit (`kit_brass.png`) in a few seconds, without a 3D scene.
+
+Fonts are OFL-1.1, with their licenses next to them in `assets/fonts`: Inter (The Inter
+Project Authors), Alegreya Sans (The Alegreya Sans Project Authors) and Harbour Serif, a Latin
+subset of Playfair Display (The Playfair Display Project Authors), renamed as the OFL requires because
+"Playfair Display" is a Reserved Font Name.
+
 ## Quests
 
 `quests::QuestLog` holds every quest (plain JSON: kind, state, level, giver, region, summary,

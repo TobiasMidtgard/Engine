@@ -87,7 +87,7 @@ pub struct ClassStyle {
 }
 
 impl ClassStyle {
-    fn base(base: StylePatch) -> Self {
+    pub fn base(base: StylePatch) -> Self {
         Self {
             base,
             ..Default::default()
@@ -102,6 +102,8 @@ pub struct Theme {
     pub palette: Palette,
     /// Body text size, logical px.
     pub font_size: f32,
+    /// Body font family; empty = the built-in UI font (Inter).
+    pub font_family: String,
     pub classes: BTreeMap<String, ClassStyle>,
 }
 
@@ -448,6 +450,7 @@ impl Theme {
         Self {
             palette: p,
             font_size: 16.0,
+            font_family: String::new(),
             classes: c,
         }
     }

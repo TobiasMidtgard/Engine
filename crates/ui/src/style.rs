@@ -638,6 +638,388 @@ impl Shadow {
     }
 }
 
+/// Corner geometry of a box: the vector shape every fill, border, shadow and bevel follows.
+///
+/// The corner size is the node's `radius`. JSON: `"round"`, `"chamfer"`, `"scoop"`, `"notch"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CornerShape {
+    /// Rounded corners (a quarter circle).
+    #[default]
+    Round,
+    /// Cut at 45° (sci-fi plates, Art Deco cartouches).
+    Chamfer,
+    /// A concave quarter circle bitten out of each corner (Victorian plaques, tickets).
+    Scoop,
+    /// A square step cut out of each corner (frames, engraved plates).
+    Notch,
+}
+
+impl CornerShape {
+    pub fn gpu(self) -> u32 {
+        match self {
+            CornerShape::Round => 0,
+            CornerShape::Chamfer => 1,
+            CornerShape::Scoop => 2,
+            CornerShape::Notch => 3,
+        }
+    }
+}
+
+/// A procedural surface laid over the background fill, so a panel reads as a material from
+/// the game's world instead of a flat color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialKind {
+    #[default]
+    None,
+    /// Parchment: cloudy mottling, fibres, flecks and darkened, aged edges.
+    Paper,
+    /// Planed wood: warped grain lines and pores along the length.
+    Wood,
+    /// Pebbled leather with a worn, darker rim.
+    Leather,
+    /// Brushed metal: fine streaks along the width and a broad soft sheen.
+    Metal,
+    /// Deep lacquer: very faint depth and a glossy band of reflected light near the top.
+    Lacquer,
+    /// Woven linen or canvas.
+    Linen,
+    /// Marble or slate: soft clouds and thin veins.
+    Stone,
+}
+
+impl MaterialKind {
+    pub fn gpu(self) -> f32 {
+        match self {
+            MaterialKind::None => 0.0,
+            MaterialKind::Paper => 1.0,
+            MaterialKind::Wood => 2.0,
+            MaterialKind::Leather => 3.0,
+            MaterialKind::Metal => 4.0,
+            MaterialKind::Lacquer => 5.0,
+            MaterialKind::Linen => 6.0,
+            MaterialKind::Stone => 7.0,
+        }
+    }
+}
+
+/// [`MaterialKind`] with its strength and grain size.
+///
+/// JSON: `{"kind": "paper", "strength": 0.8, "scale": 1.2, "seed": 3}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Material {
+    pub kind: MaterialKind,
+    /// 0 = plain fill, 1 = the full look, more = exaggerated.
+    pub strength: f32,
+    /// Size of the grain, mottling and fibres (1 = designed size).
+    pub scale: f32,
+    /// Picks a different patch of the pattern, so neighbouring panels don't match.
+    pub seed: f32,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            kind: MaterialKind::None,
+            strength: 1.0,
+            scale: 1.0,
+            seed: 0.0,
+        }
+    }
+}
+
+impl Material {
+    pub fn new(kind: MaterialKind) -> Self {
+        Self {
+            kind,
+            ..Default::default()
+        }
+    }
+
+    pub fn strength(mut self, s: f32) -> Self {
+        self.strength = s;
+        self
+    }
+
+    pub fn scale(mut self, s: f32) -> Self {
+        self.scale = s;
+        self
+    }
+
+    pub fn seed(mut self, s: f32) -> Self {
+        self.seed = s;
+        self
+    }
+}
+
+impl From<MaterialKind> for Material {
+    fn from(k: MaterialKind) -> Self {
+        Material::new(k)
+    }
+}
+
+/// Raised edges: light catching the top-left rim and shade on the bottom-right, plus an
+/// optional engraved hairline inside the edge (the gold inner line of a framed plate).
+///
+/// JSON: `{"width": 3, "light": "#ffffff40", "dark": "#00000060", "line": "#e8b65a80",
+/// "line_width": 1, "line_inset": 5}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Bevel {
+    /// How far the rounded rim reaches in, logical px; 0 = no rim.
+    pub width: f32,
+    /// Color added where the rim faces the light (up and to the left).
+    pub light: Color,
+    /// Color laid over where it faces away.
+    pub dark: Color,
+    /// The inner hairline; transparent = none.
+    pub line: Color,
+    pub line_width: f32,
+    /// Distance of the hairline from the outer edge, logical px.
+    pub line_inset: f32,
+}
+
+impl Default for Bevel {
+    fn default() -> Self {
+        Self {
+            width: 0.0,
+            light: Color::TRANSPARENT,
+            dark: Color::TRANSPARENT,
+            line: Color::TRANSPARENT,
+            line_width: 1.0,
+            line_inset: 4.0,
+        }
+    }
+}
+
+impl Bevel {
+    /// A raised rim `width` px wide.
+    pub fn raised(width: f32, light: f32, dark: f32) -> Self {
+        Self {
+            width,
+            light: Color::WHITE.with_alpha(light),
+            dark: Color::BLACK.with_alpha(dark),
+            ..Default::default()
+        }
+    }
+
+    /// A sunken well (lit from inside: shade on top, light on the bottom).
+    pub fn sunken(width: f32, light: f32, dark: f32) -> Self {
+        Self {
+            width: -width,
+            light: Color::WHITE.with_alpha(light),
+            dark: Color::BLACK.with_alpha(dark),
+            ..Default::default()
+        }
+    }
+
+    /// Add the engraved hairline.
+    pub fn with_line(mut self, color: Color, width: f32, inset: f32) -> Self {
+        self.line = color;
+        self.line_width = width;
+        self.line_inset = inset;
+        self
+    }
+
+    pub fn is_visible(&self) -> bool {
+        (self.width != 0.0 && (self.light.a > 0.0 || self.dark.a > 0.0))
+            || (self.line.a > 0.0 && self.line_width > 0.0)
+    }
+}
+
+/// A nine-slice frame drawn over the box: an icon (SVG) cut into corners that keep their
+/// size, edges that stretch along the sides and a middle that stretches both ways (or is
+/// left out). Ornate brass corners, carved wood, riveted iron.
+///
+/// JSON: `{"image": "frame_brass", "slice": 24, "width": 18, "outset": 4}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Frame {
+    /// Icon name; empty = no frame.
+    pub image: String,
+    /// Size of the corner pieces in the image's own units (its SVG viewBox).
+    pub slice: f32,
+    /// Size the corner pieces are drawn at, logical px.
+    pub width: f32,
+    /// How far the frame reaches outside the box, logical px.
+    pub outset: f32,
+    /// Draw the stretched middle too.
+    pub fill_center: bool,
+    /// Multiplies the image's colors.
+    pub tint: Color,
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self {
+            image: String::new(),
+            slice: 16.0,
+            width: 16.0,
+            outset: 0.0,
+            fill_center: false,
+            tint: Color::WHITE,
+        }
+    }
+}
+
+impl Frame {
+    pub fn new(image: &str, slice: f32, width: f32) -> Self {
+        Self {
+            image: image.into(),
+            slice,
+            width,
+            ..Default::default()
+        }
+    }
+
+    pub fn outset(mut self, o: f32) -> Self {
+        self.outset = o;
+        self
+    }
+
+    pub fn tint(mut self, c: Color) -> Self {
+        self.tint = c;
+        self
+    }
+}
+
+/// How a transition moves from one state to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ease {
+    /// Exponential approach (fast start, long soft landing); `transition` is the time
+    /// constant. The engine's original behaviour.
+    #[default]
+    Auto,
+    Linear,
+    /// Cubic ease-out: quick start, gentle stop. Most UI motion.
+    Out,
+    /// Cubic ease-in-out: for things that travel across the screen.
+    InOut,
+    /// Ease-out that overshoots a little and settles (buttons that pop, cards that land).
+    Back,
+    /// A damped spring that wobbles once or twice (rewards, notifications).
+    Spring,
+}
+
+impl Ease {
+    /// Eased progress for `t` in 0..1.
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Ease::Auto | Ease::Out => 1.0 - (1.0 - t).powi(3),
+            Ease::Linear => t,
+            Ease::InOut => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) * 0.5
+                }
+            }
+            Ease::Back => {
+                let (c1, c3) = (1.70158, 2.70158);
+                1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+            }
+            Ease::Spring => {
+                if t >= 1.0 {
+                    1.0
+                } else {
+                    1.0 - (-6.5 * t).exp() * (t * 11.0).cos()
+                }
+            }
+        }
+    }
+}
+
+/// How a node arrives when it is spawned: it starts faded, moved and scaled by these
+/// amounts and eases into place after `delay` seconds. Give a row of children growing
+/// delays for a staggered entrance.
+///
+/// JSON: `{"duration": 0.35, "delay": 0.05, "opacity": 0, "translate": [0, 24], "scale": 0.96,
+/// "ease": "back"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Enter {
+    /// Seconds; 0 = appear at once.
+    pub duration: f32,
+    pub delay: f32,
+    /// Opacity at the start (multiplies the node's own).
+    pub opacity: f32,
+    /// Offset at the start, logical px.
+    pub translate: [f32; 2],
+    /// Scale at the start (multiplies the node's own).
+    pub scale: f32,
+    pub ease: Ease,
+}
+
+impl Default for Enter {
+    fn default() -> Self {
+        Self {
+            duration: 0.0,
+            delay: 0.0,
+            opacity: 0.0,
+            translate: [0.0, 0.0],
+            scale: 1.0,
+            ease: Ease::Out,
+        }
+    }
+}
+
+impl Enter {
+    /// Fade in while rising `dy` px (negative: falling into place from above).
+    pub fn rise(duration: f32, dy: f32) -> Self {
+        Self {
+            duration,
+            translate: [0.0, dy],
+            ..Default::default()
+        }
+    }
+
+    /// Fade in while sliding `dx` px sideways.
+    pub fn slide(duration: f32, dx: f32) -> Self {
+        Self {
+            duration,
+            translate: [dx, 0.0],
+            ..Default::default()
+        }
+    }
+
+    /// Fade in while growing from `scale`, with a little overshoot.
+    pub fn pop(duration: f32, scale: f32) -> Self {
+        Self {
+            duration,
+            scale,
+            ease: Ease::Back,
+            ..Default::default()
+        }
+    }
+
+    pub fn delay(mut self, d: f32) -> Self {
+        self.delay = d;
+        self
+    }
+
+    pub fn ease(mut self, e: Ease) -> Self {
+        self.ease = e;
+        self
+    }
+
+    /// The style as the entrance starts.
+    pub fn start_of(&self, s: &Style) -> Style {
+        Style {
+            opacity: s.opacity * self.opacity,
+            translate: [
+                s.translate[0] + self.translate[0],
+                s.translate[1] + self.translate[1],
+            ],
+            scale: s.scale * self.scale,
+            ..s.clone()
+        }
+    }
+}
+
 /// Conversions accepted by [`StylePatch`]'s builder methods, so `.width(64.0)`,
 /// `.padding([8.0, 12.0])`, `.font_weight(600)` and `.background(color)` all work with plain
 /// literals.
@@ -682,6 +1064,8 @@ style_value! {
     [f64; 4] => Corners: |v| Corners([v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32]);
     [f64; 2] => [f32; 2]: |v| [v[0] as f32, v[1] as f32];
     Color => Fill: |v| Fill::Solid(v);
+    MaterialKind => Material: |v| Material::new(v);
+    &str => String: |v| v.to_string();
 }
 
 macro_rules! define_style {
@@ -812,6 +1196,28 @@ define_style! {
     font_size: f32 = 0.0,
     /// Font weight (400 regular, 600 semibold, 700 bold); 0 = inherit.
     font_weight: u16 = 0,
+    /// Font family for this node and its descendants (`"Harbour Serif"`); empty = inherit.
+    font_family: String = String::new(),
+    /// Shape of the corners (`radius` is their size): round, chamfer, scoop or notch.
+    corner_shape: CornerShape = CornerShape::Round,
+    /// Procedural surface over the background (paper, wood, leather, metal, ...).
+    material: Material = Material::default(),
+    /// Raised or sunken rim and an engraved inner hairline.
+    bevel: Bevel = Bevel::default(),
+    /// Shadow inside the box (a recessed well, a pressed button).
+    inset_shadow: Shadow = Shadow { color: Color::TRANSPARENT, blur: 0.0, offset: [0.0, 0.0], spread: 0.0 },
+    /// A second drop shadow under the first: a tight contact shadow plus a wide soft one
+    /// reads as real depth.
+    shadow2: Shadow = Shadow { color: Color::TRANSPARENT, blur: 0.0, offset: [0.0, 0.0], spread: 0.0 },
+    /// Nine-slice image frame drawn over the box.
+    frame: Frame = Frame::default(),
+    /// A band of light that sweeps across the box every few seconds, 0..1 (selected or rare
+    /// things).
+    sheen: f32 = 0.0,
+    /// Curve of `transition`s between states.
+    ease: Ease = Ease::Auto,
+    /// Entrance animation when the node is spawned.
+    enter: Enter = Enter::default(),
 }
 
 impl Style {
@@ -927,6 +1333,9 @@ impl Style {
             border_color: self.border_color.lerp(target.border_color, t),
             border_width: lerp(self.border_width, target.border_width),
             shadow: self.shadow.lerp(&target.shadow, t),
+            shadow2: self.shadow2.lerp(&target.shadow2, t),
+            inset_shadow: self.inset_shadow.lerp(&target.inset_shadow, t),
+            sheen: lerp(self.sheen, target.sheen),
             opacity: lerp(self.opacity, target.opacity),
             translate: [
                 lerp(self.translate[0], target.translate[0]),
@@ -949,6 +1358,9 @@ impl Style {
             && self.border_color == o.border_color
             && self.border_width == o.border_width
             && self.shadow == o.shadow
+            && self.shadow2 == o.shadow2
+            && self.inset_shadow == o.inset_shadow
+            && self.sheen == o.sheen
             && self.opacity == o.opacity
             && self.translate == o.translate
             && self.scale == o.scale

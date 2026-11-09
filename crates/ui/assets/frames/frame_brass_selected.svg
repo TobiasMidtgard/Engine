@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><defs><linearGradient id="br" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#fbe7a8"/><stop offset=".35" stop-color="#d9ad55"/><stop offset=".7" stop-color="#a87a2c"/><stop offset="1" stop-color="#6e4a16"/></linearGradient>
+<radialGradient id="ros" cx=".38" cy=".34" r=".75"><stop offset="0" stop-color="#fff3c8"/><stop offset=".35" stop-color="#e2b65d"/><stop offset=".8" stop-color="#8f6421"/><stop offset="1" stop-color="#4a300c"/></radialGradient>
+<radialGradient id="gem" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#9ee7f0"/><stop offset=".45" stop-color="#2b8fa3"/><stop offset="1" stop-color="#0c3440"/></radialGradient></defs>
+<rect x="2" y="2" width="60" height="60" rx="3" fill="none" stroke="#1c1105" stroke-width="4.5"/>
+<rect x="2" y="2" width="60" height="60" rx="3" fill="none" stroke="#f0c86a" stroke-width="2.6"/>
+<rect x="1" y="1" width="62" height="62" rx="3.8" fill="none" stroke="#fff2c4" stroke-width=".9"/><g>
+<path d="M3 13 L13 3 L20 3 L3 20 Z" fill="url(#br)" stroke="#1c1105" stroke-width="1"/>
+<circle cx="7" cy="7" r="4.6" fill="#1c1105"/>
+<circle cx="7" cy="7" r="3.6" fill="url(#ros)"/>
+<circle cx="7" cy="7" r="1.7" fill="url(#gem)"/></g><g transform="translate(64,0) scale(-1,1)">
+<path d="M3 13 L13 3 L20 3 L3 20 Z" fill="url(#br)" stroke="#1c1105" stroke-width="1"/>
+<circle cx="7" cy="7" r="4.6" fill="#1c1105"/>
+<circle cx="7" cy="7" r="3.6" fill="url(#ros)"/>
+<circle cx="7" cy="7" r="1.7" fill="url(#gem)"/></g><g transform="translate(0,64) scale(1,-1)">
+<path d="M3 13 L13 3 L20 3 L3 20 Z" fill="url(#br)" stroke="#1c1105" stroke-width="1"/>
+<circle cx="7" cy="7" r="4.6" fill="#1c1105"/>
+<circle cx="7" cy="7" r="3.6" fill="url(#ros)"/>
+<circle cx="7" cy="7" r="1.7" fill="url(#gem)"/></g><g transform="translate(64,64) scale(-1,-1)">
+<path d="M3 13 L13 3 L20 3 L3 20 Z" fill="url(#br)" stroke="#1c1105" stroke-width="1"/>
+<circle cx="7" cy="7" r="4.6" fill="#1c1105"/>
+<circle cx="7" cy="7" r="3.6" fill="url(#ros)"/>
+<circle cx="7" cy="7" r="1.7" fill="url(#gem)"/></g></svg>

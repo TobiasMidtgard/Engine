@@ -42,6 +42,8 @@ const K_PLANET: u32 = 7u;
 const K_PLANET_FLAT: u32 = 8u;
 const K_GALAXY: u32 = 9u;
 const K_STARFIELD: u32 = 10u;
+const K_INSET: u32 = 11u;
+const K_BEVEL: u32 = 12u;
 
 const F_LINEAR: u32 = 1u;
 const F_RADIAL: u32 = 2u;
@@ -118,6 +120,107 @@ fn sd_round_box(p: vec2<f32>, half: vec2<f32>, r: vec4<f32>) -> f32 {
     let rr = select(rad.x, rad.y, p.y > 0.0);
     let q = abs(p) - half + vec2(rr);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - rr;
+}
+
+// The node's vector shape (`kind[2]`): 0 rounded, 1 chamfered, 2 scooped (concave), 3 notched
+// corners, all sized by the corner radii.
+fn sd_shape(p: vec2<f32>, half: vec2<f32>, r: vec4<f32>, shape: u32) -> f32 {
+    if (shape == 0u) {
+        return sd_round_box(p, half, r);
+    }
+    var rad = select(r.xw, r.yz, p.x > 0.0);
+    let rr = max(select(rad.x, rad.y, p.y > 0.0), 0.0);
+    let q = abs(p) - half;
+    let box = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0)));
+    if (rr <= 0.0) {
+        return box;
+    }
+    if (shape == 1u) {
+        let cut = (q.x + q.y + rr) * 0.70710678;
+        return max(box, cut);
+    } else if (shape == 2u) {
+        let corner = length(abs(p) - half) - rr;
+        return max(box, -corner);
+    }
+    // Notch: a square step out of each corner.
+    let n = abs(p) - (half - vec2(rr));
+    let notch = min(max(n.x, n.y), 0.0) + length(max(n, vec2(0.0)));
+    return max(box, -notch);
+}
+
+// Procedural materials over a box's fill: a color multiplier for the pixel at `lp` (px from
+// the box's top-left), `e` px inside the edge. m: kind, strength, grain px, seed.
+fn ui_material(m: vec4<f32>, lp: vec2<f32>, e: f32, size: vec2<f32>) -> vec3<f32> {
+    let kind = u32(m.x + 0.5);
+    let st = m.y;
+    let sc = max(m.z, 0.05);
+    let seed = pn_seed(m.w + 17.0);
+    let p = lp / sc;
+    var mul = vec3(1.0);
+    if (kind == 1u) {
+        // Paper: cloudy mottling, long fibres, flecks, a brown aged rim.
+        let cloud = fbm_s2(p / 150.0, seed, 4u);
+        let fib = pn_simplex2(vec2(p.x / 90.0, p.y / 2.2), seed + 7u) * 0.6
+            + pn_simplex2(vec2(p.x / 2.5, p.y / 70.0), seed + 9u) * 0.4;
+        let fleck = smoothstep(0.82, 0.95, pn_simplex2(p / 3.0, seed + 3u));
+        let stain = smoothstep(0.25, 0.7, fbm_s2(p / 260.0 + 3.1, seed + 5u, 3u));
+        var v = 1.0 + cloud * 0.16 + fib * 0.045 - fleck * 0.22;
+        mul = vec3(v) * mix(vec3(1.0), vec3(0.93, 0.86, 0.74), stain * 0.6);
+        let rim = 1.0 - smoothstep(0.0, 26.0 * sc, e + fbm_s2(p / 18.0, seed + 11u, 2u) * 10.0);
+        mul *= mix(vec3(1.0), vec3(0.66, 0.5, 0.33), rim * 0.85);
+    } else if (kind == 2u) {
+        // Wood: grain lines along x, warped, with pores.
+        let warp = fbm_s2(p / vec2(220.0, 40.0), seed, 3u) * 9.0;
+        let g = sin((p.y + warp) * 0.9 + fbm_s2(p / 60.0, seed + 2u, 2u) * 3.0);
+        let band = fbm_s2(vec2(p.x / 400.0, p.y / 9.0), seed + 4u, 3u);
+        let pore = smoothstep(0.55, 0.9, pn_simplex2(vec2(p.x / 6.0, p.y / 1.2), seed + 6u));
+        let v = 1.0 + g * 0.06 + band * 0.22 - pore * 0.12;
+        mul = vec3(v) * mix(vec3(1.0), vec3(1.06, 0.98, 0.9), band * 0.5 + 0.5);
+    } else if (kind == 3u) {
+        // Leather: pebbles, creases and a darker worn rim.
+        let peb = 1.0 - abs(pn_simplex2(p / 2.6, seed));
+        let crease = smoothstep(0.92, 1.0, 1.0 - abs(fbm_s2(p / 70.0, seed + 3u, 3u)));
+        let cloud = fbm_s2(p / 120.0, seed + 5u, 3u);
+        let v = 1.0 + (peb - 0.6) * 0.14 - crease * 0.18 + cloud * 0.14;
+        let rim = 1.0 - smoothstep(0.0, 18.0 * sc, e);
+        mul = vec3(v * (1.0 - rim * 0.35));
+    } else if (kind == 4u) {
+        // Brushed metal: fine streaks across, a broad soft sheen and a few scratches.
+        let streak = pn_simplex2(vec2(p.x / 140.0, p.y / 0.9), seed) * 0.6
+            + pn_simplex2(vec2(p.x / 40.0, p.y / 0.5), seed + 1u) * 0.4;
+        let t = lp / max(size, vec2(1.0));
+        let sheen = exp(-pow((t.x - 0.32 + t.y * 0.25) * 3.2, 2.0));
+        let scratch = smoothstep(0.96, 1.0, 1.0 - abs(pn_simplex2(vec2(p.x / 30.0 + p.y / 9.0, p.y / 300.0), seed + 4u)));
+        mul = vec3(1.0 + streak * 0.07 + sheen * 0.28 + scratch * 0.18);
+    } else if (kind == 5u) {
+        // Lacquer: deep, nearly flat, with a glossy band of reflected sky near the top.
+        let depth = fbm_s2(p / 200.0, seed, 3u);
+        let t = lp.y / max(size.y, 1.0);
+        let gloss = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.1, 0.48, t));
+        mul = vec3(1.0 + depth * 0.06 + gloss * 0.32);
+    } else if (kind == 6u) {
+        // Linen: a fine over-under weave with slubs.
+        let wx = sin(p.x * 1.6) * 0.5 + 0.5;
+        let wy = sin(p.y * 1.6) * 0.5 + 0.5;
+        let over = select(wy, wx, fract((floor(p.x * 1.6 / 3.14159) + floor(p.y * 1.6 / 3.14159)) * 0.5) > 0.25);
+        let slub = pn_simplex2(vec2(p.x / 40.0, p.y / 1.5), seed) * 0.5 + pn_simplex2(vec2(p.x / 1.5, p.y / 40.0), seed + 2u) * 0.5;
+        mul = vec3(1.0 + (over - 0.5) * 0.12 + slub * 0.07 + fbm_s2(p / 120.0, seed + 4u, 2u) * 0.08);
+    } else if (kind == 7u) {
+        // Stone: soft clouds and thin veins.
+        let cloud = fbm_s2(p / 90.0, seed, 4u);
+        let vein = 1.0 - smoothstep(0.0, 0.05, abs(fbm_s2(p / 160.0 + cloud * 0.4, seed + 2u, 4u)));
+        mul = vec3(1.0 + cloud * 0.18 + vein * 0.35);
+    }
+    return mix(vec3(1.0), mul, st);
+}
+
+// A band of light sweeping across a box every few seconds.
+fn ui_sheen(lp: vec2<f32>, size: vec2<f32>, amount: f32, time: f32) -> f32 {
+    let period = 3.2;
+    let ph = fract(time / period);
+    let x = (lp.x + lp.y * 0.6) / max(size.x + size.y * 0.6, 1.0);
+    let c = ph * 2.4 - 0.7;
+    return amount * exp(-pow((x - c) * 9.0, 2.0)) * 0.55;
 }
 
 fn premul(c: vec4<f32>) -> vec4<f32> {
@@ -1100,8 +1203,9 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let p = in.local.xy;
     var out = vec4(0.0);
 
+    let shape = in.kind.z;
     if (k == K_RECT) {
-        let d = sd_round_box(p, half, in.radius);
+        let d = sd_shape(p, half, in.radius, shape);
         let cov = saturate(0.5 - d);
         if (cov <= 0.0) {
             discard;
@@ -1116,6 +1220,13 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             // inner at the center, outer at the ellipse touching the edges.
             let t = saturate(length(p / max(half, vec2(1e-3))));
             fill = mix(in.color, in.color2, t);
+        }
+        let lp = p + half;
+        if (in.uv.x > 0.5) {
+            fill = vec4(fill.rgb * ui_material(in.uv, lp, -d, in.rect.zw), fill.a);
+        }
+        if (in.extra.z > 0.0) {
+            fill = vec4(fill.rgb + vec3(1.0, 0.95, 0.82) * ui_sheen(lp, in.rect.zw, in.extra.z, g.time.x), fill.a);
         }
         var col = premul(fill);
         if ((flags & F_BACKDROP) != 0u) {
@@ -1135,10 +1246,57 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     } else if (k == K_SHADOW) {
         let box_center = in.uv.xy + in.uv.zw * 0.5;
         let q = in.screen - box_center;
-        let d = sd_round_box(q, in.uv.zw * 0.5, in.radius);
+        let d = sd_shape(q, in.uv.zw * 0.5, in.radius, shape);
         let sigma = max(in.params.y * 0.5, 0.5);
         let a = 0.5 - 0.5 * tanh(1.2 * d / (sigma * 1.41421));
         out = premul(in.color) * a;
+    } else if (k == K_INSET) {
+        let d = sd_shape(p, half, in.radius, shape);
+        let cov = saturate(0.5 - d);
+        if (cov <= 0.0) {
+            discard;
+        }
+        // The box moved by the offset and shrunk by the spread: what lies outside it, blurred,
+        // is the shadow cast inward by the rim.
+        let spread = in.uv.z;
+        let d2 = sd_shape(p - in.uv.xy, max(half - vec2(spread), vec2(0.5)), max(in.radius - vec4(spread), vec4(0.0)), shape);
+        let sigma = max(in.params.y * 0.5, 0.5);
+        let inside = 0.5 - 0.5 * tanh(1.2 * d2 / (sigma * 1.41421));
+        out = premul(in.color) * (1.0 - inside) * cov;
+    } else if (k == K_BEVEL) {
+        let d = sd_shape(p, half, in.radius, shape);
+        let cov = saturate(0.5 - d);
+        if (cov <= 0.0) {
+            discard;
+        }
+        let e = -d;
+        var col = vec4(0.0);
+        let w = in.params.x;
+        if (abs(w) > 0.0) {
+            // Outward normal from the shape's gradient; light comes from up and to the left.
+            let dx = sd_shape(p + vec2(0.75, 0.0), half, in.radius, shape) - sd_shape(p - vec2(0.75, 0.0), half, in.radius, shape);
+            let dy = sd_shape(p + vec2(0.0, 0.75), half, in.radius, shape) - sd_shape(p - vec2(0.0, 0.75), half, in.radius, shape);
+            let n = normalize(vec2(dx, dy) + vec2(1e-5));
+            var lit = dot(n, normalize(vec2(-0.45, -1.0)));
+            if (w < 0.0) {
+                lit = -lit;
+            }
+            let aw = abs(w);
+            // A rounded rim: strongest at the edge, gone `aw` px in, plus a crisp 1 px lip.
+            let rim = pow(1.0 - smoothstep(0.0, aw, e), 1.6);
+            let lip = 1.0 - smoothstep(0.6, 1.6, e);
+            let f = saturate(rim * 0.85 + lip * 0.5);
+            let lc = premul(in.color) * saturate(lit) * f;
+            let dc = premul(in.color2) * saturate(-lit) * f;
+            col = over(lc, dc);
+        }
+        let lw = in.uv.x;
+        if (in.border_color.a > 0.0 && lw > 0.0) {
+            let band = abs(e - in.uv.y - lw * 0.5) - lw * 0.5;
+            let a = saturate(0.5 - band);
+            col = over(premul(in.border_color) * a, col);
+        }
+        out = col * cov * in.params.w;
     } else if (k == K_GLYPH) {
         let uv = mix(in.uv.xy, in.uv.zw, in.local.zw);
         var a = textureSampleLevel(mask_tex, samp, uv, 0.0).r;

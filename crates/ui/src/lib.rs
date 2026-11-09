@@ -15,6 +15,7 @@ pub mod icons;
 pub mod input;
 pub mod inventory;
 pub mod items;
+pub mod kit;
 pub mod layout;
 pub mod loading;
 pub mod map;

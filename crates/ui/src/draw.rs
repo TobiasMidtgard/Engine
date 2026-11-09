@@ -45,6 +45,18 @@ pub mod kind {
     pub const GALAXY: u32 = 9;
     /// Background star field (`uv`: pan x, y, density, seed).
     pub const STARFIELD: u32 = 10;
+    /// Shadow inside a box (`color`; `params.y` blur; `uv.xy` offset, `uv.z` spread;
+    /// `kind[2]` corner shape).
+    pub const INSET: u32 = 11;
+    /// Bevelled rim and engraved hairline of a box (`params.x` rim width, negative = sunken;
+    /// `color` light, `color2` dark, `border_color` hairline; `uv.x` hairline width, `uv.y`
+    /// its inset; `kind[2]` corner shape).
+    ///
+    /// RECT, SHADOW, INSET and BEVEL read the corner shape from `kind[2]`
+    /// ([`CornerShape::gpu`](crate::style::CornerShape::gpu)). RECT also reads its material
+    /// from `uv` (kind, strength, grain size in physical px, seed) and a sweeping sheen from
+    /// `extra.z`.
+    pub const BEVEL: u32 = 12;
 }
 
 /// Instance flags (`kind[1]`).
@@ -219,6 +231,8 @@ pub struct UiAtlases {
     icons: HashMap<(Arc<str>, u32, u32, bool), Option<AtlasSlot>>,
     /// Something didn't fit this frame: rebuild after growing/clearing.
     pub overflowed: bool,
+    /// Rows (with padding) the largest failed request needed: mask, color.
+    need: [u32; 2],
 }
 
 impl Default for UiAtlases {
@@ -229,6 +243,7 @@ impl Default for UiAtlases {
             glyphs: HashMap::new(),
             icons: HashMap::new(),
             overflowed: false,
+            need: [0; 2],
         }
     }
 }
@@ -265,6 +280,7 @@ impl UiAtlases {
             };
             let Some((x, y)) = atlas.alloc(w, h) else {
                 self.overflowed = true;
+                self.need[page as usize] = self.need[page as usize].max(h + 4);
                 return None;
             };
             atlas.write(x, y, w, h, &pixels);
@@ -302,6 +318,7 @@ impl UiAtlases {
             .and_then(|(pw, ph, pixels)| {
                 let Some((x, y)) = self.color.alloc(pw, ph) else {
                     self.overflowed = true;
+                    self.need[1] = self.need[1].max(ph + 4);
                     return None;
                 };
                 self.color.write(x, y, pw, ph, &pixels);
@@ -323,8 +340,11 @@ impl UiAtlases {
     /// After an overflow: grow the full atlas (or clear it at the maximum) and drop caches.
     pub fn recover(&mut self) {
         self.overflowed = false;
-        for atlas in [&mut self.mask, &mut self.color] {
-            if atlas.usage() > 0.9 && !atlas.grow() {
+        let need = std::mem::take(&mut self.need);
+        for (atlas, need) in [&mut self.mask, &mut self.color].into_iter().zip(need) {
+            // Grow when nearly full, or when a big picture won't fit in the rows left.
+            let rows_left = atlas.height as f32 * (1.0 - atlas.usage());
+            if (atlas.usage() > 0.9 || (need as f32) > rows_left) && !atlas.grow() {
                 atlas.clear();
             }
         }
@@ -897,18 +917,23 @@ fn build(
         let op = c.opacity;
         let radius = s.radius.0.map(|r| (r * px).min(rect.w.min(rect.h) * 0.5));
 
-        // Shadow.
-        if s.shadow.color.a > 0.0 && s.shadow.blur >= 0.0 {
-            let blur = s.shadow.blur * px;
+        // Shadows: the wide ambient one first, then the tight one.
+        let shape = s.corner_shape.gpu();
+        for sh in [&s.shadow2, &s.shadow] {
+            if sh.color.a <= 0.0 || sh.blur < 0.0 {
+                continue;
+            }
+            let blur = sh.blur * px;
             let bx = rect
-                .offset(Vec2::from(s.shadow.offset) * px)
-                .inflate(s.shadow.spread * px);
+                .offset(Vec2::from(sh.offset) * px)
+                .inflate(sh.spread * px);
             let quad = bx.inflate(blur * 1.5 + 1.0);
             let mut i = UiInstance::new(kind::SHADOW, quad, c.clip);
             i.uv = [bx.x, bx.y, bx.w, bx.h];
-            i.color = s.shadow.color.fade(op).to_array();
-            i.radius = radius.map(|r| r + s.shadow.spread * px);
+            i.color = sh.color.fade(op).to_array();
+            i.radius = radius.map(|r| r + sh.spread * px);
             i.params[1] = blur.max(0.5);
+            i.kind[2] = shape;
             list.push(i);
         }
 
@@ -953,7 +978,49 @@ fn build(
                 list.uses_backdrop = true;
             }
             i.extra[0] = s.rotate_deg.to_radians();
+            i.kind[2] = shape;
+            if s.material.kind != crate::style::MaterialKind::None && has_fill {
+                i.uv = [
+                    s.material.kind.gpu(),
+                    s.material.strength,
+                    s.material.scale.max(0.05) * px,
+                    s.material.seed,
+                ];
+            }
+            i.extra[2] = s.sheen;
             list.push(i);
+        }
+
+        // Inner shadow, then the rim and hairline.
+        let sh = &s.inset_shadow;
+        if sh.color.a > 0.0 {
+            let mut i = UiInstance::new(kind::INSET, rect, c.clip);
+            i.radius = radius;
+            i.color = sh.color.fade(op).to_array();
+            i.params[1] = (sh.blur * px).max(0.5);
+            i.uv = [sh.offset[0] * px, sh.offset[1] * px, sh.spread * px, 0.0];
+            i.kind[2] = shape;
+            i.extra[0] = s.rotate_deg.to_radians();
+            list.push(i);
+        }
+        if s.bevel.is_visible() {
+            let b = &s.bevel;
+            let mut i = UiInstance::new(kind::BEVEL, rect, c.clip);
+            i.radius = radius;
+            i.params[0] = b.width * px;
+            i.params[3] = op;
+            i.color = b.light.to_array();
+            i.color2 = b.dark.to_array();
+            i.border_color = b.line.to_array();
+            i.uv = [b.line_width * px, b.line_inset * px, 0.0, 0.0];
+            i.kind[2] = shape;
+            i.extra[0] = s.rotate_deg.to_radians();
+            list.push(i);
+        }
+
+        // Nine-slice frame.
+        if !s.frame.image.is_empty() {
+            nine_slice(list, atlases, icons, &s.frame, rect, px, op, c.clip);
         }
 
         // Content box (inside border and padding), for text and icons.
@@ -1069,6 +1136,62 @@ fn build(
             i.border_color = Color::hexa(0xff00ff99).to_array();
             i.params[0] = 1.0;
             i.params[3] = 1.0;
+            list.push(i);
+        }
+    }
+}
+
+/// Draw `frame` around `rect` (physical px) as nine image quads: corners at their size,
+/// edges stretched along the sides, the middle stretched both ways (if asked for).
+#[allow(clippy::too_many_arguments)]
+pub fn nine_slice(
+    list: &mut DrawList,
+    atlases: &mut UiAtlases,
+    icons: &mut IconLibrary,
+    frame: &crate::style::Frame,
+    rect: Rect,
+    px: f32,
+    opacity: f32,
+    clip: Rect,
+) {
+    let Some((nw, nh)) = icons.size(&frame.image) else {
+        return;
+    };
+    let r = rect.inflate(frame.outset * px);
+    if r.w <= 1.0 || r.h <= 1.0 || frame.slice <= 0.0 {
+        return;
+    }
+    // Corner size on screen, shrunk if the box is too small for two of them.
+    let cw = (frame.width * px).min(r.w * 0.5).min(r.h * 0.5).max(1.0);
+    let k = cw / frame.slice;
+    let (rw, rh) = ((nw * k).round().max(1.0), (nh * k).round().max(1.0));
+    let Some(slot) = atlases.icon(icons, &frame.image, rw as u32, rh as u32, false) else {
+        return;
+    };
+    let [u0, v0, u1, v1] = slot.uv;
+    let (fu, fv) = (cw / slot.w.max(1.0), cw / slot.h.max(1.0));
+    let us = [u0, u0 + (u1 - u0) * fu, u1 - (u1 - u0) * fu, u1];
+    let vs = [v0, v0 + (v1 - v0) * fv, v1 - (v1 - v0) * fv, v1];
+    let xs = [r.x, r.x + cw, r.x + r.w - cw, r.x + r.w];
+    let ys = [r.y, r.y + cw, r.y + r.h - cw, r.y + r.h];
+    let tint = frame.tint.fade(opacity).to_array();
+    for row in 0..3 {
+        for col in 0..3 {
+            if row == 1 && col == 1 && !frame.fill_center {
+                continue;
+            }
+            let q = Rect::new(
+                xs[col],
+                ys[row],
+                xs[col + 1] - xs[col],
+                ys[row + 1] - ys[row],
+            );
+            if q.w <= 0.0 || q.h <= 0.0 {
+                continue;
+            }
+            let mut i = UiInstance::new(kind::IMAGE, q, clip);
+            i.uv = [us[col], vs[row], us[col + 1], vs[row + 1]];
+            i.color = tint;
             list.push(i);
         }
     }

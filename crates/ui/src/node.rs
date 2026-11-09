@@ -166,6 +166,14 @@ pub struct ComputedNode {
     pub layout_size: Vec2,
     /// Whether the style was resolved at least once.
     pub resolved: bool,
+    /// Effective font family (empty = the theme's).
+    pub font_family: String,
+    /// A timed tween (an `ease`d transition or the entrance): the style it started from,
+    /// progress (negative while waiting out a delay; 1 = done), seconds and curve.
+    pub tween_from: Option<Box<Style>>,
+    pub tween_t: f32,
+    pub tween_s: f32,
+    pub tween_ease: crate::style::Ease,
 }
 
 /// A stable name for a node: events carry it, `ui.click {"id": ...}` and `UiQuery` find it.
@@ -207,6 +215,8 @@ pub struct Text {
     pub shadow: bool,
     /// Use tabular (fixed-width) digits, for counters and prices.
     pub tabular: bool,
+    /// Font family; None = the node's style (inherited), else the theme's.
+    pub family: Option<String>,
 }
 
 impl Default for Text {
@@ -226,6 +236,7 @@ impl Default for Text {
             reveal: None,
             shadow: false,
             tabular: false,
+            family: None,
         }
     }
 }
@@ -293,6 +304,12 @@ impl Text {
 
     pub fn tabular(mut self) -> Self {
         self.tabular = true;
+        self
+    }
+
+    /// Set the font family (`"Harbour Serif"`, `"Alegreya Sans"`, `"Inter"`).
+    pub fn family(mut self, f: impl Into<String>) -> Self {
+        self.family = Some(f.into());
         self
     }
 

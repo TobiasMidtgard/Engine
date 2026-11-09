@@ -224,17 +224,57 @@ fn animate_screens(world: &mut World, dt: f32) {
 
 /// Resolve styles and step transitions.
 fn resolve_styles(world: &mut World, dt: f32, theme_changed: bool) {
+    use crate::style::Ease;
     world.resource_scope(|world, theme: Mut<Theme>| {
         let mut q = world.query::<(Ref<Node>, Ref<Interaction>, &mut ComputedNode)>();
         for (node, it, mut c) in q.iter_mut(world) {
+            let mut retarget = false;
             if !c.resolved || theme_changed || node.is_changed() || it.is_changed() {
-                c.target = resolve_style(&theme, &node, &it);
+                let next = resolve_style(&theme, &node, &it);
+                retarget = c.resolved && next != c.target;
+                c.target = next;
             }
-            if !c.resolved || c.target.transition <= 0.0 {
-                if !c.resolved || c.style != c.target {
+            if !c.resolved {
+                // Entrance: start offset and ease into place after the delay.
+                let enter = c.target.enter;
+                if enter.duration > 0.0 {
+                    c.style = enter.start_of(&c.target);
+                    c.tween_from = Some(Box::new(c.style.clone()));
+                    c.tween_t = -(enter.delay / enter.duration);
+                    c.tween_s = enter.duration;
+                    c.tween_ease = enter.ease;
+                } else {
                     c.style = c.target.clone();
                 }
                 c.resolved = true;
+                continue;
+            }
+            // A state change with a named curve starts a timed tween from where it is now.
+            if retarget && c.target.transition > 0.0 && c.target.ease != Ease::Auto {
+                if c.tween_from.is_some() && c.tween_t < 0.0 {
+                    // Still waiting to enter: keep waiting, aim at the new target.
+                } else {
+                    c.tween_from = Some(Box::new(c.style.clone()));
+                    c.tween_t = 0.0;
+                    c.tween_s = c.target.transition;
+                    c.tween_ease = c.target.ease;
+                }
+            }
+            if let Some(from) = c.tween_from.take() {
+                c.tween_t += dt / c.tween_s.max(1e-3);
+                if c.tween_t >= 1.0 {
+                    c.style = c.target.clone();
+                } else {
+                    let k = c.tween_ease.apply(c.tween_t.max(0.0));
+                    c.style = from.lerp_visual(&c.target, k);
+                    c.tween_from = Some(from);
+                }
+                continue;
+            }
+            if c.target.transition <= 0.0 {
+                if c.style != c.target {
+                    c.style = c.target.clone();
+                }
             } else if !c.style.visual_eq(&c.target) || c.style != c.target {
                 let k = 1.0 - (-dt * 4.0 / c.target.transition).exp();
                 let next = c.style.lerp_visual(&c.target, k);
@@ -275,15 +315,18 @@ fn text_spec(text: &Text, resolved: String, inherited: &Inherited, scale: f32) -
         rich: text.rich,
         tabular: text.tabular,
         wrap: text.wrap,
-        family: None,
+        family: text.family.clone().or_else(|| {
+            (!inherited.font_family.is_empty()).then(|| inherited.font_family.to_string())
+        }),
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Inherited {
     color: Color,
     font_size: f32,
     font_weight: u16,
+    font_family: std::sync::Arc<str>,
 }
 
 /// The whole UI pass. Runs in `PostUpdate` after transforms propagate.
@@ -314,10 +357,12 @@ pub fn ui_layout_system(world: &mut World) {
         color: theme.palette.text,
         font_size: theme.font_size,
         font_weight: 400,
+        font_family: std::sync::Arc::from(theme.font_family.as_str()),
     };
     let mut alive: Vec<Entity> = Vec::with_capacity(layout.nodes.len());
     {
-        let mut stack: Vec<(Entity, Inherited)> = roots.iter().rev().map(|e| (*e, base)).collect();
+        let mut stack: Vec<(Entity, Inherited)> =
+            roots.iter().rev().map(|e| (*e, base.clone())).collect();
         while let Some((e, inherited)) = stack.pop() {
             alive.push(e);
             let Some(c) = world.get::<ComputedNode>(e) else {
@@ -340,11 +385,19 @@ pub fn ui_layout_system(world: &mut World) {
                 } else {
                     inherited.font_weight
                 },
+                font_family: if style.font_family.is_empty() {
+                    inherited.font_family.clone()
+                } else {
+                    std::sync::Arc::from(style.font_family.as_str())
+                },
             };
             if let Some(mut c) = world.get_mut::<ComputedNode>(e) {
                 c.color = own.color;
                 c.font_size = own.font_size;
                 c.font_weight = own.font_weight;
+                if *c.font_family != *own.font_family {
+                    c.font_family = own.font_family.to_string();
+                }
             }
 
             // Text: bind, build the spec, reshape when it changed.
@@ -395,7 +448,7 @@ pub fn ui_layout_system(world: &mut World) {
 
             let children = node_children(world, e);
             for child in children.iter().rev() {
-                stack.push((*child, own));
+                stack.push((*child, own.clone()));
             }
             let child_nodes: Vec<NodeId> = children
                 .iter()

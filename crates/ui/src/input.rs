@@ -1191,14 +1191,20 @@ fn update_tooltip(
             .class("tooltip")
             .with_style(|s| s.at(-1000.0, -1000.0).pick(Pick::Ignore));
         if !tip.title.is_empty() {
-            let mut title = El::text(tip.title.clone()).class("heading").pick_ignore();
+            let mut title = El::text(tip.title.clone())
+                .class("heading tooltip_title")
+                .pick_ignore();
             if let Some(c) = tip.title_color {
                 title = title.text_style(|t| t.color(c));
             }
             el = el.child(title);
         }
         if !tip.text.is_empty() {
-            el = el.child(El::text(tip.text.clone()).class("body").pick_ignore());
+            el = el.child(
+                El::text(tip.text.clone())
+                    .class("body tooltip_body")
+                    .pick_ignore(),
+            );
         }
         if let Ok(sp) = el::spawn(world, None, &el)
             && let Some(root) = sp.root

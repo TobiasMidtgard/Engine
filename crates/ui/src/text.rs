@@ -25,9 +25,29 @@ const FONT_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic.otf");
 const FONT_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.otf");
 const FONT_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.otf");
 
+/// A display serif for titles, names and big numbers (bold and black): "Harbour Serif", a
+/// Latin subset of Playfair Display (OFL; renamed as its Reserved Font Name requires).
+pub const DISPLAY_FONT: &str = "Harbour Serif";
+/// Its small-caps cut, for engraved labels.
+pub const DISPLAY_CAPS_FONT: &str = "Harbour Serif SC";
+/// A warm humanist sans for body text in period themes (Alegreya Sans, OFL).
+pub const HUMANIST_FONT: &str = "Alegreya Sans";
+
+const EXTRA_FONTS: [&[u8]; 7] = [
+    include_bytes!("../assets/fonts/HarbourSerif-Bold.ttf"),
+    include_bytes!("../assets/fonts/HarbourSerif-Black.ttf"),
+    include_bytes!("../assets/fonts/HarbourSerifSC-Bold.ttf"),
+    include_bytes!("../assets/fonts/AlegreyaSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/AlegreyaSans-Medium.ttf"),
+    include_bytes!("../assets/fonts/AlegreyaSans-Bold.ttf"),
+    include_bytes!("../assets/fonts/AlegreyaSans-Italic.ttf"),
+];
+
 /// Fonts and the glyph rasterizer.
 ///
-/// Built-in: Inter (regular, italic, semibold, bold; Latin, Greek, Cyrillic). Add fonts with
+/// Built-in: Inter (regular, italic, semibold, bold; Latin, Greek, Cyrillic), the display
+/// serif [`DISPLAY_FONT`] (bold, black) and its small caps, and [`HUMANIST_FONT`] (regular,
+/// medium, bold, italic). Add fonts with
 /// [`Fonts::add_font`] (for other scripts or a game's own typeface); set
 /// `UiSettings::system_fonts` to also use the fonts installed on the machine as fallback.
 #[derive(Resource)]
@@ -55,6 +75,7 @@ impl Fonts {
     pub fn new(system_fonts: bool) -> Self {
         let sources = [FONT_REGULAR, FONT_ITALIC, FONT_SEMIBOLD, FONT_BOLD]
             .into_iter()
+            .chain(EXTRA_FONTS)
             .map(|b| fontdb::Source::Binary(Arc::new(b)));
         let mut system = FontSystem::new_with_fonts(sources);
         if system_fonts {
@@ -249,6 +270,9 @@ impl TextSpec {
                 if let Some(c) = st.color {
                     a = a.color(to_cosmic(c));
                 }
+                if st.display {
+                    a = a.family(Family::Name(DISPLAY_FONT));
+                }
                 if let Some(sz) = st.size {
                     let px = sz * self.size / 16.0;
                     a = a.metrics(Metrics::new(px, (px * self.line_height).ceil()));
@@ -295,9 +319,11 @@ pub struct SpanStyle {
     pub color: Option<Color>,
     /// Size relative to 16 (scaled with the text's own size).
     pub size: Option<f32>,
+    /// `[serif]`: the display serif ([`DISPLAY_FONT`]).
+    pub display: bool,
 }
 
-/// Split `[b]`, `[i]`, `[color=..]`/`[c=..]`, `[size=..]` markup into styled spans.
+/// Split `[b]`, `[i]`, `[serif]`, `[color=..]`/`[c=..]`, `[size=..]` markup into styled spans.
 /// Unknown tags stay as written; `[[` is a literal `[`.
 pub fn parse_markup(src: &str) -> Vec<(String, SpanStyle)> {
     let mut out: Vec<(String, SpanStyle)> = Vec::new();
@@ -357,6 +383,10 @@ pub fn parse_markup(src: &str) -> Vec<(String, SpanStyle)> {
                 "i" => {
                     next.italic = true;
                     "i"
+                }
+                "serif" => {
+                    next.display = true;
+                    "serif"
                 }
                 "color" | "c" => match value.as_deref().map(Color::parse) {
                     Some(Ok(c)) => {
