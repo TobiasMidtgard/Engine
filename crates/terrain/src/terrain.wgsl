@@ -547,6 +547,7 @@ fn spruce_share(conifer: f32) -> f32 {
 // Fractal sum of `pnoise3` on tiling coordinates, starting at `freq` cycles per meter (a power
 // of two), doubling per octave. Returns about 0..1.
 fn tile_fbm(tp: vec3<f32>, freq: f32, octaves: i32) -> f32 {
+    if (shade_skip(SKIP_TERRAIN_NOISE)) { return 0.5; }
     var sum = 0.0;
     var amp = 0.5;
     var f = freq;
@@ -1545,7 +1546,22 @@ struct Texels {
 // Two lookups at offsets picked by a slow noise, switched where the noise steps, so the tile
 // never visibly repeats (Quilez, "texture repetition", technique 3). The taller texel wins
 // near a switch. `uv` is in tiles; `period` is how many tiles the 4096 m camera tile holds.
-fn mat_fetch(i: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>, period: f32) -> Texels {
+fn mat_fetch(i: u32, uv: vec2<f32>, gx_in: vec2<f32>, gy_in: vec2<f32>, period: f32) -> Texels {
+    // Trial cuts (lib_frame.wgsl `trial_cut`): the sampler's anisotropy held to 8 or 4 probes
+    // instead of 16, by lengthening the footprint's short axis to that share of its long one
+    // (the sampler then picks the mip that fits and takes that many probes at most).
+    var gx = gx_in;
+    var gy = gy_in;
+    if (trial_cut(CUT_TERRAIN_ANISO_8 | CUT_TERRAIN_ANISO_4)) {
+        let most = select(8.0, 4.0, trial_cut(CUT_TERRAIN_ANISO_4));
+        let lx = dot(gx, gx);
+        let ly = dot(gy, gy);
+        let least = max(lx, ly) / (most * most);
+        if (min(lx, ly) < least) {
+            let stretch = sqrt(least / max(min(lx, ly), 1e-24));
+            if (lx < ly) { gx *= stretch; } else { gy *= stretch; }
+        }
+    }
     let k = pnoise3(vec3<f32>(uv * 0.25, f32(i) * 7.31), period * 0.25) * 8.0;
     let ia = floor(k);
     let f = fract(k);
@@ -1881,7 +1897,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (MIRROR_CLIP && under_mirror(in.rel)) {
         discard;
     }
-    if ((TERRAIN_OFF & 128u) != 0u) {
+    if ((TERRAIN_OFF & 128u) != 0u || shade_skip(SKIP_TERRAIN)) {
         return vec4<f32>(0.1, 0.2, 0.05, 1.0);
     }
     let planet = planets[in.planet];
@@ -2439,7 +2455,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var hmax = -10.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (wt[i] > 0.003) {
-            if ((TERRAIN_OFF & 1u) != 0u) {
+            if ((TERRAIN_OFF & 1u) != 0u || shade_skip(SKIP_TERRAIN_TEXTURES)) {
                 ms[i] = mat_mean(i, n_geo);
             } else {
                 ms[i] = sample_ground(i, tp_m, n_geo, dp1, dp2, tex_pixel);

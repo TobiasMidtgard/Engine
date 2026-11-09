@@ -65,7 +65,7 @@ struct Frame {
     gi_grid: vec4<f32>,            // storage slot of the grid's first probe along x, y, z (scrolling); w = the probes' epoch (0 = off)
     clip_plane: vec4<f32>,         // a mirror's view (planar_reflection.rs): camera-relative plane n.xyz, d; kept where dot(n, rel) + d >= 0 (0 = none)
     aerial: vec4<f32>,             // aerial perspective table (aerial.rs): reach (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + reach / depth scale), depth slices
-    shading: vec4<f32>,            // x = sun-shadow filter taps (RenderSettings::shadow_filter_taps), y = benders set; zw unused
+    shading: vec4<f32>,            // x = sun-shadow filter taps (RenderSettings::shadow_filter_taps), y = benders set, z = RenderSettings::debug_skip bits, w = RenderSettings::trial_cuts bits
     benders: array<vec4<f32>, 16>, // GrassBenders nearest the camera: camera-relative center xyz, radius (m) (frame.rs MAX_BENDERS)
     plant_wind: vec4<f32>,         // the wind plants sway in (frame.rs PlantWind): smoothed prevailing xyz (m/s), w its speed
     plant_wind_prev: vec4<f32>,    // the same last frame (motion vectors)

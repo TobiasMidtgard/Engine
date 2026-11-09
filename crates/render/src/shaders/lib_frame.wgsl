@@ -275,6 +275,37 @@ fn dither_keeps(dither: f32, pixel: vec2<f32>) -> bool {
 }
 
 // Point i of n on a Vogel (sunflower) disk of radius 1, turned by `angle`.
+// Parts of the shading switched off to measure what they cost (`RenderSettings::debug_skip`,
+// the bits of settings.rs `shade_skip`; none in a normal frame).
+const SKIP_SUN_SHADOW_MAPS: u32 = 1u;
+const SKIP_CAPSULES: u32 = 2u;
+const SKIP_SKY_VOLUMES: u32 = 4u;
+const SKIP_PROBE_LOOKUP: u32 = 8u;
+const SKIP_SPECULAR_SKY: u32 = 16u;
+const SKIP_POINT_LIGHTS: u32 = 32u;
+const SKIP_SURFACE_FOG: u32 = 64u;
+const SKIP_LIGHTING: u32 = 128u;
+const SKIP_TERRAIN_TEXTURES: u32 = 256u;
+const SKIP_TERRAIN_NOISE: u32 = 512u;
+const SKIP_TERRAIN: u32 = 1024u;
+const SKIP_MESH_SCENE: u32 = 2048u;
+const SKIP_MESH_PREPASS_MATERIAL: u32 = 4096u;
+const SKIP_SKY_MAP_TAPS: u32 = 8192u;
+
+fn shade_skip(bit: u32) -> bool {
+    return (u32(frame.shading.z) & bit) != 0u;
+}
+
+// Cheaper ways to draw the same picture that are being measured before they become the way it
+// is drawn (`RenderSettings::trial_cuts`, the bits of settings.rs `trial_cut`; none by default).
+const CUT_SKY_RING_TAPS: u32 = 1u;
+const CUT_TERRAIN_ANISO_8: u32 = 2u;
+const CUT_TERRAIN_ANISO_4: u32 = 4u;
+
+fn trial_cut(bit: u32) -> bool {
+    return (u32(frame.shading.w) & bit) != 0u;
+}
+
 fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
     let r = sqrt((f32(i) + 0.5) / f32(n));
     let theta = f32(i) * GOLDEN_ANGLE + angle;
@@ -285,7 +316,7 @@ fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
 // cascades out to `RenderSettings::shadow_distance`, blending over their last tenth into the
 // far shadow map (big casters only, out to `far_shadow_distance`; `far_shadow_visibility`).
 fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    if (frame.sun_color.w < 0.5) { return 1.0; }
+    if (frame.sun_color.w < 0.5 || shade_skip(SKIP_SUN_SHADOW_MAPS)) { return 1.0; }
     // Cascades are squares centred on the camera (they don't turn with it), so a cascade holds
     // every point nearer than its split: pick by distance, not view depth.
     let depth = length(rel);
@@ -576,7 +607,7 @@ fn capsule_occlusion(rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     let people = min(u32(frame.distant_shadows.y), 32u);
     var sun = 1.0;
     var sky = 1.0;
-    if (people == 0u) { return vec2<f32>(sun, sky); }
+    if (people == 0u || shade_skip(SKIP_CAPSULES)) { return vec2<f32>(sun, sky); }
     let base = frame.counts.x;
     let l = frame.sun_dir.xyz;
     let sun_on = frame.sun_color.w > 0.5 && dot(n, l) > 0.0;
@@ -702,7 +733,7 @@ fn probe_gi_texel(g: vec3<u32>, dir: vec3<f32>) -> vec2<f32> {
 // to 3 a side, an eighth of the grid), and less by the share of probes around it that wait for
 // their first trace (they scrolled in, or every probe started over).
 fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
-    if (frame.gi_grid.w < 0.5) { return vec4<f32>(0.0); }
+    if (frame.gi_grid.w < 0.5 || shade_skip(SKIP_PROBE_LOOKUP)) { return vec4<f32>(0.0); }
     let spacing = frame.gi_volume.w;
     let size = frame.gi_size.xyz;
     // Off the surface toward the viewer and along the normal, so the surface's own probes
@@ -832,7 +863,17 @@ fn sky_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     // counts as inside even where that step along its normal crosses a face: a wall's edge
     // where bumps tilt its normal into the ceiling, the rounded foot of a chair leg on the
     // floor. (Those spots read the open sky through the volume's face otherwise.)
-    return sky_map_visibility(rel, n) * min(sky_volume_factor(rel + n * 0.2), sky_volume_factor_within(rel, 0.01));
+    var map = 1.0;
+    if (trial_cut(CUT_SKY_RING_TAPS)) {
+        // Half the taps a ring, the rings turned by a different part of a step each pixel and
+        // frame: temporal anti-aliasing averages them into more directions than the eight.
+        let leaves = canopy_visibility(rel + n * 0.2);
+        canopy_last_visibility = leaves;
+        map = leaves * sky_occluder_visibility_taps(rel, n, SKY_RING_TAPS / 2u, frame_noise(pixel_of(rel) + 17.0));
+    } else {
+        map = sky_map_visibility(rel, n);
+    }
+    return map * min(sky_volume_factor(rel + n * 0.2), sky_volume_factor_within(rel, 0.01));
 }
 
 // ---------------------------------------------------------------- light through leaves
@@ -962,6 +1003,7 @@ fn sky_volume_factor(rel: vec3<f32>) -> f32 {
 // on a face is inside).
 fn sky_volume_factor_within(rel: vec3<f32>, margin: f32) -> f32 {
     var f = 1.0;
+    if (shade_skip(SKIP_SKY_VOLUMES)) { return f; }
     let p = vec4<f32>(rel, 1.0);
     for (var i = 0u; i < min(frame.counts.w, 16u); i++) {
         let v = frame.sky_volumes[i];
@@ -1007,6 +1049,7 @@ const SKY_VOLUME_NO_WALL: f32 = 1e30;
 
 // Whether camera-relative `rel` is within `margin` meters of an indoor volume's box.
 fn near_sky_volume(rel: vec3<f32>, margin: f32) -> bool {
+    if (shade_skip(SKIP_SKY_VOLUMES)) { return false; }
     let p = vec4<f32>(rel, 1.0);
     for (var i = 0u; i < min(frame.counts.w, 16u); i++) {
         let v = frame.sky_volumes[i];
@@ -1089,8 +1132,13 @@ fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
 
 // Sky visibility from the top-down occlusion map alone (solid cover: roofs, rock, trunks).
 fn sky_occluder_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    return sky_occluder_visibility_taps(rel, n, SKY_RING_TAPS, 0.0);
+}
+
+// The same with `ring_taps` taps a ring, the rings turned by `turn` of a step between taps.
+fn sky_occluder_visibility_taps(rel: vec3<f32>, n: vec3<f32>, ring_taps: u32, turn: f32) -> f32 {
     let params = frame.sky_occlusion_params;
-    if (params.x < 0.5) { return 1.0; }
+    if (params.x < 0.5 || shade_skip(SKIP_SKY_MAP_TAPS)) { return 1.0; }
     let texel = params.z;
     let depth_range = params.w;
     // Start just off the surface; walls also step one texel and a half out of their own cover.
@@ -1123,7 +1171,7 @@ fn sky_occluder_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         if (ring >= 0) {
             a = SKY_CENTER_RADIUS * f32(1u << u32(ring));
             b = a * 2.0;
-            taps = SKY_RING_TAPS;
+            taps = ring_taps;
             if (!sky_cover_near(at, b / texel + 2.0, top)) { continue; }
         }
         let share = 1.0 / f32(taps);
@@ -1131,7 +1179,7 @@ fn sky_occluder_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
             var o = vec2<f32>(0.0);
             if (ring >= 0) {
                 // Odd rings are turned half a step so taps don't line up radially.
-                let angle = (f32(k) + 0.5 * f32(u32(ring) & 1u)) * (TAU / f32(SKY_RING_TAPS));
+                let angle = (f32(k) + 0.5 * f32(u32(ring) & 1u) + turn) * (TAU / f32(ring_taps));
                 o = vec2<f32>(cos(angle), sin(angle)) * sqrt((a * a + b * b) * 0.5);
             }
             let tc = c.xy + step_x * o.x + step_z * o.y;
@@ -1173,7 +1221,7 @@ const SPECULAR_SKY_TAPS: u32 = 18u;
 fn specular_sky_visibility(rel: vec3<f32>, dir: vec3<f32>, n: vec3<f32>, roughness: f32) -> f32 {
     let params = frame.sky_occlusion_params;
     let flat_len = length(dir.xz);
-    if (params.x < 0.5 || flat_len < 1e-3) { return 1.0; }
+    if (params.x < 0.5 || flat_len < 1e-3 || shade_skip(SKIP_SPECULAR_SKY)) { return 1.0; }
     let p = rel + n * 0.2;
     let c = frame.sky_occlusion * vec4<f32>(p, 1.0);
     let edge = max(abs(c.x), abs(c.y));
@@ -1360,6 +1408,10 @@ fn thin_surface_sides(face: vec3<f32>, l: vec3<f32>) -> vec2<f32> {
 // Surface shading. With `thin`, `s` is the side in view of a thin sheet facing `face`
 // (`shade_thin_surface`); otherwise `face` is unused.
 fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>, thin: bool) -> vec3<f32> {
+    if (shade_skip(SKIP_LIGHTING)) {
+        shade_specular = vec3<f32>(0.0);
+        return pre_expose(s.albedo * 3000.0 + s.emissive);
+    }
     let v = normalize(-rel);
     let n = s.normal;
     let roughness = s.roughness * s.roughness;
@@ -1431,7 +1483,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     }
 
     // Point lights.
-    let count = frame.counts.x;
+    let count = select(frame.counts.x, 0u, shade_skip(SKIP_POINT_LIGHTS));
     for (var i = 0u; i < count; i++) {
         let light = point_lights[i];
         let to_light = light.position_range.xyz - rel;
@@ -1954,6 +2006,12 @@ struct SurfaceFog {
 // volumetric fog off the analytic height fog starts at the camera. The atmosphere's aerial
 // perspective comes on top.
 fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
+    if (shade_skip(SKIP_SURFACE_FOG)) {
+        var none: SurfaceFog;
+        none.inscatter = vec3<f32>(0.0);
+        none.transmittance = vec3<f32>(1.0);
+        return none;
+    }
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);
     // In-scattered light (pre-exposed) and transmittance between the camera and the point.

@@ -24,6 +24,12 @@ pub struct CloudSettings {
     /// March a quarter of the cloud image each frame and reproject the rest from the last
     /// frames (about 4× cheaper; off marches every pixel every frame).
     pub temporal: bool,
+    /// Pixels along the side of the block one pixel of which is marched a frame, with
+    /// `temporal`: 2 marches a quarter of the image a frame, 3 a ninth, 4 a sixteenth (as
+    /// Horizon Zero Dawn does). 0 follows the frame rate (`engine_render::FramePacing`): 2 up
+    /// to about 55 frames a second, 3 from there and 4 from about 100, so the whole image is
+    /// marched again every 130 to 160 ms at any rate; with the renderer's pacing off that is 2.
+    pub temporal_side: u32,
     /// Samples along each view ray through the cloud layer.
     pub steps: u32,
     /// Samples toward the sun or moon from each cloud sample (self-shadowing).
@@ -64,6 +70,7 @@ impl Default for CloudSettings {
             enabled: true,
             resolution_scale: 0.5,
             temporal: true,
+            temporal_side: 0,
             steps: 72,
             light_steps: 5,
             environment_steps: 24,

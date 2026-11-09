@@ -4531,6 +4531,23 @@ fn swap_quality(
     before
 }
 
+/// Keep [`crate::FramePacing`] for the frame about to be drawn (`RenderSettings::pacing_fps`).
+fn pace_frame(world: &mut World) {
+    let pacing_fps = world
+        .get_resource::<RenderSettings>()
+        .map_or(0.0, |s| s.pacing_fps);
+    let dt = world
+        .get_resource::<Time>()
+        .map_or(0.0, |t| t.real_delta_secs());
+    let mut pacing = world.get_resource_or_insert_with(crate::FramePacing::default);
+    let before = *pacing;
+    let mut now = before;
+    now.advance(dt, pacing_fps);
+    if now != before {
+        *pacing = now;
+    }
+}
+
 /// The exclusive system that renders a frame.
 ///
 /// Pipelined (`RenderSettings::pipelining`), it waits for the previous frame's recording to
@@ -4543,6 +4560,7 @@ pub fn render_system(world: &mut World) {
         return;
     }
     let headless = world.resource::<EngineConfig>().headless;
+    pace_frame(world);
     let pipelined = world
         .get_resource::<RenderSettings>()
         .is_some_and(|s| s.pipelining.on(headless));

@@ -118,7 +118,7 @@ pub struct FrameUniform {
     /// pixel marches), 1 / depth scale (1/m), 1 / log2(1 + reach / depth scale), depth slices.
     pub aerial: [f32; 4],
     /// Shading knobs: sun-shadow filter taps (`RenderSettings::shadow_filter_taps`), the
-    /// [`crate::GrassBender`]s in `benders`, unused, unused.
+    /// [`crate::GrassBender`]s in `benders`, `RenderSettings::debug_skip`, `RenderSettings::trial_cuts`.
     pub shading: [f32; 4],
     /// The [`crate::GrassBender`]s nearest the camera ([`ViewData::benders`]): camera-relative
     /// center xyz, radius (m); `shading.y` of them are set. Swaying meshes bend away from them.
@@ -1259,8 +1259,9 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         shading: [
             settings.shadow_filter_taps.clamp(1, 64) as f32,
             v.benders.len().min(MAX_BENDERS) as f32,
-            0.0,
-            0.0,
+            // (24 bits: exact in an f32.)
+            (settings.debug_skip & 0x00ff_ffff) as f32,
+            (settings.trial_cuts & 0x00ff_ffff) as f32,
         ],
         benders: gpu_benders(&v.benders),
         plant_wind: v.plant_wind.wind.to_array(),

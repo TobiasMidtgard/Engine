@@ -162,6 +162,53 @@ impl VolumetricQuality {
     }
 }
 
+/// Bits of [`RenderSettings::debug_skip`]: parts of the shading left out to measure what each
+/// costs on the GPU (lib_frame.wgsl `shade_skip`). A uniform read and a branch in a normal
+/// frame.
+pub mod shade_skip {
+    /// The sun's shadow maps read as lit: cascades, the far map, people's insets.
+    pub const SUN_SHADOW_MAPS: u32 = 1;
+    /// People's capsule shadows.
+    pub const CAPSULES: u32 = 2;
+    /// The indoor volumes' loops (sky light and the probes' walls).
+    pub const SKY_VOLUMES: u32 = 4;
+    /// The eight probes a pixel reads (their tracing still runs).
+    pub const PROBE_LOOKUP: u32 = 8;
+    /// The reflection's march through the sky occlusion map.
+    pub const SPECULAR_SKY: u32 = 16;
+    /// The point light loop.
+    pub const POINT_LIGHTS: u32 = 32;
+    /// Fog and aerial perspective on surfaces.
+    pub const SURFACE_FOG: u32 = 64;
+    /// All of `shade_surface`: surfaces show their albedo.
+    pub const LIGHTING: u32 = 128;
+    /// The ground's material textures (their means instead).
+    pub const TERRAIN_TEXTURES: u32 = 256;
+    /// The ground's fractal noises (their middle instead).
+    pub const TERRAIN_NOISE: u32 = 512;
+    /// The ground's whole pixel shader (a flat color: what is left is its triangles).
+    pub const TERRAIN: u32 = 1024;
+    /// Opaque meshes' whole scene pixel shader (a flat color).
+    pub const MESH_SCENE: u32 = 2048;
+    /// Opaque meshes' material in the prepass (the vertex normal instead).
+    pub const MESH_PREPASS_MATERIAL: u32 = 4096;
+    /// The sky occlusion map's ring taps (surfaces and fog read open sky; the map is drawn).
+    pub const SKY_MAP_TAPS: u32 = 8192;
+}
+
+/// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the same picture, switchable
+/// while they are measured (lib_frame.wgsl `trial_cut`).
+pub mod trial_cut {
+    /// The sky occlusion map read with four taps a ring instead of eight on surfaces, the rings
+    /// turned by a different part of a step each pixel and frame (temporal anti-aliasing
+    /// averages them).
+    pub const SKY_RING_TAPS: u32 = 1;
+    /// The ground's material textures filtered with at most 8 anisotropic probes, not 16.
+    pub const TERRAIN_ANISO_8: u32 = 2;
+    /// The same with at most 4.
+    pub const TERRAIN_ANISO_4: u32 = 4;
+}
+
 /// What the screen shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DebugView {
@@ -345,6 +392,23 @@ pub struct RenderSettings {
     /// Maximum point lights shaded per frame (nearest first).
     pub max_point_lights: u32,
     pub debug_view: DebugView,
+    /// Parts of the shading switched off to measure what they cost on the GPU (bits of
+    /// [`shade_skip`]; 0 = none, the default). The picture is wrong while any is set: for
+    /// `tools/engine-mcp`'s `gpu_sweep` and A/B runs only.
+    pub debug_skip: u32,
+    /// Cheaper ways to draw the same picture that are being measured before they become the
+    /// way it is drawn (bits of [`trial_cut`]; 0 = none, the default). For `gpu_sweep` and
+    /// side-by-side pictures: a cut that saves time and shows no difference loses its bit and
+    /// becomes the code, one that doesn't is removed.
+    pub trial_cuts: u32,
+    /// The frame rate the work spread over frames is set for: probe tracing's time a frame
+    /// (`gi_budget_ms`), the environment map's interval (`environment_interval`) and, in the
+    /// weather module, the share of the cloud image marched a frame. At a higher rate each frame
+    /// does less of it, so a second holds the same work whatever the rate ([`FramePacing`]):
+    /// at twice this rate, half the tracing time and the map every other interval. A frame at
+    /// 120 a second is a quarter as long as one at 30, and the light it spreads over frames
+    /// changes no faster. 0 = the same work every frame, whatever the rate (the default).
+    pub pacing_fps: f32,
     /// Write a `perf:` line to the log every this many seconds: frames per second, the render
     /// system's CPU time and its wait for the window image, everything else's CPU time, the
     /// GPU's time and memory (see `perf.rs`). 0 = never.
@@ -593,6 +657,9 @@ impl Default for RenderSettings {
             white_balance: 0.0,
             max_point_lights: 256,
             debug_view: DebugView::None,
+            debug_skip: 0,
+            trial_cuts: 0,
+            pacing_fps: 0.0,
             perf_log_secs: 10.0,
             environment_interval: 4,
             mirror_shares_lighting: true,
@@ -645,14 +712,64 @@ impl Default for RenderSettings {
     }
 }
 
+/// How much of the work spread over frames this frame does ([`RenderSettings::pacing_fps`]):
+/// the renderer keeps it from the frame rate of the last half second or so. Features that
+/// spread work of their own read `share` (the weather's cloud march does).
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct FramePacing {
+    /// 1 at the pacing rate and below it (and with pacing off), falling to 0.25 at four times
+    /// the rate: the pacing rate over the frame rate.
+    pub share: f32,
+    /// The smoothed frame time, seconds (0 before the first frame).
+    frame_s: f32,
+}
+
+impl Default for FramePacing {
+    fn default() -> Self {
+        Self {
+            share: 1.0,
+            frame_s: 0.0,
+        }
+    }
+}
+
+impl FramePacing {
+    /// Seconds over which the frame time is smoothed: one slow frame doesn't move the share.
+    const SMOOTH_S: f32 = 0.5;
+
+    /// Take a frame of `dt` seconds (wall clock) at `pacing_fps`.
+    pub fn advance(&mut self, dt: f32, pacing_fps: f32) {
+        if !(dt.is_finite() && dt > 0.0) {
+            return;
+        }
+        self.frame_s = if self.frame_s > 0.0 {
+            // A hitch is one long frame, not a slow rate: it counts as a frame twice as long as
+            // the frames lately at most, so the rate has to stay low to bring the share up.
+            let dt = dt.min(self.frame_s * 2.0);
+            let k = 1.0 - (-dt / Self::SMOOTH_S).exp();
+            self.frame_s + (dt - self.frame_s) * k
+        } else {
+            dt
+        };
+        self.share = if pacing_fps.is_finite() && pacing_fps > 0.0 {
+            (pacing_fps * self.frame_s).clamp(0.25, 1.0)
+        } else {
+            1.0
+        };
+    }
+}
+
 /// The settings the renderer draws with: [`RenderSettings`] at the game's [`Scalability`]
-/// (unscaled without one).
+/// (unscaled without one) and at the frame rate's [`FramePacing`].
 pub(crate) fn effective(world: &World) -> RenderSettings {
     let settings = world.resource::<RenderSettings>();
     let mut s = match world.get_resource::<Scalability>() {
         Some(quality) => settings.scaled(quality),
         None => settings.clone(),
     };
+    if let Some(pacing) = world.get_resource::<FramePacing>() {
+        s.paced(pacing.share);
+    }
     static PROBE_GI: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     if let Some(on) = switch_from_env("ENGINE_PROBE_GI", &PROBE_GI) {
         s.probe_gi = on;
@@ -786,6 +903,21 @@ impl RenderSettings {
         s.max_point_lights =
             ((self.max_point_lights as f32 * effects.clamp(0.25, 1.0)) as u32).max(8);
         s
+    }
+}
+
+impl RenderSettings {
+    /// Spread the work that is spread over frames for a frame doing `share` of it
+    /// ([`FramePacing::share`]): that share of the probe tracing time, the environment map
+    /// every 1/share intervals.
+    fn paced(&mut self, share: f32) {
+        let share = share.clamp(0.25, 1.0);
+        if share >= 1.0 {
+            return;
+        }
+        self.gi_budget_ms *= share;
+        self.environment_interval =
+            ((self.environment_interval.max(1) as f32 / share).round() as u32).max(1);
     }
 }
 
@@ -1137,6 +1269,84 @@ fn ray_sphere(origin: DVec3, dir: DVec3, center: DVec3, radius: f64) -> Option<(
     }
     let s = h.sqrt();
     Some((-b - s, -b + s))
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    #[test]
+    fn pacing_is_off_by_default_and_at_the_pacing_rate() {
+        let mut p = FramePacing::default();
+        for _ in 0..200 {
+            p.advance(1.0 / 120.0, 0.0);
+        }
+        assert_eq!(p.share, 1.0, "off: every frame does all of it");
+        let mut p = FramePacing::default();
+        for _ in 0..200 {
+            p.advance(1.0 / 30.0, 30.0);
+        }
+        assert!((p.share - 1.0).abs() < 1e-3);
+        for _ in 0..200 {
+            p.advance(1.0 / 20.0, 30.0);
+        }
+        assert_eq!(
+            p.share, 1.0,
+            "never more than a frame's worth below the rate"
+        );
+    }
+
+    #[test]
+    fn a_second_holds_the_same_work_at_any_rate() {
+        for fps in [60.0f32, 90.0, 120.0] {
+            let mut p = FramePacing::default();
+            for _ in 0..(fps as usize * 4) {
+                p.advance(1.0 / fps, 30.0);
+            }
+            assert!(
+                (p.share * fps - 30.0).abs() < 0.5,
+                "{fps} fps: {} frames' worth a second",
+                p.share * fps
+            );
+        }
+        let mut p = FramePacing::default();
+        for _ in 0..2000 {
+            p.advance(1.0 / 500.0, 30.0);
+        }
+        assert_eq!(p.share, 0.25, "no less than a quarter a frame");
+    }
+
+    #[test]
+    fn one_slow_frame_barely_moves_the_share() {
+        let mut p = FramePacing::default();
+        for _ in 0..600 {
+            p.advance(1.0 / 120.0, 30.0);
+        }
+        let before = p.share;
+        p.advance(0.1, 30.0);
+        assert!(p.share < before + 0.02, "{before} -> {}", p.share);
+        // A rate that stays low does bring it up, within a second or two.
+        let mut t = 0.0;
+        while p.share < 0.99 && t < 5.0 {
+            p.advance(1.0 / 30.0, 30.0);
+            t += 1.0 / 30.0;
+        }
+        assert!(t < 2.5, "back to a full frame's work after {t} s at 30 fps");
+    }
+
+    #[test]
+    fn paced_settings_trace_less_and_draw_the_environment_less_often() {
+        let base = RenderSettings::default();
+        let mut s = base.clone();
+        s.paced(1.0);
+        assert_eq!(s, base);
+        s.paced(0.5);
+        assert!((s.gi_budget_ms - base.gi_budget_ms * 0.5).abs() < 1e-6);
+        assert_eq!(s.environment_interval, base.environment_interval * 2);
+        let mut s = base.clone();
+        s.paced(0.25);
+        assert_eq!(s.environment_interval, base.environment_interval * 4);
+    }
 }
 
 #[cfg(test)]

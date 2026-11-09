@@ -161,8 +161,8 @@ pub use renderer::{
 };
 pub use rock::{StoneFinish, StoneKind, WallStone, wall_stone};
 pub use settings::{
-    AntiAliasing, Atmosphere, DebugView, FogSettings, PipelineWarmup, Pipelining, RenderSettings,
-    TextureCompression, Tonemapper, VolumetricQuality,
+    AntiAliasing, Atmosphere, DebugView, FogSettings, FramePacing, PipelineWarmup, Pipelining,
+    RenderSettings, TextureCompression, Tonemapper, VolumetricQuality,
 };
 pub use skinning::{GpuSkin, SkinBlend, SkinBone, SkinWeights};
 pub use sprites::{
@@ -221,6 +221,7 @@ impl Plugin for RenderPlugin {
                 ..Default::default()
             })
             .init_resource::<FogSettings>()
+            .init_resource::<FramePacing>()
             .init_resource::<Atmosphere>()
             .init_resource::<AmbientLight>()
             .init_resource::<Screenshots>()

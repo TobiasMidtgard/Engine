@@ -205,6 +205,66 @@ struct ReprojectUniform {
 /// The pixel of each 2x2 block marched on each frame of four: diagonals first, so two frames
 /// already cover the block evenly.
 const BLOCK_ORDER: [(f32, f32); 4] = [(0.0, 0.0), (1.0, 1.0), (1.0, 0.0), (0.0, 1.0)];
+/// The same for 3x3 blocks: each next pixel far from the last ones.
+const BLOCK_ORDER_3: [(f32, f32); 9] = [
+    (0.0, 0.0),
+    (2.0, 1.0),
+    (1.0, 2.0),
+    (1.0, 0.0),
+    (0.0, 2.0),
+    (2.0, 2.0),
+    (0.0, 1.0),
+    (2.0, 0.0),
+    (1.0, 1.0),
+];
+/// And for 4x4 blocks: the order of a Bayer matrix, so any four frames in a row cover the
+/// block evenly.
+const BLOCK_ORDER_4: [(f32, f32); 16] = [
+    (0.0, 0.0),
+    (2.0, 2.0),
+    (2.0, 0.0),
+    (0.0, 2.0),
+    (1.0, 1.0),
+    (3.0, 3.0),
+    (3.0, 1.0),
+    (1.0, 3.0),
+    (1.0, 0.0),
+    (3.0, 2.0),
+    (3.0, 0.0),
+    (1.0, 2.0),
+    (0.0, 1.0),
+    (2.0, 3.0),
+    (2.0, 1.0),
+    (0.0, 3.0),
+];
+
+/// The largest block side (`CloudSettings::temporal_side`).
+const MAX_BLOCK_SIDE: u32 = 4;
+
+/// The block pixel marched on frame `frame` with blocks `side` pixels a side.
+fn block_offset(side: u32, frame: u32) -> (f32, f32) {
+    let order: &[(f32, f32)] = match side {
+        2 => &BLOCK_ORDER,
+        3 => &BLOCK_ORDER_3,
+        4 => &BLOCK_ORDER_4,
+        _ => return (0.0, 0.0),
+    };
+    order[frame as usize % order.len()]
+}
+
+/// The block side for a frame doing `share` of the work spread over frames
+/// (`engine_render::FramePacing::share`), given the side in use: the side whose block takes as
+/// long to march in full as a 2x2 block does at the pacing rate (2 / sqrt(share)), changed only
+/// once that is well past the next side, so a frame rate hovering between two doesn't switch
+/// back and forth.
+fn paced_side(share: f32, current: u32) -> u32 {
+    let ideal = 2.0 / share.clamp(0.25, 1.0).sqrt();
+    let current = current.clamp(2, MAX_BLOCK_SIDE);
+    if (ideal - current as f32).abs() <= 0.7 {
+        return current;
+    }
+    (ideal.round() as u32).clamp(2, MAX_BLOCK_SIDE)
+}
 
 /// The cloud shadow map's world-anchored cache (see `fs_cloud_shadow_update`).
 struct ShadowCache {
@@ -283,7 +343,8 @@ struct Targets {
     camera: Option<Entity>,
     /// The cloud image's size.
     size: (u32, u32),
-    /// Pixels per block side: 2 marches a quarter of the image each frame, 1 all of it.
+    /// Pixels per block side: 1 marches all of the image each frame, 2 a quarter, up to
+    /// `MAX_BLOCK_SIDE` (a sixteenth).
     side: u32,
     march: CloudImage,
     /// The reconstructed image, this frame's and last frame's (`current` is this frame's).
@@ -329,6 +390,31 @@ impl Targets {
                 resource: uniform.as_entire_binding(),
             }],
         });
+        let reproject_groups = Self::reproject_groups(device, g, &uniform, &march, &history);
+        Self {
+            camera,
+            size,
+            side,
+            march,
+            history,
+            current: 0,
+            frames: 0,
+            drawn: false,
+            exposure: 1.0,
+            uniform,
+            march_group,
+            reproject_groups,
+        }
+    }
+
+    /// The groups that read the march and `history[1 - i]`, for drawing `history[i]`.
+    fn reproject_groups(
+        device: &wgpu::Device,
+        g: &Gpu,
+        uniform: &wgpu::Buffer,
+        march: &CloudImage,
+        history: &[CloudImage; 2],
+    ) -> [wgpu::BindGroup; 2] {
         fn tex(binding: u32, t: &Target) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry {
                 binding,
@@ -353,21 +439,17 @@ impl Targets {
                 ],
             })
         };
-        let reproject_groups = [reproject_group(&history[1]), reproject_group(&history[0])];
-        Self {
-            camera,
-            size,
-            side,
-            march,
-            history,
-            current: 0,
-            frames: 0,
-            drawn: false,
-            exposure: 1.0,
-            uniform,
-            march_group,
-            reproject_groups,
-        }
+        [reproject_group(&history[1]), reproject_group(&history[0])]
+    }
+
+    /// March one pixel of blocks `side` a side from now on. The image so far stays: the next
+    /// frames reproject it as before, only the fresh samples come more thinly or more thickly.
+    fn set_side(&mut self, device: &wgpu::Device, g: &Gpu, side: u32) {
+        self.side = side;
+        self.march = CloudImage::new(device, "clouds march", self.march_size());
+        self.reproject_groups =
+            Self::reproject_groups(device, g, &self.uniform, &self.march, &self.history);
+        self.frames = 0;
     }
 
     fn march_size(&self) -> (u32, u32) {
@@ -422,6 +504,8 @@ pub struct CloudFeature {
     top_m: f32,
     shadow_request: Option<CloudShadowRequest>,
     shadow_cache: Option<ShadowCache>,
+    /// The block side the frame rate asked for last (`paced_side`).
+    paced_side: u32,
 }
 
 fn noise_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Texture {
@@ -536,8 +620,12 @@ impl CloudFeature {
         );
         let found = self.views.iter().position(|t| t.camera == view.camera);
         let targets = match found {
-            Some(i) if self.views[i].size == size && self.views[i].side == side => {
-                self.views.remove(i)
+            Some(i) if self.views[i].size == size => {
+                let mut targets = self.views.remove(i);
+                if targets.side != side {
+                    targets.set_side(device, g, side);
+                }
+                targets
             }
             found => {
                 if let Some(i) = found {
@@ -917,15 +1005,24 @@ impl RenderFeature for CloudFeature {
         } else {
             settings.resolution_scale
         };
-        let side = if settings.temporal { 2 } else { 1 };
+        let side = if !settings.temporal {
+            1
+        } else if settings.temporal_side >= 2 {
+            settings.temporal_side.min(MAX_BLOCK_SIDE)
+        } else {
+            // The main view follows the frame rate; mirrors and insets take its side.
+            if !view.extra_view {
+                let share = world
+                    .get_resource::<engine_render::FramePacing>()
+                    .map_or(1.0, |p| p.share);
+                self.paced_side = paced_side(share, self.paced_side);
+            }
+            self.paced_side
+        };
         self.ensure_targets(&gpu.device, view, scale, side);
         if let Some(t) = self.current.and_then(|i| self.views.get_mut(i)) {
             t.current = 1 - t.current;
-            let (ox, oy) = if t.side > 1 {
-                BLOCK_ORDER[t.frames as usize % BLOCK_ORDER.len()]
-            } else {
-                (0.0, 0.0)
-            };
+            let (ox, oy) = block_offset(t.side, t.frames);
             t.frames = t.frames.wrapping_add(1);
             let usable = t.drawn && view.history_valid;
             let ratio = view.exposure / t.exposure.max(1e-12);
@@ -1403,6 +1500,66 @@ impl RenderFeature for CloudFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_block_order_marches_each_pixel_once_a_round() {
+        for side in 2..=MAX_BLOCK_SIDE {
+            let n = side * side;
+            let mut seen = vec![false; n as usize];
+            for frame in 0..n {
+                let (x, y) = block_offset(side, frame);
+                assert!(
+                    x < side as f32 && y < side as f32,
+                    "side {side} frame {frame}"
+                );
+                let i = (y as u32 * side + x as u32) as usize;
+                assert!(!seen[i], "side {side}: pixel {x},{y} twice");
+                seen[i] = true;
+            }
+            assert_eq!(block_offset(side, n), block_offset(side, 0));
+        }
+        assert_eq!(block_offset(1, 7), (0.0, 0.0));
+    }
+
+    #[test]
+    fn four_frames_of_a_4x4_block_cover_each_of_its_quarters() {
+        for start in [0u32, 4, 8, 12] {
+            let mut quarters = [false; 4];
+            for frame in start..start + 4 {
+                let (x, y) = block_offset(4, frame);
+                quarters[(y as usize / 2) * 2 + x as usize / 2] = true;
+            }
+            assert_eq!(quarters, [true; 4], "frames {start}..{}", start + 4);
+        }
+    }
+
+    #[test]
+    fn the_block_side_follows_the_frame_rate_and_holds_between_two() {
+        // Pacing off, or at the pacing rate: a quarter a frame, as without pacing.
+        assert_eq!(paced_side(1.0, 0), 2);
+        assert_eq!(paced_side(1.0, 2), 2);
+        // 60 a second paced for 30: a ninth; 120: a sixteenth.
+        assert_eq!(paced_side(0.5, 2), 3);
+        assert_eq!(paced_side(0.25, 3), 4);
+        assert_eq!(paced_side(0.25, 2), 4);
+        // Back down when the rate falls.
+        assert_eq!(paced_side(1.0, 4), 2);
+        assert_eq!(paced_side(0.5, 4), 3);
+        // Hovering around a threshold keeps the side it has: 45 to 50 a second is between
+        // a quarter and a ninth.
+        for share in [0.6f32, 0.63, 0.66] {
+            assert_eq!(paced_side(share, 2), 2, "{share}");
+            assert_eq!(paced_side(share, 3), 3, "{share}");
+        }
+        // The whole image is marched again in at most 0.2 s at any rate from 30 a second up.
+        let mut side = 2;
+        for fps in 30..=240 {
+            let share = (30.0 / fps as f32).clamp(0.25, 1.0);
+            side = paced_side(share, side);
+            let refresh_s = (side * side) as f32 / fps as f32;
+            assert!(refresh_s <= 0.2, "{fps} fps: side {side}, {refresh_s} s");
+        }
+    }
 
     #[test]
     fn clouds_hand_over_to_a_far_layer_only_while_one_is_drawn() {

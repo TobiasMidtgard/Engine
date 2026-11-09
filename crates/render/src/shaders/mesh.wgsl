@@ -1072,6 +1072,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     }
     let mat = materials[in.material];
     let flags = mat.flags.x;
+    if (shade_skip(SKIP_MESH_SCENE) && (flags & 15u) == 0u) {
+        return vec4<f32>(0.2, 0.2, 0.2, 1.0);
+    }
     // Blended materials have no prepass: they ask for their virtual texture tiles here.
     vt_feedback_on = (flags & 15u) == 2u && vt_feedback_pixel(in.clip.xy);
     let m = evaluate_material(surface_in(in, front), true);
@@ -1256,6 +1259,9 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
         discard;
     }
     let mat = materials[in.material];
+    if (shade_skip(SKIP_MESH_PREPASS_MATERIAL) && (mat.flags.x & 15u) == 0u) {
+        return prepass_output(normalize(in.normal), 0.6, in.motion_now, in.motion_prev);
+    }
     vt_feedback_on = vt_feedback_pixel(in.clip.xy);
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
         mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, 0.0);
