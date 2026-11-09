@@ -78,11 +78,12 @@ Panels can look like objects, not flat rectangles (research and the reference ga
 - Fonts: `Style.font_family` inherits down the tree, `Theme.font_family` sets the body face,
   `[serif]` switches to the display face in markup. Built in: Inter, "Harbour Serif" (bold,
   black, small caps) and Alegreya Sans.
-- `IconLibrary::add_picture`: raster pictures (backgrounds, photos) drawn like icons.
+- `IconLibrary::add_picture` (or `add_picture_rgba` for pixels painted in code): raster
+  pictures (backgrounds, photos, a game's painted sea chart) drawn like icons.
 - `kit::brass`: an industrial-era kit of classes and builders (lacquer plates with brass
   frames, parchment cards and tooltips, cartouche, tiles, enamel medallions and badges, number
   wells, meters, dividers, labels, brass buttons). `kit::brass::install(&mut theme)` adds it.
-  Archipelago's HUD is built from it.
+  Archipelago's HUD (top bar, build bar, building card, map table, ledger) is built from it.
 
 `cargo run -p engine_ui --example kit -- <dir> [width] [height] [backdrop.png]` renders a
 strategy HUD made from the kit (`kit_brass.png`) in a few seconds, without a 3D scene.

@@ -19,6 +19,34 @@ fn grad(id: &str, a: &str, b: &str) -> String {
     )
 }
 
+/// A compass rose for the sea chart: eight points, the north one red.
+fn compass() -> String {
+    let mut b = String::from(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle cx="32" cy="32" r="22" fill="#f3e6c4" fill-opacity="0.55" stroke="#3a2814" stroke-width="1.2"/><circle cx="32" cy="32" r="18.5" fill="none" stroke="#3a2814" stroke-width="0.7" stroke-dasharray="1.6 1.6"/>"##,
+    );
+    for (deg, long) in [
+        (45, false),
+        (135, false),
+        (225, false),
+        (315, false),
+        (0, true),
+        (90, true),
+        (180, true),
+        (270, true),
+    ] {
+        let (tip, side) = if long { (2.0, 5.0) } else { (14.0, 3.6) };
+        let dark = if deg == 0 { "#9a2f1c" } else { "#3a2814" };
+        b += &format!(
+            r##"<g transform="rotate({deg} 32 32)"><path d="M32 {tip} L32 32 L{l} {s} Z" fill="{dark}"/><path d="M32 {tip} L{r} {s} L32 32 Z" fill="#efe0b8" stroke="#3a2814" stroke-width="0.6" stroke-linejoin="round"/></g>"##,
+            l = 32.0 - side,
+            r = 32.0 + side,
+            s = 32.0 - side,
+        );
+    }
+    b += r##"<circle cx="32" cy="32" r="3.2" fill="#c89a3a" stroke="#3a2814" stroke-width="0.8"/></svg>"##;
+    b
+}
+
 /// The painted goods and buildings.
 const PAINTED: &[(&str, &str)] = &[
     ("isle_logs", include_str!("../assets/icons/isle_logs.svg")),
@@ -113,6 +141,32 @@ pub fn all() -> Vec<(&'static str, String)> {
                 &grad("sp", "#5a4128", "#24170b"),
                 r##"<g stroke="#2a1708" stroke-width="11" stroke-linejoin="round" stroke-linecap="round"><path d="M17 17 L47 47 M47 17 L17 47"/></g><g stroke="url(#sp)" stroke-width="5.5" stroke-linecap="round"><path d="M17 17 L47 47 M47 17 L17 47"/></g>"##,
             ),
+        ),
+        (
+            "isle_ledger",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round"><path d="M6 17 Q19 10 31 17 L31 54 Q19 47 6 54 Z" fill="url(#sp)"/><path d="M33 17 Q45 10 58 17 L58 54 Q45 47 33 54 Z" fill="url(#sp)"/></g><g stroke="#f0dfb4" stroke-width="1.8" stroke-linecap="round" fill="none" opacity="0.85"><path d="M11 25 Q19 21 27 25 M11 32 Q19 28 27 32 M11 39 Q19 35 27 39"/><path d="M37 25 Q45 21 53 25 M37 32 Q45 28 53 32 M37 39 Q45 35 53 39"/></g>"##,
+            ),
+        ),
+        (
+            "isle_home",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round"><path d="M7 33 L32 10 L57 33 L50 33 L50 55 L14 55 L14 33 Z" fill="url(#sp)"/><path d="M42 18 L42 10 L48 10 L48 24 Z" fill="url(#sp)"/></g><path d="M27 55 L27 42 Q32 37 37 42 L37 55 Z" fill="#f0dfb4" opacity="0.9"/>"##,
+            ),
+        ),
+        (
+            "isle_mark_ship",
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="M32 2 C44 16 46 36 43 62 L21 62 C18 36 20 16 32 2 Z" fill="#f6ead0"/><path d="M32 9 C40 20 41 36 39 56 L25 56 C23 36 24 20 32 9 Z" fill="#2a1a0a"/><path d="M32 22 L32 48" stroke="#f6ead0" stroke-width="3"/></svg>"##.to_string(),
+        ),
+        (
+            "isle_mark_airship",
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><ellipse cx="32" cy="30" rx="15" ry="29" fill="#f6ead0"/><path d="M20 50 L12 62 L26 56 Z M44 50 L52 62 L38 56 Z" fill="#f6ead0"/><ellipse cx="32" cy="30" rx="10" ry="24" fill="#2c4a66"/><path d="M23 48 L17 57 L27 53 Z M41 48 L47 57 L37 53 Z" fill="#2c4a66"/><path d="M32 10 L32 50" stroke="#a9c3d6" stroke-width="2.5"/></svg>"##.to_string(),
+        ),
+        (
+            "isle_compass",
+            compass(),
         ),
         (
             "isle_arrow",

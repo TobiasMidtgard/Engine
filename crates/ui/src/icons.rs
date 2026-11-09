@@ -109,6 +109,14 @@ impl IconLibrary {
         self.pictures.insert(name.to_string(), Arc::new(image));
     }
 
+    /// [`IconLibrary::add_picture`] from straight-alpha sRGB RGBA8 pixels, `w`×`h` (for callers
+    /// that paint pictures in code without the `image` crate). Wrong sizes are ignored.
+    pub fn add_picture_rgba(&mut self, name: &str, w: u32, h: u32, pixels: Vec<u8>) {
+        if let Some(img) = image::RgbaImage::from_raw(w, h, pixels) {
+            self.add_picture(name, img);
+        }
+    }
+
     /// Rasterize `name` to fit `w`×`h` (aspect kept). Returns the bitmap size and straight-alpha
     /// sRGB RGBA8 pixels.
     pub fn rasterize(

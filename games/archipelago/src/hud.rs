@@ -6,7 +6,8 @@
 //! The look of these is the UI thread's; what the buttons do, and the hand on the map, are in
 //! `tools.rs`. Between the two: the `isle.*` actions the buttons send (`tools::action`), the
 //! `isle.*` values in `UiData` filled by [`update_data`], and [`show_card`], [`tool_changed`]
-//! and [`complain`].
+//! and [`complain`]. The map table (`hud/map.rs`) and the ledger (`hud/ledger.rs`) are parts
+//! of it.
 
 use bevy_ecs::message::MessageCursor;
 use engine::prelude::*;
@@ -23,6 +24,9 @@ use crate::defs::{Category, DEFS, Good, Kind};
 use crate::island;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::tools::{Hand, Tool};
+
+mod ledger;
+mod map;
 
 /// The bars' own state between frames.
 #[derive(Resource, Default)]
@@ -41,6 +45,7 @@ pub struct Hud {
 const TOP: &str = "isle_top";
 const BAR: &str = "isle_bar";
 const INFO: &str = "isle_info";
+const MAP: &str = "isle_map";
 
 /// Game speeds the medallions set, with their icons.
 const SPEEDS: [(f32, &str, &str); 4] = [
@@ -546,6 +551,23 @@ pub fn setup(world: &mut World) {
     if let Err(e) = screens::spawn_screen(world, hud_screen(BAR, 0), &build_bar(2, tool)) {
         engine::core::log::warn!("archipelago build bar: {e}");
     }
+    map::install(world);
+    if let Err(e) = screens::spawn_screen(world, hud_screen(MAP, 0), &map::panel()) {
+        engine::core::log::warn!("archipelago map table: {e}");
+    }
+    ledger::install(world);
+    // `--hud-ledger`: run the economy ahead a few game minutes, keeping the books, then open
+    // the ledger (tour screenshots of it with real history).
+    if std::env::args().any(|a| a == "--hud-ledger") {
+        for _ in 0..60 {
+            crate::town::prewarm(world, 10.0);
+            let econ = world.resource::<Economy>().clone();
+            world.resource_mut::<ledger::Ledger>().record(&econ);
+        }
+        let isle = world.resource::<Hud>().island;
+        ledger::show(world, Some(isle));
+        ledger::update(world);
+    }
 }
 
 /// The tool changed: show it selected in the build bar.
@@ -595,7 +617,10 @@ pub fn read_actions(world: &mut World) {
     let events = engine_ui::input::read_events(world, &mut seen);
     world.resource_mut::<Hud>().seen = seen;
     for ev in events {
-        let UiEvent::Action { action: a, .. } = ev else {
+        let UiEvent::Action {
+            action: a, entity, ..
+        } = ev
+        else {
             continue;
         };
         if let Some(i) = a
@@ -604,10 +629,57 @@ pub fn read_actions(world: &mut World) {
         {
             world.resource_mut::<Hud>().category = i.min(Category::ALL.len() - 1);
             refresh_items(world);
+        } else if let Some(i) = a
+            .strip_prefix("isle.led:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            ledger::show(world, Some(i.min(island::islands().len() - 1)));
+            ledger::update(world);
+        } else if a == "isle.ledger" {
+            toggle_ledger(world);
+        } else if a == "isle.map" {
+            map::clicked(world, entity);
+        } else if a == "isle.home" {
+            map::home(world);
         } else {
             crate::tools::action(world, &a);
         }
         update_data_now(world);
+    }
+}
+
+/// Open the ledger on the island in view, or close it.
+fn toggle_ledger(world: &mut World) {
+    if world.resource::<ledger::Ledger>().open {
+        ledger::show(world, None);
+    } else {
+        let isle = world.resource::<Hud>().island;
+        ledger::show(world, Some(isle));
+        ledger::update(world);
+    }
+}
+
+/// The HUD's own keys: L opens the ledger, H goes home, Esc closes the ledger.
+fn read_keys(world: &mut World) {
+    let typing = world
+        .get_resource::<engine_ui::UiInputCapture>()
+        .is_some_and(|c| c.keyboard);
+    if typing {
+        return;
+    }
+    let Some(keys) = world.get_resource::<ButtonInput<KeyCode>>() else {
+        return;
+    };
+    let (l, h, esc) = (
+        keys.just_pressed(KeyCode::L),
+        keys.just_pressed(KeyCode::H),
+        keys.just_pressed(KeyCode::Escape),
+    );
+    if l || (esc && world.resource::<ledger::Ledger>().open) {
+        toggle_ledger(world);
+    }
+    if h {
+        map::home(world);
     }
 }
 
@@ -788,6 +860,16 @@ fn update_data_now(world: &mut World) {
             }
         }
     }
+    let (ships, airships) = {
+        let mut q = world.query::<&crate::fleet::Vessel>();
+        q.iter(world).fold((0, 0), |(s, a), v| {
+            if v.craft == crate::vessels::Craft::Airship {
+                (s, a + 1)
+            } else {
+                (s + 1, a)
+            }
+        })
+    };
     let total: f32 = econ.islands.iter().map(population).sum();
     let books = &econ.islands[isle];
     let category = world.get_resource::<Hud>().map_or(2, |h| h.category);
@@ -819,6 +901,14 @@ fn update_data_now(world: &mut World) {
                 format!("{:.0}", books.get(g)),
             );
         }
+        data.set(
+            "isle.map_note",
+            format!(
+                "{ships} {} · {airships} {} aloft",
+                if ships == 1 { "ship" } else { "ships" },
+                if airships == 1 { "airship" } else { "airships" }
+            ),
+        );
         data.set("isle.clock", clock(econ.clock_s));
         data.set("isle.season", season(econ.clock_s));
         data.set(
@@ -877,9 +967,11 @@ pub fn update_data(world: &mut World) {
         h.refresh -= dt;
         h.refresh <= 0.0
     };
+    read_keys(world);
     if due {
         world.resource_mut::<Hud>().refresh = 0.2;
         update_data_now(world);
+        ledger::update(world);
     }
     demo_step(world, dt);
 }
@@ -891,7 +983,7 @@ fn demo_step(world: &mut World, dt: f32) {
     };
     let t = t + dt;
     world.resource_mut::<Hud>().demo = Some(t);
-    if t > 2.0 && !world.resource::<Hud>().info_open {
+    if t > 2.0 && !world.resource::<Hud>().info_open && !world.resource::<ledger::Ledger>().open {
         let weaver = {
             let mut q = world.query::<(Entity, &Building)>();
             q.iter(world)
