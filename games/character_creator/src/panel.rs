@@ -87,14 +87,14 @@ pub fn setup(world: &mut World) {
             })
             .child(El::text("Character creator").class("title"))
             .child(El::text("{creator_status}").class("caption"))
+            .child(button_row(&[
+                ("Undo".to_string(), "creator.undo".to_string()),
+                ("Redo".to_string(), "creator.redo".to_string()),
+            ]))
             .child(button_row(
-                &[
-                    ("Undo".to_string(), "creator.undo".to_string()),
-                    ("Redo".to_string(), "creator.redo".to_string()),
-                ]
-                .into_iter()
-                .chain((1..=SLOTS).map(|i| (format!("Save {i}"), format!("creator.save:{i}"))))
-                .collect::<Vec<_>>(),
+                &(1..=SLOTS)
+                    .map(|i| (format!("Save {i}"), format!("creator.save:{i}")))
+                    .collect::<Vec<_>>(),
             ))
             .child(button_row(
                 &(1..=SLOTS)
@@ -766,7 +766,17 @@ pub fn sync(world: &mut World) {
     if last_pose != pose {
         let value = serde_json::to_value(&pose).unwrap_or(Value::Null);
         world.resource_mut::<UiData>().set("creator_pose", value);
-        world.resource_mut::<CreatorUi>().last_pose = pose.clone();
+        // Chips (base pose, mirror, hand shapes) aren't bound to the data: a pose changed
+        // outside the sliders (a load, undo, a shot's design) rebuilds the panel to show them.
+        let chips = |p: &Option<PoseEdit>| {
+            p.as_ref()
+                .map(|p| (p.base.clone(), p.mirror, p.moving, p.hands))
+        };
+        let mut ui = world.resource_mut::<CreatorUi>();
+        if chips(&last_pose) != chips(&pose) {
+            ui.rebuild = true;
+        }
+        ui.last_pose = pose.clone();
     } else if version != data_version
         && let Some(current_pose) = &pose
     {
