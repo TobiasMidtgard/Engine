@@ -83,6 +83,10 @@ pub struct MagicCaster {
     pub side: u32,
     /// Where the hand is, in the caster's local frame (x right, y up, −z forward), m.
     pub hand: Vec3,
+    /// Casts leave from the off hand, the one not holding the weapon (aimed-melee.md 3.7,
+    /// "weapon + magic"): from its bone when the body has a `SkeletonPose`, else from `hand`
+    /// mirrored. A body whose `Loadout` holds a spell focus in its off hand casts from it too.
+    pub off_hand: bool,
     /// Gains skill from casting.
     pub learns: bool,
     /// Never fizzles or backfires: a focus that shows a spell as it flies (the Spellcrafter's
@@ -107,6 +111,7 @@ impl Default for MagicCaster {
             selected: 0,
             side: 0,
             hand: Vec3::new(0.25, 1.35, -0.45),
+            off_hand: false,
             learns: true,
             steady: false,
             seed: 1,
@@ -309,6 +314,11 @@ pub struct CastRequest {
     /// The charge was already gathered (a held key on the spell bar): release after the
     /// spell's plain cast time, not again for the charge.
     pub gathered: bool,
+    /// Cast from the off hand this once (a weapon in the main hand: aimed-melee.md 3.7,
+    /// "weapon + magic"); a body with [`MagicCaster::off_hand`] or a spell focus in its off
+    /// hand always does. A heavy attack's charged cast is an off-hand cast with the heavy's
+    /// charge as `charge` and `gathered` set: power × (1 + charge), released at once.
+    pub off_hand: bool,
 }
 
 /// A subclass reached a new mastery tier.
@@ -349,6 +359,11 @@ pub struct Casting {
     pub release_at: f32,
     /// Recast pending from Echo (seconds until it fires).
     pub echo_in: Option<f32>,
+    /// It leaves from the off hand ([`CastRequest::off_hand`]).
+    pub off_hand: bool,
+    /// Where the aimed body was last seen while it gathered (it goes there if the body is gone
+    /// when it releases).
+    pub seen_at: Option<DVec3>,
 }
 
 #[cfg(test)]

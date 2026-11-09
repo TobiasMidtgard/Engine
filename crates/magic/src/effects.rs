@@ -66,6 +66,10 @@ pub enum EffectKind {
     Command,
     /// A creature attacks whatever is near, friend or foe (minds.rs).
     Wrath,
+    /// A sword of hard light (Shaping's conjured blade, blades.rs): the cast type makes it a
+    /// flying glintblade, a phalanx over the head, a bladefall, a spirit blade that fights
+    /// beside its caster or a blade in the hand.
+    Blade,
 }
 
 /// One entry of the effect catalog.
@@ -111,6 +115,7 @@ impl EffectDef {
             EffectKind::Phantasm => Dials::pole(Pole::Veil, 0.7) + Dials::pole(Pole::Form, 0.5),
             EffectKind::Command => Dials::pole(Pole::Reveal, 0.8) + Dials::pole(Pole::Pull, 0.4),
             EffectKind::Wrath => Dials::pole(Pole::Veil, 0.6) + Dials::pole(Pole::Heat, 0.4),
+            EffectKind::Blade => Dials::pole(Pole::Push, 0.8) + Dials::pole(Pole::Form, 0.5),
         }
     }
 
@@ -136,6 +141,7 @@ impl EffectDef {
                 | EffectKind::Fear
                 | EffectKind::Command
                 | EffectKind::Wrath
+                | EffectKind::Blade
                 | EffectKind::Force { .. }
                 | EffectKind::TimeScale { factor: ..1.0 }
         )
@@ -293,6 +299,15 @@ pub const EFFECTS: &[EffectDef] = &[
         "Take hold of a thing with force: it comes to your hand and floats there while you hold \
          the spell; let go and it flies where you aim. With nothing in reach it tears a stone \
          out of the ground.",
+    ),
+    def(
+        "blade",
+        "Conjured blade",
+        Subclass::Shaping,
+        EffectKind::Blade,
+        "A sword of hard light: thrown it flies point first, as an orbit it waits over your \
+         head and strikes what comes near, as a rain blades fall along your aim, summoned it \
+         fights beside you, on yourself it is in your hand.",
     ),
     // Vitalism: healing and wards.
     def(

@@ -22,6 +22,7 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::MeshRenderer;
 use engine_world::animation::{AnimationTrigger, SkeletonPose};
+use engine_world::combat::{ItemClass, Loadout};
 use engine_world::physics::{
     BodyKind, CharacterController, ColliderShape, PhysicsQueries, QueryFilter, RigidBody,
 };
@@ -284,6 +285,11 @@ pub struct MagicQueue {
     pub phantasms: Vec<crate::minds::NewPhantasm>,
     /// Creatures taken by Command or Wrath (minds.rs).
     pub minds: Vec<crate::minds::MindCmd>,
+    /// Conjured blades to make: a phalanx, a bladefall, spirit blades, a blade in the hand
+    /// (blades.rs).
+    pub blades: Vec<crate::blades::NewBlades>,
+    /// Imbues to put on their casters' weapons and creatures (blades.rs).
+    pub imbues: Vec<CastInfo>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -307,6 +313,34 @@ pub fn roll(seed: u64, salt: u64) -> f32 {
 /// The caster's hand in the world.
 pub fn hand_of(t: &GlobalTransform, caster: &MagicCaster) -> DVec3 {
     t.translation() + (t.rotation() * caster.hand).as_dvec3()
+}
+
+/// Casting from the off hand: the caster says so, or holds a spell focus there with a weapon
+/// in the other (aimed-melee.md 3.7, "weapon + magic").
+pub fn casts_off_hand(caster: &MagicCaster, loadout: Option<&Loadout>) -> bool {
+    caster.off_hand || loadout.is_some_and(|l| l.off == ItemClass::SpellFocus)
+}
+
+/// Where a cast leaves: [`hand_of`], or for an off-hand cast (`off`, or [`casts_off_hand`])
+/// the off hand's bone (`hand_l`) when the body has a pose, else the hand mirrored.
+pub fn cast_hand(
+    t: &GlobalTransform,
+    caster: &MagicCaster,
+    pose: Option<&SkeletonPose>,
+    loadout: Option<&Loadout>,
+    off: bool,
+) -> DVec3 {
+    if !off && !casts_off_hand(caster, loadout) {
+        return hand_of(t, caster);
+    }
+    if let Some(p) = pose
+        && let Some(i) = p.index_of("hand_l")
+        && let Some((at, _)) = p.bone_world(t, i)
+    {
+        return at;
+    }
+    let h = caster.hand;
+    t.translation() + (t.rotation() * Vec3::new(-h.x, h.y, h.z)).as_dvec3()
 }
 
 /// Velocity that lobs from `from` to `to` at `speed` under gravity `g` (the low arc), or a 45°
@@ -414,6 +448,8 @@ pub fn begin_casts(
             t: 0.0,
             release_at,
             echo_in: None,
+            off_hand: r.off_hand,
+            seen_at: None,
         };
         if let Ok(mut c) = started.get_mut(r.caster) {
             *c = casting;
@@ -463,6 +499,7 @@ pub fn advance_casts(
         Option<&LocalTimeScale>,
         Option<&mut Vitality>,
         Option<&Faction>,
+        (Option<&SkeletonPose>, Option<&Loadout>),
     )>,
     targets: Query<&GlobalTransform>,
     queries: Res<PhysicsQueries>,
@@ -473,7 +510,7 @@ pub fn advance_casts(
     mut gains: MessageWriter<crate::caster::MasteryGained>,
     mut counter: Local<u64>,
 ) {
-    for (e, mut caster, mut casting, t, local, vitality, faction) in &mut casters {
+    for (e, mut caster, mut casting, t, local, vitality, faction, (pose, loadout)) in &mut casters {
         let dt = time.delta_for(local);
         if let Some(echo) = casting.echo_in.as_mut() {
             *echo -= dt;
@@ -482,13 +519,18 @@ pub fn advance_casts(
             }
         } else {
             casting.t += dt;
+            if let Aim::Entity(target) = casting.aim
+                && let Ok(g) = targets.get(target)
+            {
+                casting.seen_at = Some(g.translation() + DVec3::Y * 1.0);
+            }
             if casting.t < casting.release_at {
                 continue;
             }
         }
         let echo = casting.echo_in.is_some();
         let spell = casting.spell.clone();
-        let hand = hand_of(t, &caster);
+        let hand = cast_hand(t, &caster, pose, loadout, casting.off_hand);
         *counter += 1;
         let seed = caster.seed ^ counter.wrapping_mul(0x2545_f491_4f6c_dd1d);
         // Aim: a direction from the hand.
@@ -499,9 +541,12 @@ pub fn advance_casts(
                 hand + (d.normalize_or(Vec3::NEG_Z) * reach).as_dvec3()
             }
             Aim::Point(p) => p,
+            // A body gone while the spell gathered (killed by another): where it was last.
             Aim::Entity(target) => targets
                 .get(target)
                 .map(|g| g.translation() + DVec3::Y * 1.0)
+                .ok()
+                .or(casting.seen_at)
                 .unwrap_or(hand + DVec3::NEG_Z * 10.0),
         };
         let target = match casting.aim {
@@ -670,6 +715,44 @@ pub fn release(
             target,
         });
         return;
+    }
+    // Imbue: the spell rides on its caster's weapon and its creatures' (blades.rs).
+    if spell.cast == CastType::Imbue {
+        queue.imbues.push(info.clone());
+        return;
+    }
+    // Conjured blades (blades.rs): an arch over the head, a fall along the aim, spirit blades
+    // beside the caster, a blade in the hand. A bolt of blades is a missile like any other,
+    // with a sword drawn on it (a glintblade).
+    if spell.payload.blades > 0 {
+        let shape = match spell.cast {
+            CastType::Orbit => Some(crate::blades::BladeShape::Phalanx),
+            CastType::Rain => Some(crate::blades::BladeShape::Fall),
+            CastType::Summon => Some(crate::blades::BladeShape::Spirit),
+            CastType::OnSelf => Some(crate::blades::BladeShape::Bound),
+            _ => None,
+        };
+        if let Some(shape) = shape {
+            let aim = if shape == crate::blades::BladeShape::Fall {
+                ground_below(queries, aim_point, &exclude)
+            } else {
+                aim_point
+            };
+            queue.blades.push(crate::blades::NewBlades {
+                cast: info.clone(),
+                shape,
+                hand,
+                body: if shape == crate::blades::BladeShape::Fall {
+                    ground_below(queries, body, &exclude)
+                } else {
+                    body
+                },
+                facing: flat,
+                aim,
+                target,
+            });
+            return;
+        }
     }
     // A summon stands where the caster points, within its range: a golem, an elemental or a
     // wisp, by its weave (summon.rs). A weave that makes no creature casts as an area.
@@ -2480,12 +2563,24 @@ pub fn flush(
         let id = ec.id();
         match s {
             Spawn::Missile(m, _) => {
+                // A glintblade: the sword is drawn on the missile, its element a trail
+                // behind it (half a bolt's look, so the blade reads).
+                let blade = m.cast.spell.payload.blades > 0;
+                if blade {
+                    ec.insert(crate::blades::BladeRide {
+                        length: m.cast.spell.payload.blade_m.max(0.5),
+                        color: m.cast.spell.weave.color,
+                        drawn: None,
+                        broke: false,
+                    });
+                }
                 looks.push(LookCmd::Attach {
                     entity: id,
                     look: m.cast.spell.weave.key.clone(),
                     role: Role::Bolt,
                     scale: (m.cast.spell.carrier.radius / 0.16 * m.cast.scale.sqrt())
-                        .clamp(0.2, 30.0),
+                        .clamp(0.2, 30.0)
+                        * if blade { 0.5 } else { 1.0 },
                     color: m.cast.spell.weave.color,
                     power_j: m.cast.spell.power.energy_j as f32 * m.cast.scale,
                 });

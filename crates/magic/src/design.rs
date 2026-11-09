@@ -120,10 +120,9 @@ impl CastType {
         )
     }
 
-    /// The engine runs it. Imbue (it needs the combat module's weapons) is still data only and
-    /// casts as a touch.
+    /// The engine runs it (every cast type does since Imbue rides on weapons, round 14).
     pub fn runs(self) -> bool {
-        !matches!(self, CastType::Imbue)
+        true
     }
 
     /// Base mana of a spell of this form at the caster's own power.

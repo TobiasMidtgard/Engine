@@ -24,6 +24,7 @@
 //! | `spells_shield` | shields you hold: one under a fire barrage cracks, flickers and shatters (its holder staggers), then regrows after a second; another raised just in time sends bolts back at the battle mage who cast them, then holds a fire shield into a flame jet ([`shield`], [`crate::wards`]) |
 //! | `spells_cataclysm` | Cataclysm: a burning meteor on a dummy among crates (its ring, the fall, the blast, a burning crater that cools), a Master's swarm of five, and fault lines that run down a lane throwing its dummies, then burst again ([`cataclysm`], [`crate::cataclysm`]) |
 //! | `spells_minds` | minds: necromancers raise a golem and skeletons; students answer with three decoys the skeletons cut into glass, a mirror image on the dais, a terror wave that sends the dead running, a frenzy that turns them on each other, and a command that turns the golem on its own side ([`minds`], [`crate::minds`]) |
+//! | `spells_blades` | spellblades: necromancers imbue their golem and skeletons with fire (blades and fists burn, every cut sets fire); students answer with a phalanx of five swords over a head that loose themselves at the dead, two spirit blades that fence with skeletons, fans of glintblades at the golem, frost bladefalls down the line of the dead, and a bound blade in the hand ([`blades`], [`crate::blades`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -31,6 +32,7 @@
 //! The mages only cast while a camera is within 160 m, so the hall costs nothing elsewhere.
 
 pub mod art;
+pub mod blades;
 pub mod cataclysm;
 pub mod craft;
 pub mod duel;
@@ -264,6 +266,18 @@ pub const VIEWS: &[DemoView] = &[
         // The skeletons at the decoys, the mirror image standing on the dais.
         warmup: 6.0,
     },
+    DemoView {
+        key: "spells_blades",
+        name: "Spellblades: a phalanx, spirit blades, glintblades and a bladefall against burning dead",
+        // From the floor's far left, across it toward the dais: the students' plinths on the
+        // left, the burning dead coming in from the right, the phalanx over lane 2's head and
+        // the spirit blades fencing mid-floor.
+        eye: [-3.5, 4.4, -8.0],
+        target: [-3.5, 1.3, 6.0],
+        hour: 16.6,
+        // The phalanx loosing at the first of the dead, the spirit blades at them.
+        warmup: 6.4,
+    },
 ];
 
 /// What the hall is running.
@@ -290,10 +304,11 @@ pub enum Program {
     Shield,
     Cataclysm,
     Minds,
+    Blades,
 }
 
 impl Program {
-    pub const ALL: [Program; 19] = [
+    pub const ALL: [Program; 20] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -313,6 +328,7 @@ impl Program {
         Program::Shield,
         Program::Cataclysm,
         Program::Minds,
+        Program::Blades,
     ];
 
     pub fn key(self) -> &'static str {
@@ -336,6 +352,7 @@ impl Program {
             Program::Shield => "spells_shield",
             Program::Cataclysm => "spells_cataclysm",
             Program::Minds => "spells_minds",
+            Program::Blades => "spells_blades",
         }
     }
 
@@ -376,6 +393,8 @@ impl Program {
             Program::Cataclysm => cataclysm::PERIOD,
             // The dead last 21.6 s and the command on the golem 12 s; the restart clears the rest.
             Program::Minds => minds::PERIOD,
+            // The dead last 21.6 s; the restart clears the blades still standing.
+            Program::Blades => blades::PERIOD,
         }
     }
 
@@ -933,6 +952,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
         Program::Shield => shield::lanes(),
         Program::Cataclysm => cataclysm::lanes(),
         Program::Minds => minds::lanes(),
+        Program::Blades => blades::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -997,7 +1017,10 @@ pub const WARD_BARRAGE_END: f32 = 13.0;
 
 /// Programs with two armies: students on the left plinths, necromancers on the right.
 fn two_sides(program: Program) -> bool {
-    matches!(program, Program::Dead | Program::Ward | Program::Minds)
+    matches!(
+        program,
+        Program::Dead | Program::Ward | Program::Minds | Program::Blades
+    )
 }
 
 /// The robes `spells_dead`'s students wear (green, blue, green), whatever they cast as.
@@ -1135,6 +1158,7 @@ fn setup_program(
         commands.queue(crate::space::clear);
         commands.queue(crate::cataclysm::clear);
         commands.queue(crate::minds::clear);
+        commands.queue(crate::blades::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -1258,6 +1282,7 @@ fn setup_program(
                 | Program::Portal
                 | Program::Shield
                 | Program::Minds
+                | Program::Blades
         ) {
             t.home - DVec3::Y * 40.0
         } else {
@@ -1479,6 +1504,7 @@ fn run_hall(
             | Program::Shield
             | Program::Cataclysm
             | Program::Minds
+            | Program::Blades
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
@@ -1571,6 +1597,7 @@ fn run_hall(
                 aim,
                 charge: 0.0,
                 gathered: false,
+                off_hand: false,
             });
         }
     }

@@ -232,6 +232,7 @@ fn cast(app: &mut App, caster: Entity, design: SpellDesign, aim: Aim) {
         aim,
         charge: 0.0,
         gathered: false,
+        off_hand: false,
     });
 }
 
@@ -3862,6 +3863,620 @@ fn the_minds_hall_fools_scares_maddens_and_turns_the_dead() {
         golem_on_skel > 0,
         "the commanded golem never struck a skeleton"
     );
+    assert!(
+        missed * 20 < looked,
+        "the fight left the picture {missed} of {looked} looks"
+    );
+}
+
+// ------------------------------------------------------------------------------- blades
+
+use engine_world::DamageKind;
+use engine_world::combat::{ItemClass, Loadout};
+
+/// A spirit blade that has just come into the world is a sphere to the stand-in physics.
+type NewSpirit = (Added<blades::Blade>, With<Vitality>, Without<Body>);
+
+fn bodies_for_blades(mut commands: Commands, q: Query<Entity, NewSpirit>) {
+    for e in &q {
+        commands.entity(e).insert(Body(0.3));
+    }
+}
+
+fn blade_app() -> App {
+    let mut a = minds_app();
+    a.world
+        .init_resource::<engine_assets::Assets<engine_render::Mesh>>();
+    a.add_systems(FixedUpdate, bodies_for_blades.in_set(SimSet::Physics));
+    a
+}
+
+fn blades_now(app: &mut App) -> Vec<(Entity, blades::Blade)> {
+    let mut q = app.world.query::<(Entity, &blades::Blade)>();
+    let mut v: Vec<_> = q.iter(&app.world).map(|(e, b)| (e, b.clone())).collect();
+    v.sort_by_key(|b| b.0);
+    v
+}
+
+fn shards(app: &mut App) -> usize {
+    let mut q = app.world.query_filtered::<(), With<wards::WardShard>>();
+    q.iter(&app.world).count()
+}
+
+fn blade(cast: CastType) -> SpellDesign {
+    SpellDesign::new(&["blade"], cast).named("Blade")
+}
+
+#[test]
+fn a_phalanx_stands_over_its_casters_head_and_looses_at_a_foe_that_comes_near() {
+    let mut app = blade_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let foe = dummy(&mut app, DVec3::new(0.0, 0.0, -30.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        blade(CastType::Orbit),
+        Aim::Point(DVec3::new(0.0, 0.0, -10.0)),
+    );
+    run(&mut app, 2.0);
+    let found = blades_now(&mut app);
+    // An Expert's phalanx: three blades in an arch over the head, waiting.
+    assert_eq!(found.len(), 3);
+    let mut xs: Vec<f64> = found.iter().map(|b| b.1.pos.x).collect();
+    xs.sort_by(f64::total_cmp);
+    assert!(xs[2] - xs[0] > 0.6, "spread along the arch: {xs:?}");
+    for (_, b) in &found {
+        assert_eq!(b.kind(), "phalanx");
+        assert!((1.8..3.2).contains(&b.pos.y), "{}", b.pos);
+        assert!(b.pos.x.abs() < 1.4 && b.pos.z.abs() < 1.2, "{}", b.pos);
+        assert!(b.left() > 20.0);
+    }
+    assert!(hits_on(&app, foe).is_empty(), "a foe 30 m off draws none");
+    // The foe comes within reach: the blades fly at it one after another and break on it.
+    app.world.get_mut::<Transform>(foe).unwrap().translation = DVec3::new(0.0, 0.0, -6.0);
+    let mut most_shards = 0;
+    let mut loosed_at = Vec::new();
+    for i in 0..150 {
+        app.update();
+        most_shards = most_shards.max(shards(&mut app));
+        let n = blades_now(&mut app).len();
+        if loosed_at.len() < 3 - n {
+            loosed_at.push(i);
+        }
+    }
+    assert!(blades_now(&mut app).is_empty(), "all three loosed");
+    assert!(
+        loosed_at.windows(2).all(|w| w[1] - w[0] >= 18),
+        "in turn, not at once: {loosed_at:?}"
+    );
+    let cuts = hits_on(&app, foe);
+    assert_eq!(cuts.len(), 3, "each blade struck once");
+    let seen = app.world.resource::<Seen>();
+    assert!(
+        seen.damage
+            .iter()
+            .filter(|d| d.target == foe)
+            .all(|d| d.kind == DamageKind::Slash && d.amount > 0.0 && d.source == Some(me))
+    );
+    assert!(
+        most_shards >= blades::BREAK_SHARDS as usize,
+        "{most_shards}"
+    );
+}
+
+#[test]
+fn a_glintblade_flies_point_first_and_breaks_into_shards_on_what_it_hits() {
+    let mut app = blade_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let foe = dummy(&mut app, DVec3::new(2.0, 0.0, -12.0));
+    run(&mut app, 0.1);
+    let fire = SpellDesign::new(&["blade", "fire"], CastType::Bolt).named("Fire glintblade");
+    cast(&mut app, me, fire, Aim::Entity(foe));
+    let mut drawn = 0;
+    let mut most_shards = 0;
+    for _ in 0..120 {
+        app.update();
+        let mut q = app
+            .world
+            .query::<(&blades::BladeRide, &runtime::Missile, &Transform)>();
+        for (r, m, t) in q.iter(&app.world) {
+            if r.drawn.is_some() && m.spent.is_none() && m.vel.length() > 1.0 {
+                drawn += 1;
+                // Its +Y (the blade's point) leads along its flight.
+                let up = t.rotation * Vec3::Y;
+                assert!(up.dot(m.vel.normalize()) > 0.95, "point first");
+                assert!(r.length > 0.8 && r.color[0] > r.color[2], "a fire blade");
+            }
+        }
+        most_shards = most_shards.max(shards(&mut app));
+    }
+    assert!(drawn > 5, "the sword was drawn on the bolt");
+    let cuts = hits_on(&app, foe);
+    assert_eq!(cuts.len(), 1);
+    assert!(cuts[0].damage > 0.0);
+    assert!(
+        most_shards >= blades::BREAK_SHARDS as usize,
+        "{most_shards}"
+    );
+    // A fire blade cuts with fire: it sets the foe burning.
+    let aff = app.world.get::<status::Afflictions>(foe).unwrap();
+    assert!(
+        aff.burning.active() || aff.gauges.iter().any(|g| g.element == Element::Fire),
+        "{aff:?}"
+    );
+}
+
+#[test]
+fn a_bladefall_drops_blades_down_its_line_that_cut_and_stick() {
+    let mut app = blade_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let near = dummy(&mut app, DVec3::new(0.0, 0.0, -4.6));
+    let aside = dummy(&mut app, DVec3::new(7.0, 0.0, -8.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        blade(CastType::Rain),
+        Aim::Point(DVec3::new(0.0, 0.0, -12.0)),
+    );
+    let mut most = 0;
+    let mut stuck_most = 0;
+    let mut grounds = Vec::new();
+    for _ in 0..150 {
+        app.update();
+        let now = blades_now(&mut app);
+        most = most.max(now.len());
+        let stuck = now
+            .iter()
+            .filter(|b| matches!(b.1.flight, blades::Flight::Stuck { .. }))
+            .count();
+        stuck_most = stuck_most.max(stuck);
+        for (_, b) in &now {
+            if let blades::Flight::Falling { ground } = b.flight {
+                grounds.push(ground);
+                // Point first, straight down.
+                assert!((b.rot * Vec3::Y).y < -0.95);
+            }
+        }
+    }
+    assert_eq!(most, 10, "ten blades");
+    assert!(stuck_most >= 8, "they stand in the floor: {stuck_most}");
+    // Down the line from the caster to the aim, a little either side.
+    assert!(
+        grounds
+            .iter()
+            .all(|g| g.x.abs() < 1.6 && (-12.6..-1.5).contains(&g.z))
+    );
+    let zs: Vec<f64> = grounds.iter().map(|g| g.z).collect();
+    let span =
+        zs.iter().cloned().fold(f64::MIN, f64::max) - zs.iter().cloned().fold(f64::MAX, f64::min);
+    assert!(span > 7.0, "{span}");
+    assert!(
+        !hits_on(&app, near).is_empty(),
+        "the dummy on the line was cut"
+    );
+    assert!(hits_on(&app, aside).is_empty(), "the one off it wasn't");
+    // They fade.
+    run(&mut app, 4.0);
+    assert!(blades_now(&mut app).is_empty());
+}
+
+#[test]
+fn spirit_blades_fight_skeletons_beside_their_caster_and_break_when_cut_down() {
+    let mut app = blade_app();
+    let (me, necro) = two_casters(&mut app, 6.0, -14.0);
+    run(&mut app, 0.1);
+    let spirits = SpellDesign::new(&["blade"], CastType::Summon)
+        .with(Modifier::Split { count: 2 })
+        .named("Spirit blades");
+    cast(&mut app, me, spirits, Aim::Point(DVec3::new(0.0, 0.0, 3.0)));
+    run(&mut app, 1.0);
+    let found = blades_now(&mut app);
+    assert_eq!(found.len(), 2);
+    for (e, b) in &found {
+        assert_eq!(b.kind(), "spirit");
+        assert!(b.pos.distance(DVec3::new(0.0, 1.5, 6.0)) < 2.2, "{}", b.pos);
+        assert_eq!(app.world.get::<MagicCaster>(*e).unwrap().side, 1);
+        assert!(app.world.get::<Vitality>(*e).is_some());
+    }
+    let ids: Vec<Entity> = found.iter().map(|b| b.0).collect();
+    cast(
+        &mut app,
+        necro,
+        raise(),
+        Aim::Point(DVec3::new(0.0, 0.0, 0.0)),
+    );
+    run(&mut app, 2.2);
+    let skeletons: Vec<Entity> = minions(&mut app).iter().map(|m| m.0).collect();
+    assert!(!skeletons.is_empty());
+    run(&mut app, 4.0);
+    let cuts: Vec<DamageEvent> = app
+        .world
+        .resource::<Seen>()
+        .damage
+        .iter()
+        .filter(|d| d.source.is_some_and(|s| ids.contains(&s)))
+        .cloned()
+        .collect();
+    assert!(cuts.len() >= 3, "the spirit blades cut: {}", cuts.len());
+    assert!(
+        cuts.iter().any(|d| skeletons.contains(&d.target)),
+        "they cut the dead"
+    );
+    assert!(cuts.iter().all(|d| d.target != me), "never their caster");
+    // One cut down breaks into shards.
+    let left = blades_now(&mut app);
+    if let Some((e, _)) = left.first() {
+        app.world.get_mut::<Vitality>(*e).unwrap().health = 0.0;
+        let mut most = 0;
+        for _ in 0..30 {
+            app.update();
+            most = most.max(shards(&mut app));
+        }
+        assert!(most >= blades::BREAK_SHARDS as usize);
+        assert!(app.world.get_entity(*e).is_err());
+    }
+}
+
+#[test]
+fn a_bound_blade_puts_a_sword_in_the_hand_and_gives_the_hand_back() {
+    let mut app = blade_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let before = Loadout {
+        main: ItemClass::None,
+        off: ItemClass::SpellFocus,
+        two_handed: false,
+    };
+    app.world.entity_mut(me).insert(before);
+    let foe = dummy(&mut app, DVec3::new(0.0, 0.0, -1.5));
+    run(&mut app, 0.1);
+    let bound = SpellDesign::new(&["blade", "frost"], CastType::OnSelf)
+        .with(Modifier::Duration { factor: 0.2 })
+        .named("Bound frost blade");
+    cast(&mut app, me, bound, Aim::Point(DVec3::new(0.0, 0.0, -5.0)));
+    run(&mut app, 1.0);
+    let held = *app.world.get::<Loadout>(me).unwrap();
+    assert_eq!(held.main, ItemClass::OneHandedBlade, "Combat sees a sword");
+    assert_eq!(held.off, ItemClass::SpellFocus);
+    assert!(!held.two_handed);
+    let im = app.world.get::<blades::Imbued>(me).unwrap();
+    assert!(im.from_blade);
+    let found = blades_now(&mut app);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].1.kind(), "bound");
+    let t = app.world.get::<Transform>(found[0].0).unwrap();
+    assert!(
+        t.translation.distance(DVec3::new(0.25, 1.0, -0.15)) < 0.6,
+        "in the hand: {}",
+        t.translation
+    );
+    // No spell was thrown at the foe.
+    assert!(hits_on(&app, foe).is_empty());
+    // A melee cut from the hand (Combat's, here written by hand) carries the blade's frost.
+    let cut = |app: &mut App| {
+        app.world.write_message(DamageEvent {
+            target: foe,
+            amount: 12.0,
+            kind: DamageKind::Slash,
+            point: DVec3::new(0.0, 1.1, -1.3),
+            impulse: Vec3::NEG_Z * 40.0,
+            source: Some(me),
+        });
+    };
+    cut(&mut app);
+    run(&mut app, 0.1);
+    let ridden = hits_on(&app, foe);
+    assert_eq!(ridden.len(), 1, "the blade's spell rode the cut");
+    assert_eq!(ridden[0].caster, Some(me));
+    // Another cut at once doesn't land it again; one after a breath does.
+    cut(&mut app);
+    run(&mut app, 0.1);
+    assert_eq!(hits_on(&app, foe).len(), 1);
+    run(&mut app, 0.4);
+    cut(&mut app);
+    run(&mut app, 0.1);
+    assert_eq!(hits_on(&app, foe).len(), 2);
+    // Its time ends: the hand is given back as it was.
+    run(&mut app, 6.5);
+    assert_eq!(app.world.get::<Loadout>(me), Some(&before));
+    assert!(blades_now(&mut app).is_empty());
+    assert!(app.world.get::<blades::Imbued>(me).is_none());
+}
+
+#[test]
+fn a_bound_greatblade_is_two_handed_and_a_bare_hand_gets_no_loadout_after() {
+    let mut app = blade_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    run(&mut app, 0.1);
+    let great = SpellDesign::new(&["blade"], CastType::OnSelf)
+        .with(Modifier::Size { factor: 2.5 })
+        .with(Modifier::Duration { factor: 0.2 })
+        .named("Bound greatblade");
+    cast(&mut app, me, great, Aim::Point(DVec3::new(0.0, 0.0, -5.0)));
+    run(&mut app, 1.0);
+    let held = *app.world.get::<Loadout>(me).unwrap();
+    assert_eq!(held.main, ItemClass::TwoHandedBlade);
+    assert!(held.two_handed);
+    assert!(blades_now(&mut app)[0].1.length >= 1.35);
+    run(&mut app, 7.0);
+    assert!(app.world.get::<Loadout>(me).is_none());
+}
+
+#[test]
+fn an_imbue_sets_its_casters_creatures_alight_and_their_cuts_burn() {
+    let mut app = blade_app();
+    let (me, necro) = two_casters(&mut app, 5.0, -8.0);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        necro,
+        raise(),
+        Aim::Point(DVec3::new(0.0, 0.0, -1.0)),
+    );
+    run(&mut app, 2.2);
+    let skeletons: Vec<Entity> = minions(&mut app).iter().map(|m| m.0).collect();
+    assert!(!skeletons.is_empty());
+    let imbue = SpellDesign::new(&["fire"], CastType::Imbue).named("Fire weapon");
+    cast(
+        &mut app,
+        necro,
+        imbue,
+        Aim::Point(DVec3::new(0.0, 0.0, 0.0)),
+    );
+    run(&mut app, 0.8);
+    for s in &skeletons {
+        let im = app
+            .world
+            .get::<blades::Imbued>(*s)
+            .expect("every creature of the caster near it is imbued");
+        assert!(!im.from_blade && im.left() > 20.0);
+    }
+    assert!(
+        app.world.get::<blades::Imbued>(necro).is_some(),
+        "and its own hand"
+    );
+    // Their blades glow orange.
+    let m = minions(&mut app)[0].1.clone();
+    let mut glowing = 0;
+    for p in &m.parts {
+        if let Some(r) = app.world.get::<engine_render::MeshRenderer>(*p)
+            && let engine_render::MaterialRef::Inline(mat) = &r.material
+            && mat.emissive_strength >= blades::IMBUE_GLOW
+            && mat.emissive[0] > mat.emissive[2]
+        {
+            glowing += 1;
+        }
+    }
+    assert_eq!(glowing, 1, "the blade, not the bones");
+    // A hand glows on the caster.
+    let mut q = app.world.query::<&blades::HandGlow>();
+    assert_eq!(q.iter(&app.world).filter(|h| h.owner == necro).count(), 1);
+    // The skeletons cut the student and each cut lands the fire too.
+    run(&mut app, 6.0);
+    let fire_hits: Vec<SpellHit> = hits_on(&app, me)
+        .into_iter()
+        .filter(|h| h.spell.name == "Fire weapon")
+        .collect();
+    assert!(!fire_hits.is_empty(), "no cut burned");
+    assert!(
+        fire_hits
+            .iter()
+            .all(|h| h.caster.is_some_and(|c| skeletons.contains(&c)))
+    );
+    let aff = app.world.get::<status::Afflictions>(me).unwrap();
+    assert!(
+        aff.burning.active() || aff.gauges.iter().any(|g| g.element == Element::Fire),
+        "{aff:?}"
+    );
+    // The api lists them.
+    let v = call_api(&mut app.world, "magic.blades", json!({})).unwrap();
+    assert!(v["imbued"].as_array().unwrap().len() > skeletons.len());
+}
+
+#[test]
+fn an_off_hand_cast_leaves_from_the_other_hand_and_a_charged_heavy_hits_harder() {
+    // Where it leaves: the hand mirrored, or the left hand's bone of a posed body.
+    let t = GlobalTransform::from(Transform::from_translation(DVec3::new(3.0, 0.0, 0.0)));
+    let caster = MagicCaster::new(10.0, Mastery::Expert);
+    let main = runtime::cast_hand(&t, &caster, None, None, false);
+    let off = runtime::cast_hand(&t, &caster, None, None, true);
+    assert!(main.x > 3.1 && off.x < 2.9, "{main} {off}");
+    let focus = Loadout {
+        main: ItemClass::OneHandedBlade,
+        off: ItemClass::SpellFocus,
+        two_handed: false,
+    };
+    assert_eq!(
+        runtime::cast_hand(&t, &caster, None, Some(&focus), false),
+        off,
+        "a spell focus in the off hand casts from it"
+    );
+    let pose = engine_world::animation::SkeletonPose {
+        names: vec!["hand_r".to_string(), "hand_l".to_string()].into(),
+        parents: vec![None, None].into(),
+        bones: vec![
+            engine_world::animation::BonePose {
+                translation: Vec3::new(0.3, 1.0, -0.2),
+                ..Default::default()
+            },
+            engine_world::animation::BonePose {
+                translation: Vec3::new(-0.35, 1.05, -0.3),
+                ..Default::default()
+            },
+        ],
+    };
+    let at = runtime::cast_hand(&t, &caster, Some(&pose), None, true);
+    assert!(at.distance(DVec3::new(2.65, 1.05, -0.3)) < 1e-4, "{at}");
+    // A heavy attack held the off hand: its full charge doubles the bolt's power, and it goes
+    // off as the heavy lands (gathered).
+    let mut app = blade_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let a = dummy(&mut app, DVec3::new(-3.0, 0.0, -10.0));
+    let b = dummy(&mut app, DVec3::new(3.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    let bolt = SpellDesign::new(&["frost"], CastType::Bolt).named("Frost bolt");
+    cast(&mut app, me, bolt.clone(), Aim::Entity(a));
+    run(&mut app, 2.0);
+    app.world.write_message(CastRequest {
+        caster: me,
+        spell: SpellChoice::Design(bolt),
+        aim: Aim::Entity(b),
+        charge: 1.0,
+        gathered: true,
+        off_hand: true,
+    });
+    run(&mut app, 2.0);
+    let first = |e: Entity| {
+        app.world
+            .resource::<Seen>()
+            .damage
+            .iter()
+            .find(|d| d.target == e)
+            .map_or(0.0, |d| d.amount)
+    };
+    let plain = first(a);
+    let heavy = first(b);
+    assert!(plain > 0.0);
+    assert!(heavy > plain * 1.25, "{plain} -> {heavy}");
+}
+
+#[test]
+fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
+    let mut app = blade_app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Blades;
+        hall.restart = true;
+    }
+    let view = demo::VIEWS
+        .iter()
+        .find(|v| v.key == "spells_blades")
+        .unwrap();
+    let eye = DVec3::from(view.eye);
+    let fwd = (DVec3::from(view.target) - eye).normalize();
+    let right = fwd.cross(DVec3::Y).normalize();
+    let up = right.cross(fwd);
+    let tan_y = (55f64.to_radians() / 2.0).tan();
+    let in_view = |p: DVec3| {
+        let d = p - eye;
+        let z = d.dot(fwd);
+        z > 0.5
+            && (d.dot(right) / (z * tan_y * 16.0 / 9.0)).abs() < 0.9
+            && (d.dot(up) / (z * tan_y)).abs() < 0.9
+    };
+    let (mut looked, mut missed) = (0usize, 0usize);
+    let mut seen_blades: std::collections::HashMap<Entity, &'static str> = Default::default();
+    let mut most_imbued = 0;
+    let mut most_stuck = 0;
+    let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
+    let mut bound_at = None;
+    let steps = (demo::blades::PERIOD * 60.0) as usize;
+    for i in 0..steps {
+        app.update();
+        let t = i as f32 / 60.0;
+        for (e, b) in blades_now(&mut app) {
+            let k = b.kind();
+            if seen_blades.insert(e, k).is_none() {
+                print!("[{:.2} m] ", b.length);
+                match b.flight {
+                    blades::Flight::Waiting { ground, .. } => {
+                        println!("{t:.2}: bladefall onto {:.1}", ground)
+                    }
+                    _ => println!("{t:.2}: {k} at {:.1}", b.pos),
+                }
+            }
+            if k == "spirit" && i % 30 == 0 {
+                println!(
+                    "  {t:.2} spirit {e:?} at {:.1} target {:?}",
+                    b.pos, b.target
+                );
+            }
+            if k == "bound" {
+                bound_at.get_or_insert(t);
+            }
+            if i % 15 == 0 && !matches!(b.flight, blades::Flight::Waiting { .. }) {
+                looked += 1;
+                if !in_view(b.pos) {
+                    missed += 1;
+                    println!("  {t:.2} blade out of the picture: {k} at {:.1}", b.pos);
+                }
+            }
+        }
+        let stuck = blades_now(&mut app)
+            .iter()
+            .filter(|b| matches!(b.1.flight, blades::Flight::Stuck { .. }))
+            .count();
+        most_stuck = most_stuck.max(stuck);
+        let mut q = app.world.query::<&blades::Imbued>();
+        most_imbued = most_imbued.max(q.iter(&app.world).count());
+        for (e, m) in minions(&mut app) {
+            kinds.entry(e).or_insert(m.kind);
+            if i % 15 == 0 && t > 1.5 {
+                looked += 1;
+                if !in_view(m.pos + DVec3::Y * 0.9) {
+                    missed += 1;
+                    println!(
+                        "  {t:.2} out of the picture: {e:?} {:?} at {:.1}",
+                        m.kind, m.pos
+                    );
+                }
+            }
+            if i % 60 == 0 {
+                println!(
+                    "  {t:.0}s {e:?} {:?} at ({:.1}, {:.1}) target {:?}",
+                    m.kind, m.pos.x, m.pos.z, m.target
+                );
+            }
+        }
+    }
+    let count = |k: &str| seen_blades.values().filter(|v| **v == k).count();
+    let seen = app.world.resource::<Seen>();
+    let spirits: Vec<Entity> = seen_blades
+        .iter()
+        .filter(|(_, k)| **k == "spirit")
+        .map(|(e, _)| *e)
+        .collect();
+    let spirit_cuts = seen
+        .damage
+        .iter()
+        .filter(|d| d.source.is_some_and(|s| spirits.contains(&s)))
+        .count();
+    let burning_cuts = seen
+        .hits
+        .iter()
+        .filter(|h| h.spell.name == "Fire weapon" && h.caster.and_then(|c| kinds.get(&c)).is_some())
+        .count();
+    let blade_hits = seen
+        .hits
+        .iter()
+        .filter(|h| h.spell.payload.blades > 0 && h.damage > 0.0)
+        .count();
+    println!("out of the picture {missed} of {looked} looks");
+    println!(
+        "phalanx {}, spirit {}, bound {}, bladefall {} (most stuck {most_stuck}); imbued at most \
+         {most_imbued}; spirit cuts {spirit_cuts}, burning cuts {burning_cuts}, blade hits \
+         {blade_hits}; bound at {bound_at:?}",
+        count("phalanx"),
+        count("spirit"),
+        count("bound"),
+        count("bladefall"),
+    );
+    assert_eq!(count("phalanx"), 10, "two phalanxes of five");
+    assert_eq!(count("spirit"), 2);
+    assert_eq!(count("bound"), 1);
+    assert_eq!(count("bladefall"), 40, "two bladefalls of twenty");
+    assert!(most_stuck >= 15, "{most_stuck}");
+    assert!(most_imbued >= 6, "{most_imbued}");
+    assert!(spirit_cuts >= 4, "{spirit_cuts}");
+    assert!(burning_cuts >= 2, "{burning_cuts}");
+    assert!(blade_hits >= 10, "{blade_hits}");
     assert!(
         missed * 20 < looked,
         "the fight left the picture {missed} of {looked} looks"

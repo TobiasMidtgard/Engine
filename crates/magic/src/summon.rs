@@ -346,6 +346,17 @@ pub struct Minion {
     pub flank: f32,
 }
 
+/// The pieces of a minion that strike (its [`MinionPart::index`]es): a golem's fists, a
+/// skeleton's blade (a mage's palm glow), an elemental's or a wisp's heart. An imbue makes them
+/// glow (blades.rs).
+pub fn weapon_parts(kind: MinionKind) -> &'static [usize] {
+    match kind {
+        MinionKind::Golem => &[ARM[0] + 2, ARM[1] + 2],
+        MinionKind::Skeleton | MinionKind::SkeletalMage => &[crate::undead::HELD],
+        MinionKind::Elemental | MinionKind::Wisp => &[0],
+    }
+}
+
 /// A piece of a minion's body.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MinionPart {

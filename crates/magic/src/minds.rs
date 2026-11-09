@@ -512,6 +512,7 @@ pub fn run_phantasms(
                 aim: Aim::Entity(t),
                 charge: 0.0,
                 gathered: false,
+                off_hand: false,
             });
         }
     }

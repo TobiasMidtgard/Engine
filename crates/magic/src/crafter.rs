@@ -421,7 +421,7 @@ pub fn fits_design(p: &Part, design: &SpellDesign) -> bool {
     !(p.default.dark_only() && !dark || p.default.clean_only() && dark)
 }
 
-/// The cast types on the screen (Imbue waits for the combat module's weapons).
+/// The cast types on the screen.
 pub fn cast_types() -> impl Iterator<Item = CastType> {
     CastType::ALL.into_iter().filter(|c| c.runs())
 }
@@ -1587,6 +1587,7 @@ fn preview(world: &mut World, c: &mut Crafter, weaver: Entity) {
         aim,
         charge: 0.0,
         gathered: false,
+        off_hand: false,
     });
 }
 

@@ -265,6 +265,7 @@ pub fn run_foes(
                     aim: Aim::Entity(target),
                     charge: 0.0,
                     gathered: false,
+                    off_hand: false,
                 });
             }
         }

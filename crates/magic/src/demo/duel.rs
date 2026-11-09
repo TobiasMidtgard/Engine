@@ -705,6 +705,7 @@ pub fn run_duel(
             aim,
             charge: 0.0,
             gathered: false,
+            off_hand: false,
         });
     }
 }

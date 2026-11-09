@@ -761,6 +761,7 @@ pub fn run_thralls(
                 aim: Aim::Entity(foe),
                 charge: 0.0,
                 gathered: false,
+                off_hand: false,
             });
         }
     }

@@ -22,6 +22,8 @@
 //! | [`space`] | portals you see through and pass through, blink to the aim point, recall along your path |
 //! | [`wards`] | wards you can see: shells, domes and ward walls that crack and shatter |
 //! | [`undead`] | raise dead: thralls from fallen bodies, skeleton warriors and mages from the ground |
+//! | [`minds`] | mirror images and decoys, command and wrath, fear that sends creatures running |
+//! | [`blades`] | conjured blades (glintblade, phalanx, bladefall, spirit blade, bound blade) and imbued weapons |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
 //! | [`crafter`] | the Spellcrafter: an altar where you build a spell in four steps, see its cost, watch it fly at a dummy and put it on a key |
@@ -33,6 +35,7 @@
 //! the particles module's public API.
 
 pub mod api;
+pub mod blades;
 pub mod caster;
 pub mod cataclysm;
 pub mod combine;
@@ -182,6 +185,13 @@ impl Plugin for MagicPlugin {
                         minds::run_phantasms,
                     )
                         .chain(),
+                    (
+                        blades::spawn_blades,
+                        blades::run_blades,
+                        blades::ride_blades,
+                        blades::strike_imbued,
+                    )
+                        .chain(),
                     kinesis::guard_rings,
                     meet::meet_spells,
                     undead::raise_dead,
@@ -208,6 +218,7 @@ impl Plugin for MagicPlugin {
                     stone::raise_stone,
                     summon::settle_rubble,
                     cataclysm::tend_cataclysm,
+                    blades::tend_imbued,
                 )
                     .chain()
                     .in_set(MagicSet::Hits),
@@ -215,7 +226,7 @@ impl Plugin for MagicPlugin {
             .add_systems(FixedUpdate, runtime::flush.in_set(MagicSet::Flush))
             .add_systems(
                 PostUpdate,
-                runtime::sync_transforms.before(UpdateSet::Propagate),
+                (runtime::sync_transforms, blades::hold_blades).before(UpdateSet::Propagate),
             )
             .add_systems(
                 PostUpdate,
@@ -223,6 +234,7 @@ impl Plugin for MagicPlugin {
                     runtime::follow_world_shift,
                     summon::follow_world_shift,
                     cataclysm::follow_world_shift,
+                    blades::follow_world_shift,
                 )
                     .in_set(WorldShiftSet::Apply)
                     .before(runtime::sync_transforms),
@@ -234,6 +246,7 @@ impl Plugin for MagicPlugin {
         kinesis::register(app);
         cataclysm::register(app);
         minds::register(app);
+        blades::register(app);
         demo::build(app);
     }
 }

@@ -137,6 +137,17 @@ pub struct Payload {
     pub command_secs: f32,
     /// Seconds a creature it hits strikes at whatever is near (minds.rs; 0: none).
     pub wrath_secs: f32,
+    /// Conjured blades it makes (blades.rs; 0: not a blade spell): a glintblade volley's
+    /// count, the phalanx's blades, the bladefall's, the spirit blades', or the blades in the
+    /// hand.
+    pub blades: u32,
+    /// A blade's length, m (a greatblade with Size).
+    pub blade_m: f32,
+    /// Seconds a phalanx, a spirit blade or a blade in the hand lasts.
+    pub blade_secs: f32,
+    /// Seconds an Imbue rides on its caster's weapon and its creatures' (blades.rs): each
+    /// melee hit lands the spell on what it struck. 0: not an imbue.
+    pub imbue_secs: f32,
     /// A light it leaves, lumens.
     pub light_lm: f32,
     /// Flame temperature for igniting fuel, °C (0: doesn't ignite).
@@ -184,7 +195,7 @@ pub struct Spell {
     pub weave: Weave,
     #[serde(skip)]
     pub design: SpellDesign,
-    /// The cast type that runs (Imbue casts as Touch until the combat module's weapons exist).
+    /// The cast type that runs.
     pub cast: CastType,
     pub carrier: Carrier,
     pub payload: Payload,
@@ -296,10 +307,7 @@ fn compile_inner(
 ) -> Spell {
     let w = weave(&design.effects).expect("validated designs have known effects");
     let dark = design.is_dark();
-    let cast = match design.cast {
-        CastType::Imbue => CastType::Touch,
-        c => c,
-    };
+    let cast = design.cast;
     let size = ctx.power.size();
     // Stone falling from the sky or splitting the ground (Cataclysm, cataclysm.rs).
     let stone = w
@@ -308,6 +316,11 @@ fn compile_inner(
         .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Stone)));
     let meteor = stone && cast == CastType::Rain;
     let fault = stone && cast == CastType::Wave;
+    // A conjured blade (Shaping, blades.rs): the cast type picks its shape.
+    let blade = w
+        .ingredients
+        .iter()
+        .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Blade)));
     let mods = &design.modifiers;
     let factor = |f: &dyn Fn(&Modifier) -> Option<f32>| -> f32 {
         mods.iter().filter_map(f).product::<f32>().max(0.05)
@@ -363,6 +376,18 @@ fn compile_inner(
     })
     .unwrap_or(1);
     let count = match cast {
+        // A phalanx: two blades over an Adept's head, five over an Ascended's (Elden Ring's
+        // glintblade phalanx), one more per Split.
+        CastType::Orbit if blade => {
+            (match ctx.mastery {
+                Mastery::Novice | Mastery::Apprentice => 1,
+                Mastery::Adept => 2,
+                Mastery::Expert => 3,
+                Mastery::Master => 4,
+                _ => 5,
+            }) + split.max(1)
+                - 1
+        }
         CastType::Orbit => 3 * split.max(1),
         CastType::Rain if meteor => split.max(1),
         CastType::Rain => (10.0 * size_k * size_k * split as f32).round() as u32,
@@ -391,7 +416,14 @@ fn compile_inner(
         } else {
             0.0
         },
-        seek_turn: if seek { 2.6 } else { 0.0 },
+        // A glintblade turns a little toward what it was thrown at, Seek or not.
+        seek_turn: if seek {
+            2.6
+        } else if blade && cast == CastType::Bolt {
+            1.4
+        } else {
+            0.0
+        },
         pierce: count_of(&|m| match m {
             Modifier::Pierce { count } => Some(*count),
             _ => None,
@@ -479,6 +511,9 @@ fn compile_inner(
             ctx.power.damage() * 1.8 * spread * if dark { 1.5 } else { 1.0 }
         } else if fault {
             ctx.power.damage() * 0.9 * if dark { 1.5 } else { 1.0 }
+        } else if blade && cast != CastType::Imbue {
+            // A conjured blade cuts, element or not, shared between a volley's blades.
+            ctx.power.damage() * 0.8 * cast.strength() * strength * spread
         } else {
             0.0
         };
@@ -531,7 +566,11 @@ fn compile_inner(
     let grip_j = ctx.power.energy_j as f32 * strength;
     let payload = Payload {
         damage,
-        damage_kind: damage_kind(&w),
+        damage_kind: if blade && w.elements.is_empty() {
+            DamageKind::Slash
+        } else {
+            damage_kind(&w)
+        },
         statuses: if harm { statuses } else { Vec::new() },
         force,
         heal: if has(&|k| matches!(k, EffectKind::Heal)) {
@@ -656,6 +695,44 @@ fn compile_inner(
         },
         wrath_secs: if has(&|k| matches!(k, EffectKind::Wrath)) {
             (6.0 * duration_k).clamp(2.0, 30.0)
+        } else {
+            0.0
+        },
+        blades: if blade
+            && matches!(
+                cast,
+                CastType::Bolt
+                    | CastType::Orbit
+                    | CastType::Rain
+                    | CastType::Summon
+                    | CastType::OnSelf
+            ) {
+            match cast {
+                // Two hands at most.
+                CastType::OnSelf => split.clamp(1, 2),
+                CastType::Summon => split.clamp(1, 6),
+                _ => count.max(1),
+            }
+        } else {
+            0
+        },
+        // About a metre for an Adept, a greatblade with Size.
+        blade_m: if blade {
+            ((0.95 + 0.06 * size) * size_k.sqrt()).clamp(0.8, 2.4)
+        } else {
+            0.0
+        },
+        blade_secs: if blade {
+            match cast {
+                CastType::Orbit | CastType::OnSelf => (30.0 * duration_k).clamp(3.0, 120.0),
+                CastType::Summon => (20.0 * duration_k).clamp(3.0, 120.0),
+                _ => 0.0,
+            }
+        } else {
+            0.0
+        },
+        imbue_secs: if cast == CastType::Imbue {
+            (30.0 * duration_k).clamp(5.0, 120.0)
         } else {
             0.0
         },
@@ -793,7 +870,35 @@ fn compile_inner(
         12.0
     };
     let name = if design.name.is_empty() {
-        format!("{} {}", w.name, cast.name().to_lowercase())
+        // A conjured blade is named for its shape (blades.rs): a fire glintblade, a frost
+        // phalanx, a bladefall, a spirit blade, a bound blade.
+        let made_of = w
+            .name
+            .strip_suffix(" blade")
+            .filter(|_| !w.elements.is_empty());
+        let shape = match cast {
+            CastType::Bolt => Some("glintblade"),
+            CastType::Orbit => Some("phalanx"),
+            CastType::Rain => Some("bladefall"),
+            CastType::Summon => Some("spirit blade"),
+            CastType::OnSelf => Some("blade"),
+            _ => None,
+        };
+        match (blade, shape, made_of) {
+            (true, Some(sh), Some(m)) if cast == CastType::OnSelf => {
+                format!("Bound {} {sh}", m.to_lowercase())
+            }
+            (true, Some(sh), Some(m)) => format!("{m} {sh}"),
+            (true, Some(_), None) if cast == CastType::OnSelf => "Bound blade".to_string(),
+            (true, Some(sh), None) if cast == CastType::Orbit => format!("Glintblade {sh}"),
+            (true, Some(sh), None) => {
+                let mut c = sh.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
+            }
+            _ => format!("{} {}", w.name, cast.name().to_lowercase()),
+        }
     } else {
         design.name.clone()
     };

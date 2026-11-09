@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dials::{Dials, Domain, Pole};
-use crate::effects::effect;
+use crate::effects::{effect, element_effect};
 use crate::schools::{Element, Status};
 
 /// What happens when two elements meet on a victim or in the air (and a woven spell's bonus).
@@ -526,6 +526,18 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
             _ => name,
         };
         ("stone".to_string(), name, STONE_COLOR)
+    } else if ingredients.iter().any(|k| k == "blade") && defs.len() <= 2 {
+        // A conjured blade is named for what it is made of, and a plain one is glintstone
+        // blue (blades.rs), with the force look for its flight and its breaking.
+        let name = match elements.first() {
+            Some(e) if defs.len() == 2 => format!("{} blade", element_effect(*e).name),
+            _ => name,
+        };
+        if elements.is_empty() {
+            ("force".to_string(), name, BLADE_COLOR)
+        } else {
+            (key, name, color)
+        }
     } else if ingredients.iter().any(|k| k == "raise") && elements.is_empty() {
         // Raising the dead is dark: it looks like shadow, in the grave's violet, not like the
         // green of the Life domain its dials sit in (a bone blade's cut would puff green).
@@ -546,6 +558,9 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
         color,
     })
 }
+
+/// A plain conjured blade's color: glintstone blue, linear RGB.
+pub const BLADE_COLOR: [f32; 3] = [0.38, 0.66, 1.0];
 
 /// Raised stone's color (a grey-brown granite), linear RGB.
 pub const STONE_COLOR: [f32; 3] = [0.42, 0.38, 0.33];

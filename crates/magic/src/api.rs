@@ -197,7 +197,10 @@ pub fn register(app: &mut App) {
         "magic.cast",
         "Cast: the caster's selected spell, a grimoire \"slot\", or a \"design\" given here. \
          Aim at an entity (\"target\"), a point (\"at\") or along a direction (\"dir\"); \
-         \"charge\" 0..1 for chargeable spells.",
+         \"charge\" 0..1 for chargeable spells; \"hand\": \"off\" casts from the off hand (a weapon in \
+         the main one; a heavy attack's charged cast is \"hand\": \"off\" with its \"charge\" and \
+         \"gathered\": true, at power × (1 + charge)); \"gathered\": true releases at once \
+         after the plain cast time.",
         r#"{"caster": "Mage", "design": {"effects": ["fire", "frost"], "cast": "lob"}, "at": [0, 0, -20]}"#,
         |world, args| {
             let caster = resolve_entity(world, args.get("caster").unwrap_or(&Value::Null))?;
@@ -225,12 +228,18 @@ pub fn register(app: &mut App) {
                 Aim::Direction(rot * Vec3::NEG_Z)
             };
             let charge = arg::<f32>(&args, "charge")?.unwrap_or(0.0);
+            let off_hand = match arg::<String>(&args, "hand")?.as_deref() {
+                None | Some("main") => false,
+                Some("off") => true,
+                Some(h) => return Err(format!("hand is \"main\" or \"off\", not {h:?}")),
+            };
             world.write_message(CastRequest {
                 caster,
                 spell,
                 aim,
                 charge,
-                gathered: false,
+                gathered: arg::<bool>(&args, "gathered")?.unwrap_or(false),
+                off_hand,
             });
             Ok(json!({ "queued": true }))
         },

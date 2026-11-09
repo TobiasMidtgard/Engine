@@ -540,6 +540,7 @@ pub fn drive_spell_bars(
                                 aim: aim(),
                                 charge,
                                 gathered: held.hold == Hold::Charge,
+                                off_hand: false,
                             });
                             start_cooldown(&mut bar, held.slot, &caster, &design, charge);
                         }
@@ -579,6 +580,7 @@ pub fn drive_spell_bars(
                                         aim: aim(),
                                         charge: 0.0,
                                         gathered: false,
+                                        off_hand: false,
                                     });
                                     start_cooldown(&mut bar, slot, &caster, &design, 0.0);
                                     if hold == Hold::Channel && input.down[slot] {
