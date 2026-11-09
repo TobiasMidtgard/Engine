@@ -3,3 +3,6 @@
 # the showcase uses the 2k sets. Check `rg <file name> crates games` before adding a line.
 fetched/render/**/*_16k.*
 fetched/render/**/*_8k.*
+# Scan zips: fetch-assets unpacks them next to themselves, and the showcase loads only the
+# unpacked maps.
+fetched/scans/**/*.zip
