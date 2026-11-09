@@ -53,7 +53,8 @@ glam = { version = "0.33", features = ["serde", "bytemuck"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 # The process's resident memory (RAM) for diagnostics and streaming budgets.
-memory-stats = "1.2"
+# statm, not smaps: reading /proc/self/smaps every 100 ms burned ~40% of a core on Linux.
+memory-stats = { version = "1.2", features = ["always_use_statm"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 raw-window-handle = "0.6"

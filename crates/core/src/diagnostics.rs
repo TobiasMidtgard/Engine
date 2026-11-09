@@ -110,9 +110,9 @@ pub const PROCESS_RAM_MB: &str = "process.ram_mb";
 
 /// The process's resident memory (RAM it holds now: the working set on Windows), MB.
 pub fn process_ram_mb() -> Option<f64> {
-    // memory-stats 1.2 on Linux decides between /proc/self/smaps and statm on its first call,
-    // and a second thread calling in the middle of that reads statm with a page size of 0
-    // (0 MB). The first call runs alone.
+    // memory-stats 1.2 on Linux loads the page size on its first call, and a second thread
+    // calling in the middle of that read statm with a page size of 0 (0 MB). The first call
+    // runs alone. (Built with `always_use_statm`: smaps cost ~40% of a core at 10 Hz.)
     static FIRST: std::sync::Once = std::sync::Once::new();
     FIRST.call_once(|| {
         memory_stats::memory_stats();
