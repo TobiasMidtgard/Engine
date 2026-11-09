@@ -460,6 +460,7 @@ fn run(world: &mut World) {
         }
         done = true;
     }
+    let loads = stream_counts(world.resource::<Diagnostics>());
     // Pictures on the way up, and at each leg's end.
     let shot = {
         let mut r = world.resource_mut::<Route>();
@@ -488,7 +489,14 @@ fn run(world: &mut World) {
                     name.replace(' ', "_")
                 ));
             }
-            engine::core::log::info!("route: {name} done at {:.1} s, {:.0} m up", r.t, altitude);
+            engine::core::log::info!(
+                "route: {name} done at {:.1} s, {:.0} m up; {}",
+                r.t,
+                altitude,
+                zone_loads(loads)
+            );
+            // The frames so far, in case the run is cut short.
+            write_csv(&r);
             r.leg += 1;
             r.in_leg = 0.0;
         } else {
@@ -566,7 +574,27 @@ fn finish(world: &mut World) {
     if frames < 4 {
         return;
     }
+    let zone_loads = zone_loads(stream_counts(world.resource::<Diagnostics>()));
     let r = world.resource::<Route>();
+    write_csv(r);
+    finish_report(r, &zone_loads);
+    world.write_message(AppExit::Success);
+}
+
+/// How many zones streaming has loaded so far, and how many of those left again without the
+/// camera ever coming within their load distance (`engine::stream`).
+fn zone_loads((loads, unneeded): (f64, f64)) -> String {
+    format!("{loads:.0} zone loads so far, {unneeded:.0} never needed")
+}
+
+/// Streaming's counts of loads and of loads never needed.
+fn stream_counts(d: &Diagnostics) -> (f64, f64) {
+    let get = |k: &str| d.get(k).unwrap_or(0.0);
+    (get("stream.loads"), get("stream.unneeded_loads"))
+}
+
+/// Every frame so far to `route.csv`.
+fn write_csv(r: &Route) {
     let mut csv = String::from(
         "t_s,leg,altitude_m,speed_mps,frame_ms,render_cpu_ms,terrain_ms,patches_missing,\
          patches_building,patches_built,patches_resident,upload_mb,ram_mb,ev100,ev100_metered\n",
@@ -596,6 +624,9 @@ fn finish(world: &mut World) {
     if let Err(e) = std::fs::write(&path, csv) {
         engine::core::log::warn!("route: can't write {path}: {e}");
     }
+}
+
+fn finish_report(r: &Route, zone_loads: &str) {
     // Each leg: frames, frame times, hitches, the terrain's worst, RAM.
     let mut report = String::from("route summary\n");
     for (i, (name, _)) in r.legs.iter().enumerate() {
@@ -662,7 +693,7 @@ fn finish(world: &mut World) {
             "RAM: {first:.0} MB at the start, {max:.0} max, {last:.0} at the end"
         );
     }
+    let _ = writeln!(report, "streaming: {zone_loads}");
     engine::core::log::info!("{report}");
     let _ = std::fs::write(format!("{}/route.txt", r.out_dir), report);
-    world.write_message(AppExit::Success);
 }

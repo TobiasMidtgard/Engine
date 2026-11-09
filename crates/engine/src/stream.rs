@@ -19,10 +19,21 @@
 //! Assets the cell's spawn added are its own ([`crate::cell_assets`]); a cell that opts in with
 //! [`StreamCell::release_assets`] frees them when it unloads.
 //!
-//! A moving source wants every cell along its path for its lookahead (its [`Velocity`], or its
-//! motion measured frame to frame for a camera or focus without one; one frame's jump is not
-//! motion), stretched to twice the time cells have been taking from wanted to loaded
-//! ([`StreamLatency`]). Cells load in the order the source will need them: those it stands in
+//! A moving source wants the cells along its path (its [`Velocity`], or its motion measured
+//! frame to frame for a camera or focus without one; one frame's jump is not motion), each one
+//! from the moment it is its lookahead away, or twice the time that cell took to load last time
+//! if that is longer ([`StreamLatency`] for a cell that has never loaded), though never from
+//! farther off for that than [`StreamingBudget::stretch_loads`] of its load distances. So a
+//! light cell far down a fast source's path waits until the source is nearly there, and a turn
+//! before then costs nothing; a slow one is asked for earlier, but a source too fast for its
+//! cells sees them fade in late over their far-view proxies rather than waking everything for
+//! kilometers ahead. A cell once asked for is held while the path still runs through it,
+//! however its lead has shrunk since. A loaded cell the path has swung away
+//! from stays for [`StreamingBudget::linger_s`] before it leaves, so looking around in flight
+//! doesn't load and unload the same cells over and over (`stream.unneeded_loads` counts loads
+//! that left without a source ever coming within their load distance); a jump (a teleport,
+//! fast travel) or a crossed memory cap ends every cell's lingering at once. Cells load in the order
+//! the source will need them: those it stands in
 //! first, then by when its path gets there. Loading keeps to [`StreamingBudget::frame_ms`]
 //! a frame, and to the larger `late_frame_ms` while a source stands in a cell that is not in
 //! yet (`stream.late` counts those, the pop-in and hole the player sees).
@@ -380,6 +391,16 @@ pub struct StreamingBudget {
     pub fade_s: f32,
     /// Frames a loaded cell stays hidden before it fades in, while its uploads land.
     pub fade_frames: u32,
+    /// Seconds a cell stays after the last moving source's path left it (by the hysteresis
+    /// margin), in case the source turns back: a load is far dearer than a few seconds of
+    /// memory. A cell left by sources that stand still (or jumped away) goes at once, and so
+    /// does one the memory caps below pick.
+    pub linger_s: f32,
+    /// A source asks for a slow cell earlier than its own lookahead (twice the cell's load
+    /// time ahead), but looks no farther down its path for it than this many of the cell's
+    /// load distances: past that the source is too fast for the cell, and asking earlier
+    /// still would load cells far down a path it may never fly.
+    pub stretch_loads: f64,
     /// Over this much process RAM (MB, `process.ram_mb`), cells no source needs right now
     /// (loaded, outside their load distance, not kept) unload early, farthest first, one a
     /// frame, instead of waiting for the hysteresis margin.
@@ -397,6 +418,8 @@ impl Default for StreamingBudget {
             builds: 2,
             fade_s: 0.4,
             fade_frames: 5,
+            linger_s: 4.0,
+            stretch_loads: 2.0,
             ram_mb: None,
             vram_mb: None,
         }
@@ -437,8 +460,19 @@ struct Slot {
     ids_seen: std::collections::HashMap<u64, u32>,
     /// A remembering cell's spawned values, from its last load.
     baseline: Option<cell_memory::Baseline>,
-    /// When a source first wanted this load (for [`StreamLatency`]).
+    /// When a source first wanted this load (for [`before_per_cell_leads`]).
     wanted_at: Option<Instant>,
+    /// When this load's work began: its build went to a worker, or its first slice ran.
+    started_at: Option<Instant>,
+    /// When this load finished.
+    loaded_at: Option<Instant>,
+    /// Seconds the last load took from `started_at` to loaded: what a source's lookahead for
+    /// this cell goes by.
+    took: Option<f64>,
+    /// A source has been within the cell's load distance during this load.
+    needed: bool,
+    /// Seconds every source's path has been away from it (beyond the hysteresis margin).
+    unwanted_s: f32,
 }
 
 impl Slot {
@@ -457,6 +491,11 @@ impl Slot {
             ids_seen: Default::default(),
             baseline: None,
             wanted_at: None,
+            started_at: None,
+            loaded_at: None,
+            took: None,
+            needed: false,
+            unwanted_s: 0.0,
         }
     }
 
@@ -470,6 +509,42 @@ impl Slot {
         self.ram = None;
         self.ids_seen.clear();
         self.wanted_at = None;
+        self.started_at = None;
+        self.loaded_at = None;
+        self.needed = false;
+        self.unwanted_s = 0.0;
+    }
+}
+
+/// Loads finished so far, and how many of them left again without a source ever coming within
+/// their load distance (`stream.loads`, `stream.unneeded_loads`).
+#[derive(Resource, Default)]
+struct LoadCounts {
+    loads: u64,
+    unneeded: u64,
+    /// Smoothed seconds from wanted to loaded (for [`before_per_cell_leads`]).
+    wanted_lag: f64,
+}
+
+/// `ENGINE_STREAM_LEADS=old`: the lookahead as it was before cells had leads of their own, for
+/// before/after runs of one build (`showcase --route lap` on the PC). Every cell on a moving
+/// source's path is asked for at once, as far ahead as twice the time cells have been taking
+/// from wanted to loaded (up to [`MAX_LOOKAHEAD_S`]), and a cell the path leaves goes at once.
+fn before_per_cell_leads() -> bool {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OLD.get_or_init(|| std::env::var("ENGINE_STREAM_LEADS").is_ok_and(|v| v == "old"))
+}
+
+/// What cells take to load lately, as the lookahead counts it.
+fn load_lag(world: &World) -> f64 {
+    if before_per_cell_leads() {
+        world
+            .get_resource::<LoadCounts>()
+            .map_or(0.0, |c| c.wanted_lag)
+    } else {
+        world
+            .get_resource::<StreamLatency>()
+            .map_or(0.0, |l| l.seconds)
     }
 }
 
@@ -507,6 +582,7 @@ impl Plugin for StreamingPlugin {
             .init_resource::<Leaves>()
             .init_resource::<SourceMotion>()
             .init_resource::<StreamLatency>()
+            .init_resource::<LoadCounts>()
             .shift_resource::<SourceMotion>()
             .add_systems(Last, stream_system)
             .register_api(
@@ -610,11 +686,16 @@ impl Plugin for StreamingPlugin {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Source {
     pub at: DVec3,
-    /// Where it will be `lookahead` seconds from now at its speed (`at` when still).
+    /// Where it will be at the end of its lookahead (stretched to the time cells have been
+    /// taking to load) at its speed (`at` when still): for the far views and the grids.
     pub ahead: DVec3,
+    /// Its velocity, m/s (zero when it stands still or has no lookahead).
+    pub v: DVec3,
     /// Its speed, m/s.
     pub speed: f64,
     pub scale: f64,
+    /// Its own lookahead, seconds (0: it wants cells only where it is).
+    pub lookahead: f64,
 }
 
 impl Source {
@@ -622,32 +703,51 @@ impl Source {
         Self {
             at,
             ahead: at,
+            v: DVec3::ZERO,
             speed: 0.0,
             scale,
+            lookahead: 0.0,
         }
     }
 
-    /// Distance from its path (now to `ahead`) to `c`'s edge, in units of `c`'s load distance:
-    /// at most 1 means the cell is wanted, now or before the source gets there.
-    pub(crate) fn reach(&self, c: &CellInfo) -> f64 {
+    /// Whether it has a path: it moves and looks ahead.
+    fn flies(&self) -> bool {
+        self.lookahead > 0.0 && self.speed > 0.0
+    }
+
+    /// How many seconds ahead it asks for a cell that takes `load_secs` to load: its
+    /// lookahead, or twice the load if that is longer (0 when it stands still). The stretch
+    /// past its own lookahead ends `reach_m` ahead of it, where there is such a limit.
+    pub(crate) fn lead(&self, load_secs: f64, reach_m: Option<f64>) -> f64 {
+        if !self.flies() {
+            return 0.0;
+        }
+        let stretch = (2.0 * load_secs).min(reach_m.map_or(f64::INFINITY, |m| m / self.speed));
+        self.lookahead.max(stretch).min(MAX_LOOKAHEAD_S)
+    }
+
+    /// Distance from its path over the next `secs` to `c`'s edge, in units of `c`'s load
+    /// distance: at most 1 means the cell is wanted, now or before the source gets there.
+    pub(crate) fn reach(&self, c: &CellInfo, secs: f64) -> f64 {
+        let ahead = self.at + self.v * secs;
         let edge =
-            (closest_on_path(self.at, self.ahead, c.center).distance(c.center) - c.radius).max(0.0);
+            (closest_on_path(self.at, ahead, c.center).distance(c.center) - c.radius).max(0.0);
         edge / (c.load_m * self.scale).max(1e-6)
     }
 
-    /// When it will need `c` (seconds; 0: it needs it now), or `None` if its path doesn't come
-    /// within `c`'s load distance.
-    fn need_in(&self, c: &CellInfo) -> Option<f64> {
+    /// When it will need `c` (seconds; 0: it needs it now), or `None` if its path over the
+    /// next `secs` doesn't come within `c`'s load distance.
+    fn need_in(&self, c: &CellInfo, secs: f64) -> Option<f64> {
         let load = (c.load_m * self.scale).max(1e-6);
         if c.distance(self.at) <= load {
             return Some(0.0);
         }
-        if self.speed <= 0.0 || self.reach(c) > 1.0 {
+        if self.speed <= 0.0 || secs <= 0.0 || self.reach(c, secs) > 1.0 {
             return None;
         }
         // Where the path first comes within the load distance of the cell's edge.
         let r = c.radius + load;
-        let d = self.ahead - self.at;
+        let d = self.v * secs;
         let len = d.length();
         let dir = d / len;
         let to = c.center - self.at;
@@ -687,6 +787,15 @@ struct Track {
     v: DVec3,
     /// Last frame's raw velocity, m/s.
     raw: DVec3,
+    /// This frame's move was a jump (a teleport, a tour stop, fast travel), not flight.
+    jumped: bool,
+}
+
+impl SourceMotion {
+    /// Whether a source or focus jumped this frame.
+    fn jumped(&self) -> bool {
+        self.sources.values().chain(&self.foci).any(|t| t.jumped)
+    }
 }
 
 impl FollowsWorldShift for SourceMotion {
@@ -715,7 +824,11 @@ impl Track {
             };
         };
         if dt <= 0.0 {
-            return Track { at, ..t };
+            return Track {
+                at,
+                jumped: false,
+                ..t
+            };
         }
         let raw = (at - t.at) / dt;
         let steady = (raw - t.raw).length() / dt <= JUMP_ACCEL;
@@ -725,16 +838,24 @@ impl Track {
         } else {
             t.v
         };
-        Track { at, v, raw }
+        Track {
+            at,
+            v,
+            raw,
+            jumped: !steady,
+        }
     }
 }
 
-/// How long cells take from wanted to loaded (seconds, smoothed over the last loads): the
-/// lookahead stretches to cover it, so a source moving at any speed finds its cells in, as
-/// Planets' terrain look-ahead does from its request-to-upload time.
+/// How long cells take to load, from when a load's work starts (its build goes to a worker or
+/// its first slice runs) to all in (seconds, smoothed over the last loads): a source asks for
+/// a cell it has no time of its own for this long ahead, twice over, so a source moving at any
+/// speed finds its cells in, as Planets' terrain look-ahead does from its request-to-upload
+/// time. Time a cell spent waiting its turn after being asked for early doesn't count: it
+/// would stretch the lookahead, which asks for cells earlier still.
 #[derive(Resource, Debug, Default, Clone, Copy, Serialize)]
 pub struct StreamLatency {
-    /// Smoothed seconds from wanted to loaded.
+    /// Smoothed seconds from started to loaded.
     pub seconds: f64,
     /// The last load's.
     pub last: f64,
@@ -789,7 +910,7 @@ fn measure_sources(world: &mut World) {
 /// The sources this frame. None when there is no source and no focus (tools and tests:
 /// everything loads). Each looks ahead along its velocity (its [`Velocity`], else its measured
 /// motion) by its `lookahead_s`, or by twice the time cells have been taking to load if that
-/// is longer; focus points look ahead 2 s the same way.
+/// is longer ([`Source::lead`]); focus points look ahead 2 s the same way.
 pub(crate) fn sources(world: &mut World) -> Option<Vec<Source>> {
     // Nothing streams around a ship in cruise: at its speed every cell would be passed before
     // it was in. Sources riding one (its pilot, its chase camera) count as cruising.
@@ -799,9 +920,7 @@ pub(crate) fn sources(world: &mut World) -> Option<Vec<Source>> {
         .map(|g| g.translation())
         .collect();
     let calm = |p: DVec3| cruising.iter().all(|c| c.distance(p) > CRUISE_REACH_M);
-    let lag = world
-        .get_resource::<StreamLatency>()
-        .map_or(0.0, |l| l.seconds);
+    let lag = load_lag(world);
     let motion = world
         .get_resource::<SourceMotion>()
         .cloned()
@@ -810,13 +929,16 @@ pub(crate) fn sources(world: &mut World) -> Option<Vec<Source>> {
         if lookahead <= 0.0 {
             return Source::still(at, scale);
         }
-        let t = lookahead.max(2.0 * lag).min(MAX_LOOKAHEAD_S);
-        Source {
+        let mut s = Source {
             at,
-            ahead: at + v * t,
+            ahead: at,
+            v,
             speed: v.length(),
             scale,
-        }
+            lookahead,
+        };
+        s.ahead = at + v * s.lead(lag, None);
+        s
     };
     let mut out = Vec::new();
     let mut any = false;
@@ -891,29 +1013,60 @@ pub fn stream_system(world: &mut World) {
     let poses = follow_frames(world);
     let sources = sources(world);
     let budget = *world.resource::<StreamingBudget>();
-    let has_build: Vec<(bool, bool)> = world
+    // Each slot's: has a build step, failed, what its last load took, how long it has been
+    // unwanted.
+    let slots: Vec<(bool, bool, Option<f64>, f32)> = world
         .resource::<CellHooks>()
         .0
         .iter()
-        .map(|s| (s.loader.build.is_some(), s.failed))
+        .map(|s| (s.loader.build.is_some(), s.failed, s.took, s.unwanted_s))
         .collect();
+    let lag = load_lag(world);
+    let old = before_per_cell_leads();
+    let linger_s = if old { 0.0 } else { budget.linger_s };
+    let dt = world.resource::<Time>().delta_secs();
+    let over_cap = budget.over(world.resource::<Diagnostics>());
+    // Nothing lingers over a memory cap, or once a source jumped (a teleport, a tour stop,
+    // fast travel: where it left is not on its way back).
+    let cut_linger = over_cap
+        || world
+            .get_resource::<SourceMotion>()
+            .is_some_and(SourceMotion::jumped);
     let mut cells = world.resource_mut::<StreamedCells>();
     let hysteresis = cells.hysteresis;
-    // Each cell's distance from the nearest source's path, in units of its load distance.
-    let reach = |c: &CellInfo| match &sources {
+    // How far ahead a source asks for a cell: by what the cell took to load last time.
+    let lead = |s: &Source, c: &CellInfo, took: Option<f64>| {
+        if old {
+            return s.lead(lag, None);
+        }
+        let reach_m = budget.stretch_loads * c.load_m * s.scale;
+        s.lead(took.unwrap_or(lag), Some(reach_m))
+    };
+    // Each cell's distance from the nearest source's path, in units of its load distance. A
+    // cell already asked for is held to the whole path (`keep`), not to the lead it would be
+    // asked with now: once it has loaded quickly, or other cells have, its lead shrinks, and
+    // it would be dropped and asked for again a moment later.
+    let reach = |c: &CellInfo, took: Option<f64>, keep: bool| match &sources {
         None => 0.0,
         Some(sources) => sources
             .iter()
-            .map(|s| s.reach(c))
+            .map(|s| {
+                let secs = if keep && !old {
+                    s.lead(MAX_LOOKAHEAD_S, None)
+                } else {
+                    lead(s, c, took)
+                };
+                s.reach(c, secs)
+            })
             .fold(f64::INFINITY, f64::min),
     };
     // Load order: cells a source stands in first (nearest first), then the rest by when a
     // source will get there, so the cell ahead on a fast path beats a nearer one behind.
-    let priority = |c: &CellInfo, r: f64| match &sources {
+    let priority = |c: &CellInfo, r: f64, took: Option<f64>| match &sources {
         None => r,
         Some(sources) => match sources
             .iter()
-            .filter_map(|s| s.need_in(c))
+            .filter_map(|s| s.need_in(c, lead(s, c, took)))
             .fold(None, |a: Option<f64>, t| Some(a.map_or(t, |a| a.min(t))))
         {
             Some(t) if t <= 0.0 => r.min(1.0),
@@ -926,24 +1079,42 @@ pub fn stream_system(world: &mut World) {
             .as_ref()
             .is_some_and(|s| s.iter().any(|s| c.distance(s.at) <= c.load_m * s.scale))
     };
+    // A source in flight may turn back: the cells its path leaves linger. Sources that stand
+    // leave cells behind for good.
+    let flying = sources
+        .as_ref()
+        .is_some_and(|s| s.iter().any(Source::flies));
     let mut late = 0usize;
     let mut woke = Vec::new();
     let mut want = Vec::new();
     let mut dropped = Vec::new();
     let mut leaving = Vec::new();
     let mut spare: Option<(f64, usize)> = None;
+    // Per cell: a source is within its load distance now, and its seconds unwanted.
+    let mut notes = Vec::with_capacity(cells.cells.len());
     let pins = std::mem::take(&mut cells.pins);
     for (i, c) in cells.cells.iter_mut().enumerate() {
+        let (build, failed, took, unwanted) = slots.get(i).copied().unwrap_or_default();
         if c.retired {
+            notes.push((false, 0.0));
             continue;
         }
         let r = match pins.get(&c.key) {
             Some(true) => 0.0,
             Some(false) => f64::INFINITY,
-            None => reach(c),
+            None => reach(c, took, c.state != CellState::Unloaded),
         };
         let kept = c.keep_loaded && pins.get(&c.key) != Some(&false);
-        let (build, failed) = has_build.get(i).copied().unwrap_or_default();
+        let loaded = matches!(c.state, CellState::Loading | CellState::Loaded);
+        let unwanted = match loaded && r > 1.0 + hysteresis {
+            true if cut_linger => linger_s.max(unwanted + dt),
+            true => unwanted + dt,
+            false => 0.0,
+        };
+        let lingers = flying && !pins.contains_key(&c.key) && unwanted < linger_s;
+        // With no source at all, or pinned in, it is there because it was asked for.
+        let needed = sources.is_none() || pins.get(&c.key) == Some(&true) || now_in(c);
+        notes.push((needed, unwanted));
         match c.state {
             CellState::Unloaded if r <= 1.0 && !failed => {
                 c.state = if build {
@@ -957,7 +1128,7 @@ pub fn stream_system(world: &mut World) {
                 c.state = CellState::Unloaded;
                 dropped.push(i);
             }
-            CellState::Loading | CellState::Loaded if r > 1.0 + hysteresis && !kept => {
+            CellState::Loading | CellState::Loaded if r > 1.0 + hysteresis && !kept && !lingers => {
                 leaving.push(i)
             }
             CellState::Loaded if r > 1.0 && !kept && spare.is_none_or(|s| r > s.0) => {
@@ -969,13 +1140,22 @@ pub fn stream_system(world: &mut World) {
             if now_in(c) {
                 late += 1;
             }
-            want.push((priority(c, r), i, c.state));
+            // (In load order by the lead it is asked with, not the path it is held to.)
+            let r = match pins.contains_key(&c.key) {
+                true => r,
+                false => reach(c, took, false),
+            };
+            want.push((priority(c, r, took), i, c.state));
         }
     }
     cells.pins = pins;
     {
         let now = Instant::now();
         let mut hooks = world.resource_mut::<CellHooks>();
+        for (slot, (needed, unwanted)) in hooks.0.iter_mut().zip(notes) {
+            slot.needed |= needed;
+            slot.unwanted_s = unwanted;
+        }
         for i in woke {
             if let Some(slot) = hooks.0.get_mut(i) {
                 slot.wanted_at.get_or_insert(now);
@@ -991,7 +1171,7 @@ pub fn stream_system(world: &mut World) {
     } else {
         budget.frame_ms
     };
-    let pressed = leaving.is_empty() && budget.over(world.resource::<Diagnostics>());
+    let pressed = leaving.is_empty() && over_cap;
     if let Some((_, i)) = spare.filter(|_| pressed) {
         leaving.push(i);
     }
@@ -1180,6 +1360,7 @@ fn builds(world: &mut World, want: &[(f64, usize, CellState)], at_once: usize) {
         match spawned {
             Ok(_) => {
                 slot.building = Some(Mutex::new(rx));
+                slot.started_at.get_or_insert_with(Instant::now);
                 running += 1;
             }
             Err(e) => {
@@ -1211,6 +1392,7 @@ fn begin(world: &mut World, i: usize, fade: bool) {
     slot.step = 0;
     slot.spawned = false;
     slot.secs = 0.0;
+    slot.started_at.get_or_insert_with(Instant::now);
     // The sampled reading: reading it here took the address space's lock behind the workers
     // building art, 240 ms a cell start on the session VM's route (and as long again in
     // `finish`). A cell's RAM is the difference of two samples up to 100 ms old.
@@ -1379,11 +1561,33 @@ fn finish(world: &mut World, i: usize) {
     {
         fade.loaded = true;
     }
-    if let Some(t) = world.resource_mut::<CellHooks>().0[i].wanted_at.take() {
-        let secs = t.elapsed().as_secs_f64();
-        world.resource_mut::<StreamLatency>().add(secs);
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("stream.latency_s", secs);
+    let slot = &mut world.resource_mut::<CellHooks>().0[i];
+    slot.loaded_at = Some(Instant::now());
+    let took = slot.started_at.take().map(|t| t.elapsed().as_secs_f64());
+    let waited = slot.wanted_at.take().map(|t| t.elapsed().as_secs_f64());
+    if let Some(took) = took {
+        slot.took = Some(took);
+        world.resource_mut::<StreamLatency>().add(took);
+    }
+    let loads = {
+        let mut counts = world.resource_mut::<LoadCounts>();
+        counts.loads += 1;
+        if let Some(waited) = waited {
+            counts.wanted_lag = if counts.wanted_lag == 0.0 {
+                waited
+            } else {
+                counts.wanted_lag + (waited - counts.wanted_lag) * 0.2
+            };
+        }
+        counts.loads
+    };
+    if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+        if let Some(took) = took {
+            d.set("stream.latency_s", took);
+        }
+        d.set("stream.loads", loads as f64);
+        if d.get("stream.unneeded_loads").is_none() {
+            d.set("stream.unneeded_loads", 0.0);
         }
     }
     let mut cells = world.resource_mut::<StreamedCells>();
@@ -1400,8 +1604,9 @@ fn finish(world: &mut World, i: usize) {
         String::new()
     };
     let ram = ram.map_or("n/a".to_string(), |mb| format!("{mb:+.0} MB"));
+    let took = took.map_or(String::new(), |t| format!(", {t:.1} s from its start"));
     engine_core::log::info!(
-        "streaming: loaded {} in {secs:.2} s ({steps} steps{built}), {entities} entities, \
+        "streaming: loaded {} in {secs:.2} s ({steps} steps{built}{took}), {entities} entities, \
          {assets} assets ({assets_mb:.0} MB), RAM {ram}",
         c.key
     );
@@ -1631,6 +1836,12 @@ fn unload(world: &mut World, i: usize) {
     world.resource_mut::<Leaves>().0.retain(|l| l.cell != id);
     hlod::fade_in(world, id, 1.0);
     let mut hooks = std::mem::take(&mut world.resource_mut::<CellHooks>().0);
+    // Loaded, and gone again without a source ever within its load distance: the lookahead
+    // asked for it and the source turned away.
+    let unneeded = hooks[i]
+        .loaded_at
+        .filter(|_| !hooks[i].needed)
+        .map(|t| t.elapsed().as_secs_f32());
     hooks[i].reset();
     if let Some(unload) = hooks[i].loader.unload.as_mut() {
         unload(world);
@@ -1647,9 +1858,26 @@ fn unload(world: &mut World, i: usize) {
     } else {
         String::new()
     };
+    let unneeded = match unneeded {
+        Some(secs) => {
+            let n = {
+                let mut counts = world.resource_mut::<LoadCounts>();
+                counts.unneeded += 1;
+                counts.unneeded
+            };
+            if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+                d.set("stream.unneeded_loads", n as f64);
+            }
+            format!(" {secs:.1} s after it loaded, never needed")
+        }
+        None => String::new(),
+    };
     let mut cells = world.resource_mut::<StreamedCells>();
     cells.cells[i].state = CellState::Unloaded;
-    engine_core::log::info!("streaming: unloaded {}{freed}", cells.cells[i].key);
+    engine_core::log::info!(
+        "streaming: unloaded {}{unneeded}{freed}",
+        cells.cells[i].key
+    );
 }
 
 #[cfg(test)]
@@ -2078,6 +2306,194 @@ mod tests {
             vec!["soon", "later"],
             "loaded by when the path gets there"
         );
+    }
+
+    /// A hut on the flight line of the tests below.
+    fn hut(key: &'static str, at: DVec3) -> StreamCell {
+        StreamCell::new(key, at, 10.0, move |world| {
+            world.spawn(Name::new(key));
+        })
+        .load_within(50.0)
+    }
+
+    fn place_at(app: &mut App, e: Entity, at: DVec3) {
+        let t = Transform::from_translation(at);
+        app.world
+            .entity_mut(e)
+            .insert((t, GlobalTransform::from(t)));
+    }
+
+    #[test]
+    fn a_quick_cell_far_down_the_path_waits_and_a_slow_one_is_asked_for_early() {
+        let mut app = app();
+        app.stream_cell(hut("quick", DVec3::new(1_000.0, 0.0, 0.0)));
+        app.stream_cell(hut("slow", DVec3::new(1_000.0, 0.0, 40.0)));
+        app.stream_cell(hut("new", DVec3::new(1_000.0, 0.0, -40.0)));
+        // What their last loads took; a cell never loaded goes by what cells take lately.
+        {
+            let mut hooks = app.world.resource_mut::<CellHooks>();
+            hooks.0[0].took = Some(0.1);
+            hooks.0[1].took = Some(6.0);
+        }
+        // No limit on how far off a slow cell may be asked for (the next test has one).
+        app.world.resource_mut::<StreamingBudget>().stretch_loads = f64::INFINITY;
+        *app.world.resource_mut::<StreamLatency>() = StreamLatency {
+            seconds: 3.0,
+            last: 3.0,
+            loads: 5,
+        };
+        let ship = flyer(&mut app, 2.0);
+        place(&mut app, ship, 0.0);
+        app.update();
+        // A second at 100 m/s: 900 m to go. The slow hut is asked for 12 s ahead and the new
+        // one about 5 s ahead; the quick one only 2 s ahead, 200 m.
+        let x = fly(&mut app, ship, 0.0, 100.0, 60);
+        assert_eq!(state(&app, "slow"), CellState::Loaded);
+        assert_eq!(state(&app, "quick"), CellState::Unloaded, "at {x}");
+        assert_eq!(state(&app, "new"), CellState::Unloaded, "at {x}");
+        let x = fly(&mut app, ship, x, 100.0, 240);
+        assert_eq!(state(&app, "new"), CellState::Loaded, "at {x}");
+        assert_eq!(state(&app, "quick"), CellState::Unloaded, "at {x}");
+        // And the quick one is in before the ship is within its 50 m.
+        let x = fly(&mut app, ship, x, 100.0, 250);
+        assert!(x < 1_000.0 - 60.0, "not there yet: {x}");
+        assert_eq!(state(&app, "quick"), CellState::Loaded, "at {x}");
+    }
+
+    #[test]
+    fn a_source_too_fast_for_a_slow_cell_asks_for_it_only_a_few_load_distances_off() {
+        let mut app = app();
+        app.stream_cell(hut("slow", DVec3::new(2_000.0, 0.0, 0.0)));
+        app.world.resource_mut::<CellHooks>().0[0].took = Some(6.0);
+        let ship = flyer(&mut app, 2.0);
+        place(&mut app, ship, 0.0);
+        app.update();
+        // 100 m/s: 12 s ahead would be 1.2 km off. Two of its 50 m load distances are
+        // 100 m, less than the ship's own 2 s (200 m), so the ship looks 200 m ahead for it.
+        let x = fly(&mut app, ship, 0.0, 100.0, 600);
+        assert_eq!(state(&app, "slow"), CellState::Unloaded, "at {x}");
+        let x = fly(&mut app, ship, x, 100.0, 420);
+        assert!(x < 2_000.0 - 260.0, "not near yet: {x}");
+        assert_eq!(state(&app, "slow"), CellState::Unloaded, "at {x}");
+        let x = fly(&mut app, ship, x, 100.0, 60);
+        assert_eq!(state(&app, "slow"), CellState::Loaded, "at {x}");
+        // A slower ship has the time: at 20 m/s it looks 100 m ahead (5 s), not the 40 m
+        // of its own 2 s, and finds the hut's 50 m when it is 150 m from its edge.
+        let mut app = self::app();
+        app.stream_cell(hut("slow", DVec3::new(2_000.0, 0.0, 0.0)));
+        app.world.resource_mut::<CellHooks>().0[0].took = Some(6.0);
+        let ship = flyer(&mut app, 2.0);
+        place(&mut app, ship, 1_700.0);
+        app.update();
+        let x = fly(&mut app, ship, 1_700.0, 20.0, 360);
+        assert!(x < 1_840.0 - 15.0, "{x}");
+        assert_eq!(state(&app, "slow"), CellState::Unloaded, "at {x}");
+        let x = fly(&mut app, ship, x, 20.0, 120);
+        assert!(x < 2_000.0 - 10.0 - 100.0, "{x}");
+        assert_eq!(state(&app, "slow"), CellState::Loaded, "at {x}");
+    }
+
+    #[test]
+    fn a_cell_the_path_turns_away_from_lingers_then_goes() {
+        for linger_s in [4.0, 0.0] {
+            let mut app = app();
+            app.world.resource_mut::<StreamingBudget>().linger_s = linger_s;
+            app.stream_cell(hut("ahead", DVec3::new(300.0, 0.0, 0.0)));
+            let ship = flyer(&mut app, 4.0);
+            place(&mut app, ship, 0.0);
+            app.update();
+            // Half a second toward it at 100 m/s: its path reaches the hut, which loads.
+            let x = fly(&mut app, ship, 0.0, 100.0, 30);
+            assert_eq!(state(&app, "ahead"), CellState::Loaded);
+            // A turn to the side, 250 m short of it: the path swings away.
+            let fly_z = |app: &mut App, from: f64, frames: usize| {
+                let mut z = from;
+                for _ in 0..frames {
+                    place_at(app, ship, DVec3::new(x, 0.0, z));
+                    app.update();
+                    z += 100.0 / 60.0;
+                }
+                z
+            };
+            let z = fly_z(&mut app, 0.0, 90);
+            let lingering = state(&app, "ahead") == CellState::Loaded;
+            assert_eq!(lingering, linger_s > 0.0, "1.5 s after the turn");
+            fly_z(&mut app, z, 240);
+            assert_eq!(state(&app, "ahead"), CellState::Unloaded);
+            assert_eq!(named(&mut app, "ahead"), 0);
+            let counts = app.world.resource::<LoadCounts>();
+            assert_eq!(
+                (counts.loads, counts.unneeded),
+                (1, 1),
+                "it came and went and the ship was never within its 50 m"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_left_by_a_source_that_stands_goes_at_once() {
+        let mut app = app();
+        app.stream_cell(hut("hut", DVec3::new(300.0, 0.0, 0.0)));
+        let ship = flyer(&mut app, 4.0);
+        place(&mut app, ship, 280.0);
+        app.update();
+        app.update();
+        assert_eq!(state(&app, "hut"), CellState::Loaded);
+        // A jump away is not a flight: nothing says it will turn back.
+        place(&mut app, ship, 5_000.0);
+        app.update();
+        app.update();
+        assert_eq!(state(&app, "hut"), CellState::Unloaded);
+        let counts = app.world.resource::<LoadCounts>();
+        assert_eq!((counts.loads, counts.unneeded), (1, 0), "it was needed");
+    }
+
+    /// A ship that flew toward "ahead" (300 m out) until it loaded, then turned aside 250 m
+    /// short of it and flew on for half a second: the hut lingers.
+    fn turned_away_from_a_lingering_hut() -> (App, Entity, DVec3) {
+        let mut app = app();
+        app.stream_cell(hut("ahead", DVec3::new(300.0, 0.0, 0.0)));
+        let ship = flyer(&mut app, 4.0);
+        place(&mut app, ship, 0.0);
+        app.update();
+        let x = fly(&mut app, ship, 0.0, 100.0, 30);
+        let mut at = DVec3::new(x, 0.0, 0.0);
+        for _ in 0..30 {
+            at.z += 100.0 / 60.0;
+            place_at(&mut app, ship, at);
+            app.update();
+        }
+        assert_eq!(state(&app, "ahead"), CellState::Loaded, "it lingers");
+        (app, ship, at)
+    }
+
+    #[test]
+    fn a_jump_in_flight_leaves_no_cell_lingering() {
+        let (mut app, ship, mut at) = turned_away_from_a_lingering_hut();
+        // Fast travel 5 km on, still flying the same way there: the hut can't be flown back
+        // to in the time it would linger, so it goes at once.
+        at.z += 5_000.0;
+        for _ in 0..3 {
+            at.z += 100.0 / 60.0;
+            place_at(&mut app, ship, at);
+            app.update();
+        }
+        assert_eq!(state(&app, "ahead"), CellState::Unloaded);
+    }
+
+    #[test]
+    fn over_the_memory_cap_no_cell_lingers() {
+        let (mut app, ship, mut at) = turned_away_from_a_lingering_hut();
+        app.world.resource_mut::<StreamingBudget>().ram_mb = Some(1.0);
+        app.world
+            .resource_mut::<Diagnostics>()
+            .set(PROCESS_RAM_MB, 150.0);
+        for _ in 0..2 {
+            at.z += 100.0 / 60.0;
+            place_at(&mut app, ship, at);
+            app.update();
+        }
+        assert_eq!(state(&app, "ahead"), CellState::Unloaded);
     }
 
     #[derive(Resource, Default)]
