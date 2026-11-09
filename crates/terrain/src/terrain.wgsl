@@ -2382,8 +2382,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     mat_variant[M_SOIL] = smoothstep(0.45, 0.6, in.water.z + vn * 0.5) * vegetation;
     // Layered sedimentary rock in beds a few dozen meters thick between massive ones, warped
     // with the land like the cliffs' bedding.
-    let rock_bed = sin((altitude + (macro_v - 0.5) * 24.0) * 0.09 + variety * 6.0);
-    mat_variant[M_ROCK] = smoothstep(0.2, 0.4, rock_bed + vn * 0.25);
+    let bed_alt = altitude + (macro_v - 0.5) * 24.0;
+    // (Uneven beds: the spacing itself wanders, 30 to 110 m from one band to the next.)
+    let rock_bed = sin(bed_alt * 0.09 + 2.6 * sin(bed_alt * 0.019 + variety * 4.0) + variety * 6.0)
+        + 0.35 * sin(bed_alt * 0.031 + 1.7);
+    mat_variant[M_ROCK] = smoothstep(0.35, 0.6, rock_bed + vn * 0.25);
     // Angular scree on natural slopes below cliffs; painted gravel (paths, yards) stays gravel.
     mat_variant[M_GRAVEL] = smoothstep(0.25, 0.45, scree + vn * 0.2) * saturate(1.0 - pw[9] * 4.0);
     // Wet, darker sand along the waterline.
