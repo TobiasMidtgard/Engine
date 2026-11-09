@@ -205,10 +205,12 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let lit = mix(occ, 1.0, 0.6);
     var color = vec3<f32>(0.0);
 
+    // People's capsules: the sun (x) and sky (y) their limbs hide.
+    let caps = capsule_occlusion(in.rel, nc);
     let l = frame.sun_dir.xyz;
     let sun = frame.sun_color.rgb * sun_transmittance(in.rel) * cloud_shadow(in.rel);
     if (dot(sun, sun) > 0.0) {
-        let shadow = shadow_factor(in.rel, nc);
+        let shadow = min(shadow_factor(in.rel, nc), caps.x);
         let depth = strand_depth_toward(in, l);
         color += hair_light(ts, v, l, base, rough, glint, shadow, depth, scatter) * sun * lit;
     }
@@ -227,7 +229,7 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let sky_vis = sky_visibility(in.rel, nc);
     let fill = frame.ambient.rgb;
     let sky = (sky_ambient_covered(nc, sky_vis) - fill) * sky_vis + fill;
-    let ao = min(occ, screen_ao(in.rel));
+    let ao = min(occ, screen_ao(in.rel)) * caps.y;
     color += base * sky * ao * (0.4 + 0.5 * scatter);
     // The sky's sheen along the fibers.
     let env = sample_env_rough(reflect(-v, nc), 0.35) * sky_vis + fill;

@@ -34,7 +34,27 @@ impl Orbit {
         drop: 0.035,
         fov_deg: 24.0,
     };
+    /// The whole person.
+    pub const BODY: Orbit = Orbit {
+        yaw: 0.35,
+        pitch: 0.06,
+        distance: 4.2,
+        drop: 0.74,
+        fov_deg: 30.0,
+    };
+    /// A hand ([`CameraFocus`] on it), from its outside and a little in front.
+    pub const HAND: Orbit = Orbit {
+        yaw: 0.9,
+        pitch: 0.2,
+        distance: 0.62,
+        drop: 0.06,
+        fov_deg: 30.0,
+    };
 }
+
+/// A bone the camera aims at instead of the eyes (`hand_l`).
+#[derive(Resource, Debug, Clone, Default)]
+pub struct CameraFocus(pub Option<String>);
 
 /// Exposure for the studio light (EV100).
 pub const EV100: f32 = 14.0;
@@ -233,6 +253,7 @@ pub fn orbit_camera(
     motion: Res<Mouse>,
     ui: Option<Res<engine_ui::input::UiInputState>>,
     subject: SubjectQuery,
+    focus: Res<CameraFocus>,
     mut cams: CameraQuery,
     mut backdrops: BackdropQuery,
     mut dragging: Local<bool>,
@@ -240,6 +261,10 @@ pub fn orbit_camera(
     let eyes = crate::subject_eyes(subject.iter())
         .map(|(p, _)| p)
         .unwrap_or(DVec3::new(0.0, 1.73, 0.12));
+    let focus = focus
+        .0
+        .as_deref()
+        .and_then(|bone| crate::subject_point(subject.iter(), bone));
     let over_ui = ui.is_some_and(|u| u.hit.is_some());
     if mouse.just_pressed(MouseButton::Left) {
         *dragging = !over_ui;
@@ -258,12 +283,12 @@ pub fn orbit_camera(
             }
         }
         // Farther out, look at the shoulders too (whole-body views set their own drop).
-        let drop = if orbit.distance > 2.5 {
+        let drop = if orbit.distance > 2.5 || focus.is_some() {
             orbit.drop
         } else {
             orbit.drop + (orbit.distance - 0.78).max(0.0) * 0.12
         };
-        let aim = eyes - DVec3::Y * drop as f64;
+        let aim = focus.unwrap_or(eyes) - DVec3::Y * drop as f64;
         let dir = Vec3::new(
             orbit.yaw.sin() * orbit.pitch.cos(),
             orbit.pitch.sin(),

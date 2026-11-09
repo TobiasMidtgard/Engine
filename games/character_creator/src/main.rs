@@ -6,9 +6,17 @@
 //! renders portrait sheets of every preset (front, three-quarter and profile) to `<dir>`;
 //! `--only kofi,mei` limits them to some people, `--views front` to some views (`body` and
 //! `body34` for the whole person in `--pose walk`, `smile` or `surprise` for expressions).
+//!
+//! The Pose and Hands tabs are a posing tool: every joint by its anatomical movements within
+//! its range of motion, every finger joint, hand shapes from the hand pose library, mirror,
+//! undo and save slots (`designs/slot<n>.json`); the Body tab sets limb proportions. Shots take
+//! `--hand fist,point` (or `all`), hand close-ups (`lhand`, `rhand`, `lhandfront`,
+//! `lhandpalm`), `--design <file>` for a saved design, and `--ui --tab Pose` to show the panel.
 
+mod joints;
 mod panel;
 mod pose;
+mod posing;
 mod shots;
 mod studio;
 
@@ -26,6 +34,7 @@ fn main() {
         .add_plugins(CharacterPlugin)
         // Long hair swings and settles as the person moves.
         .add_plugins(engine_softbody::SoftBodyPlugin)
+        .init_resource::<studio::CameraFocus>()
         .add_systems(Startup, studio::setup)
         .add_systems(
             Update,
@@ -52,13 +61,26 @@ fn main() {
         weather.wind = Vec3::ZERO;
         weather.gustiness = 0.0;
     }
+    // `--ui`: the panel in shots too (`--tab Pose` opens a tab), to show the tool itself.
+    let ui = std::env::args().any(|a| a == "--ui");
+    let shooting = shots.is_some();
     if let Some(plan) = shots {
         app.insert_resource(plan)
             .add_systems(Update, shots::run_shots.after(studio::orbit_camera));
-    } else if !headless {
+    }
+    if ui || (!headless && !shooting) {
         app.add_plugins(engine_ui::UiPlugin)
-            .add_systems(Startup, panel::setup.after(studio::setup))
-            .add_systems(Update, (panel::apply_actions, panel::sync).chain());
+            .add_systems(
+                Startup,
+                (panel::setup, joints::setup).chain().after(studio::setup),
+            )
+            .add_systems(
+                Update,
+                (panel::apply_actions, panel::sync)
+                    .chain()
+                    .before(studio::orbit_camera),
+            )
+            .add_systems(Update, joints::update.after(studio::orbit_camera));
     }
     app.run();
 }
@@ -74,6 +96,16 @@ pub type SubjectParts<'a> = (
     Option<&'a BuiltCharacter>,
     Option<&'a SkeletonPose>,
 );
+
+/// Where a bone of the subject is in world space, posed (its joint).
+pub fn subject_point<'a>(
+    mut q: impl Iterator<Item = SubjectParts<'a>>,
+    bone: &str,
+) -> Option<DVec3> {
+    let (t, _, built, skeleton) = q.next()?;
+    let p = pose::bone_point(built?, skeleton, bone)?;
+    Some(t.translation + (t.rotation * p).as_dvec3())
+}
 
 /// Eye level of the subject in world space once it is built (the camera aims there).
 pub fn subject_eyes<'a>(mut q: impl Iterator<Item = SubjectParts<'a>>) -> Option<(DVec3, bool)> {

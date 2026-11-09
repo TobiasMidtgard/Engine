@@ -7,7 +7,6 @@ use crate::appearance::Appearance;
 use crate::clothes;
 use crate::eyes::{self, EyeMesh};
 use crate::face::{self, FaceShapes};
-use crate::hands::{self, HandFrame};
 use crate::headgear::Headgear;
 use crate::hood;
 use crate::mesh::{self, Landmarks, Region, Regions, SkinMesh};
@@ -36,8 +35,6 @@ pub struct CharacterMeshes {
     /// The left thigh as a capsule for a skirt to stay outside: hip and knee joints and radii
     /// (`skirt::thigh`). `None` without a skirt.
     pub thigh: Option<[[f32; 4]; 2]>,
-    /// Each hand's frame for curling its fingers (left, right).
-    pub hands: Option<[HandFrame; 2]>,
     /// Where the lids cross each eye (`eyes::lid_curves`).
     pub lids: [[f32; 4]; 4],
     /// How much hair and body lies around the hair, for lights to be marched through
@@ -175,7 +172,6 @@ pub fn build(
     };
     CharacterMeshes {
         rig: Rig::new(pack, &morphed),
-        hands: hands::frames(pack, &morphed),
         lids,
         hair_shadow,
         thigh,

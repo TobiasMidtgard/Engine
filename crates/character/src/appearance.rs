@@ -199,6 +199,10 @@ impl AppearanceExt for Appearance {
 
     /// Set a slider, clamped to its range. Returns false for an unknown key.
     fn set_slider(&mut self, key: &str, value: f32) -> bool {
+        if crate::limbs::limb(key).is_some() {
+            self.shape.insert(key.to_string(), value.clamp(-1.0, 1.0));
+            return true;
+        }
         let Some(s) = SLIDERS.iter().find(|s| s.key() == key) else {
             return false;
         };

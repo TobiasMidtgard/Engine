@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 engine.workspace = true
 bevy_ecs.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 engine_character.workspace = true

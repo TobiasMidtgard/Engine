@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod anatomy;
 pub mod api;
 pub mod appearance;
 pub mod build;
@@ -12,6 +13,7 @@ pub mod hair_motion;
 pub mod hands;
 pub mod headgear;
 pub mod hood;
+pub mod limbs;
 pub mod lod;
 pub mod mesh;
 pub mod morph;
@@ -19,6 +21,7 @@ pub mod mouth;
 pub mod pack;
 pub mod rig;
 pub mod shoes;
+pub mod skin;
 pub mod skirt;
 pub mod sliders;
 pub mod strands;
@@ -201,7 +204,9 @@ impl HumanAssets {
                     )
                 })
                 .and_then(|bytes| HumanPack::parse(&bytes))
-                .map(|pack| {
+                .map(|mut pack| {
+                    // Fingers and twist bones from the crate's baked skin.
+                    skin::upgrade(&mut pack, &skin::baked());
                     let regions = mesh::Regions::new(&pack);
                     (pack, regions)
                 });
@@ -394,9 +399,6 @@ fn finish_builds(
                 let mut uniform = GpuCharacter::new(&appearance, &rest, 0);
                 if let Some([thigh, knee]) = meshes.thigh {
                     (uniform.thigh, uniform.knee) = (thigh, knee);
-                }
-                if let Some(hands) = meshes.hands {
-                    uniform.hands = hands.map(|h| h.gpu());
                 }
                 uniform.lids = meshes.lids;
                 if let Some(g) = &meshes.hair_shadow {

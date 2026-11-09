@@ -31,8 +31,10 @@ eye and hair shading meant for close-ups.
   skin (`clothes.rs`: trouser legs hang from the knees, the shirt from the chest, sleeves are
   loose, with folds at the elbows, wrists, waist, knees and hems), and leather shoes built as a
   shell over each foot (`shoes.rs`). It is skinned on the GPU to anim's
-  `SkeletonPose` by the humanoid bone names: MakeHuman's bones are folded onto anim's 22
-  (`tools/bake_makehuman.py`), each limb is turned from the person's own rest direction to
+  `SkeletonPose` by the humanoid bone names: MakeHuman's default skeleton weights (CC0, the
+  MakeHuman team) are folded onto the 64 humanoid bones, 22 body, 30 finger and 12 twist
+  (`tools/bake_skin.py` writes `data/hm08_skin.bin`, which upgrades the pack's weights at load),
+  each limb is turned from the person's own rest direction to
   anim's, and the feet land where the pose puts them, so a short or tall person follows any
   clip. Hair, brows and lashes ride the skin; motion vectors use last
   frame's pose.
@@ -90,9 +92,14 @@ Headgear (`Appearance::headgear`) leaves out what a helmet covers, for whoever d
 It calls `draws_appearances`, so anim poses people with an `Appearance` without drawing its
 own mesh for them. It writes `HairGuides` for posed people whose hair moves, and draws each
 hair blended from its three nearest guides as the hair simulation moves them.
-It curls each hand's fingers by its `HandControls` grip (0 open .. 1 a fist): the pack has no
-finger bones, so the skin shader bends the fingers at their joints and the thumb across the palm
-(`hands.rs`).
+Fingers have bones. A pose that names them (`index_02_l`...) moves them; otherwise each hand
+takes its `HandControls` shape from the hand pose library (`hands.rs`: relaxed, open, fist,
+grip around a handle of a given radius, shield strap, bow, point, pinch, each finger joint in
+anatomical degrees within its range of motion). A finger bone's rest rotation is its hand's, so
+a pose's finger turn is relative to the hand, from the mesh's modeled (slightly curled) rest
+shape. The forearm and shin twist bones share the wrist's and ankle's roll along the limb.
+`anatomy.rs` names every joint's movements (bend, side, twist) with their ranges, and
+`limbs.rs` reshapes limb proportions (`limb-*` shape sliders) on the skeleton.
 It draws through its own `RenderFeature` (`character`).
 
 ## API

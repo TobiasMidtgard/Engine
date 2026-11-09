@@ -573,6 +573,7 @@ pub fn build_skin(
     levels: u32,
 ) -> (SkinMesh, Vec<Vec3>) {
     let mut morphed = morph::morph(pack, a);
+    crate::limbs::apply(pack, a, &mut morphed);
     seal_lips(pack, regions, &mut morphed);
     asymmetry(pack, regions, a, &mut morphed);
     let skin = build_from(pack, regions, &morphed, region, levels);

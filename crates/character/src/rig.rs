@@ -16,38 +16,21 @@
 //! * Bone positions are rebuilt down the character's own skeleton from the pose's rotations
 //!   (a pose written for a taller skeleton still fits), then the body is moved so its feet land
 //!   where the pose puts them.
+//! * Fingers (`thumb_01_l` .. `pinky_03_r`) rest as modeled: a finger bone's rest rotation is
+//!   its hand's, and the person's own finger shape (slightly bent, fanned) is the rest pose.
+//!   A pose without finger bones gets its fingers from `HandControls` ([`crate::hands`]).
+//! * Twist bones are never posed: each turns by a share of its limb's roll
+//!   ([`crate::skin::TWIST`]).
 
 use engine_core::math::{Mat3, Mat4, Quat, Vec3};
 use engine_world::animation::SkeletonPose;
 use engine_world::character::BodyFit;
 
-use crate::pack::HumanPack;
+use engine_world::character::HandControls;
 
-/// Each humanoid bone the pack weights and its parent.
-const PARENTS: [(&str, Option<&str>); 22] = [
-    ("root", None),
-    ("hips", Some("root")),
-    ("spine", Some("hips")),
-    ("chest", Some("spine")),
-    ("neck", Some("chest")),
-    ("head", Some("neck")),
-    ("clavicle_l", Some("chest")),
-    ("upper_arm_l", Some("clavicle_l")),
-    ("lower_arm_l", Some("upper_arm_l")),
-    ("hand_l", Some("lower_arm_l")),
-    ("clavicle_r", Some("chest")),
-    ("upper_arm_r", Some("clavicle_r")),
-    ("lower_arm_r", Some("upper_arm_r")),
-    ("hand_r", Some("lower_arm_r")),
-    ("upper_leg_l", Some("hips")),
-    ("lower_leg_l", Some("upper_leg_l")),
-    ("foot_l", Some("lower_leg_l")),
-    ("toe_l", Some("foot_l")),
-    ("upper_leg_r", Some("hips")),
-    ("lower_leg_r", Some("upper_leg_r")),
-    ("foot_r", Some("lower_leg_r")),
-    ("toe_r", Some("foot_r")),
-];
+use crate::hands::{self, HandAngles};
+use crate::pack::HumanPack;
+use crate::skin::{self, FINGERS, TWIST};
 
 /// The humanoid's rest arm angle out from the body, radians (engine_anim's `humanoid`).
 const REST_ARM_ANGLE: f32 = 30.0 * std::f32::consts::PI / 180.0;
@@ -74,6 +57,36 @@ pub struct Rig {
     pub correction: Vec<Quat>,
     /// Standing height, soles to crown (m).
     pub height: f32,
+    /// Per bone, what it is (body, finger, twist), for the palette's passes.
+    pub kind: Vec<BoneKind>,
+    /// Per finger bone `_03`: where its tip is at rest (same space as `joints`).
+    pub tips: Vec<Option<Vec3>>,
+    /// Per bone: its joint's axes at rest (same space as `joints`): bend, side and twist
+    /// (zero for bones without measured axes; see [`Self::joint_axes`]).
+    pub axes: Vec<[Vec3; 3]>,
+    /// Per finger bone: how far the person's fingers already bend at rest, rad (the hand
+    /// pose library's angles count from straight).
+    pub rest_bend: Vec<f32>,
+}
+
+/// What a bone of the rig is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoneKind {
+    Body,
+    /// Finger `0..5` (thumb first), joint `0..3` (knuckle first), side (0 left, 1 right).
+    Finger(u8, u8, u8),
+    /// Index into [`TWIST`], side.
+    Twist(u8, u8),
+}
+
+fn side_of(bone: &str) -> Option<usize> {
+    if bone.ends_with("_l") {
+        Some(0)
+    } else if bone.ends_with("_r") {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 impl Rig {
@@ -87,22 +100,51 @@ impl Rig {
         let index = |name: &str| bones.iter().position(|b| b == name);
         let parents: Vec<Option<usize>> = bones
             .iter()
-            .map(|b| {
-                PARENTS
-                    .iter()
-                    .find(|(n, _)| n == b)
-                    .and_then(|(_, p)| p.and_then(index))
-            })
+            .map(|b| skin::parent_of(b).and_then(|p| index(&p)))
             .collect();
-        let mut joints: Vec<Vec3> = pack
-            .joints
-            .iter()
-            .map(|verts| {
-                let sum: Vec3 = verts.iter().map(|v| morphed[*v as usize]).sum();
-                to_humanoid(sum / verts.len().max(1) as f32)
-            })
-            .collect();
+        let mean = |verts: &[u32]| {
+            let sum: Vec3 = verts.iter().map(|v| morphed[*v as usize]).sum();
+            to_humanoid(sum / verts.len().max(1) as f32)
+        };
+        let mut joints: Vec<Vec3> = pack.joints.iter().map(|v| mean(v)).collect();
         joints.resize(bones.len(), Vec3::ZERO);
+        let kind: Vec<BoneKind> = bones
+            .iter()
+            .map(|b| {
+                let side = side_of(b).unwrap_or(0) as u8;
+                if let Some((f, j)) = skin::finger_of(b) {
+                    BoneKind::Finger(f as u8, j as u8, side)
+                } else if let Some(t) = TWIST.iter().position(|t| b.starts_with(t.bone)) {
+                    BoneKind::Twist(t as u8, side)
+                } else {
+                    BoneKind::Body
+                }
+            })
+            .collect();
+        // Twist bones sit along their limbs.
+        for (b, k) in kind.iter().enumerate() {
+            if let BoneKind::Twist(t, side) = *k {
+                let t = TWIST[t as usize];
+                let s = ["l", "r"][side as usize];
+                if let (Some(l), Some(c)) = (
+                    index(&format!("{}_{s}", t.limb)),
+                    index(&format!("{}_{s}", t.child)),
+                ) {
+                    joints[b] = joints[l].lerp(joints[c], t.at);
+                }
+            }
+        }
+        let mut tips = vec![None; bones.len()];
+        for (name, verts) in &pack.tips {
+            let Some((finger, side)) = name.split_once("_tip_") else {
+                continue;
+            };
+            if let Some(b) = index(&format!("{finger}_03_{side}"))
+                && !verts.is_empty()
+            {
+                tips[b] = Some(mean(verts));
+            }
+        }
         // The root stands on the ground under the hips.
         let mut ground = morphed.iter().fold(f32::MAX, |m, p| m.min(p.y));
         if let (Some(root), Some(hips)) = (index("root"), index("hips")) {
@@ -121,9 +163,13 @@ impl Rig {
         };
         let rest: Vec<Quat> = bones
             .iter()
-            .map(|b| {
-                if b.starts_with("upper_arm") || b.starts_with("lower_arm") || b.starts_with("hand")
-                {
+            .zip(&kind)
+            .map(|(b, k)| {
+                let arm = b.starts_with("upper_arm")
+                    || b.starts_with("lower_arm")
+                    || b.starts_with("hand")
+                    || matches!(k, BoneKind::Finger(..));
+                if arm {
                     Quat::from_rotation_z(REST_ARM_ANGLE * side(b))
                 } else {
                     Quat::IDENTITY
@@ -166,14 +212,223 @@ impl Rig {
                 }
             }
         }
-        Some(Self {
+        // Fingers keep their shape on the hand; twist bones turn with their limbs.
+        for b in 0..bones.len() {
+            let carrier = match kind[b] {
+                BoneKind::Finger(_, _, side) => {
+                    index(&format!("hand_{}", ["l", "r"][side as usize]))
+                }
+                BoneKind::Twist(t, side) => index(&format!(
+                    "{}_{}",
+                    TWIST[t as usize].limb,
+                    ["l", "r"][side as usize]
+                )),
+                BoneKind::Body => None,
+            };
+            if let Some(c) = carrier {
+                correction[b] = correction[c];
+            }
+        }
+        let mut rig = Self {
             bones,
             parents,
             joints,
             rest,
             correction,
             height: (crown - ground).max(0.0),
-        })
+            axes: vec![[Vec3::ZERO; 3]; kind.len()],
+            rest_bend: vec![0.0; kind.len()],
+            kind,
+            tips,
+        };
+        rig.measure_hands();
+        Some(rig)
+    }
+
+    /// Index of a bone.
+    pub fn bone(&self, name: &str) -> Option<usize> {
+        self.bones.iter().position(|b| b == name)
+    }
+
+    /// Where a bone's segment ends at rest: its child joint (the first child along the
+    /// limb), or a finger's tip.
+    pub fn segment_end(&self, b: usize) -> Option<Vec3> {
+        if let Some(t) = self.tips[b] {
+            return Some(t);
+        }
+        let name = &self.bones[b];
+        let child = |n: &str| self.bone(n).map(|i| self.joints[i]);
+        let s = name.rsplit_once('_').map(|x| x.1).unwrap_or("");
+        let base = name.strip_suffix(&format!("_{s}")).unwrap_or(name);
+        match (base, s) {
+            (_, _) if matches!(self.kind[b], BoneKind::Finger(..)) => {
+                let (f, j) = skin::finger_of(name)?;
+                child(&format!("{}_0{}_{s}", FINGERS[f], j + 2))
+            }
+            ("upper_arm", _) => child(&format!("lower_arm_{s}")),
+            ("lower_arm", _) => child(&format!("hand_{s}")),
+            ("hand", _) => child(&format!("middle_01_{s}")),
+            ("upper_leg", _) => child(&format!("lower_leg_{s}")),
+            ("lower_leg", _) => child(&format!("foot_{s}")),
+            ("foot", _) => child(&format!("toe_{s}")),
+            ("clavicle", _) => child(&format!("upper_arm_{s}")),
+            ("hips", _) => child("spine"),
+            ("spine", _) => child("chest"),
+            ("chest", _) => child("neck"),
+            ("neck", _) => child("head"),
+            _ => None,
+        }
+    }
+
+    /// Measures each hand's palm and every finger joint's axes and rest bend.
+    fn measure_hands(&mut self) {
+        for (si, s) in ["l", "r"].into_iter().enumerate() {
+            let j = |n: String| self.bone(&n).map(|i| self.joints[i]);
+            let (Some(wrist), Some(index), Some(middle), Some(pinky)) = (
+                j(format!("hand_{s}")),
+                j(format!("index_01_{s}")),
+                j(format!("middle_01_{s}")),
+                j(format!("pinky_01_{s}")),
+            ) else {
+                continue;
+            };
+            let along = (middle - wrist).normalize_or_zero();
+            // Toward the thumb's side.
+            let across = {
+                let a = index - pinky;
+                (a - along * a.dot(along)).normalize_or_zero()
+            };
+            let mut palm = along.cross(across).normalize_or_zero();
+            // The palm is the side the fingers curl toward at rest.
+            let mut bend = Vec3::ZERO;
+            for finger in &FINGERS[1..] {
+                let name = |k: u32| format!("{finger}_0{k}_{s}");
+                if let (Some(a), Some(b)) = (self.bone(&name(1)), self.bone(&name(3))) {
+                    let tip = self.tips[b].unwrap_or(self.joints[b]);
+                    let d = self.segment_end(a).unwrap_or(tip) - self.joints[a];
+                    let d = d.normalize_or_zero();
+                    let t = tip - self.joints[a];
+                    bend += t - d * t.dot(d);
+                }
+            }
+            if bend.dot(palm) < 0.0 {
+                palm = -palm;
+            }
+            let hand = self.bone(&format!("hand_{s}"));
+            if let Some(h) = hand {
+                // Bend (palm toward the forearm), toward the thumb, and the turn of the palm.
+                let flex = along.cross(palm).normalize_or_zero();
+                let radial = along.cross(across).normalize_or_zero();
+                // A positive turn turns the palm backward from the hanging arm's rest (pronation).
+                let c = self.correction[h];
+                let mut twist = along;
+                if (c * twist).cross(c * palm).z < 0.0 {
+                    twist = -twist;
+                }
+                self.axes[h] = [flex, radial, twist];
+            }
+            for b in 0..self.bones.len() {
+                let BoneKind::Finger(f, k, side) = self.kind[b] else {
+                    continue;
+                };
+                if side as usize != si {
+                    continue;
+                }
+                let Some(end) = self.segment_end(b) else {
+                    continue;
+                };
+                let d = (end - self.joints[b]).normalize_or_zero();
+                if d == Vec3::ZERO {
+                    continue;
+                }
+                let perp = |v: Vec3| (v - d * v.dot(d)).normalize_or_zero();
+                // The direction this joint bends the finger toward.
+                let toward = if f == 0 {
+                    // The thumb: its base swings across the palm toward the little finger;
+                    // its other joints bend its pad toward the palm and the fingers.
+                    if k == 0 {
+                        perp(-across)
+                    } else {
+                        perp(palm * 0.5 - across * 0.85)
+                    }
+                } else {
+                    perp(palm)
+                };
+                let flex = d.cross(toward).normalize_or_zero();
+                // Spread: away from the middle finger (the thumb's: out of the palm).
+                let out = if f == 0 {
+                    perp(palm)
+                } else {
+                    let knuckle = self.joints[b];
+                    let o = if f == 2 { across } else { knuckle - middle };
+                    perp(o)
+                };
+                let spread = d.cross(out).normalize_or_zero();
+                self.axes[b] = [flex, spread, d];
+                // How far it bends already at rest: from the segment before it.
+                let before = match (k, self.parents[b]) {
+                    (0, _) if f != 0 => Some((self.joints[b] - wrist).normalize_or_zero()),
+                    (0, _) => None,
+                    (_, Some(p)) => Some((self.joints[b] - self.joints[p]).normalize_or_zero()),
+                    _ => None,
+                };
+                if let Some(before) = before {
+                    let x = d.dot(before);
+                    let y = d.dot(toward);
+                    // Bent toward the palm from the line of the segment before.
+                    let y0 = before.dot(toward);
+                    self.rest_bend[b] = (y - y0).atan2(x.max(1e-3)).max(0.0);
+                }
+            }
+        }
+    }
+
+    /// A joint's bend, side and twist axes at rest, in the rig's rest space; zero for bones
+    /// without measured axes (the body's follow the humanoid's, see `crate::anatomy`).
+    pub fn joint_axes(&self, b: usize) -> [Vec3; 3] {
+        self.axes.get(b).copied().unwrap_or([Vec3::ZERO; 3])
+    }
+
+    /// A turn in the rig's rest space (`q`, about rest-space axes such as
+    /// [`Self::joint_axes`]) as the local turn a pose gives the bone (its rotation is its
+    /// parent's, times the rest offset, times this).
+    pub fn pose_turn(&self, b: usize, q: Quat) -> Quat {
+        let f = self.rest[b].inverse() * self.correction[b];
+        f * q * f.inverse()
+    }
+
+    /// A rest-space direction in a bone's pose frame (the frame of [`Self::pose_turn`]'s result).
+    pub fn pose_axis(&self, b: usize, v: Vec3) -> Vec3 {
+        self.rest[b].inverse() * self.correction[b] * v
+    }
+
+    /// A finger joint's turn in rest space for bend, side and twist angles (rad); `bend`
+    /// counts from straight, so the person's own rest bend is taken off.
+    pub fn finger_turn(&self, b: usize, bend: f32, spread: f32, twist: f32) -> Quat {
+        let [f, s, t] = self.joint_axes(b);
+        if f == Vec3::ZERO {
+            return Quat::IDENTITY;
+        }
+        let bend = bend - self.rest_bend[b];
+        Quat::from_axis_angle(s, spread)
+            * Quat::from_axis_angle(f, bend)
+            * Quat::from_axis_angle(t, twist)
+    }
+
+    /// The rest-space turn of finger bone `b` in a hand pose.
+    fn hand_turn(&self, b: usize, angles: &[HandAngles; 2]) -> Quat {
+        let BoneKind::Finger(f, k, side) = self.kind[b] else {
+            return Quat::IDENTITY;
+        };
+        let a = &angles[side as usize].fingers[f as usize];
+        let spread = if k == 0 { a.spread } else { 0.0 };
+        let twist = if k == 0 { a.roll } else { 0.0 };
+        self.finger_turn(
+            b,
+            a.bend[k as usize].to_radians(),
+            spread.to_radians(),
+            twist.to_radians(),
+        )
     }
 
     /// Where each of this rig's bones is in `pose` (`None` for bones the pose lacks).
@@ -182,14 +437,30 @@ impl Rig {
     }
 
     /// One matrix per bone taking a base-mesh-space rest point to the humanoid's model space
-    /// in `pose` (`map` from [`Self::map`]). Bones the pose lacks follow their parents.
+    /// in `pose` (`map` from [`Self::map`]). Body bones the pose lacks follow their parents,
+    /// fingers it lacks hold their rest shape, and twist bones follow their limbs' roll.
     pub fn palette(&self, pose: &SkeletonPose, map: &[Option<usize>], out: &mut Vec<Mat4>) {
+        self.palette_with(pose, map, None, out);
+    }
+
+    /// [`Self::palette`], with the fingers the pose lacks posed from `hands` (the hand pose
+    /// library's shapes and grips).
+    pub fn palette_with(
+        &self,
+        pose: &SkeletonPose,
+        map: &[Option<usize>],
+        hands: Option<&HandControls>,
+        out: &mut Vec<Mat4>,
+    ) {
         let n = self.bones.len();
         out.clear();
         let mut turn = vec![Quat::IDENTITY; n];
         let mut at = vec![Vec3::ZERO; n];
         let mut posed = vec![false; n];
         for b in 0..n {
+            if self.kind[b] != BoneKind::Body {
+                continue;
+            }
             let bone = map
                 .get(b)
                 .copied()
@@ -288,6 +559,32 @@ impl Rig {
             at[f] = new_elbow;
             at[h] = new_wrist;
         }
+        // Fingers and twist bones, on the arms as the reach left them.
+        let angles = hands.map(|h| [hands::from_controls(h, 0), hands::from_controls(h, 1)]);
+        for b in 0..n {
+            let Some(p) = self.parents[b] else {
+                continue;
+            };
+            match self.kind[b] {
+                BoneKind::Body => continue,
+                BoneKind::Finger(..) => {
+                    let bone = map
+                        .get(b)
+                        .copied()
+                        .flatten()
+                        .and_then(|i| pose.bones.get(i));
+                    turn[b] = match (bone, &angles) {
+                        (Some(pb), _) => pb.rotation * self.rest[b].inverse() * self.correction[b],
+                        (None, Some(a)) => turn[p] * self.hand_turn(b, a),
+                        (None, None) => turn[p],
+                    };
+                }
+                BoneKind::Twist(t, side) => {
+                    turn[b] = self.twist_turn(b, TWIST[t as usize], side as usize, &turn);
+                }
+            }
+            at[b] = at[p] + turn[p] * (self.joints[b] - self.joints[p]);
+        }
         let flip = Mat4::from_mat3(Mat3::from_diagonal(Vec3::new(-1.0, 1.0, -1.0)));
         for b in 0..n {
             let m = Mat4::from_translation(at[b] + shift)
@@ -296,6 +593,32 @@ impl Rig {
                 * flip;
             out.push(m);
         }
+    }
+
+    /// A twist bone's turn: its limb's, plus a share of the roll it follows.
+    fn twist_turn(&self, b: usize, t: skin::Twist, side: usize, turn: &[Quat]) -> Quat {
+        let s = ["l", "r"][side];
+        let (Some(l), Some(c)) = (
+            self.bone(&format!("{}_{s}", t.limb)),
+            self.bone(&format!("{}_{s}", t.child)),
+        ) else {
+            return self.parents[b].map_or(Quat::IDENTITY, |p| turn[p]);
+        };
+        let axis = (self.joints[c] - self.joints[l]).normalize_or(Vec3::NEG_Y);
+        let roll = if t.share >= 0.0 {
+            turn[l].inverse() * turn[c]
+        } else {
+            match self.parents[l] {
+                Some(p) => (turn[p].inverse() * turn[l]).inverse(),
+                None => Quat::IDENTITY,
+            }
+        };
+        let twist = skin::twist_about(roll, axis);
+        // The shortest way round, and never more than a forearm turns.
+        let twist = if twist.w < 0.0 { -twist } else { twist };
+        let (ax, angle) = twist.to_axis_angle();
+        let angle = angle.min(2.2) * t.share.abs();
+        turn[l] * Quat::from_axis_angle(ax, angle)
     }
 
     /// This body's rest skeleton and height, for posers fitting their skeletons to it.
@@ -479,6 +802,37 @@ mod tests {
         let landed = apply(&palette[foot], pack.positions[foot]);
         let want = pose.bones[pose.index_of("foot_l").unwrap()].translation;
         assert!((landed - want).length() < 1e-4, "{landed} {want}");
+    }
+
+    #[test]
+    fn a_turned_wrist_twists_the_forearm_along_its_length() {
+        let mut pack = stick_pack();
+        // A twist bone on the left forearm, carrying one vertex at the elbow's joint.
+        pack.bones.push("lower_arm_twist_02_l".into());
+        pack.joints.push(Vec::new());
+        let rig = Rig::new(&pack, &pack.positions).unwrap();
+        let tw = rig.bone("lower_arm_twist_02_l").unwrap();
+        assert!(matches!(rig.kind[tw], BoneKind::Twist(..)));
+        let (elbow, wrist) = (
+            rig.joints[rig.bone("lower_arm_l").unwrap()],
+            rig.joints[rig.bone("hand_l").unwrap()],
+        );
+        // It sits 85% of the way down the forearm.
+        assert!((rig.joints[tw] - elbow.lerp(wrist, 0.85)).length() < 1e-5);
+        let mut pose = rig.rest_pose();
+        let hand = pose.index_of("hand_l").unwrap();
+        let fore = pose.index_of("lower_arm_l").unwrap();
+        // Turn the hand 90° about the forearm (the forearm's own direction in the pose).
+        let axis = (pose.bones[hand].translation - pose.bones[fore].translation).normalize();
+        pose.bones[hand].rotation = Quat::from_axis_angle(axis, 1.5) * pose.bones[hand].rotation;
+        let map = rig.map(&pose);
+        let mut palette = Vec::new();
+        rig.palette(&pose, &map, &mut palette);
+        let m = |b: usize| Quat::from_mat4(&palette[b]);
+        let fb = rig.bone("lower_arm_l").unwrap();
+        let rel = m(fb).inverse() * m(tw);
+        let (_, angle) = rel.to_axis_angle();
+        assert!((angle - 1.5 * 0.85).abs() < 0.02, "{angle}");
     }
 
     #[test]

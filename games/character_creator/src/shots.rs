@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use engine::prelude::*;
-use engine::world::character::{FaceControls, HandControls};
+use engine::world::character::{FaceControls, HandControls, HandPose, HandShape};
 use engine_character::{
     Appearance, AppearanceExt, BuiltCharacter, CharacterBuild, CharacterDebug,
     CharacterPipelinesReady,
@@ -12,7 +12,8 @@ use engine_character::{
 
 use crate::Subject;
 use crate::pose::{self, PoseName};
-use crate::studio::Orbit;
+use crate::posing::PoseEdit;
+use crate::studio::{CameraFocus, Orbit};
 
 /// Frames rendered after a change before a shot (temporal anti-aliasing and screen-space
 /// lighting settle).
@@ -27,6 +28,12 @@ struct Shot {
     /// The whole body in this pose (`None`: the bust at rest).
     pose: Option<String>,
     face: FaceControls,
+    /// Both hands in this shape (`--hand`).
+    hand: Option<HandShape>,
+    /// The bone the camera aims at.
+    focus: Option<&'static str>,
+    /// A saved design's pose (`--design`).
+    edit: Option<PoseEdit>,
 }
 
 /// The shots still to take.
@@ -40,6 +47,8 @@ pub struct ShotPlan {
     completed_before: u64,
     /// `--grip g`: both hands this closed (0 open .. 1 a fist).
     grip: Option<f32>,
+    /// `--handle r`: a grip's handle radius, cm.
+    handle_cm: f32,
 }
 
 fn view(name: &str) -> Option<(Orbit, u8)> {
@@ -145,6 +154,36 @@ fn body_view(name: &str) -> Option<Orbit> {
             drop: 0.85,
             fov_deg: 30.0,
         },
+        // Close-ups that aim at a hand (see `focus`): the left from its outside, the right
+        // from its outside, the left from the front and a little above, and from its palm side.
+        "lhand" => Orbit {
+            yaw: -1.25,
+            pitch: 0.15,
+            distance: 0.5,
+            drop: 0.06,
+            fov_deg: 30.0,
+        },
+        "rhand" => Orbit {
+            yaw: 1.25,
+            pitch: 0.15,
+            distance: 0.5,
+            drop: 0.06,
+            fov_deg: 30.0,
+        },
+        "lhandfront" => Orbit {
+            yaw: -0.35,
+            pitch: 0.35,
+            distance: 0.5,
+            drop: 0.06,
+            fov_deg: 30.0,
+        },
+        "lhandpalm" => Orbit {
+            yaw: -2.3,
+            pitch: 0.1,
+            distance: 0.5,
+            drop: 0.06,
+            fov_deg: 30.0,
+        },
         // A close look at the left hand, from that side.
         "hand" => Orbit {
             yaw: 1.35,
@@ -203,6 +242,33 @@ impl ShotPlan {
         let outfit = value("--outfit");
         let colors = value("--colors");
         let grip = value("--grip").and_then(|g| g.parse::<f32>().ok());
+        let handle_cm = value("--handle")
+            .and_then(|g| g.parse::<f32>().ok())
+            .unwrap_or(1.7);
+        // `--hand fist,point` (or `all`): each shot once per hand shape.
+        let shape_named = |n: &str| {
+            engine_character::hands::SHAPES
+                .iter()
+                .find(|s| engine_character::hands::shape_name(**s).eq_ignore_ascii_case(n.trim()))
+                .copied()
+        };
+        let hand_list: Vec<Option<HandShape>> = match value("--hand").as_deref() {
+            None => vec![None],
+            Some("all") => engine_character::hands::SHAPES
+                .iter()
+                .copied()
+                .map(Some)
+                .collect(),
+            Some(list) => list.split(',').filter_map(shape_named).map(Some).collect(),
+        };
+        // `--design file.json`: the look and pose of a saved design (instead of the presets).
+        let design = value("--design").and_then(|d| match crate::posing::load(&d) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!("--design: {e}");
+                None
+            }
+        });
         let mut people: Vec<(String, Appearance)> = Appearance::presets()
             .into_iter()
             .map(|(n, a)| (n.to_lowercase(), a))
@@ -210,8 +276,30 @@ impl ShotPlan {
         for seed in 1..=6u64 {
             people.push((format!("random{seed}"), Appearance::random(seed)));
         }
+        // A design's own look, unless `--only` names people to wear its pose.
+        let only = match (&design, only) {
+            (Some(d), None) => {
+                people = vec![("design".into(), d.appearance.clone())];
+                Some(vec!["design".to_string()])
+            }
+            (_, only) => only,
+        };
         let mut shots = Vec::new();
+        // `--shape limb-forearm=1,limb-hand=0.5`: sliders set on everyone.
+        let shapes: Vec<(String, f32)> = value("--shape")
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|kv| {
+                        let (k, v) = kv.split_once('=')?;
+                        Some((k.trim().to_string(), v.trim().parse().ok()?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         for (name, mut a) in people {
+            for (k, v) in &shapes {
+                a.set_slider(k, *v);
+            }
             if let Some(h) = &headgear {
                 a.headgear = h.clone();
             }
@@ -243,8 +331,24 @@ impl ShotPlan {
             if !wanted {
                 continue;
             }
-            for v in views.split(',').map(str::trim) {
-                let file = format!("{name}_{v}.png");
+            for (v, hand) in views
+                .split(',')
+                .map(str::trim)
+                .flat_map(|v| hand_list.iter().map(move |h| (v, *h)))
+            {
+                let file = match hand {
+                    Some(h) => format!(
+                        "{name}_{v}_{}.png",
+                        engine_character::hands::shape_name(h).to_lowercase()
+                    ),
+                    None => format!("{name}_{v}.png"),
+                };
+                let focus = match v {
+                    "lhand" | "lhandfront" | "lhandpalm" => Some("hand_l"),
+                    "rhand" => Some("hand_r"),
+                    _ => None,
+                };
+                let edit = design.as_ref().map(|d| d.pose.clone());
                 let shot = |orbit, debug, pose: Option<String>, face| Shot {
                     file: file.clone(),
                     appearance: a.clone(),
@@ -252,6 +356,9 @@ impl ShotPlan {
                     debug,
                     pose,
                     face,
+                    hand,
+                    focus,
+                    edit: edit.clone(),
                 };
                 if let Some((orbit, debug)) = view(v) {
                     shots.push(shot(orbit, debug, None, FaceControls::default()));
@@ -281,6 +388,7 @@ impl ShotPlan {
             requested: false,
             completed_before: 0,
             grip,
+            handle_cm,
         })
     }
 }
@@ -303,6 +411,8 @@ type ShotSubject<'w, 's> = Query<
 pub fn run_shots(
     mut commands: Commands,
     mut plan: ResMut<ShotPlan>,
+    mut focus: ResMut<CameraFocus>,
+    edits: Query<&PoseEdit, With<Subject>>,
     mut shots: ResMut<Screenshots>,
     mut debug: ResMut<CharacterDebug>,
     mut subject: ShotSubject,
@@ -329,7 +439,7 @@ pub fn run_shots(
     let Ok((entity, mut a, build, pose_name, face, built)) = subject.single_mut() else {
         return;
     };
-    let want_build = if shot.pose.is_some() {
+    let want_build = if shot.pose.is_some() || shot.edit.is_some() {
         CharacterBuild::default()
     } else {
         CharacterBuild::portrait()
@@ -351,6 +461,30 @@ pub fn run_shots(
             grip: [g, g],
             ..Default::default()
         });
+    }
+    if let Some(shape) = shot.hand {
+        let p = HandPose {
+            shape,
+            weight: 1.0,
+            handle_radius_m: plan.handle_cm * 0.01,
+            curl: None,
+        };
+        commands.entity(entity).insert(HandControls {
+            grip: [0.0; 2],
+            hands: [p, p],
+        });
+    }
+    if edits.single().ok() != shot.edit.as_ref() {
+        match &shot.edit {
+            Some(e) => commands.entity(entity).insert(e.clone()),
+            None => commands.entity(entity).remove::<PoseEdit>(),
+        };
+        changed = true;
+    }
+    let want_focus = shot.focus.map(str::to_string);
+    if focus.0 != want_focus {
+        focus.0 = want_focus;
+        changed = true;
     }
     if face != Some(&shot.face) {
         commands.entity(entity).insert(shot.face.clone());

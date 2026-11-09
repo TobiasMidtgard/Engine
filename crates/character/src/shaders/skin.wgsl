@@ -57,10 +57,9 @@ fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     var out: SkinOut;
     let m = morph_at(vertex);
     let n0 = normalize(in.normal.xyz + m.dn);
-    // Fingers curl by the hands' grip.
-    let hand = curl_hand(in.position_curvature.xyz + m.dp, n0, in.bones, in.weights, false);
-    let hand_prev =
-        curl_hand(in.position_curvature.xyz + m.dp_prev, n0, in.bones, in.weights, true);
+    // Fingers bend on their own bones.
+    let hand = Bent(in.position_curvature.xyz + m.dp, n0);
+    let hand_prev = Bent(in.position_curvature.xyz + m.dp_prev, n0);
     let n = hand.n;
     // Clothes stand off the skin.
     let lift = n * cloth_lift(in.rest.xyz, in.m2.x);
@@ -428,6 +427,9 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
     let wrap = vec3<f32>(0.32, 0.13, 0.07) * imitate * (0.6 + 0.8 * curve);
     var color = vec3<f32>(0.0);
     var specular = vec3<f32>(0.0);
+    // Other people's limbs (and this body's other limbs) as capsules: the sun they block just
+    // above the skin (x) and the sky they hide (y), where the shadow map is too coarse.
+    let caps = capsule_occlusion(rel, s.n_soft);
 
     let l = frame.sun_dir.xyz;
     let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
@@ -435,7 +437,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
         let nl = vec3<f32>(dot(nr, l), dot(ng, l), dot(nb, l));
         // Shadow test from the smooth surface, so pores don't self-shadow at grazing light.
         // The shadow map holds the hair too; the darker of the two counts.
-        var shadow = min(skin_shadow(rel, s.n_soft, s.scatter), hair_over_skin(s, l));
+        var shadow = min(min(skin_shadow(rel, s.n_soft, s.scatter), hair_over_skin(s, l)), caps.x);
         if (nl.z > 0.0) {
             shadow *= contact_shadow(rel, s.n_soft);
         }
@@ -482,7 +484,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
     let sky_r = (sky_ambient_covered(nr, sky_vis) - fill) * sky_vis + fill;
     let sky_b = (sky_ambient_covered(nb, sky_vis) - fill) * sky_vis + fill;
     let irradiance = mouth_light(mix(sky_b, sky_r, vec3<f32>(1.0, 0.5, 0.0)) * PI, s.inside);
-    let visibility = min(s.occlusion, screen_ao(rel));
+    let visibility = min(s.occlusion, screen_ao(rel)) * caps.y;
     // Light bounces inside the skin, so occlusion darkens red less.
     let ao = ao_multibounce(visibility, s.albedo);
     let ao_rgb = mix(ao, sqrt(ao), vec3<f32>(0.5, 0.15, 0.0) * s.scatter);

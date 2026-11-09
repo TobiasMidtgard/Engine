@@ -5,16 +5,23 @@
 
 use engine::prelude::*;
 use engine::world::animation::{BonePose, SkeletonPose};
-use engine::world::character::FaceControls;
+use engine::world::character::{FaceControls, HandControls, HandPose};
 use engine_character::BuiltCharacter;
+
+use crate::posing::{PoseEdit, skeleton, turns};
 
 /// Which pose the subject holds (`None` component: the bust's rest).
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct PoseName(pub String);
 
-/// Local turns of each bone (bone name, rotation in the bone's own frame), for pose `name` at
-/// time `t` (s).
-fn turns(name: &str, t: f32) -> Vec<(&'static str, Quat)> {
+/// The base poses, in the order the creator lists them.
+pub const POSES: [&str; 8] = [
+    "stand", "walk", "wave", "think", "turn", "guard", "reach", "tpose",
+];
+
+/// Local turns of each bone (bone name, rotation in the bone's own frame), for base pose
+/// `name` at time `t` (s).
+pub fn base_turns(name: &str, t: f32) -> Vec<(&'static str, Quat)> {
     let deg = |d: f32| d.to_radians();
     let x = |d: f32| Quat::from_rotation_x(deg(d));
     let y = |d: f32| Quat::from_rotation_y(deg(d));
@@ -82,6 +89,39 @@ fn turns(name: &str, t: f32) -> Vec<(&'static str, Quat)> {
                 ("head", x(6.0) * z(-8.0) * y(-10.0)),
             ]);
         }
+        // A fighter's guard: feet apart, knees soft, the right hand high and forward, the
+        // left lower in front.
+        "guard" => {
+            v.extend([
+                ("upper_leg_l", x(18.0) * z(-8.0)),
+                ("lower_leg_l", x(-24.0)),
+                ("foot_l", x(6.0)),
+                ("upper_leg_r", x(-12.0) * z(10.0) * y(-20.0)),
+                ("lower_leg_r", x(-14.0)),
+                ("spine", x(-4.0) * y(-14.0)),
+                ("chest", x(-4.0) * y(-10.0)),
+                ("head", y(20.0) * x(2.0)),
+                ("upper_arm_r", z(-6.0) * x(48.0) * y(30.0)),
+                ("lower_arm_r", x(110.0)),
+                ("upper_arm_l", z(-14.0) * x(40.0) * y(-20.0)),
+                ("lower_arm_l", x(88.0)),
+            ]);
+        }
+        // The right arm reaching forward at shoulder height, the eyes on the hand.
+        "reach" => {
+            v.extend([
+                ("upper_arm_l", z(24.0) * x(4.0)),
+                ("lower_arm_l", x(12.0)),
+                ("upper_arm_r", z(-30.0) * x(88.0)),
+                ("lower_arm_r", x(8.0)),
+                ("chest", y(-8.0) * x(-3.0)),
+                ("head", y(-10.0) * x(-6.0)),
+            ]);
+        }
+        // Arms straight out to the sides, for checking proportions and skinning.
+        "tpose" => {
+            v.extend([("upper_arm_l", z(60.0)), ("upper_arm_r", z(-60.0))]);
+        }
         "turn" => {
             v.extend(arms_down(8.0));
             v.extend([
@@ -104,17 +144,12 @@ fn turns(name: &str, t: f32) -> Vec<(&'static str, Quat)> {
     v
 }
 
-/// The pose `name` at time `t` on a body's rest skeleton (forward kinematics from the rest
-/// pose with each bone's local turn).
-pub fn pose(rest: &SkeletonPose, name: &str, t: f32) -> SkeletonPose {
-    let turns = turns(name, t);
+/// Forward kinematics from a rest pose with each bone's local turn (in `rest` order).
+pub fn forward(rest: &SkeletonPose, turns: &[Quat]) -> SkeletonPose {
     let n = rest.bones.len();
     let mut out = rest.clone();
     for b in 0..n {
-        let turn = turns
-            .iter()
-            .filter(|(bone, _)| rest.names[b] == *bone)
-            .fold(Quat::IDENTITY, |q, (_, r)| q * *r);
+        let turn = turns.get(b).copied().unwrap_or(Quat::IDENTITY);
         let r = &rest.bones[b];
         out.bones[b] = match rest.parents[b] {
             Some(p) => {
@@ -204,35 +239,68 @@ pub fn expression(name: &str) -> FaceControls {
     f
 }
 
-/// Holds the subject in its named pose (moving with time in the window, still in shots).
+type PosedSubject<'a> = (
+    Entity,
+    &'a BuiltCharacter,
+    Option<&'a PoseName>,
+    Option<&'a PoseEdit>,
+    Option<&'a HandControls>,
+    Has<SkeletonPose>,
+);
+
+/// Holds the subject in its pose: the design tool's [`PoseEdit`] (with its hands, or the
+/// subject's `HandControls` when something else sets them), else a named base pose (moving with
+/// time in the window, still in shots).
 pub fn drive(
     mut commands: Commands,
     time: Res<Time>,
     config: Res<EngineConfig>,
-    q: Query<(
-        Entity,
-        &BuiltCharacter,
-        Option<&PoseName>,
-        Has<SkeletonPose>,
-    )>,
+    q: Query<PosedSubject>,
 ) {
     let t = if config.headless {
         0.35
     } else {
         time.elapsed_secs()
     };
-    for (entity, built, name, has_pose) in &q {
-        match (name, built.meshes.rig.as_ref()) {
-            (Some(name), Some(rig)) => {
-                commands
-                    .entity(entity)
-                    .insert(pose(&rig.rest_pose(), &name.0, t));
-            }
-            _ if has_pose => {
+    for (entity, built, name, edit, hand_controls, has_pose) in &q {
+        let Some(rig) = built.meshes.rig.as_ref() else {
+            if has_pose {
                 commands.entity(entity).remove::<SkeletonPose>();
             }
-            _ => {}
-        }
+            continue;
+        };
+        let hands = hand_controls.map(|h| h.hands);
+        let edit = match (edit, name) {
+            (Some(e), _) => e.clone(),
+            (None, Some(n)) => {
+                let mut e = PoseEdit::base(&n.0);
+                e.moving = true;
+                e
+            }
+            (None, None) => {
+                if has_pose {
+                    commands.entity(entity).remove::<SkeletonPose>();
+                }
+                continue;
+            }
+        };
+        // `HandControls::grip` alone (the shots' `--grip`): close both hands on a hilt.
+        let hands = hands.map(|mut h| {
+            for (side, hand) in h.iter_mut().enumerate() {
+                if *hand == HandPose::default()
+                    && let Some(c) = hand_controls
+                {
+                    *hand = HandPose {
+                        shape: engine::world::character::HandShape::PowerGrip,
+                        weight: c.grip(side),
+                        ..Default::default()
+                    };
+                }
+            }
+            h
+        });
+        let turns = turns(rig, &edit, hands, t);
+        commands.entity(entity).insert(skeleton(rig, &turns));
     }
 }
 
@@ -247,4 +315,17 @@ pub fn eye_point(built: &BuiltCharacter, pose: Option<&SkeletonPose>) -> Option<
     rig.palette(pose, &rig.map(pose), &mut palette);
     let head = rig.bones.iter().position(|b| b == "head")?;
     Some(palette[head].transform_point3(eyes))
+}
+
+/// Where a bone's joint is in the subject's model space, posed.
+pub fn bone_point(built: &BuiltCharacter, pose: Option<&SkeletonPose>, bone: &str) -> Option<Vec3> {
+    let rig = built.meshes.rig.as_ref()?;
+    let b = rig.bone(bone)?;
+    let rest = engine_character::rig::to_humanoid(rig.joints[b]);
+    let Some(pose) = pose else {
+        return Some(rest);
+    };
+    let mut palette = Vec::new();
+    rig.palette(pose, &rig.map(pose), &mut palette);
+    Some(palette[b].transform_point3(rest))
 }

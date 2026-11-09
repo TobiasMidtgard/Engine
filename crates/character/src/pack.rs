@@ -55,6 +55,9 @@ pub struct HumanPack {
     pub skin: Vec<SkinWeights>,
     /// Per bone of `bones`: the vertices whose mean is the joint (so joints follow the morphs).
     pub joints: Vec<Vec<u32>>,
+    /// Finger tips (`index_tip_l`, ...): the vertices whose mean is each tip, when the skin has
+    /// finger bones ([`crate::skin::upgrade`]).
+    pub tips: Vec<(String, Vec<u32>)>,
     by_name: HashMap<String, usize>,
 }
 
@@ -257,6 +260,7 @@ impl HumanPack {
             bones: Vec::new(),
             skin: Vec::new(),
             joints: Vec::new(),
+            tips: Vec::new(),
             by_name,
         }
     }

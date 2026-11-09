@@ -445,7 +445,10 @@ fn arm_weight(pack: &HumanPack, v: u32) -> f32 {
     (0..4)
         .filter(|k| {
             let b = &pack.bones[s.bones[*k] as usize];
-            b.starts_with("upper_arm") || b.starts_with("lower_arm") || b.starts_with("hand")
+            b.starts_with("upper_arm")
+                || b.starts_with("lower_arm")
+                || b.starts_with("hand")
+                || crate::skin::finger_of(b).is_some()
         })
         .map(|k| s.weights[k] as f32 / 255.0)
         .sum()

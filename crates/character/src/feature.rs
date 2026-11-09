@@ -106,9 +106,6 @@ pub struct GpuCharacter {
     /// A skirt's left thigh capsule: hip joint and radius, knee joint and radius (zero without).
     pub thigh: [f32; 4],
     pub knee: [f32; 4],
-    /// Each hand's frame for curling the fingers, left then right (`HandFrame::gpu`; zero
-    /// without hands).
-    pub hands: [[[f32; 4]; 5]; 2],
     /// Where the lids cross each eye: left upper, left lower, right upper, right lower, each
     /// `y = a + b x + c x²` in the eye's own units (`eyes::lid_curves`).
     pub lids: [[f32; 4]; 4],
@@ -184,7 +181,6 @@ impl GpuCharacter {
             accent: [o.accent[0], o.accent[1], o.accent[2], cut[2]],
             thigh: [0.0; 4],
             knee: [0.0; 4],
-            hands: [[[0.0; 4]; 5]; 2],
             lids: [[0.0; 4]; 4],
             hair_grid: [[0.0; 4]; 2],
         }
@@ -1626,7 +1622,7 @@ fn write_pose(
                 c.last.map = rig.map(pose);
                 c.last.names = Some(pose.names.clone());
             }
-            rig.palette(pose, &c.last.map, palette);
+            rig.palette_with(pose, &c.last.map, hands, palette);
             true
         }
         _ => false,
@@ -1702,7 +1698,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
-        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 33 * 16);
+        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 23 * 16);
         assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
         assert_eq!(std::mem::size_of::<GpuPose>(), 5 * 16 + 2 * 16 * 16);
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);
