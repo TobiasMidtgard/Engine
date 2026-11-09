@@ -15,6 +15,7 @@
 
 pub mod bark;
 pub mod fungi;
+mod leaf_scans;
 pub mod root_plate;
 pub mod small;
 pub mod small_textures;

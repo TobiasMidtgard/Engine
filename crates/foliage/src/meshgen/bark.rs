@@ -311,18 +311,19 @@ fn paint(kind: BarkKind, widths: [u32; 3]) -> BarkTextures {
         hm: layout::TILE_WIDTH_M * h as f32 / tile_w as f32,
         seed: kind.seed(),
     };
-    let rel = relief(kind);
-
-    // The bark tile (periodic).
-    let texels = par_grid(tile.w, tile.h, |x, y| {
-        let (xm, ym) = (
-            (x as f32 + 0.5) / tile.w as f32 * tile.wm,
-            (y as f32 + 0.5) / tile.h as f32 * tile.hm,
-        );
-        paint_bark(kind, &tile, xm, ym)
+    // The bark tile (periodic): a photographed scan where one is fetched, else painted.
+    let bark = scanned_bark(kind, tile.w, tile.h).unwrap_or_else(|| {
+        let rel = relief(kind);
+        let texels = par_grid(tile.w, tile.h, |x, y| {
+            let (xm, ym) = (
+                (x as f32 + 0.5) / tile.w as f32 * tile.wm,
+                (y as f32 + 0.5) / tile.h as f32 * tile.hm,
+            );
+            paint_bark(kind, &tile, xm, ym)
+        });
+        let px_m = tile.wm / tile.w as f32;
+        shade(&texels, tile.w, tile.h, px_m, &rel, true)
     });
-    let px_m = tile.wm / tile.w as f32;
-    let bark = shade(&texels, tile.w, tile.h, px_m, &rel, true);
     let mean = bark.albedo.iter().fold(Vec3::ZERO, |a, c| a + *c) / bark.albedo.len() as f32;
     let mean_rough = bark.rough.iter().sum::<f32>() / bark.rough.len() as f32;
     let reference = kind.painted_for().unwrap_or(mean.to_array());
@@ -408,6 +409,139 @@ fn paint(kind: BarkKind, widths: [u32; 3]) -> BarkTextures {
         reference,
         mean_albedo: mean.to_array(),
     }
+}
+
+/// A CC0 photogrammetry scan of a kind's bark (`assets/manifests/scans.toml`, fetched under
+/// `assets/fetched/scans/bark/<folder>/` in Poly Haven's layout: `<folder>_diff_2k.jpg`,
+/// `_nor_gl_2k.jpg` with OpenGL normals, `_arm_2k.jpg` with occlusion, roughness and metal).
+/// `turned`: the scan's grain runs across it, so it is turned a quarter round.
+struct BarkScan {
+    folder: &'static str,
+    turned: bool,
+}
+
+impl BarkKind {
+    /// The scan standing in for this kind's painted bark, if any. No CC0 birch scan exists;
+    /// the pine's (`render/pine_bark`) is only fetched at 8k; mushroom stems keep their paint.
+    fn scan(self) -> Option<BarkScan> {
+        let (folder, turned) = match self {
+            BarkKind::Oak => ("jolcham_oak_bark_01", false),
+            BarkKind::Spruce => ("spruce_bark", false),
+            BarkKind::Beech => ("beech_bark", false),
+            BarkKind::Hazel => ("chinese_hackberry_bark", false),
+            BarkKind::Palm => ("palm_bark", false),
+            // The aspen scan is old furrowed bark, dark olive: the painted pale bark with its
+            // diamond lenticels reads truer, so aspen keeps it (as birch, which has no CC0 scan).
+            BarkKind::Birch | BarkKind::Aspen | BarkKind::Pine | BarkKind::Stem => return None,
+        };
+        Some(BarkScan { folder, turned })
+    }
+}
+
+/// Whether fetched scans replace painted textures: `FOLIAGE_SCANS=0` keeps the paint (for
+/// before and after shots from one binary). Off in this crate's unit tests, which check the
+/// painter.
+pub fn scans_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("FOLIAGE_SCANS") {
+        Ok(v) => v != "0",
+        Err(_) => !cfg!(test),
+    })
+}
+
+/// A fetched file (`assets/fetched/<relative>`): under `ENGINE_ASSET_ROOT`, the working
+/// directory's `assets`, or this workspace's (tests and examples run from the crate folder).
+pub fn fetched_path(relative: &str) -> Option<std::path::PathBuf> {
+    let roots = [
+        std::env::var("ENGINE_ASSET_ROOT")
+            .ok()
+            .map(std::path::PathBuf::from),
+        Some("assets".into()),
+        Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").into()),
+    ];
+    roots
+        .into_iter()
+        .flatten()
+        .map(|root| root.join("fetched").join(relative))
+        .find(|p| p.exists())
+}
+
+/// The bark tile (`w` × `h` texels, periodic) from the kind's scan, or `None` when it has none
+/// or it isn't fetched (CI doesn't fetch). The scan keeps its proportions: it repeats across
+/// the tile as many times as fit its height to the tile's (oak's 1 × 2 m scan twice, a square
+/// one once), within a few percent.
+fn scanned_bark(kind: BarkKind, w: usize, h: usize) -> Option<Shaded> {
+    use image::imageops::{self, FilterType};
+    let scan = kind.scan().filter(|_| scans_on())?;
+    let load = |suffix: &str| -> Option<image::RgbImage> {
+        let f = scan.folder;
+        let path = fetched_path(&format!("scans/bark/{f}/{f}_{suffix}_2k.jpg"))?;
+        match image::open(&path) {
+            Ok(img) => {
+                let img = img.to_rgb8();
+                Some(if scan.turned {
+                    imageops::rotate90(&img)
+                } else {
+                    img
+                })
+            }
+            Err(e) => {
+                tracing::warn!("foliage: bark scan {}: {e}", path.display());
+                None
+            }
+        }
+    };
+    let (diff, nor, arm) = (load("diff")?, load("nor_gl")?, load("arm")?);
+    let (sw, sh) = diff.dimensions();
+    let copies = ((sh as f32 / sw as f32) / layout::TILE_ASPECT)
+        .round()
+        .max(1.0) as usize;
+    let cw = (w / copies).max(1) as u32;
+    let fit = |img: &image::RgbImage| imageops::resize(img, cw, h as u32, FilterType::Triangle);
+    let (diff, nor, arm) = (fit(&diff), fit(&nor), fit(&arm));
+    let mut out = Shaded {
+        albedo: Vec::with_capacity(w * h),
+        normal: Vec::with_capacity(w * h),
+        ao: Vec::with_capacity(w * h),
+        rough: Vec::with_capacity(w * h),
+    };
+    for y in 0..h {
+        for x in 0..w {
+            // Copies laid side by side, stretched by under a texel to fill the tile exactly.
+            let sx = ((x * copies * cw as usize / w) % cw as usize) as u32;
+            let (d, n, a) = (
+                diff.get_pixel(sx, y as u32).0,
+                nor.get_pixel(sx, y as u32).0,
+                arm.get_pixel(sx, y as u32).0,
+            );
+            out.albedo.push(Vec3::new(
+                srgb_to_linear(d[0] as f32 / 255.0),
+                srgb_to_linear(d[1] as f32 / 255.0),
+                srgb_to_linear(d[2] as f32 / 255.0),
+            ));
+            let v = |c: u8| c as f32 / 255.0 * 2.0 - 1.0;
+            let mut normal = Vec3::new(v(n[0]), v(n[1]), v(n[2]));
+            if scan.turned {
+                // A quarter turn clockwise: the image's right is the scan's up.
+                normal = Vec3::new(normal.y, -normal.x, normal.z);
+            }
+            out.normal.push(normal.normalize_or(Vec3::Z));
+            out.ao.push(a[0] as f32 / 255.0);
+            out.rough.push(a[1] as f32 / 255.0);
+        }
+    }
+    // Photographs carry their light and their tree's tint (the beech scan is yellow-green, the
+    // oak olive): scale each channel so the mean is the species' bark color, keeping the scan's
+    // relative variation (moss stays greener than the ridges around it).
+    if let Some(target) = kind.painted_for() {
+        let n = out.albedo.len() as f32;
+        let mean = out.albedo.iter().fold(Vec3::ZERO, |a, c| a + *c) / n;
+        let gain = Vec3::from(target) / mean.max(Vec3::splat(1e-3));
+        for c in &mut out.albedo {
+            *c = (*c * gain).min(Vec3::ONE);
+        }
+    }
+    Some(out)
 }
 
 /// Real radius the cut-face relief is modeled at, meters (a mature trunk).
@@ -1669,7 +1803,7 @@ fn paint_cut(w: &WoodParams, seed: u64, p: Vec2) -> Texel {
 // ---------------------------------------------------------------------------------------------
 // Color helpers
 
-fn srgb_to_linear(s: f32) -> f32 {
+pub(crate) fn srgb_to_linear(s: f32) -> f32 {
     if s <= 0.04045 {
         s / 12.92
     } else {

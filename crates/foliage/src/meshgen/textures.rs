@@ -2662,8 +2662,12 @@ pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures 
     let cs = (size / n).max(1);
     let st = broad_style(kind);
     let (base_y, length) = hero_leaf_frame(kind);
+    // Photographed leaves where a sheet is fetched for the kind (see `leaf_scans`).
+    let scan = super::leaf_scans::leaf_scan(kind);
+    let rect = hero_leaf_rect(kind);
     let cells: Vec<Canvas> = std::thread::scope(|scope| {
         let st = &st;
+        let scan = &scan;
         let handles: Vec<_> = (0..(n * n) as usize)
             .map(|c| {
                 scope.spawn(move || {
@@ -2676,6 +2680,14 @@ pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures 
                     // Every n-th leaf shows its underside, as often as in the sprays.
                     let every = (1.0 / st.under_share).round().max(1.0) as usize;
                     let under = c % every == every - 1;
+                    if let Some(scan) = scan.as_deref() {
+                        // Undersides mirrored, paler by the painter's color. The width draw
+                        // keeps each cell's color (and its yellowing) as painted.
+                        let _width = rng.range(0.92, 1.08);
+                        let tint = leaf_color(&mut rng, st, under);
+                        (cv.px, cv.nrm) = scan.paint(c, cs, rect, tint, under);
+                        return cv;
+                    }
                     let blade = Blade {
                         shape: st.shape,
                         base: Vec2::new(0.5, base_y),
