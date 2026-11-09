@@ -130,6 +130,9 @@ Storage (the first rule is a test, so CI enforces it):
   `copyright` line from the origin's license file; nothing non-commercial or no-derivatives
   (most motion-capture datasets, such as LAFAN1 and Bandai Namco's, are CC BY-NC-ND, so they
   are out). Format and checks: `tools/fetch-assets` docs.
+- Hosts that serve a material as a zip (ambientCG, ShareTextures) are pinned as the archive with
+  `unpack = "pbr"`: fetching writes its maps next to it as `<folder>_{diff,nor_gl,arm,disp}_2k.jpg`,
+  the Poly Haven names the terrain and foliage loaders read (`unpack = "zip"` extracts as is).
 - The repository and the mirror are public, so licenses travel with the files: fetching
   writes `assets/fetched/THIRD_PARTY_NOTICES.md` (every file's license, author and source,
   CC-BY credits, and the license texts), the Assets workflow puts the same file on the mirror,

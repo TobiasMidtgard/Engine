@@ -31,6 +31,14 @@
 //! copyright = ""                 # MIT, Apache-2.0, OFL-1.1: the origin's copyright line
 //! ```
 //!
+//! ## Archives
+//!
+//! Hosts that serve a material as one zip (ambientCG, ShareTextures) get an entry whose `path`
+//! is the archive (`scans/moss/Moss001_2K-JPG.zip`) and `unpack = "pbr"`: after fetching, the
+//! maps inside are written next to it in the engine's scan layout,
+//! `scans/moss/moss_{diff,nor_gl,arm,disp}_2k.jpg`, the names Poly Haven uses, so one loader
+//! reads every source. `unpack = "zip"` extracts the files as they are. See [`unpack`].
+//!
 //! ## Notices
 //!
 //! The repository and its mirror are public, so every copy has to carry its license. MIT,
@@ -59,6 +67,8 @@ use std::process::Command;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+pub mod unpack;
 
 /// Largest file that may be committed to git. Anything bigger goes in a manifest.
 pub const MAX_COMMITTED_BYTES: u64 = 1024 * 1024;
@@ -121,6 +131,10 @@ pub struct Entry {
     /// required for the licenses in [`LICENSE_TEXTS`], whose notice ships with the file.
     #[serde(default)]
     pub copyright: Option<String>,
+    /// For a zip archive: unpack it next to itself after fetching, `"zip"` as it is or `"pbr"`
+    /// into the engine's scan layout (see [`unpack`]). The pin is the archive's.
+    #[serde(default)]
+    pub unpack: Option<String>,
 }
 
 impl Entry {
@@ -262,6 +276,17 @@ pub fn validate(manifests: &[Manifest], require_pins: bool) -> Vec<String> {
                         "{at}: not pinned yet; copy the sha256 the Assets workflow (or `cargo run -p fetch-assets`) printed"
                     )
                 });
+            }
+            if let Some(mode) = &e.unpack {
+                if !unpack::UNPACK_MODES.contains(&mode.as_str()) {
+                    problems.push(format!(
+                        "{at}: unpack must be one of {}",
+                        unpack::UNPACK_MODES.join(", ")
+                    ));
+                }
+                if !e.path.ends_with(".zip") {
+                    problems.push(format!("{at}: only .zip archives can be unpacked"));
+                }
             }
             if !LICENSES.contains(&e.license.as_str()) {
                 problems.push(format!(

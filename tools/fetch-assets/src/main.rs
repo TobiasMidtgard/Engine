@@ -155,6 +155,22 @@ fn fetch(root: &Path, only: &[String]) -> Result<(), String> {
                     true
                 })
             };
+            // Archives unpack next to themselves once fetched (crate docs, "Archives").
+            let result = result.and_then(|copied| match &e.unpack {
+                Some(mode) if target.is_file() => {
+                    let sha = if e.is_pinned() {
+                        e.sha256.clone()
+                    } else {
+                        hash(&target)?
+                    };
+                    if copied || unpack::needs_unpack(&target, &sha, mode) {
+                        unpack::unpack(&target, &sha, mode).map(|_| copied)
+                    } else {
+                        Ok(copied)
+                    }
+                }
+                _ => Ok(copied),
+            });
             match result {
                 Ok(true) => downloaded += 1,
                 Ok(false) => ready += 1,
