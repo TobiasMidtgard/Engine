@@ -39,7 +39,7 @@ jobs:
             runner: windows-latest
             exe: showcase.exe
           - os: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             exe: showcase
           - os: macos
             runner: macos-latest

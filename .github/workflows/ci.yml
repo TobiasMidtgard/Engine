@@ -40,7 +40,9 @@ jobs:
     # two by `scripts/ci-render-tests` (its longest binaries, then the rest) and engine_physics
     # (proving_ground alone ran 5 minutes) moved from `rest` to `heavy`.
     name: Tests (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest became 26.04 on 2026-11-09, and its lavapipe (mesa 26.0.8) crashed
+    # every headless render test binary (SIGSEGV) that passed on 24.04's mesa 25.2.8.
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -100,7 +102,7 @@ jobs:
     name: Format, lint and test
     needs: check
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Every shard passed
         run: test "${{ needs.check.result }}" = success
