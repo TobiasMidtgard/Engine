@@ -964,6 +964,31 @@ impl GrowBuffer {
     pub fn capacity(&self) -> u64 {
         self.capacity
     }
+
+    /// Make room for `size` bytes keeping the first `kept`: a grown buffer gets them by a copy
+    /// on the GPU (submitted here), so only new data crosses from the CPU. Needs `COPY_SRC` in
+    /// the usage (else what was kept is lost). Returns true when the buffer was recreated.
+    pub fn grow_keeping(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: u64,
+        kept: u64,
+    ) -> bool {
+        if size <= self.capacity {
+            return false;
+        }
+        let old = std::mem::replace(self, Self::new(device, self.label, self.usage, size));
+        let kept = kept.min(old.capacity) & !(wgpu::COPY_BUFFER_ALIGNMENT - 1);
+        if kept > 0 && old.usage.contains(wgpu::BufferUsages::COPY_SRC) {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("grow buffer"),
+            });
+            encoder.copy_buffer_to_buffer(&old.buffer, 0, &self.buffer, 0, kept);
+            queue.submit([encoder.finish()]);
+        }
+        true
+    }
 }
 
 #[cfg(test)]

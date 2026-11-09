@@ -102,8 +102,21 @@ const KEEP_UNUSED_FRAMES: u64 = 600;
 /// workers' builds, following shifts and reading change ticks; refreshing the changed entities'
 /// boxes and checking a share again; the region, entity count, asset and recheck lists; reading
 /// the dirty entities; building the small meshes they asked for and reading their entities
-/// again; uploading and the instance hierarchy.
-const PARTS: [&str; 6] = ["changes", "refresh", "lists", "read", "builds", "upload"];
+/// again; uploading the hierarchies; the instance hierarchy and the instances.
+const PARTS: [&str; 7] = [
+    "changes",
+    "refresh",
+    "lists",
+    "read",
+    "builds",
+    "upload",
+    "instances",
+];
+/// An extract slower than this (ms) logs its parts, so a hitch log names the slow one.
+const SLOW_EXTRACT_MS: f32 = 30.0;
+/// Bytes of new hierarchies uploaded a frame into each store buffer; meshes wait for theirs. A
+/// zone's arrival appended 25 MB in one frame (181 ms on the cloud VM).
+const UPLOAD_BYTES_PER_FRAME: usize = 4 << 20;
 
 /// How close (meters, and per matrix element) a transform must be to its cached one (moved by a
 /// [`WorldShift`]) to count as unmoved (the shift and the transform propagation round
@@ -207,43 +220,77 @@ impl BlasStore {
         self.layout += 1;
     }
 
-    /// Upload what the GPU doesn't hold yet; true when a buffer was recreated.
+    /// Upload what the GPU doesn't hold yet, appends up to [`UPLOAD_BYTES_PER_FRAME`] of each
+    /// buffer a frame (all of it into an empty one); true when a buffer was recreated.
     fn upload(&mut self, active: &mut Active, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
         let mut regroup = false;
         if self.gpu_nodes < self.nodes.len() {
-            regroup |= append(&mut active.blas, device, queue, &self.nodes, self.gpu_nodes);
-            self.gpu_nodes = self.nodes.len();
+            let end = upload_end(self.gpu_nodes, self.nodes.len(), size_of::<bvh::Node>());
+            regroup |= append(
+                &mut active.blas,
+                device,
+                queue,
+                &self.nodes,
+                self.gpu_nodes,
+                end,
+            );
+            self.gpu_nodes = end;
         }
         if self.gpu_corners < self.corners.len() {
+            let end = upload_end(self.gpu_corners, self.corners.len(), 16);
             regroup |= append(
                 &mut active.triangles,
                 device,
                 queue,
                 &self.corners,
                 self.gpu_corners,
+                end,
             );
-            self.gpu_corners = self.corners.len();
+            self.gpu_corners = end;
         }
         regroup
     }
+
+    /// Whether the GPU holds all of `e`'s hierarchy by the end of this frame's upload (an empty
+    /// buffer takes everything at once).
+    fn holds(&self, e: &MeshEntry) -> bool {
+        (self.gpu_nodes == 0 || (e.root + e.nodes) as usize <= self.gpu_nodes)
+            && (self.gpu_corners == 0
+                || e.first_triangle as usize * 3 + e.corners as usize <= self.gpu_corners)
+    }
 }
 
-/// Write `data[held..]` after the `held` items `buffer` holds, or all of it where it doesn't fit;
-/// true when the buffer was recreated.
+/// Where this frame's append of a store's `len` items ends, `held` of them on the GPU: all of
+/// them into an empty buffer (the first upload, or after a compaction, when every instance
+/// points at them), else at most [`UPLOAD_BYTES_PER_FRAME`].
+fn upload_end(held: usize, len: usize, size: usize) -> usize {
+    if held == 0 {
+        len
+    } else {
+        len.min(held + (UPLOAD_BYTES_PER_FRAME / size).max(1))
+    }
+}
+
+/// Write `data[held..end]` after the `held` items `buffer` holds (all of `data[..end]` into an
+/// empty one), making room for all of `data`; true when the buffer was recreated.
 fn append<T: Pod>(
     buffer: &mut GrowBuffer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     data: &[T],
     held: usize,
+    end: usize,
 ) -> bool {
-    let bytes: &[u8] = bytemuck::cast_slice(data);
-    if held == 0 || bytes.len() as u64 > buffer.capacity() {
+    let bytes: &[u8] = bytemuck::cast_slice(&data[..end]);
+    if held == 0 {
         return buffer.write(device, queue, bytes);
     }
+    let all = std::mem::size_of_val(data) as u64;
+    // Grown: the GPU copies what it held (a zone's arrival rewrote 50 MB in one frame).
     let from = held * size_of::<T>();
+    let grown = buffer.grow_keeping(device, queue, all, from as u64);
     queue.write_buffer(&buffer.buffer, from as u64, &bytes[from..]);
-    false
+    grown
 }
 
 /// What every instance was last gathered for: all of them are read again when it changes.
@@ -463,6 +510,10 @@ pub(crate) struct ProbeGi {
     jobs: HashMap<u32, BuildJob>,
     /// Each mesh's local bounds by version, to leave meshes away from the grid unbuilt.
     bounds: HashMap<u32, (u64, (Vec3, Vec3))>,
+    /// Each base color image's mean color by version (`None`: not RGBA8), read from its pixels
+    /// here: the image cache's copy waits on its lock, which an upload beside the gather holds
+    /// (on a zone's arrival 226 reads waited 1.08 s in one frame on the cloud VM).
+    texture_means: HashMap<u32, (u64, Option<Vec3>)>,
     /// Triangles left out for the binding limit (warned once).
     left_out_warned: bool,
     /// What the instances were read for (`None`: read them all next frame).
@@ -561,6 +612,35 @@ fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
 /// Diffuse albedo and glow (cd/m², not pre-exposed) of a material, as the probes' rays see it.
 /// Albedo and emissive (cd/m^2) a ray sees on `m`; `texture_mean`: the mean color of its base
 /// color texture, when known.
+/// An RGBA8 image's mean color, linear, from about 4096 of its pixels (as the image cache
+/// measures it).
+fn image_mean(image: &crate::Image) -> Option<Vec3> {
+    if image.format != crate::PixelFormat::Rgba8 || image.data.len() < 4 {
+        return None;
+    }
+    let pixels = image.data.len() / 4;
+    let step = (pixels / 4096).max(1);
+    let decode = |c: u8| {
+        let c = c as f32 / 255.0;
+        if !image.srgb {
+            c
+        } else if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let mut sum = [0.0f64; 3];
+    let mut n = 0.0f64;
+    for p in image.data.as_chunks::<4>().0.iter().step_by(step) {
+        for c in 0..3 {
+            sum[c] += decode(p[c]) as f64;
+        }
+        n += 1.0;
+    }
+    Some(Vec3::from(sum.map(|s| (s / n) as f32)))
+}
+
 fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Vec3) {
     let tint = Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2]);
     let albedo = match m.preset {
@@ -638,6 +718,7 @@ impl ProbeGi {
             store: BlasStore::default(),
             jobs: HashMap::new(),
             bounds: HashMap::new(),
+            texture_means: HashMap::new(),
             left_out_warned: false,
             gathered: None,
             entries: EntityHashMap::default(),
@@ -782,6 +863,7 @@ impl ProbeGi {
             })
         };
         let usage = wgpu::BufferUsages::STORAGE;
+        let grow_usage = usage | wgpu::BufferUsages::COPY_SRC;
         self.active = Some(Active {
             trace: pipeline("cs_trace", &pipeline_layout),
             update: pipeline("cs_update", &pipeline_layout),
@@ -804,8 +886,9 @@ impl ProbeGi {
             }),
             tlas: GrowBuffer::new(device, "probe gi tlas", usage, 4096),
             instances: GrowBuffer::new(device, "probe gi instances", usage, 4096),
-            blas: GrowBuffer::new(device, "probe gi blas", usage, 1 << 16),
-            triangles: GrowBuffer::new(device, "probe gi triangles", usage, 1 << 16),
+            // Copied into a grown buffer on the GPU (`append`).
+            blas: GrowBuffer::new(device, "probe gi blas", grow_usage, 1 << 16),
+            triangles: GrowBuffer::new(device, "probe gi triangles", grow_usage, 1 << 16),
             rays: GrowBuffer::new(device, "probe gi rays", usage, 1 << 20),
             updates: GrowBuffer::new(device, "probe gi updates", usage, 4096),
             group: None,
@@ -871,6 +954,35 @@ impl ProbeGi {
             }
         };
         (!local.0.cmpgt(local.1).any()).then_some(local)
+    }
+
+    /// The mean color of base color image `handle`: from its pixels, or (released after
+    /// upload) the image cache's.
+    fn texture_mean(
+        means: &mut HashMap<u32, (u64, Option<Vec3>)>,
+        shared: &GpuShared,
+        images: &Assets<crate::Image>,
+        handle: Handle<crate::Image>,
+    ) -> Option<Vec3> {
+        let handle = images.canonical(handle);
+        let key = handle.index();
+        let version = images.version(handle);
+        if let Some(&(v, mean)) = means.get(&key)
+            && v == version
+        {
+            return mean;
+        }
+        let image = images.get(handle)?;
+        let mean = if image.is_released() {
+            // Known once it was uploaded; asked again until then.
+            let mean = shared.images.mean_color(images, handle).map(Vec3::from);
+            mean?;
+            mean
+        } else {
+            image_mean(image)
+        };
+        means.insert(key, (version, mean));
+        mean
     }
 
     /// Bring `entity`'s cache entry up to date (or drop it, gone or hidden). True when its box
@@ -1041,6 +1153,9 @@ impl ProbeGi {
             let meshes = &self.meshes;
             self.bounds.retain(|k, _| meshes.contains_key(k));
         }
+        if self.texture_means.len() > 8192 {
+            self.texture_means.clear();
+        }
     }
 
     /// Read `entity` again and update its entry and instance; true when instances came or went
@@ -1184,6 +1299,12 @@ impl ProbeGi {
         if !mesh_entry.uploaded || mesh_entry.empty {
             return Read::Entry(entry, waiting);
         }
+        if !self.store.holds(mesh_entry) {
+            // Its hierarchy is still uploading: the instance read before stays (an older
+            // version's, intact until a compaction re-reads everything).
+            entry.record = self.entries.get(&entity).and_then(|e| e.record);
+            return Read::Entry(entry, true);
+        }
         // Anchor-relative -> mesh.
         let mut rel = transform.0;
         rel.translation -= look.anchor;
@@ -1195,11 +1316,9 @@ impl ProbeGi {
             [r.x, r.y, r.z, t[i]]
         };
         let texture_mean = match (&material.base_color_texture, look.images) {
-            (Some(handle), Some(images)) => look
-                .shared
-                .images
-                .mean_color(images, *handle)
-                .map(Vec3::from),
+            (Some(handle), Some(images)) => {
+                Self::texture_mean(&mut self.texture_means, look.shared, images, *handle)
+            }
             _ => None,
         };
         let (albedo, emissive) = material_light(material, texture_mean);
@@ -1547,6 +1666,7 @@ impl ProbeGi {
         let queue = &shared.queue;
         let mut regroup = recreated || active.group.is_none();
         regroup |= self.store.upload(active, device, queue);
+        part(5);
         let placed = &mut self.placed;
         let rebuild = membership || (!moved.is_empty() && placed.refits >= REFITS_BEFORE_REBUILD);
         if rebuild {
@@ -1608,7 +1728,7 @@ impl ProbeGi {
                 }
             }
         }
-        part(5);
+        part(6);
         let gathered = rebuild || !moved.is_empty();
         let instance_count = placed.instances.len() as u32;
         regroup |= active
@@ -1731,6 +1851,29 @@ impl ProbeGi {
             parts,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
         };
+        if self.stats.extract_ms > SLOW_EXTRACT_MS {
+            let s = &self.stats;
+            let parts: Vec<String> = PARTS
+                .iter()
+                .zip(s.parts)
+                .map(|(n, ms)| format!("{n} {ms:.1}"))
+                .collect();
+            tracing::info!(
+                "probe GI: extract {:.1} ms ({}); {} changed, {} read, full {}, rebuilt {}, {} \
+                 instances, {} built triangles, {} meshes, store {} nodes {} corners",
+                s.extract_ms,
+                parts.join(", "),
+                s.changed,
+                s.read,
+                s.full,
+                s.rebuilt,
+                s.instances,
+                s.built_triangles,
+                s.meshes,
+                self.store.nodes.len(),
+                self.store.corners.len(),
+            );
+        }
         recreated
     }
 
