@@ -33,7 +33,7 @@ fn curtain() -> StrandGroom {
         // A triangle distribution over ±9 cm: dense in the middle, sparse at the sides.
         let x = (rand() + rand() - 1.0) * 0.09;
         let z = (rand() - 0.5) * 0.01;
-        let phase = rand() * 6.28;
+        let phase = rand() * std::f32::consts::TAU;
         for j in 0..POINTS {
             let t = j as f32 / (POINTS - 1) as f32;
             let y = 0.1 - 0.2 * t;
