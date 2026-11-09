@@ -58,8 +58,8 @@ pub mod terrain;
 pub use air::{AirSample, Atmospheres, BodyAtmosphere};
 pub use character::{
     Appearance, AppearanceBodies, AppearanceRequest, BodyFit, CharacterQuality, FaceControls,
-    HairGuide, HairGuides, HairGuidesPosed, HandControls, HandPose, HandShape, Outfit,
-    draws_appearances,
+    FurCoat, FurStyle, HairGuide, HairGuides, HairGuidesPosed, HandControls, HandPose, HandShape,
+    Outfit, draws_appearances,
 };
 pub use combat::{
     Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass,
@@ -617,6 +617,7 @@ mod tests {
             "HairGuidesPosed",
             "HandControls",
             "BodyFit",
+            "FurCoat",
             "Loadout",
             "CombatSkills",
             "BodyInjuries",

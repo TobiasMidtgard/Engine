@@ -648,6 +648,76 @@ impl HairGuidesPosed {
     }
 }
 
+/// A furred body's skin and coat, for the hair module to grow a groom on and move: the animal
+/// module (anim's paddock animals, npc's wildlife) builds it once from its mesh and paint and
+/// puts it on the entity that carries the body (with its `SkeletonPose` when skinned; on each
+/// piece's entity, with no bones, for a body of rigid pieces). The hair module grows the drawn
+/// strands and their guides on it, simulates the guides near the camera and skins them beyond,
+/// and draws them through the one strand renderer, on a child entity of its own (it never
+/// writes onto the body's entity). The animal module draws only the bare skin once that fur
+/// matches its own. Replace it, or bump `version`, when the body or coat changes.
+///
+/// The per-vertex arrays are shared (`Arc`), so bodies built from one mesh (a pack of wolves)
+/// hold one copy, and the hair module can grow one groom for all of them.
+#[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FurCoat {
+    pub version: u32,
+    /// The skin in this entity's model space at `grown_on`: positions, outward normals and
+    /// triangles (three indices each).
+    pub positions: Arc<[Vec3]>,
+    pub normals: Arc<[Vec3]>,
+    pub indices: Arc<[u32]>,
+    /// Per vertex: up to four bones of this entity's `SkeletonPose` and their weights (summing
+    /// to 1). Empty: the coat rides this entity rigidly.
+    pub joints: Arc<[[u16; 4]]>,
+    pub weights: Arc<[[f32; 4]]>,
+    /// The `SkeletonPose` bones (model space) the skin was built in, one per bone.
+    pub grown_on: Arc<[BonePose]>,
+    /// Per vertex: the coat's colour at the root (linear RGB, the fibre's own pigment).
+    pub color: Arc<[[f32; 3]]>,
+    /// Per vertex: how much fur grows there, 0 (bare: nose, pads, hooves, eyes) to 1 (full).
+    pub amount: Arc<[f32]>,
+    /// Per vertex: the hair's length there as a multiple of `style.length` (short on the face
+    /// and legs, long for a ruff, feathering, a mane or a tail). Empty: 1 everywhere.
+    pub length: Arc<[f32]>,
+    /// Per vertex: the way the coat lies, a model-space direction along the skin. Empty: from
+    /// the head toward the tail and down the legs, as the skeleton runs.
+    pub comb: Arc<[Vec3]>,
+    pub style: FurStyle,
+}
+
+/// How a coat looks and moves overall.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FurStyle {
+    /// Guard-hair length at `FurCoat::length` 1, meters.
+    pub length: f32,
+    /// Drawn hairs per square centimeter at full `amount` (before distance thins them).
+    pub density: f32,
+    /// The colour at the tip as a multiple of the root's (sun-bleached or dark-tipped coats).
+    pub tip: [f32; 3],
+    /// Fibre radius at the root, meters.
+    pub radius: f32,
+    /// 0..1: how firmly the coat holds its combed shape (a short dense coat ~0.9, a mane ~0.3).
+    pub stiffness: f32,
+    /// Curl amplitude, meters (0: straight).
+    pub curl: f32,
+}
+
+impl Default for FurStyle {
+    fn default() -> Self {
+        Self {
+            length: 0.03,
+            density: 60.0,
+            tip: [1.1, 1.08, 1.02],
+            radius: 0.00004,
+            stiffness: 0.85,
+            curl: 0.0,
+        }
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
     app.register_component::<Appearance>(
         "A person's look: sex, age (years), body shape, face sliders, skin, eyes, hair, wear, \
@@ -676,6 +746,13 @@ pub(crate) fn register(app: &mut App) {
          (Relaxed, Fist, PowerGrip, ShieldStrap, Bow, Open, Point, Pinch), weight 0..1, handle \
          radius (m) and optional curl per finger.",
     )
+    .register_component::<FurCoat>(
+        "A furred body's skin (model-space positions, normals, triangles; per-vertex bones and \
+         weights of its SkeletonPose and the pose grown on, or none for a rigid piece) and coat \
+         (per-vertex colour, amount 0..1, length multiple, comb direction; style: length m, \
+         density per cm2, tip colour multiple, radius m, stiffness 0..1, curl m), for the hair \
+         module to grow, move and draw its fur.",
+    )
     .register_component::<BodyFit>(
         "A person's own rest skeleton on the humanoid bones (names, parents, model-space rest \
          transforms) and standing height (m), written by the character module.",
@@ -685,6 +762,25 @@ pub(crate) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fur_coats_share_their_skin_and_round_trip() {
+        let coat = FurCoat {
+            positions: vec![Vec3::ZERO, Vec3::X, Vec3::Y].into(),
+            normals: vec![Vec3::Z; 3].into(),
+            indices: vec![0, 1, 2].into(),
+            amount: vec![1.0, 1.0, 0.0].into(),
+            ..Default::default()
+        };
+        let pack_mate = coat.clone();
+        assert!(Arc::ptr_eq(&coat.positions, &pack_mate.positions));
+        let back: FurCoat = serde_json::from_str(&serde_json::to_string(&coat).unwrap()).unwrap();
+        assert_eq!(back, coat);
+        let bare: FurCoat = serde_json::from_str(r#"{"style": {"length": 0.08}}"#).unwrap();
+        assert_eq!(bare.style.length, 0.08);
+        assert_eq!(bare.style.stiffness, 0.85);
+        assert!(bare.joints.is_empty());
+    }
 
     #[test]
     fn appearances_from_data_fill_in_the_rest() {
