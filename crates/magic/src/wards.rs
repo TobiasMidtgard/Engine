@@ -79,8 +79,9 @@ pub const FLICKER_BELOW: f32 = 0.2;
 pub const LATTICE_GLOW: f32 = 11_000.0;
 pub const FLARE_GLOW: f32 = 60_000.0;
 pub const SHARD_GLOW: f32 = 20_000.0;
-/// A glass shard's (a broken copy's), nits.
-pub const GLASS_GLOW: f32 = 7_000.0;
+/// A glass shard's (a broken copy's), nits: under a ward's so its violet isn't washed to white,
+/// but well over 10 000, or in the daylit hall the black-based plates read as dark purple.
+pub const GLASS_GLOW: f32 = 15_000.0;
 
 /// A held shield's pool against the spell's ward.
 pub const SHIELD_POOL: f32 = 3.0;
