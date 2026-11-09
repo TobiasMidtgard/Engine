@@ -563,7 +563,8 @@ pub fn floor_maps(
                     .any(|c| q.distance(Vec2::new(c[0], c[1])) < c[2] + 0.6);
             let water = if inside { soil.sample(world)[0] } else { 0.5 };
             let (x, z) = (q.x as f64, q.y as f64);
-            let open = 1.0 - 0.85 * grass.get(k).copied().unwrap_or(0.0);
+            // Thick grass crowds the herbs out (most of a colony too, now colonies are full).
+            let open = 1.0 - 0.9 * grass.get(k).copied().unwrap_or(0.0);
             // What the floor is painted with here (none outside the covers: no say).
             let painted = surfaces.iter().find_map(|c| {
                 c.at(world).map(|(_, w)| {
@@ -576,13 +577,15 @@ pub fn floor_maps(
             });
             let (leafy, hostile, needles) = painted.unwrap_or((1.0, 0.0, 0.0));
             // Herbs spread in colonies a few meters across, under a closing canopy, thicker
-            // where the soil stays moist.
+            // where the soil stays moist. Between the colonies the litter shows: woodland herb
+            // layers are patches on a brown floor (beech halls, oak woods in summer), not a
+            // lawn, so a colony takes a little under half the ground.
             let colony = fbm2(x * 0.22, z * 0.22, region.seed ^ 0x4e8b, 3, 2.0, 0.5);
             let herb_d = if blocked || bare[k] {
                 0.0
             } else {
                 let d = smoothstep(0.2, 0.8, canopy[k])
-                    * smoothstep(-0.35, 0.2, colony)
+                    * smoothstep(-0.08, 0.25, colony)
                     * (0.55 + 0.45 * smoothstep(0.15, 0.45, water))
                     * open
                     * (1.0 - hostile).max(0.0)
@@ -618,7 +621,7 @@ pub fn floor_maps(
                 let nutrients = if inside { soil.sample(world)[1] } else { 0.4 };
                 let d = bramble_want(canopy[k], broad[k], water, nutrients, needles)
                     * smoothstep(0.03, 0.12, wooded[k])
-                    * smoothstep(-0.15, 0.2, thicket)
+                    * smoothstep(0.0, 0.3, thicket)
                     * (1.0 - 0.4 * grass.get(k).copied().unwrap_or(0.0))
                     * (1.0 - hostile).max(0.0)
                     * 2.5;
