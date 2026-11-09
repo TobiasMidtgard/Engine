@@ -3361,6 +3361,8 @@ fn two_casters(app: &mut App, student_z: f64, necro_z: f64) -> (Entity, Entity) 
 #[test]
 fn a_mirror_image_steps_copies_out_to_its_sides_that_break_at_a_blow() {
     let mut app = minds_app();
+    app.world
+        .init_resource::<engine_assets::Assets<engine_render::Mesh>>();
     let (me, foe) = two_casters(&mut app, 0.0, -14.0);
     let look = engine_world::character::Appearance {
         seed: 77,
@@ -3418,7 +3420,14 @@ fn a_mirror_image_steps_copies_out_to_its_sides_that_break_at_a_blow() {
         .0;
     let fire = SpellDesign::new(&["fire"], CastType::Bolt).named("Fire bolt");
     cast(&mut app, foe, fire, Aim::Entity(first));
-    run(&mut app, 1.5);
+    // It breaks into glowing glass.
+    let mut most_glass = 0;
+    for _ in 0..90 {
+        app.update();
+        let mut q = app.world.query_filtered::<(), With<wards::WardShard>>();
+        most_glass = most_glass.max(q.iter(&app.world).count());
+    }
+    assert_eq!(most_glass, minds::GLASS_SHARDS as usize, "glass shards");
     let left_now = copies(&mut app);
     assert_eq!(left_now.len(), 2, "one broke");
     assert!(left_now.iter().all(|c| c.0 != first));

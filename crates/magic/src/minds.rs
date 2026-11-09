@@ -63,8 +63,10 @@ pub const PACE: f32 = 2.4;
 pub const MOST_COPIES: usize = 6;
 /// How much faster the terrified run than they walk.
 pub const FLEE_PACE: f32 = 1.6;
-/// Shards a broken copy bursts into.
-pub const GLASS_SHARDS: u32 = 40;
+/// Shards a broken copy bursts into, and their violet (deeper than the copies' shimmer, so it
+/// stays violet as it glows).
+pub const GLASS_SHARDS: u32 = 32;
+pub const GLASS_COLOR: [f32; 3] = [0.6, 0.28, 1.0];
 /// Pieces of a command's thread.
 pub const THREAD_PIECES: usize = 18;
 /// Sides from here up belong to one raging creature each.
@@ -395,7 +397,7 @@ pub fn run_phantasms(
                     meshes,
                     at,
                     1.75,
-                    MIND_COLOR,
+                    GLASS_COLOR,
                     GLASS_SHARDS,
                     e.to_bits() ^ p.cast.seed as u64,
                 );

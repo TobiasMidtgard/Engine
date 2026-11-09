@@ -79,6 +79,8 @@ pub const FLICKER_BELOW: f32 = 0.2;
 pub const LATTICE_GLOW: f32 = 11_000.0;
 pub const FLARE_GLOW: f32 = 60_000.0;
 pub const SHARD_GLOW: f32 = 20_000.0;
+/// A glass shard's (a broken copy's), nits.
+pub const GLASS_GLOW: f32 = 7_000.0;
 
 /// A held shield's pool against the spell's ward.
 pub const SHIELD_POOL: f32 = 3.0;
@@ -1331,6 +1333,9 @@ pub struct WardShard {
     pub age: f32,
     pub life: f32,
     pub color: [f32; 3],
+    /// Its glow at first, nits (a ward's [`SHARD_GLOW`]; glass [`GLASS_GLOW`], lower so its
+    /// violet isn't washed to white).
+    pub glow: f32,
 }
 
 /// The ring of a perfect block: the shield's lattice pulsing off its face, growing and fading.
@@ -1400,6 +1405,7 @@ fn shatter(
                 age: 0.0,
                 life: SHARD_SECS * (0.75 + 0.25 * r(8).abs()),
                 color,
+                glow: SHARD_GLOW,
             },
             NoVirtualGeometry,
         ));
@@ -1435,14 +1441,15 @@ pub fn glass_burst(
             Name::new("Glass shard"),
             Transform::from_translation(at)
                 .with_rotation(face)
-                .with_scale(Vec3::splat(0.06 + 0.06 * (r(8) * 0.5 + 0.5))),
-            renderer(shard, color, SHARD_GLOW),
+                .with_scale(Vec3::splat(0.14 + 0.12 * (r(8) * 0.5 + 0.5))),
+            renderer(shard, color, GLASS_GLOW),
             WardShard {
                 vel,
                 spin: Vec3::new(r(9), r(10), r(11)) * 11.0,
                 age: 0.0,
                 life: SHARD_SECS * (0.6 + 0.4 * r(12).abs()),
                 color,
+                glow: GLASS_GLOW,
             },
             NoVirtualGeometry,
         ));
@@ -2025,7 +2032,7 @@ pub fn tend_wards(
         let k = 1.0 - s.age / s.life;
         tf.scale *= 1.0 - 0.5 * dt;
         if let Some(mut r) = r {
-            paint.glow_clear(e, &mut r, s.color, SHARD_GLOW, k);
+            paint.glow_clear(e, &mut r, s.color, s.glow, k);
         }
     }
 

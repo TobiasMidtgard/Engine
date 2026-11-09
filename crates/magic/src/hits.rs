@@ -570,9 +570,18 @@ pub fn apply_hits(
                     // It grows slower than the bolt, so a master's blast reads as bigger, not
                     // as a sky full of fire; a rain or split volley lands many at once, each
                     // burst smaller still.
+                    // A touch (a blade's cut, a golem's fist, a hand's spell) bursts small
+                    // where it lands, so a melee doesn't hide the bodies in it.
                     scale: ((spell.carrier.radius / 0.16).powf(0.6) * 0.8 * scale.sqrt()
                         / if h.multi { 1.6 } else { 1.0 })
-                    .clamp(0.3, 2.2),
+                    .clamp(
+                        0.3,
+                        if spell.cast == CastType::Touch {
+                            0.6
+                        } else {
+                            2.2
+                        },
+                    ),
                     color: spell.weave.color,
                 });
             }
