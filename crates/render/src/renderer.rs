@@ -2847,6 +2847,12 @@ impl Renderer {
             self.effects.skip_gi();
         }
 
+        // Work that reads the prepass and lighting maps (the strand renderer's hair).
+        self.perf.pass(&mut cpu, &mut encoder, "before scene");
+        for f in self.features.iter_mut() {
+            f.before_scene(&mut encoder, &self.targets.motion.view, &ctx);
+        }
+
         if parallel {
             self.finisher
                 .hand_off(device, &mut encoder, &mut part, "scene");

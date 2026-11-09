@@ -1,15 +1,15 @@
 //! The one strand renderer for hair and fur: its API, reserved on day 0 of characters week
 //! (engine-design/characters-week.md, Rendering's round R2), so Character (scalp hair, brows,
-//! beards) and Softbody (animal fur) build against one set of types while the renderer is
-//! written. Until R2 lands nothing draws a [`StrandInstance`]: clients keep their own draws and
-//! switch over once it does.
+//! beards) and Softbody (animal fur) build against one set of types. Since R2 the renderer draws
+//! every [`StrandInstance`] (`strand_feature.rs`; engine-design/render-perf/strand-renderer.md):
+//! clients spawn one and retire their own strand draws.
 //!
 //! The shape follows the 2023-2025 shipped strand renderers (Frostbite's hair in Dragon Age:
 //! The Veilguard, RE Engine, id Tech in Indiana Jones): a groom asset holds every strand's rest
 //! shape and the guides a simulation moves; an instance places it on a body and picks a level
 //! of detail. Up close each strand is drawn (shaded once per vertex, rasterized in compute with
-//! real coverage); further out the groom is drawn as cards made from it; far away as shells
-//! (fur) or nothing.
+//! real coverage); further out a share of the strands, each wider; past a few pixels nothing
+//! (cards and shells to come).
 //!
 //! Fields may be added before R2 lands: build these with `..Default::default()`.
 
@@ -66,6 +66,9 @@ pub struct StrandGroom {
     pub guides: Vec<[f32; 3]>,
     /// Per strand, the guides it moves with (empty without guides).
     pub follow: Vec<StrandFollow>,
+    /// The fibres lie one or two deep on the skin (brows, lashes, stubble), so little light
+    /// scatters between them: with a full head's worth, fair brows glow orange.
+    pub thin: bool,
 }
 
 impl Asset for StrandGroom {}

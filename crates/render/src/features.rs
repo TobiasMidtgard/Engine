@@ -15,6 +15,8 @@
 //!    contact shadows and temporal anti-aliasing are computed from it before the scene is
 //!    shaded, so opaque features should implement it (geometry without it still renders, it
 //!    just gets no ambient occlusion or contact shadows, and only camera motion for TAA).
+//!    `before_scene` — record compute work that reads the prepass and lighting maps, right
+//!    before the scene pass (the strand renderer's hair).
 //! 6. `draw` — draw into the HDR scene in a [`RenderPhase`] (opaque → sky → transparent).
 //! 7. `overlay` — draw onto the final tonemapped image (UI, debug text, editor gizmos).
 //!
@@ -814,6 +816,20 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// Draw into the depth prepass again (same targets and group 0, contents kept) when some
     /// feature's `after_prepass` returned true: what turned out visible only then.
     fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
+
+    /// Record work right before the scene pass, once everything shading reads is ready: the
+    /// prepass depth (frame binding 12), ambient occlusion, reflections, bounce light and fog,
+    /// all bound in `ctx.frame_group`. `motion` is the prepass's motion target: a feature may
+    /// draw over it (with a render pass of its own) where it will draw something the prepass
+    /// didn't, so temporal anti-aliasing follows that instead of what is behind it (the strand
+    /// renderer rasterizes hair here). Called for the main view and extra views.
+    fn before_scene(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        motion: &wgpu::TextureView,
+        ctx: &FrameContext,
+    ) {
+    }
 
     /// Draw into the HDR scene.
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}

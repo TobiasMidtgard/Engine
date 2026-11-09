@@ -106,6 +106,7 @@ pub mod skinning;
 pub mod sky_feature;
 mod sky_occlusion;
 pub mod sprites;
+mod strand_feature;
 pub mod strands;
 mod subsurface;
 mod surface_weather;
@@ -231,7 +232,7 @@ impl Plugin for RenderPlugin {
                 "Renders the scene. Perspective (fov_y_deg, near) or Orthographic (height). Exposure Auto or Manual{ev100}. Highest `order` among active cameras wins.",
             )
             .register_component::<StrandInstance>(
-                "Hair or fur drawn from a StrandGroom asset (groom handle) at this entity: lod None picks strands, cards or shells by distance (or Strands/Cards/Shells/Hidden), width_scale, tint (rgb multiplier), visible. Reserved for the strand renderer (characters week R2): nothing draws it yet.",
+                "Hair or fur drawn from a StrandGroom asset (groom handle) at this entity: lod None picks strands, cards or shells by distance (or Strands/Cards/Shells/Hidden), width_scale, tint (rgb multiplier), visible. Drawn by the strand renderer; its guides follow HairGuidesPosed on the same entity when the counts match.",
             )
             .register_component::<DepthOfField>(
                 "Physically based depth of field for the camera on this entity (off without it): thin lens from the camera's vertical fov and sensor_height_mm (24 = full frame; fov 27 deg is then a 50 mm lens), f_stop (1.4 shallow .. 16 deep), focus_distance_m (m along the view), or autofocus (true: on what is at the screen center, sky ignored, following at autofocus_speed 1/s, snapping on camera cuts; autofocus_area = size of the center square, fraction of the image height). max_radius_px caps the blur (output pixels, up to 96). Out-of-focus foreground bleeds over what is behind it; bright lights become bokeh discs. Diagnostics: render.dof_focus_m, measured render.dof_focus_lag_frames frames ago (GPU readback).",
@@ -325,7 +326,8 @@ impl Plugin for RenderPlugin {
             .add_render_feature(mesh_feature::MeshFeature::default())
             .add_render_feature(grass::GrassFeature::default())
             .add_render_feature(sprites::SpriteFeature::default())
-            .add_render_feature(portal::PortalFeature::default());
+            .add_render_feature(portal::PortalFeature::default())
+            .add_render_feature(strand_feature::StrandFeature::default());
 
         app.register_api(
             "render.screenshot",
