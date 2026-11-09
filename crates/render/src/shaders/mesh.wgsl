@@ -1192,9 +1192,23 @@ struct PrepassVertexOut {
     @location(12) @interpolate(flat) fade: f32,
 };
 
+// Each vertex skinned on the GPU: where it was posed last frame, in its mesh's space
+// (`Skins::motion`, skinning.rs).
+@group(1) @binding(2) var<storage, read> skin_motion: array<vec4<f32>>;
+// An instance's `extra.y` bit for a mesh skinned on the GPU (`SKINNED_INSTANCE`,
+// mesh_feature.rs); its entries in `skin_motion` start at its vertex index plus `n2.w`.
+const SKINNED_INSTANCE: u32 = 0x8000u;
+
 @vertex
-fn vs_prepass(in: VertexIn) -> PrepassVertexOut {
-    return standard_prepass_vertex(in);
+fn vs_prepass(in: VertexIn, @builtin(vertex_index) vertex: u32) -> PrepassVertexOut {
+    var out = standard_prepass_vertex(in);
+    if ((in.extra.y & SKINNED_INSTANCE) != 0u) {
+        // Last frame's pose under last frame's transform: motion vectors follow the skin.
+        let i = u32(max(i32(vertex) + i32(in.n2.w), 0));
+        let q = vec4<f32>(skin_motion[min(i, arrayLength(&skin_motion) - 1u)].xyz, 1.0);
+        out.motion_prev = prev_motion_clip(vec3<f32>(dot(in.p0, q), dot(in.p1, q), dot(in.p2, q)));
+    }
+    return out;
 }
 
 fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {

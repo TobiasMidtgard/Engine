@@ -14,9 +14,14 @@
 //! the pool's copy. The mesh's bounds follow the pose (each bone's box of the vertices it moves
 //! most, posed), so culling stays right. A pose that didn't change costs nothing.
 //!
+//! Motion vectors follow the skin (characters week R1): the dispatch that poses a vertex first
+//! keeps where it was posed last frame in [`Skins::motion`] (one `vec4` per vertex, each mesh
+//! at its own offset), and the depth prepass moves it back there (`vs_prepass`, mesh.wgsl), so
+//! temporal anti-aliasing and motion blur follow swinging legs and tails instead of smearing
+//! them. A pose that stops changing is skinned once more, so last frame's place catches up.
+//!
 //! Limits: each skinned entity needs a mesh of its own (the pool's copy is posed for it);
-//! skinned meshes get no levels of detail, clusters or impostors, and their motion vectors
-//! follow the entity, not the skin.
+//! skinned meshes get no levels of detail, clusters or impostors.
 
 use std::sync::Arc;
 
@@ -151,6 +156,13 @@ pub(crate) struct Skin {
     blend: SkinBlend,
     /// Skin this frame.
     due: bool,
+    /// Skinned last frame for a new pose: skin once more after it stops, so the motion
+    /// buffer's last-frame positions catch up with it.
+    moving: bool,
+    /// Where its vertices start in [`Skins::motion`].
+    pub motion_offset: u32,
+    /// Its motion entries hold nothing yet: the next dispatch sets last frame's place to now.
+    fresh: bool,
     pub last_seen: u64,
 }
 
@@ -161,7 +173,15 @@ struct Params {
     count: u32,
     linear: u32,
     bones: u32,
+    /// Where the mesh's entries start in the motion buffer.
+    motion: u32,
+    /// 1: no last frame yet (its place last frame is its place now).
+    fresh: u32,
+    pad: [u32; 2],
 }
+
+/// Fewest motion entries the buffer holds (`vec4` each).
+const MOTION_MIN: u32 = 1024;
 
 /// Every skinned mesh's GPU state and the pass that skins them.
 #[derive(Default)]
@@ -170,6 +190,15 @@ pub(crate) struct Skins {
     pub skins: bevy_platform::collections::HashMap<u32, Skin>,
     /// Dispatches this frame.
     pub skinned: u32,
+    /// Every skinned vertex's posed position last frame (model space, `w` 1), each mesh's at
+    /// its `motion_offset`: the prepass reads it (mesh materials group, binding 2).
+    pub motion: Option<wgpu::Buffer>,
+    /// Entries `motion` holds.
+    motion_capacity: u32,
+    /// The skins changed: offsets to hand out again.
+    repack: bool,
+    /// `motion` is a new buffer (the groups that bind it are made again).
+    motion_replaced: bool,
 }
 
 impl Skins {
@@ -200,10 +229,18 @@ impl Skins {
         });
         if rebuild {
             self.skins.insert(index, Skin::new(gpu, mesh, skin));
+            self.repack = true;
         }
         let state = self.skins.get_mut(&index)?;
         state.last_seen = frame;
-        if state.skinned != skin.bones || state.blend != skin.blend {
+        let changed = state.skinned != skin.bones || state.blend != skin.blend;
+        if !changed && state.moving {
+            // Stopped: skin the same pose once more, so last frame's place is this one.
+            state.moving = false;
+            state.due = true;
+        }
+        if changed {
+            state.moving = true;
             state.skinned.clone_from(&skin.bones);
             state.blend = skin.blend;
             let mut bones = skin.bones.clone();
@@ -258,6 +295,7 @@ impl Skins {
                     storage(3, true),
                     storage(4, true),
                     storage(5, false),
+                    storage(6, false),
                 ],
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -275,6 +313,9 @@ impl Skins {
             });
             (pipeline, layout)
         });
+        let Some(motion) = &self.motion else {
+            return;
+        };
         let max_binding = device.limits().max_storage_buffer_binding_size;
         let mut jobs = Vec::new();
         for (index, state) in &mut self.skins {
@@ -303,11 +344,13 @@ impl Skins {
                 state.copied = Some((pool_mesh, version));
                 state.group = None;
                 state.due = true;
+                state.fresh = true;
             }
             if !state.due {
                 continue;
             }
             state.due = false;
+            let fresh = std::mem::take(&mut state.fresh);
             gpu.queue.write_buffer(
                 &state.params,
                 0,
@@ -316,6 +359,9 @@ impl Skins {
                     count: pool_mesh.vertex_count,
                     linear: (state.blend == SkinBlend::Linear) as u32,
                     bones: state.bone_count as u32,
+                    motion: state.motion_offset,
+                    fresh: fresh as u32,
+                    pad: [0; 2],
                 }),
             );
             if state
@@ -333,6 +379,7 @@ impl Skins {
                         entry(3, &state.weights_buffer),
                         entry(4, &state.bones),
                         entry(5, vertex_buffer),
+                        entry(6, motion),
                     ],
                 });
                 state.group = Some((pool_mesh.page, group));
@@ -359,7 +406,55 @@ impl Skins {
 
     /// Forget skins not drawn for `frames` frames (their entities are gone or far).
     pub fn evict(&mut self, frame: u64, frames: u64) {
+        let before = self.skins.len();
         self.skins.retain(|_, s| s.last_seen + frames >= frame);
+        self.repack |= self.skins.len() != before;
+    }
+
+    /// After `prepare` and `evict`, once a frame: hand out the motion buffer's offsets again
+    /// when the skins changed (every skin starts afresh), growing the buffer if they need it.
+    /// The buffer exists from the first call on, so the mesh groups can always bind it.
+    pub fn place_motion(&mut self, gpu: &GpuShared) {
+        if self.repack {
+            self.repack = false;
+            let mut next = 0u32;
+            for state in self.skins.values_mut() {
+                state.motion_offset = next;
+                state.fresh = true;
+                state.due = true;
+                state.group = None;
+                next += state.rest.size() as u32 / std::mem::size_of::<Vertex>() as u32;
+            }
+            if next > self.motion_capacity {
+                self.motion = None;
+            }
+            if self.motion.is_none() {
+                self.motion_capacity = next.next_power_of_two().max(MOTION_MIN);
+            }
+        }
+        if self.motion.is_none() {
+            self.motion_capacity = self.motion_capacity.max(MOTION_MIN);
+            self.motion = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu skinning motion"),
+                size: self.motion_capacity as u64 * 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }));
+            self.motion_replaced = true;
+            for state in self.skins.values_mut() {
+                state.group = None;
+            }
+        }
+    }
+
+    /// Whether the motion buffer was replaced since the last call.
+    pub fn take_motion_replaced(&mut self) -> bool {
+        std::mem::take(&mut self.motion_replaced)
+    }
+
+    /// Where mesh `index`'s entries start in the motion buffer, when it's skinned.
+    pub fn motion_offset(&self, index: u32) -> Option<u32> {
+        self.skins.get(&index).map(|s| s.motion_offset)
     }
 }
 
@@ -442,6 +537,9 @@ impl Skin {
             skinned: Vec::new(),
             blend: skin.blend,
             due: true,
+            moving: false,
+            motion_offset: 0,
+            fresh: true,
             last_seen: 0,
         }
     }
@@ -481,6 +579,10 @@ struct Params {
     count: u32,
     linear: u32,
     bones: u32,
+    motion: u32,
+    fresh: u32,
+    pad0: u32,
+    pad1: u32,
 }
 struct Bone {
     real: vec4<f32>,
@@ -495,6 +597,8 @@ struct Bone {
 @group(0) @binding(4) var<storage, read> bones: array<Bone>;
 // The mesh pool page's vertices: the posed position and normal go over the mesh's range.
 @group(0) @binding(5) var<storage, read_write> pool: array<f32>;
+// Each vertex's posed position last frame (`Skins::motion`), for the prepass's motion vectors.
+@group(0) @binding(6) var<storage, read_write> motion: array<vec4<f32>>;
 
 fn rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     let t = 2.0 * cross(q.xyz, v);
@@ -560,6 +664,9 @@ fn cs_skin(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     out_n = normalize(select(n, out_n, dot(out_n, out_n) > 1e-12));
     let o = (params.base_vertex + i) * 12u;
+    // Where the pool posed it last frame (where it is now, on a mesh's first frame).
+    let was = vec3<f32>(pool[o], pool[o + 1u], pool[o + 2u]);
+    motion[params.motion + i] = vec4<f32>(select(was, out_p, params.fresh != 0u), 1.0);
     pool[o] = out_p.x;
     pool[o + 1u] = out_p.y;
     pool[o + 2u] = out_p.z;

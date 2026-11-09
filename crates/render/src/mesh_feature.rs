@@ -441,6 +441,9 @@ struct MeshFrame {
     impostor: bool,
     /// Skinned on the GPU (`GpuSkin`): never in static shadow images.
     skinned: bool,
+    /// Skinned: where its vertices' last-frame places are in the skins' motion buffer, less
+    /// its first vertex in the pool page (`vs_prepass`: entry = vertex index + this).
+    motion_delta: f32,
     /// `GpuMesh::still_from`.
     still_from: u64,
     /// Whether its clusters are ready, once asked this frame (undisplaced instances).
@@ -462,8 +465,9 @@ impl MeshFrame {
     }
 
     /// Take bounds and levels from its upload.
-    fn set_uploaded(&mut self, gpu_mesh: &GpuMesh, building_levels: bool, skinned: bool) {
+    fn set_uploaded(&mut self, gpu_mesh: &GpuMesh, building_levels: bool, motion: Option<u32>) {
         let coarsest = gpu_mesh.coarsest_triangles();
+        let skinned = motion.is_some();
         *self = MeshFrame {
             ready: true,
             page: gpu_mesh.pool.page,
@@ -475,6 +479,9 @@ impl MeshFrame {
             // A skinned mesh's pose changes: no bake can show it.
             impostor: coarsest >= crate::impostor::MIN_TRIANGLES && !building_levels && !skinned,
             skinned,
+            motion_delta: motion.map_or(0.0, |m| {
+                (m as i64 - gpu_mesh.pool.base_vertex as i64) as f32
+            }),
             still_from: gpu_mesh.still_from,
             ..*self
         };
@@ -1607,6 +1614,9 @@ const FAR_MOVING_CASTER_TEXELS: f32 = 2.0;
 const MAX_LOD_JOBS: usize = 2;
 /// `MeshFeature::layout`: drawn as its impostor.
 const AS_IMPOSTOR: u32 = 1 << 31;
+/// An instance's `extra.y` bit for a mesh skinned on the GPU (`SKINNED_INSTANCE` in mesh.wgsl;
+/// bits 0-15 are otherwise an impostor's layer, and skinned meshes have none).
+const SKINNED_INSTANCE: u32 = 1 << 15;
 /// In `layout`: the item's previous level, drawn while the new one cross-fades in.
 const AS_OLD_LEVEL: u32 = 1 << 30;
 /// An item index in `layout`, without the flags above.
@@ -2974,6 +2984,8 @@ impl RenderFeature for MeshFeature {
                 storage(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
                 // The plant wind table (lib_wind.wgsl).
                 storage(1, wgpu::ShaderStages::VERTEX),
+                // Skinned vertices' places last frame (`Skins::motion`, `vs_prepass`).
+                storage(2, wgpu::ShaderStages::VERTEX),
             ],
         });
         let mut texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..TEXTURE_SLOTS as u32)
@@ -3302,6 +3314,7 @@ impl RenderFeature for MeshFeature {
             }
             self.skins.evict(frame, SKIN_EVICT_FRAMES);
         }
+        self.skins.place_motion(gpu);
         self.skin_query = Some(skin_query);
 
         steps.step("meshes: gather");
@@ -3340,7 +3353,7 @@ impl RenderFeature for MeshFeature {
                     entry.set_uploaded(
                         gpu_mesh,
                         self.lod_jobs.contains_key(&handle.index()),
-                        self.skins.skins.contains_key(&handle.index()),
+                        self.skins.motion_offset(handle.index()),
                     );
                 }
                 let i = raw as usize;
@@ -3746,11 +3759,11 @@ impl RenderFeature for MeshFeature {
                     }
                 }
                 let building = self.lod_jobs.contains_key(&mesh.index);
-                let skinned = self.skins.skins.contains_key(&mesh.index);
+                let motion = self.skins.motion_offset(mesh.index);
                 let entry = &mut self.mesh_frames[raw];
                 entry.checked = true;
                 if let Some(gpu_mesh) = self.meshes.get(&mesh.index) {
-                    entry.set_uploaded(gpu_mesh, building, skinned);
+                    entry.set_uploaded(gpu_mesh, building, motion);
                 }
             }
         }
@@ -4206,6 +4219,9 @@ impl RenderFeature for MeshFeature {
                 // 16-31 (its impostor leans with its trunk).
                 let impostor = if n & AS_IMPOSTOR != 0 {
                     item.impostor | mesh.wind << 16
+                } else if mesh.skinned {
+                    // Skinned (never an impostor): `vs_prepass` reads last frame's places.
+                    SKINNED_INSTANCE | mesh.wind << 16
                 } else {
                     mesh.wind << 16
                 };
@@ -4238,6 +4254,9 @@ impl RenderFeature for MeshFeature {
                         cold.previous_rows(frame, prev_origin),
                     ),
                 };
+                if mesh.skinned && n & AS_IMPOSTOR == 0 {
+                    normal[2][3] = mesh.motion_delta;
+                }
                 normal[0][3] = if item.dither > 0.0 {
                     item.dither
                 } else if item.dither < 0.0 {
@@ -4320,11 +4339,13 @@ impl RenderFeature for MeshFeature {
                 queue.write_buffer(&buffer.buffer, 0, &words[..head.min(words.len())]);
             }
         }
+        grown |= self.skins.take_motion_replaced();
         if (grown || self.material_group.is_none())
-            && let (Some(layout), Some(materials), Some(plants)) = (
+            && let (Some(layout), Some(materials), Some(plants), Some(motion)) = (
                 &self.material_layout,
                 &self.materials,
                 &self.plant_wind_buffer,
+                &self.skins.motion,
             )
         {
             self.material_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4338,6 +4359,10 @@ impl RenderFeature for MeshFeature {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: plants.buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: motion.as_entire_binding(),
                     },
                 ],
             }));
