@@ -123,24 +123,24 @@ pub(super) fn lanes() -> Vec<Lane> {
         // The dead rise mid-floor before the necromancers' plinths, near enough to the
         // students that the whole fight stays in one picture.
         of(vec![
-            cast(0.0, golem(), AimAt::Floor(3.2, 4.2)),
+            cast(0.0, golem(), AimAt::Floor(3.0, 6.6)),
             cast(1.8, fire_weapon(), AimAt::Foe),
         ]),
         of(vec![
-            cast(0.1, raise(), AimAt::Floor(1.2, 3.0)),
-            cast(0.7, raise(), AimAt::Floor(0.6, 1.0)),
-            cast(1.3, raise(), AimAt::Floor(2.6, 1.6)),
+            cast(0.1, raise(), AimAt::Floor(1.4, 6.0)),
+            cast(0.7, raise(), AimAt::Floor(0.6, 4.4)),
+            cast(1.3, raise(), AimAt::Floor(2.6, 4.6)),
             cast(2.0, fire_weapon(), AimAt::Foe),
-            cast(10.0, late_raise(), AimAt::Floor(2.4, 4.6)),
-            cast(10.6, late_raise(), AimAt::Floor(1.4, 5.6)),
+            cast(10.0, late_raise(), AimAt::Floor(2.6, 6.4)),
+            cast(10.6, late_raise(), AimAt::Floor(1.2, 7.2)),
             cast(11.6, fire_weapon(), AimAt::Foe),
         ]),
         of(vec![
-            cast(0.2, raise(), AimAt::Floor(3.8, 2.6)),
-            cast(0.8, raise(), AimAt::Floor(3.4, 0.6)),
+            cast(0.2, raise(), AimAt::Floor(4.0, 5.4)),
+            cast(0.8, raise(), AimAt::Floor(3.6, 4.0)),
             cast(2.2, fire_weapon(), AimAt::Foe),
-            cast(9.4, late_raise(), AimAt::Floor(1.0, 2.4)),
-            cast(10.2, late_raise(), AimAt::Floor(3.0, 1.8)),
+            cast(9.4, late_raise(), AimAt::Floor(0.8, 5.0)),
+            cast(10.2, late_raise(), AimAt::Floor(3.4, 4.6)),
             cast(11.8, fire_weapon(), AimAt::Foe),
         ]),
     ]

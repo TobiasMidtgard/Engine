@@ -53,7 +53,9 @@ use crate::wards::{WardMeshes, glass_burst, ward_material};
 /// A conjured blade's glow, nits: about the brightest a thin glowing thing gets in the daylit
 /// hall before its colour washes to white (magic-hall-pictures: violet glass read at 7 000 to
 /// 15 000).
-pub const BLADE_GLOW: f32 = 11_000.0;
+pub const BLADE_GLOW: f32 = 10_000.0;
+/// The light a lasting blade (a phalanx's, a spirit blade, one in the hand) throws, lm.
+pub const BLADE_LIGHT_LM: f32 = 700.0;
 /// A phalanx loosens a blade at a foe this near its caster, m.
 pub const PHALANX_REACH_M: f32 = 9.0;
 /// Seconds between a phalanx's blades.
@@ -72,6 +74,8 @@ pub const FALL_CUT_M: f32 = 1.0;
 /// A spirit blade looks this far for a foe, and strays at most this far from its caster, m.
 pub const SPIRIT_SEE_M: f32 = 16.0;
 pub const SPIRIT_LEASH_M: f32 = 22.0;
+/// A spirit blade goes for a foe that isn't a creature only this near its caster, m.
+pub const SPIRIT_GUARD_REACH_M: f32 = 7.0;
 /// A spirit blade's flight, m/s.
 pub const SPIRIT_PACE: f32 = 7.5;
 /// A spirit blade's cut: the whole sweep, the moment it lands, and the rest after, s.
@@ -245,8 +249,10 @@ impl BladeMeshes {
 // ------------------------------------------------------------------------------- shapes
 
 /// A sword of unit length along +Y from the pommel (y = 0) to the point (y = 1): pommel, grip,
-/// crossguard and a diamond-section blade. Vertex alpha makes the blade's flat translucent and
-/// its edges and ridge bright, so it reads as hard light; the hilt is solid.
+/// crossguard and a broad diamond-section blade. Vertex alpha makes the blade's flat translucent
+/// and its edges and ridge bright, so it reads as hard light; the hilt is solid. Two crossed
+/// fringes of fading light round the blade (in its flat and across it) give it a glow from any
+/// side, so it reads at 20 m as a sword of light, not a hairline.
 pub fn blade_mesh() -> Mesh {
     let mut m = Mesh::new(Vec::new(), Vec::new());
     let quad = |m: &mut Mesh, p: [Vec3; 4], a: [f32; 4]| {
@@ -302,18 +308,18 @@ pub fn blade_mesh() -> Mesh {
     // The blade: an edge each side, a ridge each face, tapering to the point. Rows up the
     // blade: (height, half width).
     let rows: [(f32, f32); 5] = [
-        (0.235, 0.036),
-        (0.5, 0.033),
-        (0.78, 0.027),
-        (0.92, 0.016),
+        (0.235, 0.052),
+        (0.5, 0.048),
+        (0.78, 0.039),
+        (0.92, 0.023),
         (1.0, 0.0),
     ];
-    let ridge = 0.009;
+    let ridge = 0.012;
     for w in rows.windows(2) {
         let (y0, h0) = w[0];
         let (y1, h1) = w[1];
-        let t0 = ridge * (h0 / 0.036).max(0.15);
-        let t1 = ridge * (h1 / 0.036).max(0.15);
+        let t0 = ridge * (h0 / 0.052).max(0.15);
+        let t1 = ridge * (h1 / 0.052).max(0.15);
         for (sx, sz) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
             // From the edge (bright) in to the ridge (bright), the flat between them dimmer:
             // two strips per quarter.
@@ -336,6 +342,25 @@ pub fn blade_mesh() -> Mesh {
             quad(&mut m, p, al);
             let (p, al) = strip([mid0, ridge0, ridge1, mid1], [0.35, 0.8, 0.8, 0.35]);
             quad(&mut m, p, al);
+        }
+    }
+    // The glow: from each edge out to nothing, in the blade's flat (x) and across it (z), and
+    // on past the point.
+    const FRINGE: f32 = 0.085;
+    for w in rows.windows(2) {
+        let (y0, h0) = w[0];
+        let (y1, h1) = w[1];
+        let y1x = if h1 == 0.0 { y1 + FRINGE } else { y1 };
+        for axis in [Vec3::X, Vec3::Z] {
+            // Across the blade the fringe hugs its thickness, not its width.
+            let k = if axis == Vec3::X { 1.0 } else { 0.45 };
+            for side in [1.0, -1.0] {
+                let in0 = Vec3::new(0.0, y0, 0.0) + axis * side * h0 * k;
+                let in1 = Vec3::new(0.0, y1, 0.0) + axis * side * h1 * k;
+                let out0 = in0 + axis * side * FRINGE;
+                let out1 = Vec3::new(0.0, y1x, 0.0) + axis * side * (h1 * k + FRINGE * 0.6);
+                quad(&mut m, [in0, out0, out1, in1], [0.42, 0.0, 0.0, 0.42]);
+            }
         }
     }
     m
@@ -478,6 +503,13 @@ pub fn spawn_blades(
     let imbues = std::mem::take(&mut queue.imbues);
     for cast in imbues {
         let Some(caster) = cast.caster else { continue };
+        // What rides on a blow is a touch of the spell: it lands where the blow did, with a
+        // small burst (a touch's), so the melee isn't hidden in fire.
+        let look_spell = cast.spell.clone();
+        let cast = CastInfo {
+            spell: cut_of(&cast.spell, 1.0),
+            ..cast
+        };
         let secs = cast.spell.payload.imbue_secs.max(1.0);
         let at = owners
             .get(caster)
@@ -516,10 +548,10 @@ pub fn spawn_blades(
         queue.looks.push(LookCmd::Burst {
             at: at + DVec3::Y * 1.1,
             up: Vec3::Y,
-            look: blade_look(&cast.spell),
+            look: blade_look(&look_spell),
             role: Role::Impact,
             scale: 0.6,
-            color: cast.spell.weave.color,
+            color: look_spell.weave.color,
         });
     }
     if queue.blades.is_empty() {
@@ -731,6 +763,15 @@ fn spawn_blade(
         r.visible = !hidden;
         ec.insert(r);
     }
+    // A blade that lasts lights what is round it (a bladefall's twenty don't).
+    if !matches!(b.flight, Flight::Waiting { .. }) {
+        ec.insert(PointLight {
+            color,
+            intensity_lm: BLADE_LIGHT_LM,
+            range: 4.0,
+            radius: 0.05,
+        });
+    }
     let e = ec.insert(b).id();
     // A woven blade wears its element: flames lick a fire blade, frost smokes off an ice one.
     if woven && aura > 0.0 {
@@ -929,22 +970,18 @@ pub fn run_blades(
                             expire: false,
                         });
                     }
-                    queue.looks.push(LookCmd::Burst {
-                        at: ground,
-                        up: Vec3::Y,
-                        look: "stone".into(),
-                        role: Role::Impact,
-                        scale: 0.35 * b.length,
-                        color: crate::combine::STONE_COLOR,
-                    });
-                    queue.looks.push(LookCmd::Burst {
-                        at: ground + DVec3::Y * 0.3,
-                        up: Vec3::Y,
-                        look: blade_look(&b.cast.spell),
-                        role: Role::Impact,
-                        scale: 0.3 * b.length,
-                        color: b.color,
-                    });
+                    // A small burst of its light where it bites, every other blade, so twenty
+                    // of them don't fill the floor with dust and ice (the first film did).
+                    if b.slot.0.is_multiple_of(2) {
+                        queue.looks.push(LookCmd::Burst {
+                            at: ground + DVec3::Y * 0.15,
+                            up: Vec3::Y,
+                            look: blade_look(&b.cast.spell),
+                            role: Role::Impact,
+                            scale: 0.16 * b.length,
+                            color: b.color,
+                        });
+                    }
                 }
             }
             Flight::Stuck { t } => {
@@ -959,10 +996,20 @@ pub fn run_blades(
                 if b.look_in <= 0.0 || b.target.is_some_and(|t| bodies.get(t).is_err()) {
                     b.look_in = 0.4;
                     // Creatures first, as the dead go for summons: a spirit blade fences
-                    // with the foe's skeletons before it flies at their master.
+                    // with the foe's creatures anywhere within its leash, and with a body that
+                    // isn't one only when it comes near its caster (it guards, it doesn't go
+                    // hunting their master).
                     b.target =
                         nearest_foe(&b.cast, b.pos, SPIRIT_SEE_M, e, &bodies, factions, true)
-                            .filter(|(_, at)| at.distance(home) <= SPIRIT_LEASH_M as f64)
+                            .filter(|(f, at)| {
+                                let creature = bodies.get(*f).is_ok_and(|x| x.4);
+                                at.distance(home)
+                                    <= if creature {
+                                        SPIRIT_LEASH_M
+                                    } else {
+                                        SPIRIT_GUARD_REACH_M
+                                    } as f64
+                            })
                             .map(|(f, _)| f);
                 }
                 let foe = b
@@ -1636,8 +1683,17 @@ mod tests {
         let m = blade_mesh();
         assert_eq!(m.indices.len() % 3, 0);
         assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
-        let top = m.vertices.iter().map(|v| v.position[1]).fold(0.0, f32::max);
+        // The point at 1, its glow a little past it.
+        let solid = |v: &&Vertex| v.color[3] > 0.0;
+        let top = m
+            .vertices
+            .iter()
+            .filter(solid)
+            .map(|v| v.position[1])
+            .fold(0.0, f32::max);
         assert!((top - 1.0).abs() < 1e-5);
+        let glow = m.vertices.iter().map(|v| v.position[1]).fold(0.0, f32::max);
+        assert!(glow > 1.0 && glow < 1.1);
         // The edges are bright, the flats between them dimmer.
         let alphas: Vec<f32> = m.vertices.iter().map(|v| v.color[3]).collect();
         assert!(alphas.iter().any(|&a| a < 0.5) && alphas.iter().any(|&a| a >= 1.0));

@@ -272,8 +272,8 @@ pub const VIEWS: &[DemoView] = &[
         // From the floor's far left, across it toward the dais: the students' plinths on the
         // left, the burning dead coming in from the right, the phalanx over lane 2's head and
         // the spirit blades fencing mid-floor.
-        eye: [-3.5, 4.4, -8.0],
-        target: [-3.5, 1.3, 6.0],
+        eye: [-2.6, 3.0, -2.6],
+        target: [-2.6, 1.4, 8.5],
         hour: 16.6,
         // The phalanx loosing at the first of the dead, the spirit blades at them.
         warmup: 6.4,
