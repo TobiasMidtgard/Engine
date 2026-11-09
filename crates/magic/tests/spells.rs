@@ -126,6 +126,7 @@ struct Seen {
     died: Vec<Died>,
     wards: Vec<wards::WardStruck>,
     blasts: Vec<engine_world::WorldImpulse>,
+    minds: Vec<engine_world::MindEffect>,
 }
 
 fn snapshot(scene: Res<SceneRes>, q: Query<(Entity, &GlobalTransform, &Body)>) {
@@ -152,7 +153,9 @@ fn collect(
     mut died: MessageReader<Died>,
     mut struck: MessageReader<wards::WardStruck>,
     mut blasts: MessageReader<engine_world::WorldImpulse>,
+    mut minds: MessageReader<engine_world::MindEffect>,
 ) {
+    seen.minds.extend(minds.read().copied());
     seen.blasts.extend(blasts.read().copied());
     seen.wards.extend(struck.read().copied());
     seen.cues.extend(cues.read().cloned());
@@ -3649,6 +3652,73 @@ fn a_fire_decoy_bursts_into_fire_on_the_skeleton_that_breaks_it() {
 }
 
 #[test]
+fn a_veiled_mage_fades_out_and_shows_itself_when_it_strikes() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
+    app.world.entity_mut(me).insert(Body(0.5));
+    let d = dummy(&mut app, DVec3::ZERO);
+    run(&mut app, 0.1);
+    let veil = SpellDesign::new(&["veil"], CastType::OnSelf).named("Veil");
+    cast(&mut app, me, veil, Aim::Entity(me));
+    run(&mut app, 1.0);
+    let shown = |app: &App| app.world.get::<Statuses>(me).map_or(0.0, |s| s.veil);
+    assert_eq!(shown(&app), 1.0, "hidden");
+    run(&mut app, 2.0);
+    assert_eq!(shown(&app), 1.0, "and stays hidden");
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.2);
+    assert!(!hits_on(&app, d).is_empty());
+    let a = app.world.get::<status::Afflictions>(me).unwrap();
+    assert_eq!(a.veiled, 0.0, "the bolt broke the veil");
+    run(&mut app, status::VEIL_OUT);
+    assert_eq!(shown(&app), 0.0, "seen again");
+}
+
+#[test]
+fn people_are_told_to_fight_for_the_commanders_faction_or_strike_at_anyone() {
+    use engine_world::{Faction, MindKind};
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Master);
+    app.world.entity_mut(me).insert(Faction(7));
+    let loner = mage(&mut app, DVec3::new(4.0, 0.0, 6.0), Mastery::Master);
+    let guard = dummy(&mut app, DVec3::new(0.0, 0.0, 0.0));
+    let other = dummy(&mut app, DVec3::new(4.0, 0.0, 0.0));
+    run(&mut app, 0.1);
+    let command = || SpellDesign::new(&["command"], CastType::Bolt).named("Command");
+    cast(&mut app, me, command(), Aim::Entity(guard));
+    cast(&mut app, loner, command(), Aim::Entity(other));
+    run(&mut app, 1.0);
+    let told = |app: &App, t: Entity| -> Vec<engine_world::MindEffect> {
+        let seen = app.world.resource::<Seen>();
+        seen.minds
+            .iter()
+            .filter(|m| m.target == t)
+            .copied()
+            .collect()
+    };
+    let g = told(&app, guard);
+    assert_eq!(g.len(), 1, "told once: {g:?}");
+    assert_eq!(g[0].kind, MindKind::Command { side: 7 });
+    assert!(g[0].secs >= 8.0 && g[0].source == Some(me), "{g:?}");
+    assert!(
+        told(&app, other).is_empty(),
+        "a caster with no faction has no side to give a person"
+    );
+    let wrath = SpellDesign::new(&["wrath"], CastType::Bolt).named("Frenzy");
+    cast(&mut app, loner, wrath, Aim::Entity(other));
+    run(&mut app, 1.0);
+    let o = told(&app, other);
+    assert_eq!(o.len(), 1, "{o:?}");
+    assert_eq!(o[0].kind, MindKind::Frenzy);
+    assert!(o[0].secs >= 4.0, "{o:?}");
+}
+
+#[test]
 fn the_minds_hall_fools_scares_maddens_and_turns_the_dead() {
     let mut app = minds_app();
     {
@@ -3670,6 +3740,24 @@ fn the_minds_hall_fools_scares_maddens_and_turns_the_dead() {
     let mut wrath_at: Option<f32> = None;
     let mut first_terror: Option<f32> = None;
     let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
+    // The stop's camera (a 55° tall view, 16:9): how often the fight leaves the picture.
+    let view = demo::VIEWS
+        .iter()
+        .find(|v| v.key == "spells_minds")
+        .unwrap();
+    let eye = DVec3::from(view.eye);
+    let fwd = (DVec3::from(view.target) - eye).normalize();
+    let right = fwd.cross(DVec3::Y).normalize();
+    let up = right.cross(fwd);
+    let tan_y = (55f64.to_radians() / 2.0).tan();
+    let in_view = |p: DVec3| {
+        let d = p + DVec3::Y * 0.9 - eye;
+        let z = d.dot(fwd);
+        z > 0.5
+            && (d.dot(right) / (z * tan_y * 16.0 / 9.0)).abs() < 0.85
+            && (d.dot(up) / (z * tan_y)).abs() < 0.85
+    };
+    let (mut looked, mut missed) = (0usize, 0usize);
     let steps = (demo::minds::PERIOD * 60.0) as usize;
     for i in 0..steps {
         app.update();
@@ -3691,6 +3779,16 @@ fn the_minds_hall_fools_scares_maddens_and_turns_the_dead() {
         }
         for (e, m) in minions(&mut app) {
             kinds.entry(e).or_insert(m.kind);
+            if i % 15 == 0 && t > 1.0 {
+                looked += 1;
+                if !in_view(m.pos) {
+                    missed += 1;
+                    println!(
+                        "  {t:.2} out of the picture: {e:?} {:?} at {:.1}",
+                        m.kind, m.pos
+                    );
+                }
+            }
             if i % 60 == 0 {
                 println!(
                     "  {t:.0}s {e:?} {:?} at ({:.1}, {:.1}) side {} target {:?}",
@@ -3737,6 +3835,7 @@ fn the_minds_hall_fools_scares_maddens_and_turns_the_dead() {
                 && kind(x.target) == Some(summon::MinionKind::Skeleton)
         })
         .count();
+    println!("out of the picture {missed} of {looked} looks");
     println!(
         "copies at most {most_copies}; decoys {} ({cut_decoys} cut), mirrors {}; terror from \
          {first_terror:?}, most terrified {most_terrified}; wrath at {wrath_at:?}; command at \
@@ -3753,5 +3852,9 @@ fn the_minds_hall_fools_scares_maddens_and_turns_the_dead() {
     assert!(
         golem_on_skel > 0,
         "the commanded golem never struck a skeleton"
+    );
+    assert!(
+        missed * 20 < looked,
+        "the fight left the picture {missed} of {looked} looks"
     );
 }

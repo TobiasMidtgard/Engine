@@ -1406,6 +1406,55 @@ fn shatter(
     }
 }
 
+/// Glowing glass shards out of a body breaking (a copy, minds.rs): they burst from a column
+/// `height` tall over `feet`, flying out and up, spinning, falling and fading as a broken
+/// ward's shards do, with a flash.
+#[allow(clippy::too_many_arguments)]
+pub fn glass_burst(
+    commands: &mut Commands,
+    wm: &mut WardMeshes,
+    meshes: &mut Assets<Mesh>,
+    feet: DVec3,
+    height: f32,
+    color: [f32; 3],
+    count: u32,
+    seed: u64,
+) {
+    let shard = wm.shard(meshes);
+    for k in 0..count as u64 {
+        let r = |s: u64| roll(seed.wrapping_add(k * 13 + s), 29 + s) * 2.0 - 1.0;
+        let up = (k as f32 + 0.5) / count as f32;
+        let a = r(1) * std::f32::consts::PI;
+        let out = Vec3::new(a.cos(), 0.0, a.sin());
+        let at = feet
+            + (out * 0.18 + Vec3::Y * (0.15 + 0.8 * up) * height + Vec3::Y * 0.05 * r(2))
+                .as_dvec3();
+        let vel = out * (1.4 + 1.6 * (r(3) * 0.5 + 0.5)) + Vec3::Y * (1.0 + 1.2 * r(4).abs());
+        let face = Quat::from_scaled_axis(Vec3::new(r(5), r(6), r(7)) * std::f32::consts::PI);
+        commands.spawn((
+            Name::new("Glass shard"),
+            Transform::from_translation(at)
+                .with_rotation(face)
+                .with_scale(Vec3::splat(0.06 + 0.06 * (r(8) * 0.5 + 0.5))),
+            renderer(shard, color, SHARD_GLOW),
+            WardShard {
+                vel,
+                spin: Vec3::new(r(9), r(10), r(11)) * 11.0,
+                age: 0.0,
+                life: SHARD_SECS * (0.6 + 0.4 * r(12).abs()),
+                color,
+            },
+            NoVirtualGeometry,
+        ));
+    }
+    flash(
+        commands,
+        feet + DVec3::Y * (height as f64 * 0.6),
+        color,
+        9000.0,
+    );
+}
+
 fn flash(commands: &mut Commands, at: DVec3, color: [f32; 3], peak: f32) {
     commands.spawn((
         Name::new("Ward breaking"),

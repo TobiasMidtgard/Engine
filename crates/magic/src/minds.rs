@@ -63,6 +63,8 @@ pub const PACE: f32 = 2.4;
 pub const MOST_COPIES: usize = 6;
 /// How much faster the terrified run than they walk.
 pub const FLEE_PACE: f32 = 1.6;
+/// Shards a broken copy bursts into.
+pub const GLASS_SHARDS: u32 = 40;
 /// Pieces of a command's thread.
 pub const THREAD_PIECES: usize = 18;
 /// Sides from here up belong to one raging creature each.
@@ -364,6 +366,10 @@ pub fn run_phantasms(
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
     mut commands: Commands,
+    (mut wm, mut meshes): (
+        ResMut<crate::wards::WardMeshes>,
+        Option<ResMut<engine_assets::Assets<engine_render::Mesh>>>,
+    ),
 ) {
     if copies.is_empty() {
         return;
@@ -381,6 +387,19 @@ pub fn run_phantasms(
         let owner_down = p.owner.is_some() && owner.is_none_or(|o| o.1);
         let broke = v.down();
         if broke || p.age >= p.life || owner_down {
+            // Glass: a broken copy bursts into glowing violet shards.
+            if broke && let Some(meshes) = meshes.as_deref_mut() {
+                crate::wards::glass_burst(
+                    &mut commands,
+                    &mut wm,
+                    meshes,
+                    at,
+                    1.75,
+                    MIND_COLOR,
+                    GLASS_SHARDS,
+                    e.to_bits() ^ p.cast.seed as u64,
+                );
+            }
             vanish(
                 e,
                 &p,
@@ -522,21 +541,14 @@ fn vanish(
         });
         return;
     }
-    // Glass: the frost burst's shards in the copy's violet, and a ripple of light.
-    queue.looks.push(LookCmd::Burst {
-        at: chest,
-        up: Vec3::Y,
-        look: "frost".into(),
-        role: Role::Impact,
-        scale: 0.95,
-        color: MIND_COLOR,
-    });
+    // The glass itself is magic's own (`wards::glass_burst`, from `run_phantasms`); a ripple of
+    // light goes with it.
     queue.looks.push(LookCmd::Burst {
         at: chest,
         up: Vec3::Y,
         look: "force".into(),
         role: Role::Impact,
-        scale: 0.9,
+        scale: 0.6,
         color: MIND_COLOR,
     });
     // Shatter: a copy woven with an element bursts with it on its foes within 2.5 m.

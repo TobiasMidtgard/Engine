@@ -32,6 +32,9 @@ pub const ICD_HITS: u32 = 3;
 pub const AURA_TAX: f32 = 0.8;
 /// Seconds between damage-over-time ticks.
 pub const DOT_TICK: f32 = 0.5;
+/// Seconds a Veil takes to hide a body, and to show it again once it ends or the body strikes.
+pub const VEIL_IN: f32 = 0.4;
+pub const VEIL_OUT: f32 = 0.6;
 /// No reaction multiplies a hit by more than this.
 pub const MAX_REACTION: f32 = 2.0;
 
@@ -124,8 +127,16 @@ pub struct Afflictions {
     pub tempo: Option<(f32, f32)>,
     /// Seconds left unseen.
     pub veiled: f32,
+    /// How hidden it looks, 0..1 (`Statuses::veil`): eased in over [`VEIL_IN`] while veiled
+    /// and out over [`VEIL_OUT`] after.
+    pub veil_shown: f32,
     /// Seconds left calmed.
     pub calmed: f32,
+    /// Seconds left fighting for whoever commanded it (what NPC AI was told; magic's own
+    /// creatures are held by `minds::Commanded`).
+    pub commanded: f32,
+    /// Seconds left in a frenzy (likewise).
+    pub frenzied: f32,
     /// Seconds left held by a stone grip (fire cracks it early).
     pub rooted: f32,
     /// Who last hurt it (damage over time is theirs).
@@ -423,7 +434,14 @@ impl Afflictions {
         self.shocked = (self.shocked - dt).max(0.0);
         self.dread = (self.dread - dt).max(0.0);
         self.veiled = (self.veiled - dt).max(0.0);
+        self.veil_shown = if self.veiled > 0.0 {
+            (self.veil_shown + dt / VEIL_IN).min(1.0)
+        } else {
+            (self.veil_shown - dt / VEIL_OUT).max(0.0)
+        };
         self.calmed = (self.calmed - dt).max(0.0);
+        self.commanded = (self.commanded - dt).max(0.0);
+        self.frenzied = (self.frenzied - dt).max(0.0);
         self.rooted = (self.rooted - dt).max(0.0);
         if self.ward_secs > 0.0 {
             self.ward_secs -= dt;
@@ -487,8 +505,7 @@ impl Afflictions {
             rooted: self.rooted > 0.0,
             staggered: self.staggered > 0.0,
             shielding: self.shielding > 0.0,
-            // Magic eases this in and out from its veil affliction.
-            veil: 0.0,
+            veil: self.veil_shown,
         }
     }
 }
@@ -685,5 +702,35 @@ mod tests {
         assert!(a.has(Status::Burning));
         a.quench();
         assert!(!a.has(Status::Burning));
+    }
+
+    #[test]
+    fn a_veil_eases_in_holds_and_eases_out() {
+        let mut a = Afflictions {
+            veiled: 1.01,
+            ..Default::default()
+        };
+        let mut seen = Vec::new();
+        for _ in 0..120 {
+            a.tick(1.0 / 60.0);
+            seen.push(a.statuses().veil);
+        }
+        assert!(
+            (seen[11] - 0.5).abs() < 0.05,
+            "half hidden at 0.2 s: {}",
+            seen[11]
+        );
+        assert_eq!(seen[40], 1.0, "gone by 0.4 s and while it lasts");
+        assert_eq!(seen[59], 1.0);
+        assert!(
+            seen[60] > 0.95 && seen[60] < 1.0,
+            "fading back once it ends"
+        );
+        assert!(
+            (seen[77] - 0.5).abs() < 0.05,
+            "half seen 0.3 s after: {}",
+            seen[77]
+        );
+        assert_eq!(seen[119], 0.0);
     }
 }

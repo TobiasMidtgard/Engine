@@ -152,6 +152,16 @@ pub fn apply_hits(
             continue;
         }
         let target = h.target;
+        // A veiled body that strikes at another shows itself (as Invisibility breaks in
+        // Skyrim); its veil eases out (`Afflictions::veil_shown`).
+        if p.harmful()
+            && let Some(c) = h.cast.caster
+            && target != Some(c)
+            && let Ok(mut a) = affs.get_mut(c)
+            && a.veiled > 0.0
+        {
+            a.veiled = 0.0;
+        }
         // Nothing touches a body rewinding along its path (a recall), but its own spells.
         if target.is_some_and(|t| rewinding.contains(t) && Some(t) != h.cast.caster) {
             continue;
@@ -194,7 +204,13 @@ pub fn apply_hits(
             if base_damage > 0.0 {
                 aff.source = h.cast.caster;
             }
-            let before = (aff.dread, aff.calmed, aff.veiled);
+            let before = (
+                aff.dread,
+                aff.calmed,
+                aff.veiled,
+                aff.commanded,
+                aff.frenzied,
+            );
             // A warded body's ward takes the blow, and with it the element (wards.rs).
             let warded = aff.ward > 0.0 && base_damage > 0.0;
             if let Some(el) = spell.element()
@@ -309,22 +325,35 @@ pub fn apply_hits(
                 );
             }
             // Command and Wrath take hold of creatures (minds.rs).
-            if creature && (p.command_secs > 0.0 || p.wrath_secs > 0.0) {
+            let held = (
+                p.command_secs * scale.clamp(0.5, 1.5),
+                p.wrath_secs * scale.clamp(0.5, 1.5),
+            );
+            aff.commanded = aff.commanded.max(held.0);
+            aff.frenzied = aff.frenzied.max(held.1);
+            if creature && (held.0 > 0.0 || held.1 > 0.0) {
                 queue.minds.push(crate::minds::MindCmd {
                     target: t,
                     by: h.cast.clone(),
-                    command_secs: p.command_secs * scale.clamp(0.5, 1.5),
-                    wrath_secs: p.wrath_secs * scale.clamp(0.5, 1.5),
+                    command_secs: held.0,
+                    wrath_secs: held.1,
                 });
             }
-            // Minds are NPC AI's: it makes the terrified flee, the calmed stand down and the
-            // veiled unseen. Sent when one starts or grows, not on every tick of an aura.
+            // Minds are NPC AI's: it makes the terrified flee, the calmed stand down, the
+            // veiled unseen, the commanded fight for the caster's faction (only a caster with
+            // one can command a person) and the frenzied strike whoever is nearest. Sent when
+            // one starts or grows, not on every tick of an aura.
+            let command = h.cast.faction.map(|f| MindKind::Command { side: f.0 });
             for (kind, was, now) in [
-                (MindKind::Fear, before.0, aff.dread),
-                (MindKind::Calm, before.1, aff.calmed),
-                (MindKind::Veil, before.2, aff.veiled),
+                (Some(MindKind::Fear), before.0, aff.dread),
+                (Some(MindKind::Calm), before.1, aff.calmed),
+                (Some(MindKind::Veil), before.2, aff.veiled),
+                (command, before.3, aff.commanded),
+                (Some(MindKind::Frenzy), before.4, aff.frenzied),
             ] {
-                if now > was + 0.5 {
+                if let Some(kind) = kind
+                    && now > was + 0.5
+                {
                     let secs = now;
                     out.mind.write(MindEffect {
                         target: t,
