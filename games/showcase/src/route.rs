@@ -13,6 +13,12 @@
 //!
 //! `--route up` flies only the climb to orbit, with pictures at more heights (item 30).
 //!
+//! `--route lap` stays low instead: from the plaza round every zone of the valley and back,
+//! 15 m up, sprinting on the long stretches, so each zone streams in ahead of the camera and
+//! the ones behind go, as when a player flies about. It is the route for streaming stutters:
+//! with `--profile`, `engine-hitches.txt` names what held each slow frame. `--route dash`
+//! is the same lap sprinting all the way.
+//!
 //! Headless runs (`--headless`) step time by 1/60 s, so the camera flies as it would at 60 fps
 //! and the per-frame costs are comparable; in a window it flies in real time. `--exe` keeps the
 //! exe's loading and start screens (the first pictures then show what the start screen opens on).
@@ -47,6 +53,8 @@ enum Do {
     },
     /// Fly forward for this long (s).
     Fly { secs: f32, sprint: bool },
+    /// Fly level toward this point of the valley (x, z) until it is [`REACHED_M`] away.
+    To { x: f64, z: f64, sprint: bool },
 }
 
 type Leg = (&'static str, Do);
@@ -157,6 +165,57 @@ const LEGS: [Leg; 13] = [
     ("end", Do::Wait(2.0)),
 ];
 
+/// How near a [`Do::To`] leg's point counts as there (m, level distance).
+const REACHED_M: f64 = 15.0;
+/// Height over the ground the lap flies at, m.
+const LAP_HEIGHT_M: f64 = 15.0;
+
+const fn to(name: &'static str, x: f64, z: f64, sprint: bool) -> Leg {
+    (name, Do::To { x, z, sprint })
+}
+
+/// `--route lap`: round the valley's zones, low (see the module docs). Each leg is named for
+/// the zone it flies to.
+const LAP_LEGS: [Leg; 29] = [
+    ("plaza", Do::Wait(2.0)),
+    (
+        "rise",
+        Do::Rise {
+            to_m: LAP_HEIGHT_M,
+            ascend: 1.0,
+            forward: 0.0,
+            sprint: false,
+        },
+    ),
+    to("market", 75.0, 70.0, false),
+    to("field", 165.0, 185.0, false),
+    to("weather", 215.0, 370.0, true),
+    to("spaceport", 470.0, 280.0, true),
+    to("range", 285.0, 55.0, true),
+    to("airfield", 780.0, -150.0, true),
+    to("meadow", 375.0, -250.0, true),
+    to("lake", 240.0, -175.0, false),
+    to("yard", 125.0, -35.0, false),
+    to("script", 70.0, -105.0, false),
+    to("spells", 48.0, -250.0, true),
+    to("track", 0.0, -500.0, true),
+    to("magic", 0.0, -150.0, true),
+    to("gallery2d", -65.0, -115.0, false),
+    to("forest", -260.0, -170.0, true),
+    to("water", -330.0, 30.0, true),
+    to("fortress", -300.0, 190.0, false),
+    to("voxel", -420.0, 320.0, true),
+    to("parkour", -125.0, 330.0, true),
+    to("arena", -125.0, 200.0, false),
+    to("cave", 0.0, 290.0, true),
+    to("tracks", 70.0, 205.0, false),
+    to("footsteps", 0.0, 150.0, false),
+    to("paddock", -75.0, 70.0, false),
+    to("physics", -125.0, -35.0, false),
+    to("back to the plaza", 0.0, 0.0, false),
+    ("end", Do::Wait(2.0)),
+];
+
 struct Row {
     t: f64,
     leg: usize,
@@ -201,6 +260,8 @@ pub(crate) struct Route {
     /// When the last frame was recorded, for frame times on the wall clock (headless the
     /// route runs on a manual clock: every frame 1/60 s of game time).
     wall: Option<std::time::Instant>,
+    /// Sprint on every leg (`--route dash`).
+    dash: bool,
 }
 
 /// Seconds the route leaves the exe's start screen up (`--exe`) before it flies.
@@ -209,7 +270,7 @@ const START_SCREEN_S: f32 = 5.0;
 /// Frames the start waits at most for the ground (a wait that never ends goes on).
 const SETTLE_MAX_FRAMES: u32 = 1200;
 
-/// `up` flies [`UP_LEGS`]; anything else the whole route.
+/// `up` flies [`UP_LEGS`], `lap` and `dash` [`LAP_LEGS`]; anything else the whole route.
 pub fn install(app: &mut App, which: Option<&str>) {
     // Headless the route flies on a manual clock (the same frames every run), unless
     // `ENGINE_ROUTE_REALTIME=1` keeps the real clock, as in play: slow frames then skip game
@@ -227,6 +288,7 @@ pub fn install(app: &mut App, which: Option<&str>) {
     let _ = std::fs::create_dir_all(&out_dir);
     let legs: &'static [Leg] = match which {
         Some("up") => &UP_LEGS,
+        Some("lap" | "dash") => &LAP_LEGS,
         _ => &LEGS,
     };
     app.insert_resource(Route {
@@ -244,6 +306,7 @@ pub fn install(app: &mut App, which: Option<&str>) {
         restood: false,
         done_frames: 0,
         wall: None,
+        dash: which == Some("dash"),
     });
     app.add_systems(Update, run.before(camera::fly));
 }
@@ -324,6 +387,21 @@ fn run(world: &mut World) {
         return;
     };
     let mut done = false;
+    let dash = world.resource::<Route>().dash;
+    // A leg toward a point turns the camera to it, level, and says whether it is there.
+    let mut toward = None;
+    if let Do::To { x, z, .. } = step {
+        let d = DVec3::new(x - pos.x, 0.0, z - pos.z);
+        done = d.length() <= REACHED_M;
+        toward = (!done).then(|| (-d.x).atan2(-d.z) as f32);
+    }
+    if let Some(yaw) = toward {
+        let mut q = world.query::<&mut ShowcaseCamera>();
+        for mut cam in q.iter_mut(world) {
+            cam.yaw = yaw;
+            cam.pitch = 0.0;
+        }
+    }
     {
         let mut actions = world.resource_mut::<ActionState>();
         actions.release_all_overrides();
@@ -356,6 +434,18 @@ fn run(world: &mut World) {
                 if !done {
                     actions.set_axis("move", Vec2::new(0.0, 1.0), None);
                     if sprint {
+                        actions.press("sprint");
+                    }
+                }
+            }
+            Do::To { sprint, .. } => {
+                if !done {
+                    actions.set_axis("move", Vec2::new(0.0, 1.0), None);
+                    // Hold the lap's height over rising and falling ground (the camera's
+                    // speed grows with it).
+                    let climb = ((LAP_HEIGHT_M - altitude) / 5.0).clamp(-1.0, 1.0) as f32;
+                    actions.set_axis("ascend", Vec2::new(climb, 0.0), None);
+                    if sprint || dash {
                         actions.press("sprint");
                     }
                 }
@@ -525,6 +615,29 @@ fn finish(world: &mut World) {
             "  {name}: {} frames, {mean:.1} ms mean, {max:.1} max, {hitches} over {HITCH_MS} ms; \
              terrain prepare max {terrain:.1} ms, patches missing max {missing}, RAM max {ram:.0} MB",
             rows.len()
+        );
+    }
+    // The whole flight: how even the frames were (the 1% low is the mean of the slowest 1%).
+    let mut all: Vec<f64> = r.rows.iter().map(|x| x.frame_ms).collect();
+    all.sort_by(f64::total_cmp);
+    if !all.is_empty() {
+        let at = |q: f64| all[((all.len() - 1) as f64 * q).round() as usize];
+        let mean = all.iter().sum::<f64>() / all.len() as f64;
+        let slowest = &all[all.len() - all.len().div_ceil(100)..];
+        let low = slowest.iter().sum::<f64>() / slowest.len() as f64;
+        let over = |ms: f64| all.iter().filter(|&&m| m > ms).count();
+        let _ = writeln!(
+            report,
+            "all: {} frames, {mean:.1} ms mean, {:.1} median, {:.1} p99, {low:.1} slowest 1%, \
+             {:.1} max; over 16.7 ms {}, over 33 ms {}, over 50 ms {}, over 100 ms {}",
+            all.len(),
+            at(0.5),
+            at(0.99),
+            at(1.0),
+            over(16.7),
+            over(33.0),
+            over(50.0),
+            over(100.0)
         );
     }
     let hitches: Vec<&Row> = r.rows.iter().filter(|x| x.frame_ms > HITCH_MS).collect();

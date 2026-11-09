@@ -474,7 +474,12 @@ impl App {
     /// If an [`AppExit`] was sent since the last check, return it.
     pub fn should_exit(&mut self) -> Option<AppExit> {
         let messages = self.world.get_resource::<Messages<AppExit>>()?;
-        self.exit_cursor.read(messages).last().cloned()
+        let exit = self.exit_cursor.read(messages).last().cloned();
+        if exit.is_some() {
+            // The runner is about to leave: the slow-frame log's last lines go out now.
+            crate::profile::flush();
+        }
+        exit
     }
 
     /// Run the app with its runner until it exits.
@@ -550,7 +555,10 @@ pub fn run_frame(world: &mut World) {
     world.run_schedule(Extract);
     world.run_schedule(Render);
     world.run_schedule(Last);
-    crate::profile::frame_done();
+    let fixed = world
+        .get_resource::<FixedTime>()
+        .map(|f| (f.tick(), f.dropped_secs()));
+    crate::profile::frame_done(fixed);
 }
 
 /// Runs frames as fast as possible until an [`AppExit`] is sent. Used when no platform

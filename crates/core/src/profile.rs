@@ -14,6 +14,14 @@
 //! `scripts/trace-summary.py`): `ENGINE_TRACE_AT` seconds after the first frame (default 30),
 //! for `ENGINE_TRACE_FRAMES` frames (default 60). It shows, frame by frame, which system each
 //! thread ran and where every thread waited, which the 5 s averages can't.
+//!
+//! While it records, every frame of 25 ms or more (`ENGINE_HITCH_MS` sets another length, `0`
+//! none) is one line in `engine-hitches.txt` in the working directory: the frame, its length,
+//! the fixed steps it ran and the step time its budget dropped, and the spans that ended in it
+//! on the main thread and on the others, longest first. A streaming stutter is one frame among
+//! hundreds, which the 5 s table averages away; this names what held each one
+//! (`scripts/hitch-summary.py` adds them up). The lines are written with each report and when
+//! the app exits, never on the frame they describe.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -67,10 +75,22 @@ pub(crate) fn enable() {
 /// Frames finished so far (bumped at the end of every `run_frame`), for the hang watchdog.
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 
-/// A frame finished.
-pub(crate) fn frame_done() {
-    FRAMES.fetch_add(1, Ordering::Relaxed);
+/// A frame finished. `fixed`: the fixed clock's tick and the seconds of steps its budget has
+/// dropped so far, for the slow-frame log.
+pub(crate) fn frame_done(fixed: Option<(u64, f64)>) {
+    let frames = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
     trace::frame_done();
+    if enabled() {
+        hitch::frame_done(frames, fixed);
+    }
+}
+
+/// Write what the slow-frame log has gathered (the app calls it on its way out; while it runs
+/// the lines go out with each report).
+pub(crate) fn flush() {
+    if enabled() {
+        hitch::flush();
+    }
 }
 
 /// A frame stuck this long is reported as a hang. `ENGINE_HANG_MS` sets another (700 reports
@@ -424,6 +444,209 @@ where
         stat.max = stat.max.max(elapsed);
         drop(totals);
         trace::span(key, args.as_deref(), start, elapsed);
+        hitch::span(key, elapsed);
+    }
+}
+
+/// Slow frames, each with what took the time (see the module docs).
+mod hitch {
+    use super::*;
+    use std::io::Write as _;
+
+    /// A frame at least this long is logged, ms. `ENGINE_HITCH_MS` sets another; `0` logs none.
+    const HITCH_MS: f64 = 25.0;
+    /// Spans shorter than this are not kept: they can't explain a hitch.
+    const KEEP: Duration = Duration::from_micros(500);
+    /// Rows a line lists for the main thread, and for all the other threads together.
+    const MAIN_ROWS: usize = 12;
+    const OTHER_ROWS: usize = 6;
+    /// The file, in the working directory.
+    const FILE: &str = "engine-hitches.txt";
+
+    fn threshold() -> Option<Duration> {
+        static AFTER: OnceLock<Option<Duration>> = OnceLock::new();
+        *AFTER.get_or_init(|| {
+            let ms = std::env::var("ENGINE_HITCH_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(HITCH_MS);
+            (ms > 0.0).then(|| Duration::from_secs_f64(ms / 1000.0))
+        })
+    }
+
+    struct Note {
+        key: String,
+        thread: std::thread::ThreadId,
+        dur: Duration,
+    }
+
+    #[derive(Default)]
+    struct Log {
+        /// Spans that ended since the last frame did.
+        spans: Vec<Note>,
+        /// When the last frame ended, and when the first did.
+        last: Option<Instant>,
+        first: Option<Instant>,
+        /// The fixed clock at the last frame's end (see [`super::frame_done`]).
+        fixed: Option<(u64, f64)>,
+        /// Lines not written yet.
+        lines: Vec<String>,
+        /// The file has its heading.
+        started: bool,
+        /// The file could not be written: said once.
+        failed: bool,
+    }
+
+    fn log() -> &'static Mutex<Log> {
+        static LOG: OnceLock<Mutex<Log>> = OnceLock::new();
+        LOG.get_or_init(Default::default)
+    }
+
+    /// A timed span ended on this thread.
+    pub(super) fn span(key: &str, dur: Duration) {
+        if dur < KEEP || threshold().is_none() {
+            return;
+        }
+        log().lock().spans.push(Note {
+            key: key.to_string(),
+            thread: std::thread::current().id(),
+            dur,
+        });
+    }
+
+    /// The frame ended (on the main thread): a slow one is kept with its longest spans.
+    pub(super) fn frame_done(frame: u64, fixed: Option<(u64, f64)>) {
+        let Some(after) = threshold() else {
+            return;
+        };
+        let now = Instant::now();
+        let mut log = log().lock();
+        let mut spans = std::mem::take(&mut log.spans);
+        let first = *log.first.get_or_insert(now);
+        let before = std::mem::replace(&mut log.fixed, fixed);
+        let Some(last) = log.last.replace(now) else {
+            return;
+        };
+        let took = now.saturating_duration_since(last);
+        if took >= after {
+            let steps = fixed
+                .zip(before)
+                .map(|(now, before)| (now.0.saturating_sub(before.0), now.1 - before.1));
+            let line = format_line(frame, now.duration_since(first), took, steps, &mut spans);
+            log.lines.push(line);
+        }
+        // Keep the list's room for the next frame.
+        spans.clear();
+        log.spans = spans;
+    }
+
+    /// Append the lines gathered so far to the file (off the frames they describe: with each
+    /// report, and at exit).
+    pub(super) fn flush() {
+        let Some(after) = threshold() else {
+            return;
+        };
+        let (lines, heading) = {
+            let mut log = log().lock();
+            if log.failed || (log.lines.is_empty() && log.started) {
+                return;
+            }
+            let heading = !std::mem::replace(&mut log.started, true);
+            (std::mem::take(&mut log.lines), heading)
+        };
+        let write = || -> std::io::Result<()> {
+            let mut file = if heading {
+                let mut file = std::fs::File::create(FILE)?;
+                writeln!(
+                    file,
+                    "# frames of {:.0} ms or more: fixed steps run and step time dropped, then \
+                     the spans that ended in the frame, longest first (ms): main thread | other \
+                     threads",
+                    after.as_secs_f64() * 1000.0
+                )?;
+                file
+            } else {
+                std::fs::OpenOptions::new().append(true).open(FILE)?
+            };
+            for line in &lines {
+                writeln!(file, "{line}")?;
+            }
+            Ok(())
+        };
+        if let Err(e) = write() {
+            log().lock().failed = true;
+            tracing::warn!("could not write {FILE}: {e}");
+        }
+    }
+
+    fn format_line(
+        frame: u64,
+        at: Duration,
+        took: Duration,
+        steps: Option<(u64, f64)>,
+        spans: &mut [Note],
+    ) -> String {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let main = std::thread::current().id();
+        spans.sort_by_key(|a| std::cmp::Reverse(a.dur));
+        let rows = |on_main: bool, rows: usize| {
+            spans
+                .iter()
+                .filter(|n| (n.thread == main) == on_main)
+                .take(rows)
+                .map(|n| format!("{} {:.1}", n.key.trim(), ms(n.dur)))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let steps = steps.map_or(String::new(), |(steps, dropped)| {
+            format!(
+                ", {steps} fixed steps, {:.0} ms dropped",
+                dropped.max(0.0) * 1000.0
+            )
+        });
+        format!(
+            "frame {frame} at {:.2} s: {:.1} ms{steps} | {} | {}",
+            at.as_secs_f64(),
+            ms(took),
+            rows(true, MAIN_ROWS),
+            rows(false, OTHER_ROWS)
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_line_lists_the_main_threads_spans_then_the_others_longest_first() {
+            let main = std::thread::current().id();
+            let other = std::thread::spawn(|| std::thread::current().id())
+                .join()
+                .unwrap();
+            let note = |key: &str, thread, ms| Note {
+                key: key.to_string(),
+                thread,
+                dur: Duration::from_millis(ms),
+            };
+            let line = format_line(
+                7,
+                Duration::from_millis(1500),
+                Duration::from_millis(80),
+                Some((3, 0.0167)),
+                &mut [
+                    note("small", main, 2),
+                    note("  in engine: stream: step", main, 60),
+                    note("a build", other, 900),
+                    note("stream_system", main, 61),
+                ],
+            );
+            assert_eq!(
+                line,
+                "frame 7 at 1.50 s: 80.0 ms, 3 fixed steps, 17 ms dropped | stream_system 61.0; \
+                 in engine: stream: step 60.0; small 2.0 | a build 900.0"
+            );
+        }
     }
 }
 
@@ -857,6 +1080,7 @@ pub(crate) fn profile_report_system(
     if let Err(e) = std::fs::write("engine-profile.txt", &report) {
         crate::log::warn!("could not write engine-profile.txt: {e}");
     }
+    hitch::flush();
     *window = ProfileWindow {
         clock: mark,
         ..ProfileWindow::default()

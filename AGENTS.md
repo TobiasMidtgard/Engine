@@ -232,7 +232,11 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   `ENGINE_TRACE=trace.json` (with `ENGINE_TRACE_AT=<s>`, `ENGINE_TRACE_FRAMES=<n>`), or the
   bridge's `engine.trace {"path", "frames"}` under `--profile`, records
   every span of a few frames for <https://ui.perfetto.dev>, and `scripts/trace-summary.py`
-  names what ran alone in which schedule and what each idle gap waited between. So:
+  names what ran alone in which schedule and what each idle gap waited between. For
+  stutters (one slow frame among hundreds, which the 5 s table averages away), `--profile`
+  also writes `engine-hitches.txt`: one line per frame of 25 ms or more (`ENGINE_HITCH_MS`
+  sets another length, `0` none) with its fixed steps, the step time dropped and the spans
+  that ended in it, longest first; `scripts/hitch-summary.py` adds up what held them. So:
   - A `&mut World` system runs with nothing beside it, and the executor can only start it
     (or skip it on its `run_if`) once nothing else is running, and systems ordered after it
     wait for that too. Keep heavy work out of them (take the queries you need in a normal
