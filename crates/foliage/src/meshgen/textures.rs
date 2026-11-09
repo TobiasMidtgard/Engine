@@ -381,6 +381,49 @@ impl Canvas {
         }
     }
 
+    /// A photographed leaf in place of the drawn blade `l` (same base, direction and length;
+    /// the scan's own width and outline), recolored to the blade's color, mirrored when it
+    /// shows its underside, casting the same soft shadow on what is under it.
+    fn scanned_blade(&mut self, scan: &super::leaf_scans::LeafScan, l: &Blade) {
+        let s = self.size as f32;
+        let base = l.base * s;
+        let len = l.length * s;
+        let dir = l.dir.normalize_or(Vec2::NEG_Y);
+        // The scan's right in the canvas (y down): its up turned to `dir`.
+        let right = Vec2::new(-dir.y, dir.x) * if l.under { -1.0 } else { 1.0 };
+        let index = (l.seed % scan.count() as u64) as usize;
+        let tint = Vec3::from(l.color);
+        let shadow = Vec2::new(0.7, 1.0) * (0.006 * s).max(0.6);
+        let r = len * 0.8 + shadow.length() + 2.0;
+        let tip = base + dir * len;
+        let min = base.min(tip) - Vec2::splat(r);
+        let max = base.max(tip) + Vec2::splat(r);
+        let frame = |p: Vec2| {
+            let d = p - base;
+            (d.dot(dir) / len, d.dot(right) / len)
+        };
+        for y in min.y.floor() as i32..=max.y.ceil() as i32 {
+            for x in min.x.floor() as i32..=max.x.ceil() as i32 {
+                let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                let (su, sv) = frame(p - shadow);
+                if let Some((c, _)) = scan.sample(index, su, sv, len) {
+                    self.darken(x, y, 1.0 - c[3] * 0.38);
+                }
+                let (u, v) = frame(p);
+                let Some((c, n)) = scan.sample(index, u, v, len) else {
+                    continue;
+                };
+                let a = c[3].min(1.0);
+                let color = scan.recolor(Vec3::new(c[0], c[1], c[2]) / c[3], tint);
+                // The scan's tangent (x right, y to the tip) turned into the canvas's
+                // (x right, y up).
+                let t = right * n.x + dir * n.y;
+                let normal = Vec3::new(t.x, -t.y, n.z).normalize_or(Vec3::Z);
+                self.put(x, y, color.into(), normal, a);
+            }
+        }
+    }
+
     /// Flip left to right (normals too).
     fn mirror(&mut self) {
         let s = self.size as usize;
@@ -1304,6 +1347,11 @@ fn broad_spray(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
 
 /// Paint one leaf of a layout: a blade, or for rowan a whole compound leaf.
 fn paint_leaf(cv: &mut Canvas, kind: LeafKind, l: &Blade) {
+    // Photographed leaves where a sheet is fetched for the kind (see `leaf_scans`).
+    if let Some(scan) = super::leaf_scans::leaf_scan(kind) {
+        cv.scanned_blade(&scan, l);
+        return;
+    }
     match kind {
         LeafKind::Pinnate => pinnate_leaf(cv, l),
         LeafKind::Palmate => palmate_leaf(cv, l),

@@ -1,10 +1,13 @@
-//! Photographed leaves for the single-leaf atlas ([`super::textures::hero_leaf_textures`]).
+//! Photographed leaves for the leaf atlases: the single-leaf atlas
+//! ([`super::textures::hero_leaf_textures`]) and every drawn blade of the spray and mass
+//! atlases (`Canvas::scanned_blade`).
 //!
 //! The CC0 leaf sets fetched by `cargo run -p fetch-assets -- scans` (assets/manifests/
 //! scans.toml) are sheets of real leaves scanned flat on a light table, upright with the
 //! petiole down, coverage in alpha and an OpenGL normal map beside them. A sheet is split into
-//! its leaves once (connected regions of its alpha), and each atlas cell then takes one leaf,
-//! scaled to the cell's leaf frame and recolored to the species' painted leaf color, so a scan
+//! its leaves once (connected regions of its alpha); each single-leaf cell, and each blade a
+//! spray would draw, then takes one leaf, scaled and turned to its frame and recolored to the
+//! painted leaf color, so a scan
 //! changes the leaf's shape, veins, holes and blemishes but not the crown's color or season.
 //! Without the files (CI does not fetch them) the painter draws the leaves as before.
 
@@ -36,6 +39,54 @@ struct ScanLeaf {
     /// Linear color premultiplied by coverage, cropped to the leaf.
     color: Rgba32FImage,
     normal: RgbImage,
+    /// `color` and `normal` halved again and again (from half size down to about 16 pixels
+    /// tall), for leaves stamped small into sprays.
+    mips: Vec<(Rgba32FImage, RgbImage)>,
+    /// Row (pixels, from the top) where the blade ends and the petiole begins.
+    blade_y: f32,
+    /// Column (pixels) of the leaf's middle: its coverage centroid.
+    mid_x: f32,
+}
+
+impl ScanLeaf {
+    fn new(color: Rgba32FImage, normal: RgbImage) -> Self {
+        let (w, h) = color.dimensions();
+        // The blade ends at the lowest row wider than a fifth of the widest one.
+        let widths: Vec<u32> = (0..h)
+            .map(|y| (0..w).filter(|&x| color.get_pixel(x, y).0[3] > 0.5).count() as u32)
+            .collect();
+        let widest = widths.iter().copied().max().unwrap_or(1);
+        let blade_y = widths
+            .iter()
+            .rposition(|&n| n * 5 > widest)
+            .map_or(h as f32, |y| y as f32 + 1.0);
+        let (mut sx, mut sa) = (0.0, 0.0);
+        for (x, _, p) in color.enumerate_pixels() {
+            sx += x as f32 * p.0[3];
+            sa += p.0[3];
+        }
+        let mid_x = if sa > 0.0 {
+            sx / sa + 0.5
+        } else {
+            w as f32 * 0.5
+        };
+        let mut mips = Vec::new();
+        let (mut mw, mut mh) = (w / 2, h / 2);
+        while mh >= 16 && mw >= 4 {
+            mips.push((
+                imageops::resize(&color, mw, mh, FilterType::Triangle),
+                imageops::resize(&normal, mw, mh, FilterType::Triangle),
+            ));
+            (mw, mh) = (mw / 2, mh / 2);
+        }
+        Self {
+            color,
+            normal,
+            mips,
+            blade_y,
+            mid_x,
+        }
+    }
 }
 
 /// The fetched sheet a leaf kind's single leaves come from, and whether its colors are kept.
@@ -158,7 +209,7 @@ fn load(folder: &str, keep_hue: bool) -> Option<LeafScan> {
             *out = image::Rgba([c.x * a, c.y * a, c.z * a, a]);
         }
         let normal = imageops::crop_imm(&nor, x0, y0, x1 - x0, y1 - y0).to_image();
-        leaves.push((b[1], b[0], ScanLeaf { color, normal }));
+        leaves.push((b[1], b[0], ScanLeaf::new(color, normal)));
     }
     // Reading order, so a sheet's layout maps to cells the same way every run.
     leaves.sort_by_key(|(y, x, _)| (*y / 64, *x));
@@ -176,6 +227,83 @@ fn load(folder: &str, keep_hue: bool) -> Option<LeafScan> {
 }
 
 impl LeafScan {
+    /// How many leaves the sheet holds.
+    pub(crate) fn count(&self) -> usize {
+        self.leaves.len()
+    }
+
+    /// Premultiplied scan color `c` recolored so the sheet's mean comes out `tint`.
+    pub(crate) fn recolor(&self, c: Vec3, tint: Vec3) -> Vec3 {
+        if self.keep_hue {
+            c * tint / self.mean.max(Vec3::splat(1e-4))
+        } else {
+            tint * (c.max_element() / self.mean_value.max(1e-4))
+        }
+    }
+
+    /// Leaf `index` sampled in its blade's frame: `u` from the blade's base (0) to its tip
+    /// (1), `v` across it in blade lengths (positive to the leaf's right as scanned), for a
+    /// blade drawn `blade_px` pixels long. Returns the premultiplied linear color (coverage
+    /// in alpha) and the scan's tangent normal (x right, y toward the tip), or `None` off
+    /// the blade (the petiole included: sprays paint their own).
+    pub(crate) fn sample(
+        &self,
+        index: usize,
+        u: f32,
+        v: f32,
+        blade_px: f32,
+    ) -> Option<([f32; 4], Vec3)> {
+        let leaf = &self.leaves[index % self.leaves.len()];
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        // The level whose blade is the smallest still at least `blade_px` long.
+        let mut level = (&leaf.color, &leaf.normal, 1.0f32);
+        for (k, (c, n)) in leaf.mips.iter().enumerate() {
+            let scale = 0.5f32.powi(k as i32 + 1);
+            if leaf.blade_y * scale < blade_px {
+                break;
+            }
+            level = (c, n, scale);
+        }
+        let (color, normal, scale) = level;
+        let (w, h) = color.dimensions();
+        let x = (leaf.mid_x + v * leaf.blade_y) * scale - 0.5;
+        let y = leaf.blade_y * (1.0 - u) * scale - 0.5;
+        if x < -1.0 || y < -1.0 || x > w as f32 || y > h as f32 {
+            return None;
+        }
+        // Bilinear, transparent outside.
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let mut c = [0.0f32; 4];
+        for (dx, dy, wgt) in [
+            (0, 0, (1.0 - fx) * (1.0 - fy)),
+            (1, 0, fx * (1.0 - fy)),
+            (0, 1, (1.0 - fx) * fy),
+            (1, 1, fx * fy),
+        ] {
+            let (sx, sy) = (x0 as i32 + dx, y0 as i32 + dy);
+            if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
+                continue;
+            }
+            let p = color.get_pixel(sx as u32, sy as u32).0;
+            for i in 0..4 {
+                c[i] += p[i] * wgt;
+            }
+        }
+        if c[3] <= 1e-3 {
+            return None;
+        }
+        let (nx, ny) = (
+            (x.round() as i32).clamp(0, w as i32 - 1) as u32,
+            (y.round() as i32).clamp(0, h as i32 - 1) as u32,
+        );
+        let q = normal.get_pixel(nx, ny).0;
+        let f = |c: u8| c as f32 / 255.0 * 2.0 - 1.0;
+        Some((c, Vec3::new(f(q[0]), f(q[1]), f(q[2]))))
+    }
+
     /// Leaf `index` painted into a `size`² cell: premultiplied linear color and tangent
     /// normals (x right, y up), row by row from the top. The leaf is scaled to fit `rect`
     /// (cell units, y down) with its petiole at the rect's bottom center, recolored so its
@@ -200,14 +328,6 @@ impl LeafScan {
         let oy = ((max.y * size as f32).round() as i32 - th as i32).max(0) as u32;
 
         let tint = Vec3::from(tint);
-        let mean = self.mean.max(Vec3::splat(1e-4));
-        let recolor = |c: Vec3| -> Vec3 {
-            if self.keep_hue {
-                c * tint / mean
-            } else {
-                tint * (c.max_element() / self.mean_value.max(1e-4))
-            }
-        };
         let n = (size * size) as usize;
         let mut px = vec![[0.0f32; 4]; n];
         let mut nrm = vec![[0.0f32, 0.0, 1.0]; n];
@@ -218,7 +338,7 @@ impl LeafScan {
                 if p[3] <= 0.0 {
                     continue;
                 }
-                let c = recolor(Vec3::new(p[0], p[1], p[2]));
+                let c = self.recolor(Vec3::new(p[0], p[1], p[2]), tint);
                 let i = ((oy + y) * size + ox + x) as usize;
                 px[i] = [c.x, c.y, c.z, p[3].min(1.0)];
                 let q = normal.get_pixel(sx, y).0;

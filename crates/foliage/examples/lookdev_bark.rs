@@ -95,7 +95,7 @@ fn genes(variant: u8) -> Genes {
 }
 
 /// Save every bark texture set as PNGs (`<kind>_albedo.png`, `_normal.png`, `_orm.png`), and
-/// the close-up leaf atlases (`hero_<kind>.png`).
+/// the leaf atlases (`hero_<kind>.png`, `spray_<kind>.png`, `mass_<kind>.png`).
 fn dump_textures(out: &str) {
     std::fs::create_dir_all(out).expect("output directory");
     for kind in BarkKind::ALL {
@@ -120,20 +120,28 @@ fn dump_textures(out: &str) {
         }
     }
     // The close-up leaf atlases (photographed leaves where scans are fetched).
-    use engine_foliage::meshgen::textures::{HERO_ATLAS_SIZE, LeafKind, hero_leaf_textures};
+    use engine_foliage::meshgen::textures::{
+        HERO_ATLAS_SIZE, LeafKind, MASS_ATLAS_SIZE, hero_leaf_textures, leaf_textures,
+        mass_textures,
+    };
     for kind in [
         LeafKind::Lobed,
         LeafKind::Oval,
         LeafKind::Broad,
         LeafKind::Palmate,
     ] {
-        let t = hero_leaf_textures(kind, HERO_ATLAS_SIZE, 7);
-        let (w, h) = (t.color.width, t.color.height);
-        let path = format!("{out}/hero_{kind:?}.png").to_lowercase();
-        image::RgbaImage::from_raw(w, h, t.color.data[..(w * h * 4) as usize].to_vec())
-            .expect("rgba8")
-            .save(&path)
-            .expect("png");
+        for (name, t) in [
+            ("hero", hero_leaf_textures(kind, HERO_ATLAS_SIZE, 7)),
+            ("spray", leaf_textures(kind, 1024, 7)),
+            ("mass", mass_textures(kind, MASS_ATLAS_SIZE, 7)),
+        ] {
+            let (w, h) = (t.color.width, t.color.height);
+            let path = format!("{out}/{name}_{kind:?}.png").to_lowercase();
+            image::RgbaImage::from_raw(w, h, t.color.data[..(w * h * 4) as usize].to_vec())
+                .expect("rgba8")
+                .save(&path)
+                .expect("png");
+        }
     }
 }
 
