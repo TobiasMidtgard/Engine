@@ -323,6 +323,12 @@ fn variants() -> Vec<Variant> {
             "ground textures with at most 4 anisotropic probes",
         ),
         v(
+            "cut_shadow_refresh",
+            r,
+            json!({"shadow_refresh_secs": 0.25}),
+            "far shadow maps redrawn for changed casters every 0.25 to 1 s, not every frame",
+        ),
+        v(
             "cut_pacing_30",
             r,
             json!({"pacing_fps": 30.0}),

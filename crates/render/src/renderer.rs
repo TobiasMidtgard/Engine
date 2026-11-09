@@ -2005,6 +2005,12 @@ impl Renderer {
             ));
         }
         if borrowed.is_none() {
+            self.shadow_cache.hold = crate::shadows::static_holds(
+                settings.shadow_refresh_secs,
+                world
+                    .get_resource::<crate::FramePacing>()
+                    .map_or(0.0, |p| p.frame_secs()),
+            );
             self.shadow_cache.apply(
                 &mut view.cascades,
                 &mut view.sky_occlusion,

@@ -271,6 +271,13 @@ pub struct RenderSettings {
     /// every frame. 0 draws every caster into every map every frame (for comparisons); any
     /// other value keeps the static images.
     pub shadow_cascade_reuse: u32,
+    /// A far shadow map whose still casters changed (one started to move, was edited or
+    /// removed) is drawn again at most this often, seconds: the third cascade at this interval,
+    /// the last cascade and the sky occlusion map at twice it, the far shadow map at four times
+    /// (`shadows::static_holds`). The two nearest cascades never wait. In a busy scene something
+    /// changes somewhere in a far map on most frames, and each change draws every still caster
+    /// in it again. 0 = at once (the default).
+    pub shadow_refresh_secs: f32,
     /// Record and submit on a render thread (see [`Pipelining`]).
     pub pipelining: Pipelining,
     /// Split each frame's commands into a few encoders and finish (encode) all but the last on
@@ -613,6 +620,7 @@ impl Default for RenderSettings {
             far_shadow_distance: 8000.0,
             shadow_split_lambda: 0.8,
             shadow_cascade_reuse: 3,
+            shadow_refresh_secs: 0.0,
             pipelining: Pipelining::Windowed,
             parallel_encoding: true,
             shadow_depth_bias: 0.0,
@@ -736,6 +744,11 @@ impl Default for FramePacing {
 impl FramePacing {
     /// Seconds over which the frame time is smoothed: one slow frame doesn't move the share.
     const SMOOTH_S: f32 = 0.5;
+
+    /// The frame time of the last half second or so, seconds (0 before the first frame).
+    pub fn frame_secs(&self) -> f32 {
+        self.frame_s
+    }
 
     /// Take a frame of `dt` seconds (wall clock) at `pacing_fps`.
     pub fn advance(&mut self, dt: f32, pacing_fps: f32) {

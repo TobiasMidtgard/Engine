@@ -301,6 +301,34 @@ pub struct ShadowCache {
     cascades: [Option<Placed>; MAX_CASCADES],
     sky: Option<Placed>,
     far: Option<Placed>,
+    /// Frames since each map's static image was last drawn.
+    since: [u32; SHADOW_MAPS],
+    /// Frames a map's static image stands at least before a feature's request draws it again
+    /// (`static_holds`; 0 = at once). The camera leaving the margin, the sun and a cut don't
+    /// wait.
+    pub hold: [u32; SHADOW_MAPS],
+}
+
+/// How long each map's static image stands before a change in what is in it draws it again
+/// (`ShadowCache::hold`), in frames of `frame_s` seconds, for `RenderSettings::
+/// shadow_refresh_secs`: the two nearest cascades not at all, the third that long, the last
+/// cascade and the sky occlusion map twice and the far shadow map four times that long. A still
+/// caster that starts to move is drawn as a moving one at once; until its map is drawn again its
+/// old shadow stays where it stood, in maps whose texels are decimeters to meters wide and that
+/// only shade the distance (Cyberpunk 2077 refreshes its cached distant cascades every few
+/// seconds; Dybisz, SIGGRAPH 2021).
+pub fn static_holds(refresh_secs: f32, frame_s: f32) -> [u32; SHADOW_MAPS] {
+    let mut hold = [0; SHADOW_MAPS];
+    if !(refresh_secs > 0.0 && frame_s > 0.0) {
+        return hold;
+    }
+    let frames = |times: f32| ((refresh_secs * times / frame_s).ceil() as u32).min(100_000);
+    for (i, h) in hold.iter_mut().enumerate().take(MAX_CASCADES).skip(2) {
+        *h = frames((i - 1) as f32);
+    }
+    hold[SKY_OCCLUSION_VIEW] = frames(2.0);
+    hold[FAR_SHADOW_MAP] = frames(4.0);
+    hold
 }
 
 impl ShadowCache {
@@ -318,6 +346,10 @@ impl ShadowCache {
         fresh: bool,
         requested: [bool; SHADOW_MAPS],
     ) {
+        // A map whose image was drawn a moment ago lets what changed in it wait (`hold`): the
+        // feature asks again every frame until the image is drawn.
+        let requested: [bool; SHADOW_MAPS] =
+            std::array::from_fn(|i| requested[i] && self.since[i] >= self.hold[i]);
         // The sun turned a little: one map a frame, nearest first.
         let mut sun_spent = false;
         let mut sun_due = |last: &Placed, sun: Vec3| {
@@ -421,6 +453,18 @@ impl ShadowCache {
             }
         } else {
             self.far = None;
+        }
+        for i in 0..SHADOW_MAPS {
+            let drawn = match i {
+                SKY_OCCLUSION_VIEW => sky.enabled && sky.static_redraw,
+                FAR_SHADOW_MAP => far.enabled && far.static_redraw,
+                _ => i < count && cascades.static_redraw[i],
+            };
+            self.since[i] = if drawn {
+                0
+            } else {
+                self.since[i].saturating_add(1)
+            };
         }
     }
 }
@@ -1035,6 +1079,43 @@ mod sky_occlusion_tests {
         assert_eq!(c.static_redraw, [true; MAX_CASCADES]);
         let c = apply(&mut cache, jump, sun, true, none);
         assert_eq!(c.static_redraw, [true; MAX_CASCADES]);
+    }
+
+    #[test]
+    fn far_maps_let_changed_casters_wait_and_near_ones_dont() {
+        let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
+        let origin = DVec3::new(1000.0, 20.0, -5000.0);
+        // Off: no map waits.
+        assert_eq!(static_holds(0.0, 1.0 / 60.0), [0; SHADOW_MAPS]);
+        assert_eq!(static_holds(0.25, 0.0), [0; SHADOW_MAPS]);
+        // A quarter second at 60 frames a second.
+        let hold = static_holds(0.25, 1.0 / 60.0);
+        assert_eq!(hold[..4], [0, 0, 15, 30]);
+        assert_eq!(hold[SKY_OCCLUSION_VIEW], 30);
+        assert_eq!(hold[FAR_SHADOW_MAP], 60);
+
+        let mut cache = ShadowCache {
+            hold,
+            ..Default::default()
+        };
+        apply(&mut cache, origin, sun, true, [false; SHADOW_MAPS]);
+        // Something changes in every map on every frame: the near cascades are drawn again
+        // every frame, the third every 16th, the last every 31st.
+        let mut redrawn = [0u32; MAX_CASCADES];
+        for _ in 0..62 {
+            let c = apply(&mut cache, origin, sun, false, [true; SHADOW_MAPS]);
+            for (n, r) in redrawn.iter_mut().zip(c.static_redraw) {
+                *n += r as u32;
+            }
+        }
+        assert_eq!(redrawn, [62, 62, 3, 2]);
+        // A camera cut doesn't wait.
+        let c = apply(&mut cache, origin, sun, true, [false; SHADOW_MAPS]);
+        assert_eq!(c.static_redraw, [true; MAX_CASCADES]);
+        // Nor does the camera leaving the margin.
+        let jump = origin + DVec3::new(c.half_extent[3] as f64 * 0.2, 0.0, 0.0);
+        let c = apply(&mut cache, jump, sun, false, [false; SHADOW_MAPS]);
+        assert!(c.static_redraw[3] && c.static_redraw[2]);
     }
 
     #[test]
