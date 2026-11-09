@@ -25,6 +25,7 @@ mod island;
 mod logistics;
 mod looks;
 mod sim;
+mod tools;
 mod tour;
 mod town;
 mod vessels;
@@ -73,14 +74,15 @@ pub fn add_game(app: &mut App) {
         .init_resource::<draw::Drawn>()
         .init_resource::<fleet::SeaChart>()
         .init_resource::<fleet::Routes>()
-        .init_resource::<hud::Tool>()
+        .init_resource::<tools::Tool>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, sim::economy_system)
         .add_systems(
             Update,
             (
                 camera::control,
-                hud::input,
+                hud::read_actions,
+                tools::input,
                 town::upgrade_looks,
                 build::refresh,
                 draw::redraw_buildings,
@@ -92,7 +94,7 @@ pub fn add_game(app: &mut App) {
                 fleet::spin_props,
                 draw::spin_parts,
                 draw::follow_bodies,
-                hud::ghost,
+                tools::ghost,
                 hud::update_data,
             )
                 .chain(),
@@ -125,6 +127,7 @@ fn setup(world: &mut World) {
     town::build_start(world);
     build::refresh(world);
     town::prewarm(world, 600.0);
+    tools::setup(world);
     hud::setup(world);
     let isle = &island::islands()[0];
     let focus = world
