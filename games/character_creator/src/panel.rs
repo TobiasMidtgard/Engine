@@ -247,10 +247,12 @@ fn tab_content(ui: &CreatorUi, a: &Appearance, p: &PoseEdit) -> Vec<El> {
                 joint_sliders(&mut out, b);
             }
             out.push(heading("Base pose"));
-            out.push(styles(
-                crate::pose::POSES.iter().map(|n| (*n, *n == p.base)),
-                "creator.base",
-            ));
+            for row in crate::pose::POSES.chunks(4) {
+                out.push(styles(
+                    row.iter().map(|n| (*n, *n == p.base)),
+                    "creator.base",
+                ));
+            }
             out.push(
                 El::new().class("row").children([
                     El::button("Mirror left and right", "creator.mirror")
@@ -299,12 +301,13 @@ fn tab_content(ui: &CreatorUi, a: &Appearance, p: &PoseEdit) -> Vec<El> {
             ));
             let h = p.hands[ui.hand];
             out.push(heading("Hand shape"));
-            out.push(styles(
-                hands::SHAPES
-                    .iter()
-                    .map(|s| (hands::shape_name(*s), *s == h.shape)),
-                "creator.shape",
-            ));
+            // Two rows of four, so every shape shows in the panel's width.
+            for row in hands::SHAPES.chunks(4) {
+                out.push(styles(
+                    row.iter().map(|s| (hands::shape_name(*s), *s == h.shape)),
+                    "creator.shape",
+                ));
+            }
             out.push(bound_slider(
                 "Into the shape",
                 format!("creator_pose.hands.{}.weight", ui.hand),

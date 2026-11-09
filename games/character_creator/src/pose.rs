@@ -120,7 +120,7 @@ pub fn base_turns(name: &str, t: f32) -> Vec<(&'static str, Quat)> {
         }
         // Arms straight out to the sides, for checking proportions and skinning.
         "tpose" => {
-            v.extend([("upper_arm_l", z(60.0)), ("upper_arm_r", z(-60.0))]);
+            v.extend([("upper_arm_l", z(-60.0)), ("upper_arm_r", z(60.0))]);
         }
         "turn" => {
             v.extend(arms_down(8.0));
