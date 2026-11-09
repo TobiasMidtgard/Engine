@@ -32,17 +32,17 @@ const X1: f64 = 3300.0;
 const Z0: f64 = -2500.0;
 const Z1: f64 = 3400.0;
 /// The painted picture's size, pixels.
-const PW: usize = 504;
-const PH: usize = 472;
+pub(super) const PW: usize = 504;
+pub(super) const PH: usize = 472;
 /// The chart node's size, logical px (same aspect as the picture).
 pub const CHART_W: f32 = 300.0;
 pub const CHART_H: f32 = CHART_W * PH as f32 / PW as f32;
 
-const PICTURE: &str = "isle_chart";
+pub(super) const PICTURE: &str = "isle_chart";
 pub const PAINTER: &str = "isle_map";
 
 /// Chart position 0..1 of a world point.
-fn to_uv(x: f64, z: f64) -> Vec2 {
+pub(super) fn to_uv(x: f64, z: f64) -> Vec2 {
     Vec2::new(((x - X0) / (X1 - X0)) as f32, ((z - Z0) / (Z1 - Z0)) as f32)
 }
 
@@ -253,6 +253,10 @@ pub fn panel() -> El {
                     brass::medallion("isle_ledger", 38.0, "isle.ledger")
                         .id("isle.ledger")
                         .tooltip("Ledger", "Goods made and used, the treasury and the people, island by island.\n[b]Key[/b]  L"),
+                )
+                .child(
+                    brass::medallion("isle_routes", 38.0, "isle.routes")
+                        .tooltip("Trade routes", "Every route, its stops and cargo, and its ships on the chart.\n[b]Key[/b]  T"),
                 )
                 .child(
                     brass::medallion("isle_home", 38.0, "isle.home")

@@ -6,8 +6,8 @@
 //! The look of these is the UI thread's; what the buttons do, and the hand on the map, are in
 //! `tools.rs`. Between the two: the `isle.*` actions the buttons send (`tools::action`), the
 //! `isle.*` values in `UiData` filled by [`update_data`], and [`show_card`], [`tool_changed`]
-//! and [`complain`]. The map table (`hud/map.rs`) and the ledger (`hud/ledger.rs`) are parts
-//! of it.
+//! and [`complain`]. The map table (`hud/map.rs`), the ledger (`hud/ledger.rs`) and the trade
+//! routes (`hud/routes.rs`) are parts of it.
 
 use bevy_ecs::message::MessageCursor;
 use engine::prelude::*;
@@ -27,6 +27,7 @@ use crate::tools::{Hand, Tool};
 
 mod ledger;
 mod map;
+mod routes;
 
 /// The bars' own state between frames.
 #[derive(Resource, Default)]
@@ -556,6 +557,12 @@ pub fn setup(world: &mut World) {
         engine::core::log::warn!("archipelago map table: {e}");
     }
     ledger::install(world);
+    routes::install(world);
+    // `--hud-routes`: open the trade routes with the second route picked out (tour shots).
+    if std::env::args().any(|a| a == "--hud-routes") {
+        routes::toggle(world);
+        routes::select(world, 1);
+    }
     // `--hud-ledger`: run the economy ahead a few game minutes, keeping the books, then open
     // the ledger (tour screenshots of it with real history).
     if std::env::args().any(|a| a == "--hud-ledger") {
@@ -637,6 +644,13 @@ pub fn read_actions(world: &mut World) {
             ledger::update(world);
         } else if a == "isle.ledger" {
             toggle_ledger(world);
+        } else if a == "isle.routes" {
+            toggle_routes(world);
+        } else if let Some(i) = a
+            .strip_prefix("isle.route:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            routes::select(world, i);
         } else if a == "isle.map" {
             map::clicked(world, entity);
         } else if a == "isle.home" {
@@ -648,8 +662,19 @@ pub fn read_actions(world: &mut World) {
     }
 }
 
-/// Open the ledger on the island in view, or close it.
+/// Open the trade routes (closing the ledger), or close them.
+fn toggle_routes(world: &mut World) {
+    if world.resource::<ledger::Ledger>().open {
+        ledger::show(world, None);
+    }
+    routes::toggle(world);
+}
+
+/// Open the ledger on the island in view (closing the routes), or close it.
 fn toggle_ledger(world: &mut World) {
+    if world.resource::<routes::RouteBook>().open {
+        routes::toggle(world);
+    }
     if world.resource::<ledger::Ledger>().open {
         ledger::show(world, None);
     } else {
@@ -659,7 +684,7 @@ fn toggle_ledger(world: &mut World) {
     }
 }
 
-/// The HUD's own keys: L opens the ledger, H goes home, Esc closes the ledger.
+/// The HUD's own keys: L the ledger, T the trade routes, H home, Esc closes either book.
 fn read_keys(world: &mut World) {
     let typing = world
         .get_resource::<engine_ui::UiInputCapture>()
@@ -670,13 +695,17 @@ fn read_keys(world: &mut World) {
     let Some(keys) = world.get_resource::<ButtonInput<KeyCode>>() else {
         return;
     };
-    let (l, h, esc) = (
+    let (l, h, t, esc) = (
         keys.just_pressed(KeyCode::L),
         keys.just_pressed(KeyCode::H),
+        keys.just_pressed(KeyCode::T),
         keys.just_pressed(KeyCode::Escape),
     );
     if l || (esc && world.resource::<ledger::Ledger>().open) {
         toggle_ledger(world);
+    }
+    if t || (esc && world.resource::<routes::RouteBook>().open) {
+        toggle_routes(world);
     }
     if h {
         map::home(world);
@@ -983,7 +1012,11 @@ fn demo_step(world: &mut World, dt: f32) {
     };
     let t = t + dt;
     world.resource_mut::<Hud>().demo = Some(t);
-    if t > 2.0 && !world.resource::<Hud>().info_open && !world.resource::<ledger::Ledger>().open {
+    if t > 2.0
+        && !world.resource::<Hud>().info_open
+        && !world.resource::<ledger::Ledger>().open
+        && !world.resource::<routes::RouteBook>().open
+    {
         let weaver = {
             let mut q = world.query::<(Entity, &Building)>();
             q.iter(world)

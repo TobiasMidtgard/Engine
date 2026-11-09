@@ -150,6 +150,21 @@ pub fn all() -> Vec<(&'static str, String)> {
             ),
         ),
         (
+            "isle_routes",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><circle cx="32" cy="32" r="17" fill="none" stroke-width="9"/><circle cx="32" cy="32" r="17" fill="none" stroke="url(#sp)" stroke-width="4.5"/><path d="M32 4 L32 60 M4 32 L60 32 M12.2 12.2 L51.8 51.8 M51.8 12.2 L12.2 51.8" stroke-width="7"/><path d="M32 4 L32 60 M4 32 L60 32 M12.2 12.2 L51.8 51.8 M51.8 12.2 L12.2 51.8" stroke="url(#sp)" stroke-width="3"/><circle cx="32" cy="32" r="6.5" fill="url(#sp)"/></g>"##,
+            ),
+        ),
+        (
+            "isle_load",
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="M32 6 L60 54 L4 54 Z" fill="#2f6e28" stroke="#1c3a14" stroke-width="4" stroke-linejoin="round"/></svg>"##.to_string(),
+        ),
+        (
+            "isle_unload",
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="M32 58 L60 10 L4 10 Z" fill="#9a2f1c" stroke="#4a160c" stroke-width="4" stroke-linejoin="round"/></svg>"##.to_string(),
+        ),
+        (
             "isle_home",
             svg(
                 &grad("sp", "#5a4128", "#24170b"),
