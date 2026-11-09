@@ -745,6 +745,15 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// static image (see [`RenderFeature::draw_shadow_static`]): what moves goes here.
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {}
 
+    /// Draw depth into inset shadow map `inset`: one person's own sun shadow map
+    /// (`ctx.view.shadow_insets[inset]`, a millimeter or two per texel; characters week R1).
+    /// Draw only the casters [`crate::shadows::ShadowInset::casts`] keeps (the person, what they
+    /// wear and hold), with the same pipeline and group 0 layout as `draw_shadow`. The shading
+    /// takes the darker of it and the cascades, so a nose, a hat brim or an arm shades the face
+    /// and body crisply. Features that draw people implement it; nothing is drawn by default.
+    fn draw_inset_shadow(&self, pass: &mut wgpu::RenderPass<'_>, inset: usize, ctx: &FrameContext) {
+    }
+
     /// Draw depth into the far shadow map: one coarse map (texels of several meters) around the
     /// camera that gives sun shadows beyond the cascades, out to
     /// `RenderSettings::far_shadow_distance`. Draw only what is big enough to show at that

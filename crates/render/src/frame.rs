@@ -144,8 +144,13 @@ pub struct FrameUniform {
     pub canopy_params: [f32; 4],
     /// Screen-space sun shadows past the cascades (`distant_shadow` in lib_frame.wgsl): march
     /// length scale (`RenderSettings::distant_shadows`, 0 = off); the number of people with
-    /// capsules (capsules.rs, after the point lights in their buffer); unused x2.
+    /// capsules (capsules.rs, after the point lights in their buffer); the number of inset
+    /// shadow maps (`ViewData::shadow_insets`); their size (texels).
     pub distant_shadows: [f32; 4],
+    /// Each inset shadow map's camera-relative to clip-space matrix (`shadow_insets` layers).
+    pub shadow_insets: [[[f32; 4]; 4]; crate::shadows::MAX_SHADOW_INSETS],
+    /// Each inset's body: camera-relative center, radius (m).
+    pub shadow_inset_spheres: [[f32; 4]; crate::shadows::MAX_SHADOW_INSETS],
 }
 
 /// Most [`crate::GrassBender`]s that push grass and swaying plants aside (nearest the camera).
@@ -286,6 +291,10 @@ pub struct ViewData {
     /// people, then their headers and capsules.
     pub capsule_people: u32,
     pub capsules: Vec<GpuPointLight>,
+    /// The people nearest the camera with an inset shadow map of their own
+    /// (`RenderSettings::shadow_insets`; features draw them with
+    /// [`crate::RenderFeature::draw_inset_shadow`]). Empty without sun shadows.
+    pub shadow_insets: Vec<crate::shadows::ShadowInset>,
     /// Indoor volumes near the camera (at most [`MAX_SKY_VOLUMES`]).
     pub sky_volumes: Vec<GpuSkyVolume>,
     pub debug_view: DebugView,
@@ -916,8 +925,19 @@ pub fn build_view(
     }
     lights.sort_by(|a, b| a.0.total_cmp(&b.0));
     lights.truncate(settings.max_point_lights as usize);
-    let (capsule_people, capsules) =
-        crate::capsules::gather(world, origin, &frustum, lights.len() as u32);
+    let people = crate::capsules::gather(world, origin, &frustum, lights.len() as u32);
+    // Inset shadows for the nearest people, while the sun casts shadows.
+    let shadow_insets: Vec<crate::shadows::ShadowInset> = if sun_shadows {
+        people
+            .bodies
+            .iter()
+            .filter(|(center, radius)| center.length() - radius < crate::shadows::INSET_DISTANCE_M)
+            .take((settings.shadow_insets as usize).min(crate::shadows::MAX_SHADOW_INSETS))
+            .map(|&(center, radius)| crate::shadows::ShadowInset::new(center, radius, sun_dir))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Indoor volumes: nearest first (by distance from the camera to the box's bounding sphere).
     let mut volumes: Vec<(f32, GpuSkyVolume)> = Vec::new();
@@ -1003,8 +1023,9 @@ pub fn build_view(
         delta,
         frame_index,
         point_lights: lights.into_iter().map(|(_, l)| l).collect(),
-        capsule_people,
-        capsules,
+        capsule_people: people.count,
+        capsules: people.entries,
+        shadow_insets,
         sky_volumes: volumes.into_iter().map(|(_, v)| v).collect(),
         debug_view: settings.debug_view,
         sun_angular_radius,
@@ -1252,9 +1273,19 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         distant_shadows: [
             settings.distant_shadows.max(0.0),
             v.capsule_people as f32,
-            0.0,
-            0.0,
+            v.shadow_insets.len() as f32,
+            settings.shadow_inset_size.clamp(256, 4096) as f32,
         ],
+        shadow_insets: std::array::from_fn(|i| {
+            v.shadow_insets
+                .get(i)
+                .map_or([[0.0; 4]; 4], |s| s.view_proj.to_cols_array_2d())
+        }),
+        shadow_inset_spheres: std::array::from_fn(|i| {
+            v.shadow_insets
+                .get(i)
+                .map_or([0.0; 4], |s| s.center.extend(s.radius).to_array())
+        }),
     }
 }
 
@@ -1382,7 +1413,7 @@ mod tests {
         // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
         // the window (vec4), probe GI (3 vec4), the clip plane (vec4), the aerial table (vec4),
         // shading knobs (vec4), benders, plant wind (2 vec4, 2 gust waves, vec4), the canopy (2
-        // vec4), distant shadows (vec4).
+        // vec4), distant shadows (vec4), the inset shadows (4 mat4 + 4 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -1413,6 +1444,8 @@ mod tests {
                 + 16
                 + 2 * 16
                 + 16
+                + 4 * 64
+                + 4 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

@@ -58,6 +58,8 @@
 // from above, 1 m texels with mips: r the leaf area index, g and b its mean leaf height and mean
 // squared leaf height times it (heights in CANOPY_HEIGHT_UNIT above `frame.canopy.z`). The 19th.
 @group(0) @binding(26) var canopy_map: texture_2d<f32>;
+// People's own sun shadow maps (shadows.rs `ShadowInset`, `frame.shadow_insets`), one layer each.
+@group(0) @binding(27) var inset_shadow_map: texture_depth_2d_array;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -292,8 +294,63 @@ fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let near = saturate((reach - depth) / (reach * 0.1));
     var s = 1.0;
     if (near > 0.0) { s = cascade_visibility(rel, n, depth, noise); }
-    if (near >= 1.0) { return s; }
-    return mix(far_shadow_visibility(rel, n, noise), s, near);
+    if (near < 1.0) { s = mix(far_shadow_visibility(rel, n, noise), s, near); }
+    if (frame.distant_shadows.z > 0.5) { s = min(s, inset_visibility(rel, n, noise)); }
+    return s;
+}
+
+// Sun visibility from the people's inset shadow maps (shadows.rs `ShadowInset`; 1 outside
+// their bodies' spheres). Each map holds only its person, what they wear and what they hold, at
+// a millimeter or two per texel, so a nose, a hat brim or an arm shades the face and body
+// crisply where the cascades' texels are centimeters across (Unreal's per-object "inset"
+// shadows). A short blocker search sizes the penumbra by the sun's disc, as the cascades do.
+fn inset_visibility(rel: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
+    let count = min(u32(frame.distant_shadows.z), 4u);
+    let size = max(frame.distant_shadows.w, 1.0);
+    let l = frame.sun_dir.xyz;
+    let n_dot_l = dot(n, l);
+    let slope = min(sqrt(max(1.0 - n_dot_l * n_dot_l, 0.0)) / max(abs(n_dot_l), 0.2), 5.0);
+    let tan_sun = tan(frame.sun_dir.w) * frame.effects.z;
+    let angle = noise * TAU;
+    var v = 1.0;
+    for (var i = 0u; i < count; i++) {
+        let sphere = frame.shadow_inset_spheres[i];
+        let d = length(rel - sphere.xyz);
+        if (d >= sphere.w) { continue; }
+        let m = frame.shadow_insets[i];
+        let texel_world = 2.0 * sphere.w / size;
+        let z_per_meter = length(vec3<f32>(m[0].z, m[1].z, m[2].z));
+        let p = rel + n * (2.0 * texel_world * (1.0 - 0.5 * saturate(n_dot_l)));
+        let lp = m * vec4<f32>(p, 1.0);
+        let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
+        if (any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || lp.z > 1.0) { continue; }
+        let texel = 1.0 / size;
+        let z = lp.z - texel_world * (1.0 + slope) * z_per_meter;
+        // Blockers within a 12-texel disc: how far they are sizes the penumbra.
+        var blocker_sum = 0.0;
+        var blockers = 0.0;
+        for (var k = 0; k < 6; k++) {
+            let o = vogel_disk(k, 6, angle) * 12.0 * texel;
+            let b = textureSampleLevel(inset_shadow_map, sky_occlusion_sampler, uv + o, i, 0);
+            if (b < z) {
+                blocker_sum += b;
+                blockers += 1.0;
+            }
+        }
+        if (blockers < 0.5) { continue; }
+        let distance = max(z - blocker_sum / blockers, 0.0) / max(z_per_meter, 1e-9);
+        let radius = clamp(distance * tan_sun / texel_world, 1.0, 10.0);
+        let z_ref = z - radius * texel_world * slope * z_per_meter * 0.5;
+        var sum = 0.0;
+        for (var k = 0; k < 10; k++) {
+            let o = vogel_disk(k, 10, angle) * radius * texel;
+            sum += textureSampleCompareLevel(inset_shadow_map, shadow_sampler, uv + o, i, z_ref);
+        }
+        // Fade out over the sphere's outer sixth, into the cascades alone.
+        let fade = saturate((sphere.w - d) / (0.17 * sphere.w));
+        v = min(v, mix(1.0, sum * 0.1, fade));
+    }
+    return v;
 }
 
 // Sun visibility from the shadow cascades at camera distance `depth` (within their reach).

@@ -212,6 +212,53 @@ pub const FAR_SHADOW_MAP: usize = SKY_OCCLUSION_VIEW + 1;
 /// Number of shadow maps: the cascades, the sky occlusion map and the far map.
 pub const SHADOW_MAPS: usize = FAR_SHADOW_MAP + 1;
 
+/// Most people with an inset shadow map of their own (`RenderSettings::shadow_insets`).
+pub const MAX_SHADOW_INSETS: usize = 4;
+/// People within this of the camera (m, from the camera to their body) get an inset shadow.
+pub const INSET_DISTANCE_M: f32 = 6.0;
+
+/// One person's inset shadow map (`RenderSettings::shadow_insets`): an orthographic sun view
+/// fitted around their body, camera-relative. Draw into it with
+/// [`crate::RenderFeature::draw_inset_shadow`], only the casters [`ShadowInset::casts`] keeps
+/// (the person, what they wear and hold), with the same pipeline as the cascades.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowInset {
+    /// The body's bounding sphere (camera-relative center, radius in m).
+    pub center: Vec3,
+    pub radius: f32,
+    /// Camera-relative to the map's clip space (depth 0 toward the sun, as the cascades').
+    pub view_proj: Mat4,
+}
+
+impl ShadowInset {
+    /// The map around the sphere at `center` (camera-relative) of `radius`, lit from `sun_dir`.
+    pub fn new(center: Vec3, radius: f32, sun_dir: Vec3) -> Self {
+        let radius = radius.max(0.1);
+        let light_rot = look_rotation_f64(-sun_dir.as_dvec3());
+        // The eye sits just outside the sphere toward the sun; depth spans the sphere.
+        let eye = center + sun_dir * (radius + 0.25);
+        let light_view =
+            Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
+        let light_proj = crate::frame::orthographic_standard(radius, 0.0, 2.0 * radius + 0.5);
+        Self {
+            center,
+            radius,
+            view_proj: light_proj * light_view,
+        }
+    }
+
+    /// Whether a caster's bounding sphere (camera-relative) can draw into this map: it overlaps
+    /// the body's sphere.
+    pub fn casts(&self, center: Vec3, radius: f32) -> bool {
+        center.distance_squared(self.center) <= (self.radius + radius).powi(2)
+    }
+
+    /// Meters per texel of a map `size` texels across.
+    pub fn texel(&self, size: u32) -> f32 {
+        2.0 * self.radius / size.max(1) as f32
+    }
+}
+
 /// Where a map's static image was drawn.
 #[derive(Debug, Clone, Copy)]
 struct Placed {
@@ -774,6 +821,27 @@ fn look_rotation_f64(forward: DVec3) -> DQuat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_inset_frames_its_body_toward_the_sun() {
+        let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
+        let center = Vec3::new(1.0, 0.9, -3.0);
+        let inset = ShadowInset::new(center, 1.0, sun);
+        // The body's sphere fills the map: its center in the middle, depth inside 0..1, and
+        // a point toward the sun nearer the map's near plane than one away from it.
+        let clip = |p: Vec3| inset.view_proj.project_point3(p);
+        let c = clip(center);
+        assert!(
+            c.x.abs() < 1e-4 && c.y.abs() < 1e-4 && (0.0..1.0).contains(&c.z),
+            "{c:?}"
+        );
+        assert!(clip(center + sun * 0.9).z < clip(center - sun * 0.9).z);
+        let side = sun.any_orthonormal_vector();
+        assert!((clip(center + side).truncate().length() - 1.0).abs() < 1e-3);
+        assert!(inset.casts(center + Vec3::X * 1.5, 0.6));
+        assert!(!inset.casts(center + Vec3::X * 3.0, 0.6));
+        assert!((inset.texel(2048) - 2.0 / 2048.0).abs() < 1e-7);
+    }
 
     #[test]
     fn splits_increase_to_far() {

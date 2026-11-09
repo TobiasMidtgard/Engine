@@ -84,16 +84,21 @@ fn person_capsules(
     true
 }
 
-/// The people nearest the camera in `frustum` (grown by their reach and a sun shadow's length),
-/// as the shaders read them: the per-person headers, then every capsule, entries numbered from
-/// `first` (the number of point lights before them). Returns the number of people and the
-/// entries.
-pub(crate) fn gather(
-    world: &mut World,
-    origin: DVec3,
-    frustum: &Frustum,
-    first: u32,
-) -> (u32, Vec<GpuPointLight>) {
+/// The people [`gather`] found, nearest the camera first.
+#[derive(Default)]
+pub(crate) struct People {
+    /// How many have capsules.
+    pub count: u32,
+    /// The per-person headers, then every capsule, as the shaders read them.
+    pub entries: Vec<GpuPointLight>,
+    /// Each one's body: a camera-relative sphere around their capsules (without the reach).
+    pub bodies: Vec<(Vec3, f32)>,
+}
+
+/// The people nearest the camera in `frustum` (grown by their reach and a sun shadow's length):
+/// their capsules as the shaders read them, entries numbered from `first` (the number of point
+/// lights before them), and their bodies.
+pub(crate) fn gather(world: &mut World, origin: DVec3, frustum: &Frustum, first: u32) -> People {
     let mut people: Vec<(f32, Vec3, f32, std::ops::Range<usize>)> = Vec::new();
     let mut capsules: Vec<(Vec3, Vec3, f32)> = Vec::new();
     let mut q = world.query::<(&SkeletonPose, &GlobalTransform)>();
@@ -115,21 +120,22 @@ pub(crate) fn gather(
             .iter()
             .fold(Vec3::splat(f32::MIN), |m, c| m.max(c.0.max(c.1) + c.2));
         let center = (lo + hi) * 0.5;
-        let radius = (hi - lo).length() * 0.5 + REACH_M;
+        let body = (hi - lo).length() * 0.5;
+        let radius = body + REACH_M;
         if !frustum.intersects_sphere(center, radius + 2.0) {
             capsules.truncate(start);
             continue;
         }
-        people.push((center.length(), center, radius, start..capsules.len()));
+        people.push((center.length(), center, body, start..capsules.len()));
     }
     people.sort_by(|a, b| a.0.total_cmp(&b.0));
     people.truncate(MAX_PEOPLE);
     let mut out =
         Vec::with_capacity(people.len() + people.iter().map(|p| p.3.len()).sum::<usize>());
     let mut next = first + people.len() as u32;
-    for (_, center, radius, span) in &people {
+    for (_, center, body, span) in &people {
         out.push(GpuPointLight {
-            position_range: [center.x, center.y, center.z, *radius],
+            position_range: [center.x, center.y, center.z, body + REACH_M],
             color_radius: [next as f32, span.len() as f32, 0.0, 0.0],
         });
         next += span.len() as u32;
@@ -142,7 +148,11 @@ pub(crate) fn gather(
             });
         }
     }
-    (people.len() as u32, out)
+    People {
+        count: people.len() as u32,
+        entries: out,
+        bodies: people.iter().map(|p| (p.1, p.2)).collect(),
+    }
 }
 
 #[cfg(test)]
@@ -217,8 +227,11 @@ mod tests {
             },
             GlobalTransform::default(),
         ));
-        let (people, entries) = gather(&mut world, CAMERA, &everything(), 3);
+        let found = gather(&mut world, CAMERA, &everything(), 3);
+        let (people, entries) = (found.count, found.entries);
         assert_eq!(people, 1);
+        assert_eq!(found.bodies.len(), 1);
+        assert!((found.bodies[0].1 + REACH_M - entries[0].position_range[3]).abs() < 1e-5);
         assert_eq!(entries.len(), 1 + SEGMENTS.len());
         let header = entries[0];
         assert_eq!(
@@ -248,7 +261,7 @@ mod tests {
                 Quat::IDENTITY,
             ),
         ));
-        let (people, entries) = gather(&mut world, CAMERA, &everything(), 0);
-        assert_eq!((people, entries.len()), (0, 0));
+        let found = gather(&mut world, CAMERA, &everything(), 0);
+        assert_eq!((found.count, found.entries.len()), (0, 0));
     }
 }

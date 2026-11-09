@@ -396,6 +396,15 @@ pub struct RenderSettings {
     /// each pixel marches toward the sun (1 = 6 % of its distance, 12-60 m); 0 = off.
     /// `ENGINE_DISTANT_SHADOWS=on|off`.
     pub distant_shadows: f32,
+    /// Inset shadows (characters week R1): the people nearest the camera, within
+    /// [`crate::shadows::INSET_DISTANCE_M`], each get a sun shadow map of their own around their
+    /// body (`shadow_inset_size`² texels, a millimeter or two each), so a nose, a hat brim or an
+    /// arm shades the face and body as sharply as Unreal's per-object shadows do. Drawn by the
+    /// features that draw people (`RenderFeature::draw_inset_shadow`). At most
+    /// [`crate::shadows::MAX_SHADOW_INSETS`]; 0 = off.
+    pub shadow_insets: u32,
+    /// Texels across each inset shadow map.
+    pub shadow_inset_size: u32,
     /// Cloud shadows: when a module draws the cloud shadow map (the weather's clouds; see
     /// `cloud_shadows`), the sunlight on every surface and in the fog is shaded by it. Off: the
     /// map is not drawn and nothing is shaded by clouds. `ENGINE_CLOUD_SHADOWS=on|off` overrides
@@ -596,6 +605,8 @@ impl Default for RenderSettings {
             canopy: true,
             canopy_strength: 1.0,
             distant_shadows: 1.0,
+            shadow_insets: crate::shadows::MAX_SHADOW_INSETS as u32,
+            shadow_inset_size: 2048,
             cloud_shadows: true,
             night_exposure_bias: 2.5,
             interior_exposure_bias: 1.25,
@@ -768,7 +779,10 @@ impl RenderSettings {
         s.ambient_occlusion &= quality.allows(0.5);
         if !quality.allows(0.5) {
             s.distant_shadows = 0.0;
+            s.shadow_insets = 0;
         }
+        let inset = self.shadow_inset_size.max(1) as f32 * shadows.min(1.0);
+        s.shadow_inset_size = (2f32.powf(inset.log2().round()) as u32).clamp(256, 4096);
         s.max_point_lights =
             ((self.max_point_lights as f32 * effects.clamp(0.25, 1.0)) as u32).max(8);
         s
@@ -797,6 +811,7 @@ impl RenderSettings {
         Self {
             contact_shadow_length: 0.0,
             distant_shadows: 0.0,
+            shadow_insets: 0,
             shadow_filter_taps: (self.shadow_filter_taps / 2).max(4),
             mesh_lod_pixels: self.mesh_lod_pixels * far,
             cluster_error_px: self.cluster_error_px * far,

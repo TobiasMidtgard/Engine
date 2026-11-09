@@ -158,6 +158,76 @@ struct ShadowResources {
     occlusion_size: u32,
     /// The maps' static images (`shadows::ShadowCache`), made the first time they are used.
     statics: Option<StaticShadows>,
+    /// People's inset shadow maps (`ViewData::shadow_insets`, frame binding 27).
+    insets: InsetShadows,
+}
+
+/// The inset shadow maps (`RenderSettings::shadow_insets`): one layer per person, each with
+/// its view uniform. A 16² stand-in until a frame has people near the camera.
+struct InsetShadows {
+    /// Kept alive with its views.
+    _texture: wgpu::Texture,
+    array_view: wgpu::TextureView,
+    layer_views: Vec<wgpu::TextureView>,
+    view_buffers: Vec<wgpu::Buffer>,
+    view_bind_groups: Vec<wgpu::BindGroup>,
+    size: u32,
+}
+
+impl InsetShadows {
+    fn new(shared: &GpuShared, size: u32) -> Self {
+        let device = &shared.device;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("inset shadows"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: crate::shadows::MAX_SHADOW_INSETS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: shared.formats.shadow,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let array_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("inset shadows"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let view_buffers: Vec<wgpu::Buffer> = (0..crate::shadows::MAX_SHADOW_INSETS)
+            .map(|_| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("inset shadow view"),
+                    size: std::mem::size_of::<ShadowViewUniform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        let view_bind_groups = view_buffers
+            .iter()
+            .map(|b| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("inset shadow view"),
+                    layout: &shared.shadow_view_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: b.as_entire_binding(),
+                    }],
+                })
+            })
+            .collect();
+        Self {
+            layer_views: layer_views(&texture),
+            _texture: texture,
+            array_view,
+            view_buffers,
+            view_bind_groups,
+            size,
+        }
+    }
 }
 
 /// The static images of the shadow maps: drawn when a map moves or what holds still in it
@@ -1050,6 +1120,16 @@ impl Renderer {
                 layout_entry(25, all, crate::sky_occlusion::cover_binding()),
                 // The canopy map (canopy.rs). The 19th.
                 layout_entry(26, all, float_texture),
+                // People's inset shadow maps (shadows.rs `ShadowInset`). The 20th.
+                layout_entry(
+                    27,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let shadow_view_layout =
@@ -1900,6 +1980,16 @@ impl Renderer {
         if let Some(b) = &borrowed {
             b.place(&mut view);
         }
+        // Inset shadows are the main view's (its maps made at their size once people are near).
+        if is_extra {
+            view.shadow_insets.clear();
+        }
+        let inset_size = settings.shadow_inset_size.clamp(256, 4096);
+        let insets_resized =
+            !view.shadow_insets.is_empty() && self.shadow.insets.size != inset_size;
+        if insets_resized {
+            self.shadow.insets = InsetShadows::new(&self.shared, inset_size);
+        }
         // Extra views draw every shadow caster straight into their maps each frame.
         let requests = if is_extra {
             [false; SHADOW_MAPS]
@@ -1932,6 +2022,7 @@ impl Renderer {
         uniform.shadow_params[3] = borrowed
             .as_ref()
             .map_or(self.shadow.size, |b| b.shadow_size) as f32;
+        uniform.distant_shadows[3] = self.shadow.insets.size as f32;
         if borrowed.is_some() {
             // The main view draws these maps: no feature draws casters for this view.
             view.sun_shadows = false;
@@ -2065,7 +2156,13 @@ impl Renderer {
             .aerial
             .prepare(&self.shared, &view, uniform.aerial);
         cpu.step("shadow views");
-        if lights_moved || occlusion_resized || fog_moved || surface_resized || gi_atlas_moved {
+        if lights_moved
+            || occlusion_resized
+            || fog_moved
+            || surface_resized
+            || gi_atlas_moved
+            || insets_resized
+        {
             self.rebuild_frame_groups();
         }
         let queue = &self.shared.queue;
@@ -2098,6 +2195,20 @@ impl Renderer {
             };
             queue.write_buffer(
                 &self.shadow.view_buffers[FAR_SHADOW_VIEW],
+                0,
+                bytemuck::bytes_of(&u),
+            );
+        }
+        for (i, inset) in view.shadow_insets.iter().enumerate() {
+            let u = ShadowViewUniform {
+                view_proj: inset.view_proj.to_cols_array_2d(),
+                wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
+                time: [view.time, view.real_time, view.delta, 0.0],
+                camera_frac: uniform.camera_world_frac,
+                ..shadow_plants(&uniform, inset.texel(self.shadow.insets.size))
+            };
+            queue.write_buffer(
+                &self.shadow.insets.view_buffers[i],
                 0,
                 bytemuck::bytes_of(&u),
             );
@@ -2491,6 +2602,16 @@ impl Renderer {
                 );
                 let mut pass = depth_pass(&mut encoder, "shadow map", live, false);
                 draw_moving(&mut pass);
+            }
+            // People's inset shadow maps: only what the features that draw people put in.
+            let insets = &self.shadow.insets;
+            for i in 0..view.shadow_insets.len() {
+                let mut pass =
+                    depth_pass(&mut encoder, "inset shadow", &insets.layer_views[i], true);
+                pass.set_bind_group(0, &insets.view_bind_groups[i], &[]);
+                for f in &self.features {
+                    f.draw_inset_shadow(&mut pass, i, &ctx);
+                }
             }
         }
 
@@ -3616,6 +3737,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
     });
     let occlusion = create_occlusion_target(shared, occlusion_size, wgpu::TextureUsages::COPY_DST);
     ShadowResources {
+        insets: InsetShadows::new(shared, 16),
         texture,
         array_view,
         layer_views,
@@ -3855,6 +3977,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 26,
                 resource: view(shared.canopy.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 27,
+                resource: view(&shadow.insets.array_view),
             },
         ],
     })
