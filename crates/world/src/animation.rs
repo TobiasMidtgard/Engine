@@ -76,8 +76,15 @@ impl SkeletonPose {
 /// and reads people by (`SkeletonPose::names`, [`crate::BodyFit`], [`crate::combat::BodyZone`]).
 /// Model space, meters, facing −Z, +X to the person's right; `_l` / `_r` are the person's own
 /// left and right. The first 25 are the original skeleton; 30 finger bones (three joints
-/// each) and 12 twist bones came with characters week's finger-and-twist skeleton. Posers that don't know a bone
-/// leave it at rest. Index a pose by its own `names`, never by this order.
+/// each) and 12 twist bones came with characters week's finger-and-twist skeleton. Posers that
+/// don't know a bone leave it at rest. Index a pose by its own `names`, never by this order.
+///
+/// Rest pose: the animation module's humanoid, with straight legs and straight arms hanging 30°
+/// out from the body. A finger bone's rest rotation is its hand's, and the hand's own modeled
+/// shape (slightly bent, fanned) is the fingers' rest, so a finger's rotation in a pose is a
+/// turn relative to its hand from that shape. A pose without finger bones gets its fingers
+/// from [`crate::HandControls`]. Twist bones are never posed: each follows a share of its
+/// limb's roll.
 pub const HUMANOID_BONES: [(&str, Option<&str>); 67] = [
     ("root", None),
     ("hips", Some("root")),
