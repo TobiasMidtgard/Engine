@@ -256,9 +256,10 @@ pub const VIEWS: &[DemoView] = &[
         // From the far end of the floor, as spells_dead, looking back at the dais: the dead
         // coming in from the left, the decoys on the floor before the students' plinths,
         // lane 2's mirror image on the dais behind them; far enough left that the dead the
-        // terror wave scatters stay in the picture (the probe in tests/spells.rs checks).
-        eye: [5.5, 3.9, -6.5],
-        target: [3.5, 0.9, 5.0],
+        // terror wave scatters stay in the picture (the probe in tests/spells.rs checks), and
+        // the four late dead climb out mid-floor, around the golem, close to the camera.
+        eye: [7.0, 3.9, -6.5],
+        target: [5.0, 0.9, 5.0],
         hour: 16.6,
         // The skeletons at the decoys, the mirror image standing on the dais.
         warmup: 6.0,

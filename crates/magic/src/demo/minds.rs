@@ -9,7 +9,7 @@
 //! * Lane 1 throws Frenzy where the skeletons crowd (6.8 s): they hack at each other.
 //! * Lane 2 Commands the golem (9.2 s): it glows magenta on a thread of light from the
 //!   student's hand and smashes the skeletons it rose with, then goes for its own necromancer.
-//! * Four more skeletons climb out before the necromancers' plinths to fight it (10 to 11 s),
+//! * Four more skeletons climb out mid-floor, around the golem, to fight it (10 to 11 s),
 //!   and lane 0 rolls a Terror wave across the floor (11.1 s): the dead it passes run, dread
 //!   over their heads, then come back to the golem's fists. The wave spares the golem, which is
 //!   the students' while it serves.
@@ -42,7 +42,7 @@ pub fn terror() -> SpellDesign {
     d(&["fear"], CastType::Wave)
         .with(Modifier::Size { factor: 2.0 })
         .with(Modifier::Range { factor: 1.3 })
-        .with(Modifier::Duration { factor: 0.45 })
+        .with(Modifier::Duration { factor: 0.35 })
         .with(Modifier::Safeguard)
         .named("Terror wave")
 }
@@ -96,9 +96,9 @@ pub(super) fn lanes() -> Vec<Lane> {
     // The dead go for the decoys (3 to 7 s); the frenzy takes them where they crowd, the golem
     // is turned on the last of them, and when four more climb out to fight it the terror wave
     // (which spares it, now the students') sends them running down the floor until the fear
-    // wears off (1.8 s) and they come back to it.
+    // wears off (1.4 s) and they come back to it.
     vec![
-        of(vec![cast(10.9, terror(), AimAt::Floor(4.0, 5.0))]),
+        of(vec![cast(10.9, terror(), AimAt::Floor(5.0, 3.5))]),
         of(vec![
             cast(2.2, decoy(), AimAt::Floor(0.5, 3.0)),
             cast(6.6, frenzy(), AimAt::Foe),
@@ -112,14 +112,14 @@ pub(super) fn lanes() -> Vec<Lane> {
             cast(0.1, raise(), AimAt::Floor(5.5, 2.5)),
             cast(0.7, raise(), AimAt::Floor(5.0, 0.2)),
             cast(1.3, raise(), AimAt::Floor(6.8, 1.2)),
-            cast(10.0, late_raise(), AimAt::Floor(3.0, 7.0)),
-            cast(10.6, late_raise(), AimAt::Floor(4.5, 7.4)),
+            cast(10.0, late_raise(), AimAt::Floor(7.2, 4.4)),
+            cast(10.6, late_raise(), AimAt::Floor(6.6, 5.6)),
         ]),
         of(vec![
             cast(0.2, raise(), AimAt::Floor(7.8, 3.2)),
             cast(0.8, raise(), AimAt::Floor(7.4, -0.4)),
-            cast(9.4, late_raise(), AimAt::Floor(1.5, 6.6)),
-            cast(10.2, late_raise(), AimAt::Floor(4.0, 6.0)),
+            cast(9.4, late_raise(), AimAt::Floor(6.5, 2.6)),
+            cast(10.2, late_raise(), AimAt::Floor(7.6, 1.6)),
         ]),
     ]
 }
@@ -138,7 +138,7 @@ mod tests {
         let mir = compile(&mirror(), ctx).unwrap();
         assert_eq!(mir.payload.phantasms, 4);
         let t = compile(&terror(), ctx).unwrap();
-        assert!((1.5..2.5).contains(&t.payload.fear_secs) && t.safeguard && t.carrier.range > 22.0);
+        assert!((1.2..2.0).contains(&t.payload.fear_secs) && t.safeguard && t.carrier.range > 22.0);
         let c = compile(&command(), ctx).unwrap();
         assert!(c.payload.command_secs >= 12.0);
         let f = compile(&frenzy(), ctx).unwrap();
