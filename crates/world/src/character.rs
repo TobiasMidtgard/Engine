@@ -74,6 +74,11 @@ pub struct Appearance {
     pub headgear: String,
     /// What the person wears.
     pub outfit: Outfit,
+    /// Body regions a covering layer (armor, a long coat) hides, so the skin under it is not
+    /// drawn and cannot poke through. Ids: `head`, `neck`, `torso`, `upper_arms`, `forearms`,
+    /// `hands`, `hips`, `thighs`, `shins`, `feet`; unknown ids are ignored. Empty (the default)
+    /// draws the whole body.
+    pub hide: Vec<String>,
 }
 
 impl Default for Appearance {
@@ -96,6 +101,7 @@ impl Default for Appearance {
             wear: Wear::default(),
             headgear: "none".into(),
             outfit: Outfit::default(),
+            hide: Vec::new(),
         }
     }
 }
