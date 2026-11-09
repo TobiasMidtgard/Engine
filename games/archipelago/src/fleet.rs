@@ -275,6 +275,8 @@ pub enum Roam {
     Crossing { a: DVec2, b: DVec2 },
     /// A plane flying a loop through these points.
     Loop { points: Arc<Vec<DVec3>> },
+    /// Off duty: lying at a harbour's mooring or an airship mast until given a route.
+    Idle { at: DVec3 },
 }
 
 fn lengths(path: &[DVec3]) -> Arc<Vec<f64>> {
@@ -308,7 +310,7 @@ pub fn mast_point(b: &Building) -> DVec3 {
     DVec3::new(c.x, b.base_y + 37.5, c.y)
 }
 
-fn building_by_id(world: &mut World, id: u32) -> Option<Building> {
+pub(crate) fn building_by_id(world: &mut World, id: u32) -> Option<Building> {
     let mut q = world.query::<&Building>();
     q.iter(world).find(|b| b.id == id).cloned()
 }
@@ -420,7 +422,13 @@ pub fn plan_legs(world: &mut World) {
 fn arrive(world: &mut World, v: &mut Vessel) {
     match (&v.roam, v.route) {
         (_, Some(r)) => {
-            let Some(route) = world.resource::<Routes>().0.get(r).cloned() else {
+            let Some(route) = world
+                .resource::<Routes>()
+                .0
+                .get(r)
+                .filter(|r| !r.stops.is_empty())
+                .cloned()
+            else {
                 v.doing = Doing::Lingering(5.0);
                 return;
             };
@@ -440,6 +448,7 @@ fn arrive(world: &mut World, v: &mut Vessel) {
                 Doing::Lingering(25.0 + (v.seed % 13) as f32)
             };
         }
+        (Roam::Idle { .. }, None) => v.doing = Doing::Moored(30.0),
         _ => v.doing = Doing::Lingering(if v.craft.flies() { 0.01 } else { 4.0 }),
     }
 }
@@ -515,6 +524,13 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
             v.next_stop += 1;
             points.get(i).copied()
         }
+        (Roam::Idle { at }, None) => {
+            if (DVec2::new(at.x, at.z) - from).length() < 30.0 {
+                v.doing = Doing::Moored(30.0);
+                return;
+            }
+            Some(*at)
+        }
         (Roam::None, None) => None,
     };
     let Some(to) = target else {
@@ -540,7 +556,7 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
             cruise,
             to.z - dir.y * climb,
         ));
-        if v.route.is_some() {
+        if v.route.is_some() || matches!(v.roam, Roam::Idle { .. }) {
             // Nose to the mast: its middle ends 48 m short, just above the cup.
             pts.push(DVec3::new(
                 to.x - dir.x * 48.0,

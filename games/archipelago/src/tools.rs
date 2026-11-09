@@ -118,6 +118,82 @@ pub fn action(world: &mut World, a: &str) {
     {
         build::demolish(world, e);
         select(world, None);
+    } else if let Some(rest) = a.strip_prefix("isle.route.")
+        && let Err(msg) = route_action(world, rest)
+    {
+        toast(world, "Trade route", &msg);
+    }
+}
+
+/// `isle.route.<verb>:<args>` from the routes screen's buttons; see `orders`.
+///
+/// - `open:sea` / `open:air`, `close:<r>`
+/// - `stop.add:<r>:<building id>`, `stop.remove:<r>:<i>`, `stop.move:<r>:<from>:<to>`
+/// - `stop.load:<r>:<i>:<good>` / `stop.unload:<r>:<i>:<good>` (toggle that good)
+/// - `assign:<r>:<vessel entity bits>`, `unassign:<vessel entity bits>`
+fn route_action(world: &mut World, a: &str) -> Result<(), String> {
+    use crate::orders;
+    let (verb, args) = a.split_once(':').unwrap_or((a, ""));
+    let parts: Vec<&str> = args.split(':').collect();
+    let num = |k: usize| -> Result<usize, String> {
+        parts
+            .get(k)
+            .and_then(|s| s.parse().ok())
+            .ok_or(format!("isle.route.{verb}: argument {k} wants a number"))
+    };
+    let vessel = |world: &mut World, k: usize| -> Result<Entity, String> {
+        parts
+            .get(k)
+            .and_then(|s| orders::find_vessel(world, s))
+            .ok_or("no such vessel".to_string())
+    };
+    match verb {
+        "open" => {
+            orders::open_route(world, "", parts[0] == "air");
+            Ok(())
+        }
+        "close" => orders::close_route(world, num(0)?),
+        "stop.add" => {
+            orders::add_stop(world, num(0)?, num(1)? as u32, None, vec![], vec![]).map(|_| ())
+        }
+        "stop.remove" => orders::remove_stop(world, num(0)?, num(1)?),
+        "stop.move" => orders::move_stop(world, num(0)?, num(1)?, num(2)?),
+        "stop.load" | "stop.unload" => {
+            let (r, i) = (num(0)?, num(1)?);
+            let g = parts
+                .get(2)
+                .and_then(|s| crate::defs::Good::from_name(s))
+                .ok_or("unknown good")?;
+            let stop = world
+                .resource::<crate::fleet::Routes>()
+                .0
+                .get(r)
+                .and_then(|route| route.stops.get(i))
+                .cloned()
+                .ok_or(format!("route {r} has no stop {i}"))?;
+            let (mut load, mut unload) = (stop.load, stop.unload);
+            let list = if verb == "stop.load" {
+                &mut load
+            } else {
+                &mut unload
+            };
+            if let Some(k) = list.iter().position(|x| *x == g) {
+                list.remove(k);
+            } else {
+                list.push(g);
+            }
+            orders::set_goods(world, r, i, load, unload)
+        }
+        "assign" => {
+            let r = num(0)?;
+            let e = vessel(world, 1)?;
+            orders::assign(world, e, r)
+        }
+        "unassign" => {
+            let e = vessel(world, 0)?;
+            orders::unassign(world, e)
+        }
+        _ => Err(format!("unknown action isle.route.{verb}")),
     }
 }
 

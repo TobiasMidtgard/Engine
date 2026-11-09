@@ -26,6 +26,7 @@ mod icons;
 mod island;
 mod logistics;
 mod looks;
+mod orders;
 mod sim;
 mod streets;
 mod tools;

@@ -317,6 +317,9 @@ pub fn demolish(world: &mut World, e: Entity) {
             g.cells.remove(&c);
         }
     }
+    if matches!(b.kind, Kind::Harbour | Kind::AirshipMast) {
+        crate::orders::forget_building(world, b.id);
+    }
     if b.kind == Kind::Harbour {
         let h = &mut world.resource_mut::<Economy>().islands[b.island].harbours;
         *h = h.saturating_sub(1);

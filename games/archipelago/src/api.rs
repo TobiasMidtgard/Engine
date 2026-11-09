@@ -9,6 +9,7 @@ use crate::defs::{DEFS, Good, Kind};
 use crate::fleet::{Roam, Route, Routes, Stop, Vessel, mast_point, mooring, spawn_vessel};
 use crate::grid::{self, Grid};
 use crate::island::islands;
+use crate::orders;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::vessels::Craft;
 
@@ -21,6 +22,34 @@ fn cell(args: &Value, key: &str) -> Result<IVec2, String> {
         .as_i64()
         .ok_or(format!("{key} wants [x, z] in cells"))?;
     Ok(IVec2::new(x as i32, z as i32))
+}
+
+fn index(args: &Value, key: &str) -> Result<usize, String> {
+    args[key]
+        .as_u64()
+        .map(|i| i as usize)
+        .ok_or(format!("{key} wants an index"))
+}
+
+fn goods(v: &Value) -> Result<Vec<Good>, String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| {
+            g.as_str()
+                .and_then(Good::from_name)
+                .ok_or(format!("unknown good {g}"))
+        })
+        .collect()
+}
+
+fn vessel(world: &mut World, args: &Value) -> Result<Entity, String> {
+    let key = match &args["vessel"] {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return Err("vessel wants a name or an id".into()),
+    };
+    orders::find_vessel(world, &key).ok_or(format!("no vessel {key}"))
 }
 
 pub fn register(app: &mut App) {
@@ -149,12 +178,12 @@ pub fn register(app: &mut App) {
     )
     .register_api("isle.fleet", "Routes and every ship and aircraft: where, doing what, carrying what.", "{}", |world, _| {
         let routes = serde_json::to_value(&world.resource::<Routes>().0).map_err(|e| e.to_string())?;
-        let mut q = world.query::<(&Vessel, &Transform)>();
+        let mut q = world.query::<(Entity, &Vessel, &Transform)>();
         let vessels: Vec<Value> = q
             .iter(world)
-            .map(|(v, t)| {
+            .map(|(e, v, t)| {
                 json!({
-                    "name": v.name, "craft": v.craft.name(), "route": v.route, "doing": v.doing,
+                    "id": e.to_bits(), "name": v.name, "craft": v.craft.name(), "route": v.route, "doing": v.doing,
                     "at": [t.translation.x.round(), t.translation.y.round(), t.translation.z.round()],
                     "cargo": v.cargo.iter().map(|(g, n)| json!([g.name(), n])).collect::<Vec<_>>(),
                 })
@@ -168,13 +197,6 @@ pub fn register(app: &mut App) {
         r#"{"name": "Wool run", "craft": "schooner", "vessel": "Sea Lark", "stops": [{"at": 1, "load": ["wool"], "unload": []}, {"at": 7, "load": [], "unload": ["wool"]}]}"#,
         |world, args| {
             let craft = args["craft"].as_str().and_then(Craft::from_name).ok_or("craft: schooner, steamer, smack, barque, clipper, paddle_steamer, airship, biplane or seaplane")?;
-            let goods = |v: &Value| -> Result<Vec<Good>, String> {
-                v.as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|g| g.as_str().and_then(Good::from_name).ok_or(format!("unknown good {g}")))
-                    .collect()
-            };
             let mut stops = Vec::new();
             for s in args["stops"].as_array().ok_or("stops wants a list")? {
                 let at = s["at"].as_u64().ok_or("each stop wants a building id in at")? as u32;
@@ -208,6 +230,46 @@ pub fn register(app: &mut App) {
             Ok(json!({"route": r}))
         },
     )
+    .register_api("isle.route.open", "Open an empty trade route; air for airship masts. Returns its index.", r#"{"name": "Brick run", "air": false}"#, |world, args| {
+        let r = orders::open_route(world, args["name"].as_str().unwrap_or(""), args["air"].as_bool().unwrap_or(false));
+        Ok(json!({"route": r}))
+    })
+    .register_api("isle.route.close", "Close a route; its vessels wait at the nearest harbour or mast, and later routes move down by one.", r#"{"route": 2}"#, |world, args| {
+        orders::close_route(world, index(&args, "route")?)?;
+        Ok(json!({}))
+    })
+    .register_api("isle.route.rename", "Rename a route.", r#"{"route": 0, "name": "Wool run"}"#, |world, args| {
+        orders::rename_route(world, index(&args, "route")?, args["name"].as_str().unwrap_or(""))?;
+        Ok(json!({}))
+    })
+    .register_api("isle.route.add_stop", "Add a harbour (or mast) to a route, at index or at the end.", r#"{"route": 0, "at": 7, "index": 1, "load": ["wool"], "unload": []}"#, |world, args| {
+        let at = args["at"].as_u64().ok_or("at wants a building id")? as u32;
+        let i = args["index"].as_u64().map(|i| i as usize);
+        let i = orders::add_stop(world, index(&args, "route")?, at, i, goods(&args["load"])?, goods(&args["unload"])?)?;
+        Ok(json!({"stop": i}))
+    })
+    .register_api("isle.route.remove_stop", "Take a stop off a route.", r#"{"route": 0, "stop": 1}"#, |world, args| {
+        orders::remove_stop(world, index(&args, "route")?, index(&args, "stop")?)?;
+        Ok(json!({}))
+    })
+    .register_api("isle.route.move_stop", "Reorder a route: stop from becomes stop to.", r#"{"route": 0, "from": 2, "to": 0}"#, |world, args| {
+        orders::move_stop(world, index(&args, "route")?, index(&args, "from")?, index(&args, "to")?)?;
+        Ok(json!({}))
+    })
+    .register_api("isle.route.set_goods", "What a stop loads and unloads.", r#"{"route": 0, "stop": 1, "load": [], "unload": ["wool"]}"#, |world, args| {
+        orders::set_goods(world, index(&args, "route")?, index(&args, "stop")?, goods(&args["load"])?, goods(&args["unload"])?)?;
+        Ok(json!({}))
+    })
+    .register_api("isle.route.assign", "Put a ship or aircraft (by name or id from isle.fleet) on a route.", r#"{"route": 0, "vessel": "Sea Lark"}"#, |world, args| {
+        let e = vessel(world, &args)?;
+        orders::assign(world, e, index(&args, "route")?)?;
+        Ok(json!({}))
+    })
+    .register_api("isle.route.unassign", "Take a ship or aircraft off its route; it waits at the nearest harbour or mast.", r#"{"vessel": "Sea Lark"}"#, |world, args| {
+        let e = vessel(world, &args)?;
+        orders::unassign(world, e)?;
+        Ok(json!({}))
+    })
     .register_api("isle.speed", "Game speed: 0 pauses, 1 normal, up to 8.", r#"{"speed": 2}"#, |world, args| {
         let s = args["speed"].as_f64().ok_or("speed wants a number")? as f32;
         world.resource_mut::<Economy>().speed = s.clamp(0.0, 8.0);
