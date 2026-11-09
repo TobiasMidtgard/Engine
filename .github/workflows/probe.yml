@@ -3,28 +3,7 @@ on:
   push:
     branches: [ci-probe]
 jobs:
-  label:
-    runs-on: ubuntu-24.04
+  bare:
+    runs-on: ubuntu-latest
     steps:
       - run: cat /etc/os-release | head -2
-  crash:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: "1"
-      ENGINE_REQUIRE_GPU: "1"
-      RUST_BACKTRACE: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libwayland-dev libxkbcommon-dev gdb vulkan-tools
-          cat /etc/os-release | head -2; dpkg -l | grep -E "mesa|llvm" | awk '{print $2, $3}'
-          vulkaninfo --summary || true
-      - run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo test -p engine_render --test grass --no-run
-      - name: Run under gdb
-        run: |
-          bin=$(ls -t target/debug/deps/grass-* | grep -v '\.d$' | head -1)
-          gdb -batch -ex run -ex "thread apply all bt 25" --args $bin --test-threads=1 2>&1 | tail -150
