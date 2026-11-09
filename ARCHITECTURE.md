@@ -95,6 +95,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 | `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Audio and footsteps |
 | `engine_character`, `games/character_creator`, `assets/manifests/character.toml` | People's faces and busts from a morphable human (MakeHuman's CC0 base mesh and shape targets): appearance, skin, eyes, strand hair, brows, lashes and beards; the character creator | Character creator |
 | `engine_script` | Luau gameplay scripting, hot reloaded (`Script` component, `script.*` API) | Scripting and hot reload |
+| `games/archipelago` | Archipelago, the island city-building and trade game that tests many buildings, carts, ships and aircraft at once (`isle.*` API, `--tour` screenshots) | Anno-like island game |
 
 ### Dependencies between modules: none
 

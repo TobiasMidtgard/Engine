@@ -154,6 +154,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "archipelago"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine",
+ "engine_foliage",
+ "engine_terrain",
+ "engine_ui",
+ "engine_water",
+ "engine_weather",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
