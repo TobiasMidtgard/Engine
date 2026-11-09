@@ -345,6 +345,21 @@ impl Placement {
 }
 
 impl GpuMeshes {
+    /// The body's bounding sphere where it was last placed (camera-relative center, radius in
+    /// m): around the hips, wide enough for raised arms and loose hair.
+    fn body_sphere(&self) -> Option<(Vec3, f32)> {
+        let (model, _) = self.placement.now?;
+        let scale = model
+            .x_axis
+            .truncate()
+            .length()
+            .max(model.y_axis.truncate().length());
+        Some((
+            model.transform_point3(Vec3::new(0.0, 0.95, 0.0)),
+            1.3 * scale,
+        ))
+    }
+
     /// The skin, coarse from afar.
     fn draw_skin(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_vertex_buffer(0, self.skin_vertices.slice(..));
@@ -1201,10 +1216,20 @@ impl CharacterFeature {
     }
 
     fn draw_meshes(&self, pass: &mut wgpu::RenderPass<'_>, which: Pass) {
+        self.draw_meshes_where(pass, which, |_| true);
+    }
+
+    /// [`Self::draw_meshes`] for the characters `keep` accepts.
+    fn draw_meshes_where(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        which: Pass,
+        keep: impl Fn(&GpuMeshes) -> bool,
+    ) {
         let Some(p) = &self.pipelines else {
             return;
         };
-        for c in self.characters.values().filter(|c| c.seen) {
+        for c in self.characters.values().filter(|c| c.seen && keep(c)) {
             pass.set_bind_group(1, &c.group, &[]);
             match which {
                 Pass::Scene | Pass::Prepass => {
@@ -1552,6 +1577,16 @@ impl RenderFeature for CharacterFeature {
             return;
         }
         self.draw_meshes(pass, Pass::Shadow);
+    }
+
+    fn draw_inset_shadow(&self, pass: &mut wgpu::RenderPass<'_>, inset: usize, ctx: &FrameContext) {
+        let Some(map) = ctx.view.shadow_insets.get(inset) else {
+            return;
+        };
+        self.draw_meshes_where(pass, Pass::Shadow, |c| {
+            c.body_sphere()
+                .is_some_and(|(center, radius)| map.casts(center, radius))
+        });
     }
 
     fn stats(&self) -> FeatureStats {
