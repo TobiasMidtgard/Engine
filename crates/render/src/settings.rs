@@ -811,6 +811,51 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
     if let Some(on) = switch_from_env("ENGINE_MESH_OCCLUSION", &OCCLUSION) {
         s.mesh_occlusion_culling = on;
     }
+    // `ENGINE_TEXTURE_COMPRESSION=off|on|cpu`: material images stay RGBA8, are compressed, or
+    // are compressed under a software GPU too (so a headless run on lavapipe fills and uses the
+    // disk cache of compressed images as a player's GPU does), to compare GPU memory on one
+    // build.
+    static COMPRESSION: std::sync::OnceLock<Option<(bool, bool)>> = std::sync::OnceLock::new();
+    let compression = COMPRESSION.get_or_init(|| {
+        let text = std::env::var("ENGINE_TEXTURE_COMPRESSION").ok()?;
+        match text.to_ascii_lowercase().as_str() {
+            "off" | "0" => Some((false, false)),
+            "on" | "1" => Some((true, false)),
+            "cpu" => Some((true, true)),
+            _ => {
+                tracing::warn!("ENGINE_TEXTURE_COMPRESSION={text} is not off, on or cpu");
+                None
+            }
+        }
+    });
+    match compression {
+        Some((false, _)) => s.texture_compression = TextureCompression::Off,
+        Some((true, on_cpu)) => {
+            if s.texture_compression == TextureCompression::Off {
+                s.texture_compression = TextureCompression::Quality;
+            }
+            s.texture_compression_on_cpu |= *on_cpu;
+        }
+        None => {}
+    }
+    // `ENGINE_TEXTURE_COMPRESSION_MS=<ms>`: the GPU time compression may take a frame, in play
+    // and while loading (to fill the disk cache of compressed images in one short run).
+    static COMPRESSION_MS: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    let compression_ms = COMPRESSION_MS.get_or_init(|| {
+        let text = std::env::var("ENGINE_TEXTURE_COMPRESSION_MS").ok()?;
+        let ms = text
+            .parse::<f32>()
+            .ok()
+            .filter(|f| f.is_finite() && *f >= 0.0);
+        if ms.is_none() {
+            tracing::warn!("ENGINE_TEXTURE_COMPRESSION_MS={text} is not a number of milliseconds");
+        }
+        ms
+    });
+    if let Some(ms) = compression_ms {
+        s.texture_compression_ms = *ms;
+        s.texture_compression_loading_ms = *ms;
+    }
     // `ENGINE_GI_PROBES_PER_FRAME=<n>` caps the probes traced a frame (as a GPU budget does), to
     // see on a software GPU how the probes keep up with a moving camera.
     static GI_PROBES: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();

@@ -3410,6 +3410,15 @@ impl Renderer {
                 image_stats.bytes_compressed_away as f64 / (1024.0 * 1024.0),
             );
             d.set("render.image_uploads", image_stats.uploads as f64);
+            // Images uploaded already compressed from the disk cache, the GPU memory that
+            // spared at the peak, and images stored there for the next run.
+            d.set("render.image_cache_hits", image_stats.cache_hits as f64);
+            d.set(
+                "render.image_cache_saved_mb",
+                image_stats.cache_bytes_saved as f64 / (1024.0 * 1024.0),
+            );
+            d.set("render.image_cache_stores", image_stats.cache_stores as f64);
+            self.perf.note_for_census(&d);
             let (warming, built_inline) = self.shared.materials.warming();
             d.set("render.materials.pipelines_warming", warming as f64);
             d.set(

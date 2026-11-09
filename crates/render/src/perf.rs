@@ -587,6 +587,8 @@ pub(crate) struct PerfLog {
     usual_frames: u32,
     /// The latest frames' [`SideWork`], oldest first.
     side: VecDeque<SideCounts>,
+    /// `ENGINE_GPU_CENSUS`: every label's GPU memory, written to a file each window.
+    census: CensusFile,
 }
 
 impl PerfLog {
@@ -612,6 +614,7 @@ impl PerfLog {
             usual: None,
             usual_frames: 0,
             side: VecDeque::new(),
+            census: CensusFile::from_env(),
         }
     }
 
@@ -787,6 +790,9 @@ impl PerfLog {
                 }
             }
         }
+        if let Some(report) = &report {
+            self.census.write(report);
+        }
         self.window = Window::default();
         self.window_start = now;
     }
@@ -894,6 +900,11 @@ impl PerfLog {
     /// The latest step and pass times into `Diagnostics` (`render.cpu.<step>`,
     /// `render.gpu.<pass>`). A step or pass the frame before had and this one hasn't (a map
     /// drawn every few frames) reads 0, so the passes always add up to this frame.
+    /// Keep the diagnostics the census file (`ENGINE_GPU_CENSUS`) writes with its next window.
+    pub fn note_for_census(&mut self, d: &Diagnostics) {
+        self.census.note(d);
+    }
+
     pub fn publish(&mut self, d: &mut Diagnostics) {
         let mut now = std::collections::HashSet::with_capacity(self.published.len());
         for (prefix, rows) in [
@@ -1012,6 +1023,123 @@ fn blocks_table(blocks: &[Block]) -> String {
         );
     }
     out
+}
+
+/// Every resource label's share of the allocator's memory, largest first: (label, resources,
+/// bytes). Unlike [`memory_table`]'s top twenty this is the whole list, so two runs can be
+/// compared row by row.
+fn census_rows<'a>(allocations: impl Iterator<Item = (&'a str, u64)>) -> Vec<(&'a str, u32, u64)> {
+    let mut labels: HashMap<&str, (u32, u64)> = HashMap::new();
+    for (name, bytes) in allocations {
+        let e = labels.entry(name).or_default();
+        e.0 += 1;
+        e.1 += bytes;
+    }
+    let mut rows: Vec<_> = labels.into_iter().map(|(l, (n, b))| (l, n, b)).collect();
+    rows.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));
+    rows
+}
+
+/// The census as tab-separated text: a header with the allocator's totals, then a row per label.
+fn census_text(reserved: u64, in_use: u64, rows: &[(&str, u32, u64)]) -> String {
+    use std::fmt::Write;
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    let mut out = String::new();
+    let _ = writeln!(out, "# reserved_mb\t{:.1}", mb(reserved));
+    let _ = writeln!(out, "# in_use_mb\t{:.1}", mb(in_use));
+    let _ = writeln!(
+        out,
+        "# free_inside_blocks_mb\t{:.1}",
+        mb(reserved.saturating_sub(in_use))
+    );
+    let _ = writeln!(out, "mb\tcount\tlabel");
+    for (label, count, bytes) in rows {
+        let label = if label.is_empty() {
+            "(no label)"
+        } else {
+            label
+        };
+        let _ = writeln!(out, "{:.2}\t{count}\t{label}", mb(*bytes));
+    }
+    out
+}
+
+/// `ENGINE_GPU_CENSUS=<file>`: each perf window writes every resource label's GPU memory there
+/// (tab-separated, largest first), and `<file>.peak` keeps the window with the most memory
+/// reserved, which is what the driver and Task Manager see. For before/after tables of a
+/// memory change; without the variable nothing is written.
+struct CensusFile {
+    path: Option<std::path::PathBuf>,
+    peak_reserved: u64,
+    /// [`CENSUS_STATS`] as last published, written into the header.
+    stats: Vec<(&'static str, f64)>,
+}
+
+/// Diagnostics the census file carries in its header (`# <key>\t<value>`): what the memory
+/// changes report about themselves.
+const CENSUS_STATS: &[&str] = &[
+    "render.gpu_images",
+    "render.images_compressed",
+    "render.image_mb_compressed_away",
+    "render.image_cache_hits",
+    "render.image_cache_saved_mb",
+    "render.image_cache_stores",
+    "render.meshes.pool_vertex_mb",
+    "render.meshes.pool_vertex_used_mb",
+    "render.meshes.pool_index_mb",
+    "render.meshes.pool_index_used_mb",
+    "render.meshes.pool_lods_refused",
+    "render.meshes.resident",
+];
+
+impl CensusFile {
+    fn from_env() -> Self {
+        Self {
+            path: std::env::var_os("ENGINE_GPU_CENSUS")
+                .filter(|v| !v.is_empty())
+                .map(Into::into),
+            peak_reserved: 0,
+            stats: Vec::new(),
+        }
+    }
+
+    fn note(&mut self, d: &Diagnostics) {
+        if self.path.is_some() {
+            self.stats = CENSUS_STATS
+                .iter()
+                .filter_map(|&key| Some((key, d.get(key)?)))
+                .collect();
+        }
+    }
+
+    fn write(&mut self, report: &wgpu::AllocatorReport) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let rows = census_rows(report.allocations.iter().map(|a| (a.name.as_str(), a.size)));
+        let mut text = census_text(
+            report.total_reserved_bytes,
+            report.total_allocated_bytes,
+            &rows,
+        );
+        let stats: String = self
+            .stats
+            .iter()
+            .map(|(key, value)| format!("# {key}\t{value:.1}\n"))
+            .collect();
+        text.insert_str(0, &stats);
+        if let Err(e) = std::fs::write(path, &text) {
+            tracing::warn!("ENGINE_GPU_CENSUS: could not write {}: {e}", path.display());
+            self.path = None;
+            return;
+        }
+        if report.total_reserved_bytes > self.peak_reserved {
+            self.peak_reserved = report.total_reserved_bytes;
+            let mut peak = path.clone().into_os_string();
+            peak.push(".peak");
+            let _ = std::fs::write(peak, &text);
+        }
+    }
 }
 
 fn truncate(s: &str, n: usize) -> &str {
@@ -1170,6 +1298,28 @@ mod tests {
             t.add(Duration::ZERO);
         }
         assert!((t.ms() - 3.9).abs() < 1e-9, "{}", t.ms());
+    }
+
+    #[test]
+    fn the_census_lists_every_label_largest_first() {
+        const MB: u64 = 1024 * 1024;
+        let allocations = [
+            ("material image", 5 * MB),
+            ("shadow cascades", 320 * MB),
+            ("material image", 16 * MB),
+            ("", MB / 2),
+        ];
+        let rows = census_rows(allocations.iter().copied());
+        assert_eq!(rows[0], ("shadow cascades", 1, 320 * MB));
+        assert_eq!(rows[1], ("material image", 2, 21 * MB));
+        let text = census_text(512 * MB, 342 * MB, &rows);
+        assert!(
+            text.starts_with("# reserved_mb\t512.0\n# in_use_mb\t342.0\n"),
+            "{text}"
+        );
+        assert!(text.contains("# free_inside_blocks_mb\t170.0\n"), "{text}");
+        assert!(text.contains("21.00\t2\tmaterial image\n"), "{text}");
+        assert!(text.ends_with("0.50\t1\t(no label)\n"), "{text}");
     }
 
     #[test]

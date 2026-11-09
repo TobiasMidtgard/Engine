@@ -113,6 +113,31 @@ fn noop_options() -> wgpu::NoopBackendOptions {
     options
 }
 
+/// How the GPU allocator takes memory from the driver: in blocks of 16 to 64 MB that it hands
+/// out pieces of, with anything larger in an allocation of its own. wgpu's "performance" preset
+/// takes 128 to 256 MB blocks, and a block only goes back to the driver once everything in it is
+/// freed; with thousands of textures and buffers of a few MB each coming and going (zones
+/// streaming, images recompressed), gigabytes stayed reserved in mostly empty blocks, which is
+/// what the driver, Task Manager and the other programs on the card see. Smaller blocks empty
+/// far more often. `ENGINE_GPU_BLOCK_MB=<n>` sets the largest block (256 = the old preset), to
+/// compare on one build.
+fn memory_hints() -> wgpu::MemoryHints {
+    const MB: u64 = 1 << 20;
+    let largest = std::env::var("ENGINE_GPU_BLOCK_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| (4..=256).contains(n));
+    match largest {
+        Some(256) => wgpu::MemoryHints::Performance,
+        Some(n) => wgpu::MemoryHints::Manual {
+            suballocated_device_memory_block_size: (n / 4).max(4) * MB..n * MB,
+        },
+        None => wgpu::MemoryHints::Manual {
+            suballocated_device_memory_block_size: 16 * MB..64 * MB,
+        },
+    }
+}
+
 fn try_create(
     window: Option<Arc<dyn WindowHandleSource>>,
     backends: wgpu::Backends,
@@ -176,7 +201,7 @@ fn try_create(
         label: Some("engine device"),
         required_features,
         required_limits: adapter.limits(),
-        memory_hints: wgpu::MemoryHints::Performance,
+        memory_hints: memory_hints(),
         ..Default::default()
     }))
     .map_err(|e| format!("could not open the GPU device: {e}"))?;

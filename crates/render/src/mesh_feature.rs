@@ -1822,7 +1822,15 @@ impl MeshFeature {
 
     /// Put `mesh` on the GPU as mesh `index`, replacing its old copy. False when it can't go
     /// there (no triangles, or too large): it is then left off until it changes.
-    fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) -> bool {
+    /// `lods`: its levels of detail will be asked for, so its pool page holds room for them.
+    fn upload_mesh(
+        &mut self,
+        gpu: &GpuShared,
+        index: u32,
+        mesh: &Mesh,
+        version: u64,
+        lods: bool,
+    ) -> bool {
         let edit = self.meshes.contains_key(&index);
         if let Some(old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
@@ -1838,10 +1846,18 @@ impl MeshFeature {
             return false;
         }
         let aabb = mesh.aabb();
-        let Some(pool) = self
-            .pool
-            .add(&gpu.device, &gpu.queue, &mesh.vertices, &mesh.indices)
-        else {
+        let lod_room = if lods && mesh.indices.len() / 3 >= crate::mesh_lod::MIN_TRIANGLES {
+            (mesh.indices.len() as f32 * crate::mesh_lod::USUAL_INDEX_SHARE) as u32
+        } else {
+            0
+        };
+        let Some(pool) = self.pool.add(
+            &gpu.device,
+            &gpu.queue,
+            &mesh.vertices,
+            &mesh.indices,
+            lod_room,
+        ) else {
             tracing::warn!(
                 "mesh {index} ({} vertices) is larger than a GPU buffer may be",
                 mesh.vertices.len()
@@ -1923,18 +1939,21 @@ impl MeshFeature {
             let Some(LodJob { version, job }) = self.lod_jobs.remove(&index) else {
                 continue;
             };
-            let Ok(levels) = job.join() else {
-                tracing::warn!("building the levels of detail of mesh {index} failed");
-                continue;
-            };
+            let levels = job.join();
             // A mesh changed meanwhile has been queued again by its upload.
             let Some(gpu_mesh) = self.meshes.get_mut(&index).filter(|m| m.version == version)
             else {
                 continue;
             };
+            // The room its page held for these levels is theirs now.
+            let pool = &mut self.pool;
+            pool.release_lod_room(&mut gpu_mesh.pool);
+            let Ok(levels) = levels else {
+                tracing::warn!("building the levels of detail of mesh {index} failed");
+                continue;
+            };
             // Finest first, as many as its page has room for.
             let page = gpu_mesh.pool.page;
-            let pool = &mut self.pool;
             for l in gpu_mesh.lods.drain(..) {
                 pool.free_indices(page, l.first_index, l.index_count);
             }
@@ -3747,14 +3766,15 @@ impl RenderFeature for MeshFeature {
                         resident.is_some(),
                     )
                 {
-                    if self.upload_mesh(gpu, mesh.index, asset, mesh.version) {
+                    // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
+                    let lods = lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index);
+                    if self.upload_mesh(gpu, mesh.index, asset, mesh.version, lods) {
                         self.uploads += 1;
                         self.edits += resident.is_some() as u32;
                         self.reuploads +=
                             (resident.is_none() && !self.uploaded_before.insert(mesh.index)) as u32;
                     }
-                    // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
-                    if lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index) {
+                    if lods {
                         self.request_lods(mesh.index, handle, asset, mesh.version);
                     }
                 }
@@ -4505,6 +4525,18 @@ impl RenderFeature for MeshFeature {
             d.set("render.meshes.skins", self.skins.skins.len() as f64);
             d.set("render.meshes.pool_mb", reserved as f64 / (1 << 20) as f64);
             d.set("render.meshes.pool_used_mb", used as f64 / (1 << 20) as f64);
+            // The same for the vertex buffers and the index buffers alone.
+            let [vertices, indices] = self.pool.split();
+            let mb = |bytes: u64| bytes as f64 / (1 << 20) as f64;
+            d.set("render.meshes.pool_vertex_mb", mb(vertices.0));
+            d.set("render.meshes.pool_vertex_used_mb", mb(vertices.1));
+            d.set("render.meshes.pool_index_mb", mb(indices.0));
+            d.set("render.meshes.pool_index_used_mb", mb(indices.1));
+            // Levels of detail that found no room in their mesh's page.
+            d.set(
+                "render.meshes.pool_lods_refused",
+                self.pool.lods_refused as f64,
+            );
             // Meshes with a copy in the pool.
             d.set("render.meshes.resident", self.meshes.len() as f64);
         }

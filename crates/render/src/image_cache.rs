@@ -42,6 +42,15 @@
 //! done. The commands go with the frame's own submit (`GpuShared::submit_with_frame`), not a
 //! submit of their own on the main thread, which would wait for the render thread's.
 //!
+//! **The disk cache.** Compressing a whole world's images this way takes minutes of play, and
+//! until an image is done the GPU holds its RGBA8 copy as well (four times the bytes; the
+//! allocator keeps that space reserved afterwards). So the blocks of each finished image are
+//! read back and stored on disk under a hash of its pixels ([`crate::block_cache`]), and the
+//! next time the same pixels are uploaded, in this run or a later one, the image goes to the GPU
+//! compressed from its first frame: no RGBA8 copy, no mip pass and no compression. Only the
+//! first run after new art pays for it. An image whose pixels change after its first upload (a
+//! map redrawn now and then) stays out of the cache: each version would leave a file.
+//!
 //! Images whose levels don't halve to multiples of 4 texels stay RGBA8, as do
 //! [`TextureUse::Exact`] slots and 16-bit float images. Under a software GPU (lavapipe) nothing
 //! is compressed unless `RenderSettings::texture_compression_on_cpu` says so: building the
@@ -59,6 +68,7 @@ use block_compression::{BC7Settings, CompressionVariant, GpuBlockCompressor};
 
 use engine_assets::{Assets, Handle};
 
+use crate::block_cache::{BlockCache, BlockShape};
 use crate::features::GpuShared;
 use crate::settings::TextureCompression;
 use crate::texture::{Image, PixelFormat};
@@ -212,6 +222,17 @@ impl Encoding {
         }
     }
 
+    /// A number per encoding (and encoder profile) for the disk cache's keys and headers.
+    fn tag(self) -> u32 {
+        match self {
+            Encoding::Bc1 => 1,
+            Encoding::Bc4 => 4,
+            Encoding::Bc5 => 5,
+            Encoding::Bc7 { alpha: false } => 7,
+            Encoding::Bc7 { alpha: true } => 8,
+        }
+    }
+
     /// The encoding for `image` read as `usage` (uploaded at `width`×`height` with `levels`
     /// mips), or `None` when it stays as it is.
     fn choose(
@@ -311,6 +332,12 @@ pub struct ImageMemoryStats {
     pub bytes_compressed_away: u64,
     /// Texels compressed since startup (all levels; whole slices, finished views or not).
     pub texels_compressed: u64,
+    /// Views uploaded already compressed, from the disk cache ([`crate::block_cache`]).
+    pub cache_hits: u64,
+    /// GPU bytes those uploads never took (RGBA8 size minus compressed size, all levels).
+    pub cache_bytes_saved: u64,
+    /// Compressed views stored in the disk cache since startup.
+    pub cache_stores: u64,
 }
 
 /// One image's GPU copies.
@@ -330,6 +357,9 @@ struct CachedImage {
     views: [Option<Arc<ImageTexture>>; VIEW_SLOTS],
     /// Views due to be compressed, and to what.
     pending: [Option<Encoding>; VIEW_SLOTS],
+    /// The disk cache key of each view due to be compressed: its blocks are stored under it
+    /// when they are done.
+    keys: [Option<(u64, u64)>; VIEW_SLOTS],
     /// Mean linear color of the pixels as uploaded (RGBA8 images), which outlives a release.
     mean: Option<[f32; 3]>,
     /// Share of its pixels an alpha test at 0.5 keeps (RGBA8 images), which
@@ -382,7 +412,38 @@ struct Inner {
     /// Images an extra view renders into (`ViewTarget::Image`), by canonical handle index: their
     /// texture is the view's picture.
     targets: HashMap<u32, Arc<ImageTexture>>,
+    /// The disk cache of compressed images.
+    disk: Disk,
+    /// Images (by canonical handle index) whose pixels changed after their first upload: a map
+    /// that is redrawn now and then would leave a file per version in the disk cache, so these
+    /// are compressed without it.
+    rewritten: std::collections::HashSet<u32>,
+    /// Finished views' blocks on their way back from the GPU to the disk cache.
+    readbacks: Vec<Readback>,
 }
+
+/// The disk cache of compressed images: opened with the first image that could use it.
+#[derive(Default)]
+enum Disk {
+    #[default]
+    Unopened,
+    Off,
+    Open(Arc<BlockCache>),
+}
+
+/// A finished view's blocks being read back for the disk cache.
+struct Readback {
+    key: (u64, u64),
+    shape: BlockShape,
+    staging: wgpu::Buffer,
+    /// [`READBACK_SUBMITTING`] and on.
+    state: Arc<std::sync::atomic::AtomicU8>,
+}
+
+const READBACK_SUBMITTING: u8 = 0;
+const READBACK_MAPPING: u8 = 1;
+const READBACK_MAPPED: u8 = 2;
+const READBACK_FAILED: u8 = 3;
 
 impl Compressor {
     /// Encoders building on a thread.
@@ -491,6 +552,7 @@ impl ImageCache {
                 // New pixels.
                 update = cached.views[slot].is_some();
                 inner.images.remove(&index);
+                inner.rewritten.insert(index);
             }
         }
         if let Some(cached) = inner.images.get_mut(&index) {
@@ -563,20 +625,67 @@ impl ImageCache {
         ) {
             return None;
         }
-        let uploaded = {
-            let _span = crate::perf::HitchStep::new("images: upload");
-            upload_image(gpu, image, srgb, aliasable)
+        // An image whose blocks are in the disk cache goes up compressed: its RGBA8 copy never
+        // reaches the GPU.
+        let planned = if compression == TextureCompression::Off {
+            None
+        } else {
+            upload_plan(gpu, image, srgb).and_then(|plan| {
+                Some((
+                    plan,
+                    Encoding::choose(compression, usage, image, plan.shape())?,
+                ))
+            })
         };
-        let Some((texture, view)) = uploaded else {
-            inner.failed.insert((index, slot), version);
-            return None;
+        let disk = planned
+            .filter(|_| !inner.rewritten.contains(&index))
+            .and_then(|_| inner.disk_cache(gpu));
+        let key = match (&planned, &disk) {
+            (Some((plan, encoding)), Some(_)) => Some(cache_key(image, srgb, *encoding, *plan)),
+            _ => None,
         };
-        let encoding = Encoding::choose(
-            compression,
-            usage,
-            image,
-            (texture.width(), texture.height(), texture.mip_level_count()),
-        );
+        let from_disk = match (&planned, &disk, key) {
+            (Some((plan, encoding)), Some(disk), Some(key)) => {
+                let _span = crate::perf::HitchStep::new("images: upload");
+                let (w, h, levels) = plan.shape();
+                disk.load(
+                    key,
+                    block_shape(*encoding, plan.shape()),
+                    compressed_bytes(*encoding, w, h, levels),
+                )
+                .map(|blocks| upload_blocks(gpu, *encoding, srgb, aliasable, plan.shape(), &blocks))
+            }
+            _ => None,
+        };
+        let (texture, view, encoding, key, aliasable) = if let Some(texture) = from_disk {
+            let (w, h, levels) = (texture.width(), texture.height(), texture.mip_level_count());
+            inner.stats.cache_hits += 1;
+            if let Some((_, encoding)) = planned {
+                inner.stats.cache_bytes_saved += (texels_with_mips(w, h, levels) * 4)
+                    .saturating_sub(compressed_bytes(encoding, w, h, levels));
+            }
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let f = texture.format();
+            let both = f.add_srgb_suffix() != f.remove_srgb_suffix();
+            (texture, view, None, None, aliasable && both)
+        } else {
+            let uploaded = {
+                let _span = crate::perf::HitchStep::new("images: upload");
+                upload_image(gpu, image, srgb, aliasable)
+            };
+            let Some((texture, view)) = uploaded else {
+                inner.failed.insert((index, slot), version);
+                return None;
+            };
+            let shape = (texture.width(), texture.height(), texture.mip_level_count());
+            // As planned (always, unless the plan and the upload ever disagree: then the image
+            // is compressed as uploaded and stays out of the disk cache).
+            let (encoding, key) = match planned {
+                Some((plan, encoding)) if plan.shape() == shape => (Some(encoding), key),
+                _ => (Encoding::choose(compression, usage, image, shape), None),
+            };
+            (texture, view, encoding, key, aliasable)
+        };
         inner.failed.remove(&(index, slot));
         inner.next_id += 1;
         inner.stats.uploads += 1;
@@ -600,16 +709,28 @@ impl ImageCache {
             released: false,
             views: Default::default(),
             pending: [None; VIEW_SLOTS],
+            keys: [None; VIEW_SLOTS],
             mean: mean_color(image),
             coverage: alpha_coverage(image),
         });
         cached.views[slot] = Some(uploaded.clone());
         cached.pending[slot] = encoding;
+        cached.keys[slot] = key;
         if encoding.is_some() {
             // Ready by the time the image is due.
             inner.start_compressor(gpu);
         }
         Some(uploaded)
+    }
+
+    /// Keep compressed images in `dir` from now on instead of the default folder
+    /// ([`crate::block_cache`]); `None` switches the disk cache off. For tools and tests: a game
+    /// sets `ENGINE_TEXTURE_CACHE`.
+    pub fn use_disk_cache(&self, dir: Option<std::path::PathBuf>) {
+        self.lock().disk = match dir {
+            Some(dir) => Disk::Open(Arc::new(BlockCache::open(dir))),
+            None => Disk::Off,
+        };
     }
 
     /// From now on image `index` (a canonical handle index) shows `texture`, an extra view's
@@ -669,6 +790,7 @@ impl ImageCache {
         let mut guard = self.lock();
         let inner = &mut *guard;
         let frame = inner.frame;
+        inner.store_readbacks();
         if inner.ms_per_mtexel <= 0.0 {
             inner.ms_per_mtexel = DEFAULT_MS_PER_MTEXEL;
         }
@@ -784,9 +906,55 @@ impl ImageCache {
             .timer
             .as_mut()
             .and_then(|t| t.end_deferred(&mut encoder));
+        // Finished views' blocks also go back to the CPU, for the disk cache.
+        let mut mapping: Vec<(wgpu::Buffer, Arc<std::sync::atomic::AtomicU8>)> = Vec::new();
         for job in &finished {
             job.out.copy(&mut encoder);
+            let key = inner.images.get(&job.index).and_then(|c| c.keys[job.slot]);
+            if let (Some(key), Disk::Open(_)) = (key, &inner.disk) {
+                let size = job.out.buffer.size();
+                let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("compressed blocks readback"),
+                    size,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_buffer_to_buffer(&job.out.buffer, 0, &staging, 0, size);
+                let state = Arc::new(std::sync::atomic::AtomicU8::new(READBACK_SUBMITTING));
+                mapping.push((staging.clone(), state.clone()));
+                inner.readbacks.push(Readback {
+                    key,
+                    shape: block_shape(
+                        job.encoding,
+                        (job.source.width, job.source.height, job.source.mip_levels),
+                    ),
+                    staging,
+                    state,
+                });
+            }
         }
+        // Mapped once the commands that fill them are submitted.
+        let after: Option<Box<dyn FnOnce() + Send>> = if mapping.is_empty() {
+            after
+        } else {
+            Some(Box::new(move || {
+                use std::sync::atomic::Ordering;
+                if let Some(after) = after {
+                    after();
+                }
+                for (staging, state) in mapping {
+                    state.store(READBACK_MAPPING, Ordering::Release);
+                    staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                        let next = if r.is_ok() {
+                            READBACK_MAPPED
+                        } else {
+                            READBACK_FAILED
+                        };
+                        state.store(next, Ordering::Release);
+                    });
+                }
+            }))
+        };
         gpu.submit_with_frame(encoder.finish(), after);
         gpu.side_work.compressed(queued);
         inner.stats.texels_compressed += queued;
@@ -814,8 +982,10 @@ impl ImageCache {
                 cached.views[1 - slot] =
                     Some(Arc::new(alias_view(&view, !view.srgb, inner.next_id)));
                 cached.pending[1 - slot] = None;
+                cached.keys[1 - slot] = None;
             }
             cached.views[slot] = Some(view);
+            cached.keys[slot] = None;
             inner.stats.compressed += 1;
             let rgba = texels_with_mips(source.width, source.height, source.mip_levels) * 4;
             inner.stats.bytes_compressed_away += rgba.saturating_sub(compressed_bytes(
@@ -888,6 +1058,9 @@ impl ImageCache {
             inner.failed.retain(|&(index, _), version| {
                 images.version(Handle::from_index(index)) == *version
             });
+            inner
+                .rewritten
+                .retain(|&index| images.contains(Handle::from_index(index)));
         }
         released
     }
@@ -954,6 +1127,235 @@ impl Inner {
     fn compressor_usable(&self) -> bool {
         !matches!(self.compressor, Compressor::Failed)
     }
+
+    /// The disk cache of compressed images, opened on first use; `None` when it is off.
+    fn disk_cache(&mut self, gpu: &GpuShared) -> Option<Arc<BlockCache>> {
+        if matches!(self.disk, Disk::Unopened) {
+            // Under a software GPU only a folder asked for by name (see `block_cache`).
+            let software = gpu.adapter_info.device_type == wgpu::DeviceType::Cpu;
+            self.disk = match crate::block_cache::default_dir(software) {
+                Some(dir) => {
+                    let cache = BlockCache::open(dir);
+                    tracing::info!(
+                        "texture cache: {} compressed images in {}",
+                        cache.len(),
+                        cache.dir().display()
+                    );
+                    Disk::Open(Arc::new(cache))
+                }
+                None => Disk::Off,
+            };
+        }
+        match &self.disk {
+            Disk::Open(cache) => Some(cache.clone()),
+            _ => None,
+        }
+    }
+
+    /// Hand the blocks that have arrived from the GPU to the disk cache.
+    fn store_readbacks(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.readbacks.is_empty() {
+            return;
+        }
+        let disk = match &self.disk {
+            Disk::Open(cache) => Some(cache.clone()),
+            _ => None,
+        };
+        let mut stored = 0;
+        self.readbacks
+            .retain(|r| match r.state.load(Ordering::Acquire) {
+                READBACK_MAPPED => {
+                    if let (Some(disk), Ok(blocks)) =
+                        (&disk, r.staging.slice(..).get_mapped_range())
+                    {
+                        disk.store(r.key, r.shape, &blocks);
+                        stored += 1;
+                    }
+                    r.staging.unmap();
+                    false
+                }
+                READBACK_FAILED => false,
+                _ => true,
+            });
+        self.stats.cache_stores += stored;
+    }
+}
+
+/// What a disk cache file of `encoding` blocks for a texture of `shape` must say it holds.
+fn block_shape(encoding: Encoding, (width, height, levels): (u32, u32, u32)) -> BlockShape {
+    BlockShape {
+        format: encoding.tag(),
+        width,
+        height,
+        levels,
+    }
+}
+
+/// What [`upload_image`] makes of an image: its first level's size, its level count and where
+/// the levels after the first come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UploadPlan {
+    width: u32,
+    height: u32,
+    levels: u32,
+    /// The image's stored mips are uploaded.
+    stored: bool,
+    /// The chain is drawn on the GPU (`crate::mipmaps`).
+    gpu_mips: bool,
+}
+
+impl UploadPlan {
+    fn shape(&self) -> (u32, u32, u32) {
+        (self.width, self.height, self.levels)
+    }
+}
+
+/// Whether `image`'s stored mips are uploaded (`.0`), or its chain drawn on the GPU (`.1`),
+/// for a view in color space `srgb`; neither: the chain is filtered on the CPU, or there is none.
+fn mip_source(gpu: &GpuShared, image: &Image, srgb: bool) -> (bool, bool) {
+    let format = match image.format {
+        PixelFormat::Rgba8 if srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+        PixelFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+        PixelFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+    };
+    let max = gpu.device.limits().max_texture_dimension_2d;
+    let stored =
+        !image.mips.is_empty() && (image.format != PixelFormat::Rgba8 || srgb == image.srgb);
+    // A large image without a fitting chain gets it drawn on the GPU (`mipmaps`) rather than
+    // made on this thread.
+    let gpu_mips = image.mipmaps
+        && !stored
+        && image.width as u64 * image.height as u64 >= crate::mipmaps::GPU_MIPS_MIN_TEXELS
+        && image.width.max(image.height) <= max
+        && crate::mipmaps::MipGenerator::supports(format);
+    (stored, gpu_mips)
+}
+
+/// The plan for `image` when every level of it is uploaded; `None` for an image [`upload_image`]
+/// refuses or cuts the first levels of (larger than the GPU allows).
+fn upload_plan(gpu: &GpuShared, image: &Image, srgb: bool) -> Option<UploadPlan> {
+    let max = gpu.device.limits().max_texture_dimension_2d;
+    if !image.is_valid() || image.width.max(image.height) > max {
+        return None;
+    }
+    let (stored, gpu_mips) = mip_source(gpu, image, srgb);
+    let levels = if !image.mipmaps {
+        1
+    } else if stored {
+        image.mips.len() as u32 + 1
+    } else {
+        image.full_mip_count()
+    };
+    Some(UploadPlan {
+        width: image.width,
+        height: image.height,
+        levels,
+        stored: stored && image.mipmaps,
+        gpu_mips,
+    })
+}
+
+/// The disk cache key of `image` uploaded by `plan` for a view in color space `srgb` and
+/// compressed to `encoding`: everything the blocks depend on.
+fn cache_key(image: &Image, srgb: bool, encoding: Encoding, plan: UploadPlan) -> (u64, u64) {
+    use crate::virtual_geometry::StableHasher;
+    let mut h = StableHasher::new(0x7e87_ca5e ^ crate::block_cache::CACHE_VERSION as u64);
+    for word in [plan.width, plan.height, plan.levels, encoding.tag()] {
+        h.write_u32(word);
+    }
+    // The mips after the first level differ with where they come from and, when they are
+    // filtered here, with the color space they are filtered in.
+    let filtered = plan.levels > 1 && !plan.stored;
+    h.write_u32(
+        plan.stored as u32
+            | (plan.gpu_mips as u32) << 1
+            | ((filtered && srgb) as u32) << 2
+            | (filtered as u32) << 3,
+    );
+    crate::block_cache::hash_pixels(&mut h, &image.data);
+    if plan.stored {
+        for level in &image.mips {
+            crate::block_cache::hash_pixels(&mut h, level);
+        }
+    }
+    h.finish128()
+}
+
+/// The texture a view compressed to `encoding` lives in.
+fn compressed_texture(
+    gpu: &GpuShared,
+    encoding: Encoding,
+    srgb: bool,
+    aliasable: bool,
+    (width, height, levels): (u32, u32, u32),
+) -> wgpu::Texture {
+    let format = encoding.format(srgb);
+    let alias = [if srgb {
+        format.remove_srgb_suffix()
+    } else {
+        format.add_srgb_suffix()
+    }];
+    let view_formats: &[wgpu::TextureFormat] = if aliasable && alias[0] != format {
+        &alias
+    } else {
+        &[]
+    };
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("compressed material image"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats,
+    })
+}
+
+/// Upload `blocks` (every level's, largest first, as the disk cache holds them) as a compressed
+/// texture.
+fn upload_blocks(
+    gpu: &GpuShared,
+    encoding: Encoding,
+    srgb: bool,
+    aliasable: bool,
+    shape: (u32, u32, u32),
+    blocks: &[u8],
+) -> wgpu::Texture {
+    let texture = compressed_texture(gpu, encoding, srgb, aliasable, shape);
+    let (width, height, levels) = shape;
+    let mut offset = 0usize;
+    for level in 0..levels {
+        let (w, h) = ((width >> level).max(1), (height >> level).max(1));
+        let (bw, bh) = (w.div_ceil(4), h.div_ceil(4));
+        let bytes = (bw * bh * encoding.block_bytes()) as usize;
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &blocks[offset..offset + bytes],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bw * encoding.block_bytes()),
+                rows_per_image: Some(bh),
+            },
+            wgpu::Extent3d {
+                width: bw * 4,
+                height: bh * 4,
+                depth_or_array_layers: 1,
+            },
+        );
+        offset += bytes;
+    }
+    texture
 }
 
 /// Texels in a `width`×`height` texture with `levels` mips.
@@ -1100,31 +1502,13 @@ impl Encode {
         source: Arc<ImageTexture>,
     ) -> Self {
         let (width, height, levels) = (source.width, source.height, source.mip_levels);
-        let format = encoding.format(source.srgb);
-        let alias = [if source.srgb {
-            format.remove_srgb_suffix()
-        } else {
-            format.add_srgb_suffix()
-        }];
-        let view_formats: &[wgpu::TextureFormat] = if source.aliasable && alias[0] != format {
-            &alias
-        } else {
-            &[]
-        };
-        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("compressed material image"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: levels,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats,
-        });
+        let texture = compressed_texture(
+            gpu,
+            encoding,
+            source.srgb,
+            source.aliasable,
+            (width, height, levels),
+        );
         let mut offsets = Vec::with_capacity(levels as usize);
         let mut total = 0u64;
         for l in 0..levels {
@@ -1304,15 +1688,7 @@ pub(crate) fn upload_image(
     };
     let generated;
     let max = gpu.device.limits().max_texture_dimension_2d;
-    let stored =
-        !image.mips.is_empty() && (image.format != PixelFormat::Rgba8 || srgb == image.srgb);
-    // A large image without a fitting chain gets it drawn on the GPU (`mipmaps`) rather than
-    // made on this thread.
-    let gpu_mips = image.mipmaps
-        && !stored
-        && image.width as u64 * image.height as u64 >= crate::mipmaps::GPU_MIPS_MIN_TEXELS
-        && image.width.max(image.height) <= max
-        && crate::mipmaps::MipGenerator::supports(format);
+    let (stored, gpu_mips) = mip_source(gpu, image, srgb);
     let mips: &[Vec<u8>] = if !image.mipmaps || gpu_mips {
         &[]
     } else if stored {
