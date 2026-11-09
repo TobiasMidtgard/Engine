@@ -3302,3 +3302,446 @@ fn the_cataclysm_hall_drops_a_meteor_a_swarm_and_runs_two_fault_lines() {
     assert!(now["faults"].as_array().unwrap().is_empty());
     assert!(most < 4000, "{most}");
 }
+
+// ------------------------------------------------------------------------------- minds
+
+/// A copy or creature that has just come into the world without a stand-in body.
+type NewCreature = (
+    Or<(Added<minds::Phantasm>, Added<summon::Minion>)>,
+    Without<Body>,
+);
+
+/// Copies and creatures are spheres to the stand-in physics, so bolts find them.
+fn bodies_for_creatures(mut commands: Commands, q: Query<Entity, NewCreature>) {
+    for e in &q {
+        commands.entity(e).insert(Body(0.5));
+    }
+}
+
+fn minds_app() -> App {
+    let mut a = app();
+    a.add_systems(FixedUpdate, bodies_for_creatures.in_set(SimSet::Physics));
+    a
+}
+
+fn copies(app: &mut App) -> Vec<(Entity, minds::Phantasm, DVec3)> {
+    let mut q = app.world.query::<(Entity, &minds::Phantasm, &Transform)>();
+    let mut v: Vec<_> = q
+        .iter(&app.world)
+        .map(|(e, p, t)| (e, p.clone(), t.translation))
+        .collect();
+    v.sort_by_key(|c| c.0);
+    v
+}
+
+/// A student (side 1) and a necromancer (side 2) facing each other down the z axis.
+fn two_casters(app: &mut App, student_z: f64, necro_z: f64) -> (Entity, Entity) {
+    let me = mage(app, DVec3::new(0.0, 0.0, student_z), Mastery::Expert);
+    let necro = mage(app, DVec3::new(0.0, 0.0, necro_z), Mastery::Master);
+    app.world.get_mut::<MagicCaster>(me).unwrap().side = 1;
+    app.world.get_mut::<MagicCaster>(necro).unwrap().side = 2;
+    app.world.entity_mut(necro).insert(Body(0.5));
+    app.world.entity_mut(me).insert(Body(0.5));
+    (me, necro)
+}
+
+#[test]
+fn a_mirror_image_steps_copies_out_to_its_sides_that_break_at_a_blow() {
+    let mut app = minds_app();
+    let (me, foe) = two_casters(&mut app, 0.0, -14.0);
+    let look = engine_world::character::Appearance {
+        seed: 77,
+        ..Default::default()
+    };
+    app.world
+        .entity_mut(me)
+        .insert((look.clone(), engine_world::animation::BodyRequest::human(5)));
+    run(&mut app, 0.1);
+    let mirror = SpellDesign::new(&["phantasm"], CastType::OnSelf).named("Mirror image");
+    cast(
+        &mut app,
+        me,
+        mirror,
+        Aim::Point(DVec3::new(0.0, 0.0, -10.0)),
+    );
+    run(&mut app, 2.0);
+    let found = copies(&mut app);
+    // An Expert makes three (the design's three copies), each the caster to look at.
+    assert_eq!(found.len(), 3);
+    let mut left = 0;
+    let mut right = 0;
+    for (e, p, at) in &found {
+        assert!(p.around && p.owner == Some(me));
+        assert_eq!(
+            app.world.get::<engine_world::character::Appearance>(*e),
+            Some(&look)
+        );
+        assert_eq!(app.world.get::<MagicCaster>(*e).unwrap().side, 1);
+        let d = at.distance(DVec3::ZERO);
+        assert!((1.6..3.4).contains(&d), "{at}");
+        if at.x < -0.5 {
+            left += 1;
+        }
+        if at.x > 0.5 {
+            right += 1;
+        }
+    }
+    assert!(left >= 1 && right >= 1, "to both sides: {left} {right}");
+    // They throw glamour bolts at the foe, as the caster would, and do it no harm.
+    run(&mut app, 3.0);
+    let glamours = hits_on(&app, foe);
+    assert!(!glamours.is_empty(), "no glamour reached the foe");
+    let seen = app.world.resource::<Seen>();
+    assert!(
+        seen.damage
+            .iter()
+            .all(|d| d.target != foe || d.amount == 0.0)
+    );
+    // A fire bolt at the one nearest the foe breaks it; the others stand.
+    let first = copies(&mut app)
+        .into_iter()
+        .min_by(|a, b| a.2.z.total_cmp(&b.2.z))
+        .unwrap()
+        .0;
+    let fire = SpellDesign::new(&["fire"], CastType::Bolt).named("Fire bolt");
+    cast(&mut app, foe, fire, Aim::Entity(first));
+    run(&mut app, 1.5);
+    let left_now = copies(&mut app);
+    assert_eq!(left_now.len(), 2, "one broke");
+    assert!(left_now.iter().all(|c| c.0 != first));
+    assert!(app.world.get_entity(first).is_err());
+    // The api lists them.
+    let v = call_api(&mut app.world, "magic.minds", json!({})).unwrap();
+    assert_eq!(v["copies"].as_array().unwrap().len(), 2);
+    assert_eq!(v["copies"][0]["kind"], "mirror_image");
+}
+
+#[test]
+fn a_skeleton_goes_for_a_decoy_before_the_mage_who_made_it() {
+    let mut app = minds_app();
+    let (me, necro) = two_casters(&mut app, 6.0, -8.0);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        necro,
+        raise(),
+        Aim::Point(DVec3::new(0.0, 0.0, -2.0)),
+    );
+    run(&mut app, 2.2);
+    let skeleton = minions(&mut app)[0].0;
+    let decoy = SpellDesign::new(&["phantasm"], CastType::Summon).named("Decoy");
+    cast(&mut app, me, decoy, Aim::Point(DVec3::new(4.0, 0.0, 1.0)));
+    run(&mut app, 1.0);
+    let found = copies(&mut app);
+    assert_eq!(found.len(), 1);
+    assert!(!found[0].1.around);
+    let copy = found[0].0;
+    let target = |app: &mut App| {
+        minions(app)
+            .into_iter()
+            .find(|m| m.0 == skeleton)
+            .and_then(|m| m.1.target)
+    };
+    assert_eq!(
+        target(&mut app),
+        Some(copy),
+        "the skeleton turned to the copy"
+    );
+    // It cuts the copy down (into glass), then goes for the mage.
+    run(&mut app, 6.0);
+    assert!(copies(&mut app).is_empty(), "the copy still stands");
+    let seen = app.world.resource::<Seen>();
+    let first_cut_on_me = seen
+        .damage
+        .iter()
+        .position(|d| d.target == me && d.source == Some(skeleton));
+    let cut_copy = seen
+        .damage
+        .iter()
+        .position(|d| d.target == copy && d.source == Some(skeleton));
+    assert!(cut_copy.is_some(), "the skeleton never cut the copy");
+    assert!(first_cut_on_me.is_none_or(|m| m > cut_copy.unwrap()));
+}
+
+#[test]
+fn fear_sends_a_skeleton_running_from_its_caster_until_it_wears_off() {
+    let mut app = minds_app();
+    let (me, necro) = two_casters(&mut app, 8.0, -8.0);
+    run(&mut app, 0.1);
+    let raise = SpellDesign::new(&["raise"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.5 })
+        .named("Raise skeleton");
+    cast(
+        &mut app,
+        necro,
+        raise,
+        Aim::Point(DVec3::new(0.0, 0.0, 2.0)),
+    );
+    run(&mut app, 2.2);
+    let skeleton = minions(&mut app)[0].0;
+    let pos = |app: &App| app.world.get::<Transform>(skeleton).unwrap().translation;
+    let fear = SpellDesign::new(&["fear"], CastType::Bolt).named("Fear");
+    cast(&mut app, me, fear, Aim::Entity(skeleton));
+    run(&mut app, 0.8);
+    let aff = app.world.get::<status::Afflictions>(skeleton).unwrap();
+    assert!(aff.dread > 1.0, "dread {}", aff.dread);
+    let from = aff.dread_from.expect("it knows what it fears");
+    assert!(from.distance(DVec3::new(0.0, 0.0, 8.0)) < 0.5, "{from}");
+    let scared_at = pos(&app).distance(DVec3::new(0.0, 0.0, 8.0));
+    run(&mut app, 2.0);
+    let fled_to = pos(&app).distance(DVec3::new(0.0, 0.0, 8.0));
+    assert!(fled_to > scared_at + 2.5, "{scared_at} -> {fled_to}");
+    let m = minions(&mut app)
+        .into_iter()
+        .find(|m| m.0 == skeleton)
+        .unwrap();
+    assert!(m.1.target.is_none());
+    // It wears off and the skeleton comes back to fight.
+    run(&mut app, 3.0);
+    let m = minions(&mut app)
+        .into_iter()
+        .find(|m| m.0 == skeleton)
+        .unwrap();
+    assert_eq!(m.1.target, Some(me));
+    run(&mut app, 3.0);
+    assert!(pos(&app).distance(DVec3::new(0.0, 0.0, 8.0)) < fled_to - 2.0);
+}
+
+#[test]
+fn a_commanded_golem_fights_its_own_side_then_goes_back() {
+    let mut app = minds_app();
+    let (me, necro) = two_casters(&mut app, 10.0, -8.0);
+    run(&mut app, 0.1);
+    let golem = SpellDesign::new(&["stone"], CastType::Summon).named("Stone golem");
+    cast(
+        &mut app,
+        necro,
+        golem,
+        Aim::Point(DVec3::new(-1.5, 0.0, -1.0)),
+    );
+    run(&mut app, 0.6);
+    cast(
+        &mut app,
+        necro,
+        raise(),
+        Aim::Point(DVec3::new(1.5, 0.0, -1.0)),
+    );
+    run(&mut app, 2.4);
+    let found = minions(&mut app);
+    let g = found
+        .iter()
+        .find(|m| m.1.kind == summon::MinionKind::Golem)
+        .unwrap()
+        .0;
+    let s = found
+        .iter()
+        .find(|m| m.1.kind == summon::MinionKind::Skeleton)
+        .unwrap()
+        .0;
+    let command = SpellDesign::new(&["command"], CastType::Bolt).named("Command");
+    cast(&mut app, me, command, Aim::Entity(g));
+    run(&mut app, 1.0);
+    let held = app
+        .world
+        .get::<minds::Commanded>(g)
+        .expect("the golem is held");
+    assert_eq!(held.by, Some(me));
+    assert!(!held.wrath && held.thread.len() == minds::THREAD_PIECES);
+    assert_eq!(app.world.get::<MagicCaster>(g).unwrap().side, 1);
+    run(&mut app, 4.0);
+    let seen = app.world.resource::<Seen>();
+    let blows = seen
+        .damage
+        .iter()
+        .filter(|d| d.source == Some(g) && d.target == s)
+        .count();
+    assert!(blows > 0, "the golem never struck the skeleton");
+    assert!(
+        seen.damage
+            .iter()
+            .all(|d| d.source != Some(g) || d.target != me)
+    );
+    // An Expert's hold lasts 8 s: then it is the necromancer's again.
+    run(&mut app, 4.5);
+    assert!(app.world.get::<minds::Commanded>(g).is_none());
+    assert_eq!(app.world.get::<MagicCaster>(g).unwrap().side, 2);
+    let m = minions(&mut app).into_iter().find(|m| m.0 == g).unwrap();
+    assert_eq!(m.1.cast.side, 2);
+    assert_eq!(m.1.cast.caster, Some(necro));
+    let mut threads = app.world.query::<&minds::ThreadPiece>();
+    assert_eq!(threads.iter(&app.world).count(), 0);
+}
+
+#[test]
+fn wrath_turns_skeletons_on_each_other() {
+    let mut app = minds_app();
+    let (me, necro) = two_casters(&mut app, 30.0, -8.0);
+    run(&mut app, 0.1);
+    for x in [-0.8, 0.8] {
+        cast(
+            &mut app,
+            necro,
+            raise(),
+            Aim::Point(DVec3::new(x, 0.0, 0.0)),
+        );
+        run(&mut app, 0.7);
+    }
+    run(&mut app, 1.6);
+    let ids: Vec<Entity> = minions(&mut app).into_iter().map(|m| m.0).collect();
+    assert_eq!(ids.len(), 2);
+    let wrath = SpellDesign::new(&["wrath"], CastType::Area).named("Frenzy");
+    cast(&mut app, me, wrath, Aim::Point(DVec3::new(0.0, 0.0, 0.0)));
+    run(&mut app, 3.5);
+    for e in &ids {
+        if let Some(h) = app.world.get::<minds::Commanded>(*e) {
+            assert!(h.wrath && h.by.is_none());
+        }
+    }
+    let seen = app.world.resource::<Seen>();
+    let at_each_other = seen
+        .damage
+        .iter()
+        .filter(|d| {
+            d.source.is_some_and(|s| ids.contains(&s)) && ids.contains(&d.target) && d.amount > 0.0
+        })
+        .count();
+    assert!(at_each_other > 0, "they never struck each other");
+}
+
+#[test]
+fn a_fire_decoy_bursts_into_fire_on_the_skeleton_that_breaks_it() {
+    let mut app = minds_app();
+    let (me, necro) = two_casters(&mut app, 8.0, -8.0);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        necro,
+        raise(),
+        Aim::Point(DVec3::new(0.0, 0.0, -2.0)),
+    );
+    run(&mut app, 2.2);
+    let skeleton = minions(&mut app)[0].0;
+    let decoy = SpellDesign::new(&["phantasm", "fire"], CastType::Summon).named("Burning decoy");
+    cast(&mut app, me, decoy, Aim::Point(DVec3::new(0.0, 0.0, 3.0)));
+    run(&mut app, 6.0);
+    assert!(copies(&mut app).is_empty(), "the decoy still stands");
+    let seen = app.world.resource::<Seen>();
+    let burnt = seen
+        .damage
+        .iter()
+        .any(|d| d.target == skeleton && d.source == Some(me) && d.amount > 0.0);
+    assert!(burnt, "the copy's fire never reached the skeleton");
+    assert!(
+        minions(&mut app)
+            .iter()
+            .all(|m| m.1.kind != summon::MinionKind::Elemental)
+    );
+}
+
+#[test]
+fn the_minds_hall_fools_scares_maddens_and_turns_the_dead() {
+    let mut app = minds_app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Minds;
+        hall.restart = true;
+    }
+    let mut most_copies = 0;
+    let mut decoys_seen: Vec<Entity> = Vec::new();
+    let mut mirrors_seen: Vec<Entity> = Vec::new();
+    let mut most_terrified = 0;
+    let mut held_golem_at: Option<f32> = None;
+    let mut wrath_at: Option<f32> = None;
+    let mut first_terror: Option<f32> = None;
+    let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
+    let steps = (demo::minds::PERIOD * 60.0) as usize;
+    for i in 0..steps {
+        app.update();
+        let t = i as f32 / 60.0;
+        let now = call_api(&mut app.world, "magic.minds", json!({})).unwrap();
+        let cs = now["copies"].as_array().unwrap();
+        most_copies = most_copies.max(cs.len());
+        for c in cs {
+            let e = Entity::from_bits(c["id"].as_u64().unwrap());
+            let list = if c["kind"] == "decoy" {
+                &mut decoys_seen
+            } else {
+                &mut mirrors_seen
+            };
+            if !list.contains(&e) {
+                list.push(e);
+                println!("{t:.2}: {} at {}", c["kind"], c["at"]);
+            }
+        }
+        for (e, m) in minions(&mut app) {
+            kinds.entry(e).or_insert(m.kind);
+            if i % 60 == 0 {
+                println!(
+                    "  {t:.0}s {e:?} {:?} at ({:.1}, {:.1}) side {} target {:?}",
+                    m.kind, m.pos.x, m.pos.z, m.cast.side, m.target
+                );
+            }
+        }
+        let terrified = now["terrified"].as_array().unwrap().len();
+        if terrified > 0 && first_terror.is_none() {
+            first_terror = Some(t);
+        }
+        most_terrified = most_terrified.max(terrified);
+        for h in now["held"].as_array().unwrap() {
+            if h["wrath"] == json!(true) {
+                wrath_at.get_or_insert(t);
+            } else {
+                held_golem_at.get_or_insert(t);
+            }
+        }
+    }
+    let kind = |e: Entity| kinds.get(&e).copied();
+    let seen = app.world.resource::<Seen>();
+    let cut_decoys = decoys_seen
+        .iter()
+        .filter(|d| {
+            seen.damage
+                .iter()
+                .any(|x| x.target == **d && x.amount > 0.0)
+        })
+        .count();
+    let skel_on_skel = seen
+        .damage
+        .iter()
+        .filter(|x| {
+            x.source.and_then(kind) == Some(summon::MinionKind::Skeleton)
+                && kind(x.target) == Some(summon::MinionKind::Skeleton)
+        })
+        .count();
+    let golem_on_skel = seen
+        .damage
+        .iter()
+        .filter(|x| {
+            x.source.and_then(kind) == Some(summon::MinionKind::Golem)
+                && kind(x.target) == Some(summon::MinionKind::Skeleton)
+        })
+        .count();
+    println!(
+        "copies at most {most_copies}; decoys {} ({cut_decoys} cut), mirrors {}; terror from \
+         {first_terror:?}, most terrified {most_terrified}; wrath at {wrath_at:?}; command at \
+         {held_golem_at:?}; skeleton on skeleton {skel_on_skel}, golem on skeleton {golem_on_skel}",
+        decoys_seen.len(),
+        mirrors_seen.len()
+    );
+    assert_eq!(decoys_seen.len(), 3);
+    assert_eq!(mirrors_seen.len(), 4);
+    assert!(cut_decoys >= 2, "the dead cut {cut_decoys} decoys");
+    assert!(most_terrified >= 3, "{most_terrified} ran");
+    assert!(wrath_at.is_some() && held_golem_at.is_some());
+    assert!(skel_on_skel > 0, "the frenzied never struck each other");
+    assert!(
+        golem_on_skel > 0,
+        "the commanded golem never struck a skeleton"
+    );
+}

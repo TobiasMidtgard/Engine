@@ -60,6 +60,12 @@ pub enum EffectKind {
     /// The dead rise and serve: a fallen body stands as a thrall, or bones climb out of the
     /// ground (undead.rs).
     Raise,
+    /// Copies of the caster that fool its foes and break at a touch (minds.rs).
+    Phantasm,
+    /// A creature fights for the caster for a while (minds.rs).
+    Command,
+    /// A creature attacks whatever is near, friend or foe (minds.rs).
+    Wrath,
 }
 
 /// One entry of the effect catalog.
@@ -102,6 +108,9 @@ impl EffectDef {
             EffectKind::Drain => Dials::pole(Pole::Wither, 0.7) + Dials::pole(Pole::Near, 0.7),
             EffectKind::Stone => Dials::pole(Pole::Form, 1.0) + Dials::pole(Pole::Push, 0.2),
             EffectKind::Raise => Dials::pole(Pole::Wither, 0.8) + Dials::pole(Pole::Form, 0.4),
+            EffectKind::Phantasm => Dials::pole(Pole::Veil, 0.7) + Dials::pole(Pole::Form, 0.5),
+            EffectKind::Command => Dials::pole(Pole::Reveal, 0.8) + Dials::pole(Pole::Pull, 0.4),
+            EffectKind::Wrath => Dials::pole(Pole::Veil, 0.6) + Dials::pole(Pole::Heat, 0.4),
         }
     }
 
@@ -125,6 +134,8 @@ impl EffectDef {
             EffectKind::Harm { .. }
                 | EffectKind::Drain
                 | EffectKind::Fear
+                | EffectKind::Command
+                | EffectKind::Wrath
                 | EffectKind::Force { .. }
                 | EffectKind::TimeScale { factor: ..1.0 }
         )
@@ -367,6 +378,13 @@ pub const EFFECTS: &[EffectDef] = &[
         EffectKind::Calm,
         "Anger drains away; a fight may end.",
     ),
+    def(
+        "phantasm",
+        "Phantasm",
+        Subclass::Illusion,
+        EffectKind::Phantasm,
+        "Copies of you that fool your foes and break into glass at a touch.",
+    ),
     // Domination.
     def(
         "fear",
@@ -374,6 +392,20 @@ pub const EFFECTS: &[EffectDef] = &[
         Subclass::Domination,
         EffectKind::Fear,
         "Terror: the target flees or freezes.",
+    ),
+    def(
+        "command",
+        "Command",
+        Subclass::Domination,
+        EffectKind::Command,
+        "The creature fights for you until the hold lets go.",
+    ),
+    def(
+        "wrath",
+        "Wrath",
+        Subclass::Domination,
+        EffectKind::Wrath,
+        "Blind rage: it strikes at whatever is near, friend or foe.",
     ),
 ];
 

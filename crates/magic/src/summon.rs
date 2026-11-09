@@ -1006,9 +1006,18 @@ pub fn run_minions(
         Option<&Vitality>,
         Option<&LocalTimeScale>,
         Option<&Statuses>,
+        Option<&crate::status::Afflictions>,
+        Has<crate::minds::Commanded>,
     )>,
     bodies: Query<(Entity, &GlobalTransform, &Vitality, Allegiance)>,
-    creatures: Query<(), Or<(With<Minion>, With<crate::undead::Thrall>)>>,
+    creatures: Query<
+        (),
+        Or<(
+            With<Minion>,
+            With<crate::undead::Thrall>,
+            With<crate::minds::Phantasm>,
+        )>,
+    >,
     anchors: Query<&GlobalTransform>,
     mut parts: Query<(&MinionPart, &mut Transform), Without<Minion>>,
     rubble: Query<Entity, With<Rubble>>,
@@ -1020,9 +1029,10 @@ pub fn run_minions(
         return;
     }
     // Past the limit: the oldest of a summoner's kind goes.
+    // A creature held by Command isn't its holder's to retire.
     let mut kept: Vec<(Option<Entity>, MinionKind, f32, Entity, Mastery)> = minions
         .iter()
-        .filter(|(_, m, ..)| m.age < m.life)
+        .filter(|(_, m, .., held)| m.age < m.life && !held)
         .map(|(e, m, ..)| (m.cast.caster, m.kind, m.age, e, m.cast.spell.mastery))
         .collect();
     kept.sort_by(|a, b| a.2.total_cmp(&b.2));
@@ -1053,7 +1063,7 @@ pub fn run_minions(
         .filter(|(_, m, ..)| m.kind.walks() && !matches!(m.act, Act::Rise { .. }))
         .map(|(e, m, ..)| (e, m.pos, body_radius(m.kind, m.size)))
         .collect();
-    for (e, mut m, mut tf, vit, local, statuses) in &mut minions {
+    for (e, mut m, mut tf, vit, local, statuses, afflictions, _) in &mut minions {
         let dt = time.delta_for(local);
         m.age += dt;
         if retire.contains(&e) {
@@ -1066,14 +1076,19 @@ pub fn run_minions(
         }
         let k = m.size;
         let held = statuses.is_some_and(|s| s.rooted || s.frozen);
+        // Terrified: it drops its foe and runs from the terror (minds.rs).
+        let fleeing = afflictions
+            .filter(|a| a.dread > 0.0 && m.kind.walks())
+            .and_then(|a| a.dread_from);
         let owner = m
             .cast
             .caster
             .and_then(|o| anchors.get(o).ok())
             .map(|g| (g.translation(), g.rotation()));
-        // Look around now and then.
+        // Look around now and then, never in the middle of a blow (it lands on the one it
+        // was swung at).
         m.look_in -= dt;
-        if m.look_in <= 0.0 {
+        if m.look_in <= 0.0 && (m.act == Act::Ready || m.target.is_none()) {
             m.look_in = 0.5;
             let near = |p: DVec3, r: f32| p.distance(m.pos) <= r as f64;
             let leash = |p: DVec3| owner.is_none_or(|(o, _)| o.distance(p) <= LEASH_M as f64);
@@ -1109,6 +1124,9 @@ pub fn run_minions(
                         .map(|s| s.e)
                 }
             };
+        }
+        if fleeing.is_some() {
+            m.target = None;
         }
         let target = m
             .target
@@ -1328,7 +1346,12 @@ pub fn run_minions(
                         0.0,
                         1.0 + 2.2 * roll(m.cast.seed as u64, 8),
                     );
+                    let away = fleeing.map(|from| {
+                        let d = crate::minds::flee_dir(m.pos, from, m.age, m.cast.seed as u64);
+                        (m.pos + (d * 4.0).as_dvec3(), 0.0)
+                    });
                     let goal = match (target, owner) {
+                        _ if away.is_some() => away,
                         (Some((_, tp)), _) => Some((tp, stop)),
                         (None, Some((op, orot))) => Some((
                             op + (orot
@@ -1382,7 +1405,12 @@ pub fn run_minions(
                                 speed = gait.walk
                                     * k
                                     * diff.cos().max(0.0)
-                                    * ((dist - stop) / 0.6).min(1.0);
+                                    * ((dist - stop) / 0.6).min(1.0)
+                                    * if away.is_some() {
+                                        crate::minds::FLEE_PACE
+                                    } else {
+                                        1.0
+                                    };
                             }
                         }
                     }

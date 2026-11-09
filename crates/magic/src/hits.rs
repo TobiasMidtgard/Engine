@@ -295,6 +295,28 @@ pub fn apply_hits(
             if p.fear_secs > 0.0 && base_damage <= 0.0 {
                 aff.dread = aff.dread.max(p.fear_secs);
             }
+            // The terrified run from where the terror came from: its caster, else back along
+            // the blow.
+            if aff.dread > before.0 + 0.5 {
+                aff.dread_from = Some(
+                    h.cast
+                        .caster
+                        .filter(|c| Some(*c) != target)
+                        .and_then(|c| info.get(c).ok())
+                        .and_then(|i| i.0)
+                        .map(|g| g.translation())
+                        .unwrap_or(h.point - (h.dir * 3.0).as_dvec3()),
+                );
+            }
+            // Command and Wrath take hold of creatures (minds.rs).
+            if creature && (p.command_secs > 0.0 || p.wrath_secs > 0.0) {
+                queue.minds.push(crate::minds::MindCmd {
+                    target: t,
+                    by: h.cast.clone(),
+                    command_secs: p.command_secs * scale.clamp(0.5, 1.5),
+                    wrath_secs: p.wrath_secs * scale.clamp(0.5, 1.5),
+                });
+            }
             // Minds are NPC AI's: it makes the terrified flee, the calmed stand down and the
             // veiled unseen. Sent when one starts or grows, not on every tick of an aura.
             for (kind, was, now) in [
@@ -328,6 +350,14 @@ pub fn apply_hits(
             let ward_element = aff.ward_element;
             let (left, taken) = aff.absorb_hit(damage, spell.element());
             damage = left;
+            // A hard blow shakes off terror (WoW's fear breaks past a share of health): a
+            // fifth of the body's health in one hit, from anything but the terror itself.
+            if aff.dread > 0.0
+                && p.fear_secs <= 0.0
+                && vitals.get(t).is_ok_and(|v| damage >= 0.2 * v.max)
+            {
+                aff.dread = aff.dread.min(0.3);
+            }
             if had > 0.0 {
                 let full = aff.ward_full.max(1e-3);
                 out.ward.write(crate::wards::WardStruck {

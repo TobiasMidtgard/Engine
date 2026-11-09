@@ -100,6 +100,10 @@ pub struct Afflictions {
     pub rot: Dot,
     /// Seconds left terrified.
     pub dread: f32,
+    /// Where the terror came from (its caster, else where it struck): the terrified run from
+    /// it (minds.rs).
+    #[serde(skip)]
+    pub dread_from: Option<DVec3>,
     /// Damage a ward will still absorb.
     pub ward: f32,
     pub ward_secs: f32,

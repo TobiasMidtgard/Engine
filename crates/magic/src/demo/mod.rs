@@ -23,6 +23,7 @@
 //! | `spells_kinesis` | telekinesis: a stone torn out of the floor and launched (then a burning one), a barrel and a crate lifted and thrown, a bolt caught in the air and thrown on, a loose dummy hurled down the hall, and a ring of torn stones that stops bolts and is flung at a dummy ([`kinesis`], [`crate::kinesis`]) |
 //! | `spells_shield` | shields you hold: one under a fire barrage cracks, flickers and shatters (its holder staggers), then regrows after a second; another raised just in time sends bolts back at the battle mage who cast them, then holds a fire shield into a flame jet ([`shield`], [`crate::wards`]) |
 //! | `spells_cataclysm` | Cataclysm: a burning meteor on a dummy among crates (its ring, the fall, the blast, a burning crater that cools), a Master's swarm of five, and fault lines that run down a lane throwing its dummies, then burst again ([`cataclysm`], [`crate::cataclysm`]) |
+//! | `spells_minds` | minds: necromancers raise a golem and skeletons; students answer with three decoys the skeletons cut into glass, a mirror image on the dais, a terror wave that sends the dead running, a frenzy that turns them on each other, and a command that turns the golem on its own side ([`minds`], [`crate::minds`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -34,6 +35,7 @@ pub mod cataclysm;
 pub mod craft;
 pub mod duel;
 pub mod kinesis;
+pub mod minds;
 pub mod player;
 pub mod portal;
 pub mod shield;
@@ -248,6 +250,18 @@ pub const VIEWS: &[DemoView] = &[
         // Lane 3's meteor has struck: its crater burning, the swarm's rings pulsing far off.
         warmup: 4.6,
     },
+    DemoView {
+        key: "spells_minds",
+        name: "Minds: decoys the skeletons cut into glass, a terror wave, a frenzy and a commanded golem",
+        // From the far end of the floor, as spells_dead, looking back at the dais: the dead
+        // coming in from the right, the decoys on the floor before the students' plinths,
+        // lane 2's mirror image on the dais behind them.
+        eye: [2.5, 3.8, -6.5],
+        target: [0.5, 0.9, 5.0],
+        hour: 16.6,
+        // The skeletons at the decoys, the mirror image standing on the dais.
+        warmup: 6.0,
+    },
 ];
 
 /// What the hall is running.
@@ -273,10 +287,11 @@ pub enum Program {
     Kinesis,
     Shield,
     Cataclysm,
+    Minds,
 }
 
 impl Program {
-    pub const ALL: [Program; 18] = [
+    pub const ALL: [Program; 19] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -295,6 +310,7 @@ impl Program {
         Program::Kinesis,
         Program::Shield,
         Program::Cataclysm,
+        Program::Minds,
     ];
 
     pub fn key(self) -> &'static str {
@@ -317,6 +333,7 @@ impl Program {
             Program::Kinesis => "spells_kinesis",
             Program::Shield => "spells_shield",
             Program::Cataclysm => "spells_cataclysm",
+            Program::Minds => "spells_minds",
         }
     }
 
@@ -355,6 +372,8 @@ impl Program {
             Program::Shield => 16.0,
             // Every crater has sunk and every crack closed before the next period's.
             Program::Cataclysm => cataclysm::PERIOD,
+            // The dead last 21.6 s and the command on the golem 12 s; the restart clears the rest.
+            Program::Minds => minds::PERIOD,
         }
     }
 
@@ -380,6 +399,8 @@ enum AimAt {
     Foe,
     /// The hall mage on that lane.
     Mage(usize),
+    /// The nearest golem of another side, else the lane's far dummy.
+    Golem,
     /// A point (x, y, z) from the hall's center.
     At(f64, f64, f64),
 }
@@ -909,6 +930,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
         Program::Kinesis => kinesis::lanes(),
         Program::Shield => shield::lanes(),
         Program::Cataclysm => cataclysm::lanes(),
+        Program::Minds => minds::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -973,7 +995,7 @@ pub const WARD_BARRAGE_END: f32 = 13.0;
 
 /// Programs with two armies: students on the left plinths, necromancers on the right.
 fn two_sides(program: Program) -> bool {
-    matches!(program, Program::Dead | Program::Ward)
+    matches!(program, Program::Dead | Program::Ward | Program::Minds)
 }
 
 /// The robes `spells_dead`'s students wear (green, blue, green), whatever they cast as.
@@ -1110,6 +1132,7 @@ fn setup_program(
         commands.queue(crate::wards::clear);
         commands.queue(crate::space::clear);
         commands.queue(crate::cataclysm::clear);
+        commands.queue(crate::minds::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -1232,6 +1255,7 @@ fn setup_program(
                 | Program::Ward
                 | Program::Portal
                 | Program::Shield
+                | Program::Minds
         ) {
             t.home - DVec3::Y * 40.0
         } else {
@@ -1452,6 +1476,7 @@ fn run_hall(
             | Program::Kinesis
             | Program::Shield
             | Program::Cataclysm
+            | Program::Minds
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
@@ -1491,7 +1516,7 @@ fn run_hall(
                         hall.origin
                             + DVec3::new(LANES.get(lane).copied().unwrap_or(0.0), FLOOR, MAGE_Z),
                     )),
-                AimAt::Foe => {
+                AimAt::Golem | AimAt::Foe => {
                     let me = mage_at
                         .get(e)
                         .map(|g| g.translation())
@@ -1502,6 +1527,8 @@ fn run_hall(
                         .filter(|(_, mn, _)| {
                             mn.cast.side != caster.side
                                 && !matches!(mn.act, crate::summon::Act::Rise { .. })
+                                && (c.aim != AimAt::Golem
+                                    || mn.kind == crate::summon::MinionKind::Golem)
                         })
                         .map(|(c, _, g)| (c, g.translation()))
                         .chain(

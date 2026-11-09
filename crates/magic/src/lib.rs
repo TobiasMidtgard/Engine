@@ -47,6 +47,7 @@ pub mod hits;
 pub mod kinesis;
 pub mod looks;
 pub mod meet;
+pub mod minds;
 pub mod player;
 pub mod runtime;
 pub mod schools;
@@ -158,6 +159,7 @@ impl Plugin for MagicPlugin {
                     player::write_hud,
                     tether::draw_tethers,
                     kinesis::draw_grips,
+                    minds::draw_threads,
                 )
                     .chain(),
             )
@@ -176,6 +178,8 @@ impl Plugin for MagicPlugin {
                         cataclysm::fall_meteors,
                         cataclysm::run_faults,
                         cataclysm::apply_blasts,
+                        minds::spawn_phantasms,
+                        minds::run_phantasms,
                     )
                         .chain(),
                     kinesis::guard_rings,
@@ -191,6 +195,8 @@ impl Plugin for MagicPlugin {
                 FixedUpdate,
                 (
                     hits::apply_hits,
+                    minds::take_minds,
+                    minds::tend_minds,
                     hits::take_damage,
                     hits::recover,
                     status::tick_afflictions,
@@ -227,6 +233,7 @@ impl Plugin for MagicPlugin {
         space::register(app);
         kinesis::register(app);
         cataclysm::register(app);
+        minds::register(app);
         demo::build(app);
     }
 }

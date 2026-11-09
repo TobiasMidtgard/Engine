@@ -128,6 +128,15 @@ pub struct Payload {
     pub veil_secs: f32,
     pub fear_secs: f32,
     pub calm_secs: f32,
+    /// Copies of the caster it makes (minds.rs): round the caster for a Self cast (Mirror
+    /// image), where it aims for a Summon (Decoy). 0: none.
+    pub phantasms: u32,
+    /// Seconds a copy lasts.
+    pub phantasm_secs: f32,
+    /// Seconds a creature it hits fights for the caster (minds.rs; 0: none).
+    pub command_secs: f32,
+    /// Seconds a creature it hits strikes at whatever is near (minds.rs; 0: none).
+    pub wrath_secs: f32,
     /// A light it leaves, lumens.
     pub light_lm: f32,
     /// Flame temperature for igniting fuel, °C (0: doesn't ignite).
@@ -151,7 +160,11 @@ pub struct Payload {
 impl Payload {
     /// Hurts what it lands on.
     pub fn harmful(&self) -> bool {
-        self.damage > 0.0 || self.force.is_some() || self.fear_secs > 0.0
+        self.damage > 0.0
+            || self.force.is_some()
+            || self.fear_secs > 0.0
+            || self.command_secs > 0.0
+            || self.wrath_secs > 0.0
     }
 }
 
@@ -602,6 +615,47 @@ fn compile_inner(
         },
         calm_secs: if has(&|k| matches!(k, EffectKind::Calm)) {
             8.0 * duration_k
+        } else {
+            0.0
+        },
+        // Mirror image: two copies for an Adept, three from Expert (the design's three),
+        // four once ascended, one more per Split; a Decoy one per Split.
+        phantasms: if !has(&|k| matches!(k, EffectKind::Phantasm)) {
+            0
+        } else {
+            match cast {
+                CastType::OnSelf => {
+                    let base = match ctx.mastery {
+                        Mastery::Novice | Mastery::Apprentice => 1,
+                        Mastery::Adept => 2,
+                        Mastery::Expert | Mastery::Master => 3,
+                        _ => 4,
+                    };
+                    base + split.max(1) - 1
+                }
+                CastType::Summon => split.max(1),
+                _ => 0,
+            }
+            .min(8)
+        },
+        phantasm_secs: if has(&|k| matches!(k, EffectKind::Phantasm)) {
+            (if cast == CastType::Summon { 15.0 } else { 12.0 } * duration_k).clamp(3.0, 60.0)
+        } else {
+            0.0
+        },
+        // Command holds 8 s (12 from Master), Wrath 6 s.
+        command_secs: if has(&|k| matches!(k, EffectKind::Command)) {
+            (if ctx.mastery >= Mastery::Master {
+                12.0
+            } else {
+                8.0
+            } * duration_k)
+                .clamp(2.0, 40.0)
+        } else {
+            0.0
+        },
+        wrath_secs: if has(&|k| matches!(k, EffectKind::Wrath)) {
+            (6.0 * duration_k).clamp(2.0, 30.0)
         } else {
             0.0
         },

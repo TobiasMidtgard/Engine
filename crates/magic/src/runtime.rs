@@ -280,6 +280,10 @@ pub struct MagicQueue {
     pub grips: Vec<crate::kinesis::Grip>,
     /// Meteors to drop and fault lines to open (cataclysm.rs).
     pub cataclysm: Vec<crate::cataclysm::NewCataclysm>,
+    /// Copies of casters to make (minds.rs).
+    pub phantasms: Vec<crate::minds::NewPhantasm>,
+    /// Creatures taken by Command or Wrath (minds.rs).
+    pub minds: Vec<crate::minds::MindCmd>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -646,6 +650,27 @@ pub fn release(
     let dir = to_aim.normalize_or(forward);
     let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
     let exclude = info.caster.map(QueryFilter::excluding).unwrap_or_default();
+    // Phantasm: copies of the caster round it (Mirror image) or where it points (Decoy), in
+    // place of anything else a self or summon cast would do (minds.rs).
+    if spell.payload.phantasms > 0 && matches!(spell.cast, CastType::OnSelf | CastType::Summon) {
+        let at = if spell.cast == CastType::OnSelf {
+            body
+        } else {
+            ground_below(
+                queries,
+                crate::summon::place(body, aim_point, c.range),
+                &exclude,
+            )
+        };
+        queue.phantasms.push(crate::minds::NewPhantasm {
+            cast: info.clone(),
+            at,
+            facing: flat,
+            around_caster: spell.cast == CastType::OnSelf,
+            target,
+        });
+        return;
+    }
     // A summon stands where the caster points, within its range: a golem, an elemental or a
     // wisp, by its weave (summon.rs). A weave that makes no creature casts as an area.
     if spell.cast == CastType::Summon

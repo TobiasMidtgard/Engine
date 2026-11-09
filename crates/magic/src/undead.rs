@@ -663,9 +663,10 @@ pub fn run_thralls(
         &GlobalTransform,
         &Vitality,
         &MagicCaster,
+        Option<&crate::status::Afflictions>,
     )>,
     bodies: Query<(Entity, &GlobalTransform, &Vitality, Allegiance)>,
-    creatures: Query<(), Or<(With<Minion>, With<Thrall>)>>,
+    creatures: Query<(), Or<(With<Minion>, With<Thrall>, With<crate::minds::Phantasm>)>>,
     poses: Query<&SkeletonPose>,
     mut eyes: Query<(Entity, &ThrallEye, &mut Transform), Without<Thrall>>,
     mut casts: MessageWriter<CastRequest>,
@@ -692,7 +693,7 @@ pub fn run_thralls(
         etf.translation = at + (g.rotation() * off).as_dvec3();
         etf.scale = Vec3::splat(if up { 1.0 } else { 0.0 });
     }
-    for (e, mut t, mut tf, g, v, c) in &mut thralls {
+    for (e, mut t, mut tf, g, v, c, afflictions) in &mut thralls {
         t.age += dt;
         t.cooldown -= dt;
         let at = g.translation();
@@ -707,6 +708,20 @@ pub fn run_thralls(
             .and_then(|p| p.bone_world(g, p.index_of("head")?));
         if head.is_some_and(|(h, _)| h.y - at.y < HEAD_UP_M) {
             t.cooldown = t.cooldown.max(0.6);
+            continue;
+        }
+        // Terrified: it casts at nothing and turns its back on the terror (minds.rs).
+        if let Some(from) = afflictions
+            .filter(|a| a.dread > 0.0)
+            .and_then(|a| a.dread_from)
+        {
+            t.target = None;
+            let away = crate::minds::flee_dir(at, from, t.age, t.cast.seed as u64);
+            let want = (-away.x).atan2(-away.z);
+            let (yaw, ..) = tf.rotation.to_euler(EulerRot::YXZ);
+            let diff = (want - yaw + PI).rem_euclid(2.0 * PI) - PI;
+            tf.rotation = Quat::from_rotation_y(yaw + diff.clamp(-4.0 * dt, 4.0 * dt));
+            t.cooldown = t.cooldown.max(0.8);
             continue;
         }
         let foe = bodies
