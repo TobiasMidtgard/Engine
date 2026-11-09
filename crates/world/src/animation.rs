@@ -72,6 +72,82 @@ impl SkeletonPose {
     }
 }
 
+/// The humanoid skeleton's bones, each with its parent: the names every module poses, skins
+/// and reads people by (`SkeletonPose::names`, [`crate::BodyFit`], [`crate::combat::BodyZone`]).
+/// Model space, meters, facing −Z, +X to the person's right; `_l` / `_r` are the person's own
+/// left and right. The first 25 are the original skeleton; 30 finger bones (three joints
+/// each) and 12 twist bones came with characters week's finger-and-twist skeleton. Posers that don't know a bone
+/// leave it at rest. Index a pose by its own `names`, never by this order.
+pub const HUMANOID_BONES: [(&str, Option<&str>); 67] = [
+    ("root", None),
+    ("hips", Some("root")),
+    ("spine", Some("hips")),
+    ("chest", Some("spine")),
+    ("neck", Some("chest")),
+    ("head", Some("neck")),
+    ("ponytail_1", Some("head")),
+    ("ponytail_2", Some("ponytail_1")),
+    ("ponytail_3", Some("ponytail_2")),
+    ("clavicle_l", Some("chest")),
+    ("upper_arm_l", Some("clavicle_l")),
+    ("lower_arm_l", Some("upper_arm_l")),
+    ("hand_l", Some("lower_arm_l")),
+    ("clavicle_r", Some("chest")),
+    ("upper_arm_r", Some("clavicle_r")),
+    ("lower_arm_r", Some("upper_arm_r")),
+    ("hand_r", Some("lower_arm_r")),
+    ("upper_leg_l", Some("hips")),
+    ("lower_leg_l", Some("upper_leg_l")),
+    ("foot_l", Some("lower_leg_l")),
+    ("toe_l", Some("foot_l")),
+    ("upper_leg_r", Some("hips")),
+    ("lower_leg_r", Some("upper_leg_r")),
+    ("foot_r", Some("lower_leg_r")),
+    ("toe_r", Some("foot_r")),
+    ("thumb_01_l", Some("hand_l")),
+    ("thumb_02_l", Some("thumb_01_l")),
+    ("thumb_03_l", Some("thumb_02_l")),
+    ("index_01_l", Some("hand_l")),
+    ("index_02_l", Some("index_01_l")),
+    ("index_03_l", Some("index_02_l")),
+    ("middle_01_l", Some("hand_l")),
+    ("middle_02_l", Some("middle_01_l")),
+    ("middle_03_l", Some("middle_02_l")),
+    ("ring_01_l", Some("hand_l")),
+    ("ring_02_l", Some("ring_01_l")),
+    ("ring_03_l", Some("ring_02_l")),
+    ("pinky_01_l", Some("hand_l")),
+    ("pinky_02_l", Some("pinky_01_l")),
+    ("pinky_03_l", Some("pinky_02_l")),
+    ("thumb_01_r", Some("hand_r")),
+    ("thumb_02_r", Some("thumb_01_r")),
+    ("thumb_03_r", Some("thumb_02_r")),
+    ("index_01_r", Some("hand_r")),
+    ("index_02_r", Some("index_01_r")),
+    ("index_03_r", Some("index_02_r")),
+    ("middle_01_r", Some("hand_r")),
+    ("middle_02_r", Some("middle_01_r")),
+    ("middle_03_r", Some("middle_02_r")),
+    ("ring_01_r", Some("hand_r")),
+    ("ring_02_r", Some("ring_01_r")),
+    ("ring_03_r", Some("ring_02_r")),
+    ("pinky_01_r", Some("hand_r")),
+    ("pinky_02_r", Some("pinky_01_r")),
+    ("pinky_03_r", Some("pinky_02_r")),
+    ("upper_arm_twist_01_l", Some("upper_arm_l")),
+    ("upper_arm_twist_02_l", Some("upper_arm_l")),
+    ("lower_arm_twist_01_l", Some("lower_arm_l")),
+    ("lower_arm_twist_02_l", Some("lower_arm_l")),
+    ("upper_arm_twist_01_r", Some("upper_arm_r")),
+    ("upper_arm_twist_02_r", Some("upper_arm_r")),
+    ("lower_arm_twist_01_r", Some("lower_arm_r")),
+    ("lower_arm_twist_02_r", Some("lower_arm_r")),
+    ("thigh_twist_01_l", Some("upper_leg_l")),
+    ("calf_twist_01_l", Some("lower_leg_l")),
+    ("thigh_twist_01_r", Some("upper_leg_r")),
+    ("calf_twist_01_r", Some("lower_leg_r")),
+];
+
 /// Continuous inputs to a character's animation graph, by name (see module docs).
 #[derive(Component, Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -109,10 +185,16 @@ pub struct AnimationEvent {
 /// Gameplay (the combat module, AI) writes it: `target` is the one gameplay picked, and `foes`
 /// limits whom the animation module's own freeflow picking may choose (empty: anyone it can
 /// strike).
+///
+/// `zone` and `point` are where on the target the strike aims (where the player looks, the zone
+/// an NPC picked), `point` in the target's model space; defenders read them when the
+/// attacker's `AttackEvent` telegraph arrives.
 #[derive(Component, Debug, Clone, PartialEq, Default)]
 pub struct StrikeTargets {
     pub target: Option<Entity>,
     pub foes: Vec<Entity>,
+    pub zone: Option<crate::combat::BodyZone>,
+    pub point: Option<Vec3>,
 }
 
 /// How physical a character is: 0 = fully animated, 1 = limp ragdoll; in between, the
@@ -209,6 +291,21 @@ pub(crate) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_humanoid_bone_has_one_name_and_a_parent_listed_before_it() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, parent) in HUMANOID_BONES {
+            assert!(seen.insert(name), "{name} twice");
+            if let Some(p) = parent {
+                assert!(
+                    seen.contains(p),
+                    "{name}'s parent {p} comes later or is missing"
+                );
+            }
+        }
+        assert_eq!(HUMANOID_BONES.iter().filter(|b| b.1.is_none()).count(), 1);
+    }
 
     #[test]
     fn body_requests_from_data_fill_in_the_rest() {

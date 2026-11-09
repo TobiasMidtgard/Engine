@@ -483,13 +483,16 @@ pub enum CharacterQuality {
     Crowd,
 }
 
-/// How closed each hand is: 0 open .. 1 a closed grip, left then right (read clamped to 0..1).
-/// One writer per entity: NPC AI for the fighters it poses itself (1 while holding), the
-/// animation module for `BodyRequest` people. The character module curls the fingers.
+/// How each hand is posed, left then right. One writer per entity: NPC AI for the fighters it
+/// poses itself, the animation module for `BodyRequest` people. With finger bones the animation
+/// module poses the fingers from [`HandControls::hands`]; bodies without them curl the fingers
+/// from `grip` (0 open .. 1 a closed grip, read clamped to 0..1).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HandControls {
     pub grip: [f32; 2],
+    /// Per hand: the pose, how far into it, the handle it closes on, and per-finger overrides.
+    pub hands: [HandPose; 2],
 }
 
 impl HandControls {
@@ -499,10 +502,42 @@ impl HandControls {
     }
 }
 
-/// A person's own rest skeleton on the animation module's humanoid bones: their limb lengths
-/// and stature, for a poser to fit its skeleton (and the items it holds) to them. The character
-/// module writes it once the person is built and rewrites it when the look changes, so readers
-/// must not keep it across [`Appearance`] changes.
+/// A hand's shape from the hand pose library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum HandShape {
+    /// Hanging loose (natural cascade, index to pinky curling more).
+    #[default]
+    Relaxed,
+    Fist,
+    /// Closed round a handle of [`HandPose::handle_radius_m`].
+    PowerGrip,
+    /// Through a shield's straps, fingers round the grip.
+    ShieldStrap,
+    /// Drawing a bowstring.
+    Bow,
+    /// Flat and spread.
+    Open,
+    Point,
+    /// Thumb and index together.
+    Pinch,
+}
+
+/// One hand's pose: shape, weight 0..1 from relaxed, handle radius for grips (m), and an
+/// optional curl override per finger (thumb, index, middle, ring, pinky; 0 open .. 1 curled).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HandPose {
+    pub shape: HandShape,
+    pub weight: f32,
+    pub handle_radius_m: f32,
+    pub curl: Option<[f32; 5]>,
+}
+
+/// A person's own rest skeleton on the humanoid bones ([`crate::animation::HUMANOID_BONES`]):
+/// their limb lengths and stature. When a body has one, the animation module fits its logic
+/// skeleton to it, so IK and held items work on the drawn proportions (an input it must honour,
+/// not a hint). The character module writes it once the person is built and rewrites it when
+/// the look changes, so readers must not keep it across [`Appearance`] changes.
 #[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BodyFit {
@@ -631,7 +666,9 @@ pub(crate) fn register(app: &mut App) {
          echoes the guides simulated.",
     )
     .register_component::<HandControls>(
-        "How closed each hand is: grip [left, right], 0 open .. 1 closed.",
+        "How each hand is posed: grip [left, right] 0 open .. 1 closed, and per hand a shape \
+         (Relaxed, Fist, PowerGrip, ShieldStrap, Bow, Open, Point, Pinch), weight 0..1, handle \
+         radius (m) and optional curl per finger.",
     )
     .register_component::<BodyFit>(
         "A person's own rest skeleton on the humanoid bones (names, parents, model-space rest \
@@ -677,7 +714,10 @@ mod tests {
         assert_eq!(o.top, "shirt");
         assert_eq!(o.bottom, "trousers");
         assert_eq!(o.accent, [0.0, 0.2, 0.9]);
-        let hands = HandControls { grip: [1.4, -0.2] };
+        let hands = HandControls {
+            grip: [1.4, -0.2],
+            ..Default::default()
+        };
         assert_eq!((hands.grip(0), hands.grip(1)), (1.0, 0.0));
     }
 

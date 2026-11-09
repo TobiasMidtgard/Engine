@@ -347,9 +347,10 @@ pub fn run_shots(
         changed = true;
     }
     if let Some(g) = plan.grip {
-        commands
-            .entity(entity)
-            .insert(HandControls { grip: [g, g] });
+        commands.entity(entity).insert(HandControls {
+            grip: [g, g],
+            ..Default::default()
+        });
     }
     if face != Some(&shot.face) {
         commands.entity(entity).insert(shot.face.clone());

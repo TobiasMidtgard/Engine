@@ -126,6 +126,11 @@ pub struct Statuses {
     pub dread: f32,
     /// Held fast (a stone grip on the feet): anim keeps the feet planted, AI can't move off.
     pub rooted: bool,
+    /// A held shield just broke in this body's hands (0.6 s): anim plays a stagger; magic slows
+    /// the body's time scale meanwhile.
+    pub staggered: bool,
+    /// Holding a shield up: anim raises the off hand, movement walks 30% slower.
+    pub shielding: bool,
 }
 
 /// Present while a module draws and sounds spells from [`SpellLook`], [`SpellCue`] and

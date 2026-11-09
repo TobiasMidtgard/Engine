@@ -481,6 +481,8 @@ impl Afflictions {
             // Three seconds of terror is full fright.
             dread: (self.dread / 3.0).clamp(0.0, 1.0),
             rooted: self.rooted > 0.0,
+            // Magic fills these once shields that break and shields held up are afflictions.
+            ..Default::default()
         }
     }
 }

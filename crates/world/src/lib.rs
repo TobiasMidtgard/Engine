@@ -38,6 +38,7 @@
 pub mod air;
 pub mod animation;
 pub mod character;
+pub mod combat;
 pub mod cover;
 pub mod environment;
 pub mod events;
@@ -57,7 +58,12 @@ pub mod terrain;
 pub use air::{AirSample, Atmospheres, BodyAtmosphere};
 pub use character::{
     Appearance, AppearanceBodies, AppearanceRequest, BodyFit, CharacterQuality, FaceControls,
-    HairGuide, HairGuides, HairGuidesPosed, HandControls, Outfit, draws_appearances,
+    HairGuide, HairGuides, HairGuidesPosed, HandControls, HandPose, HandShape, Outfit,
+    draws_appearances,
+};
+pub use combat::{
+    Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass,
+    Loadout, ZoneInjury,
 };
 pub use cover::{CoverCell, CoverKind, GroundCover};
 pub use environment::*;
@@ -295,6 +301,7 @@ impl Plugin for WorldPlugin {
         physics::register(app);
         animation::register(app);
         character::register(app);
+        combat::register(app);
         locomotion::register(app);
         terrain::register(app);
         shift::register(app);
@@ -610,6 +617,10 @@ mod tests {
             "HairGuidesPosed",
             "HandControls",
             "BodyFit",
+            "Loadout",
+            "CombatSkills",
+            "BodyInjuries",
+            "AttackWindow",
         ] {
             assert!(
                 registry.component(name).is_some(),
