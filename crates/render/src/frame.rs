@@ -143,7 +143,8 @@ pub struct FrameUniform {
     /// Leaf area scale (`RenderSettings::canopy_strength`), mip levels, texel (m), unused.
     pub canopy_params: [f32; 4],
     /// Screen-space sun shadows past the cascades (`distant_shadow` in lib_frame.wgsl): march
-    /// length scale (`RenderSettings::distant_shadows`, 0 = off), unused x3.
+    /// length scale (`RenderSettings::distant_shadows`, 0 = off); the number of people with
+    /// capsules (capsules.rs, after the point lights in their buffer); unused x2.
     pub distant_shadows: [f32; 4],
 }
 
@@ -281,6 +282,10 @@ pub struct ViewData {
     pub delta: f32,
     pub frame_index: u64,
     pub point_lights: Vec<GpuPointLight>,
+    /// People's capsules (capsules.rs), in the lights' buffer after `point_lights`: how many
+    /// people, then their headers and capsules.
+    pub capsule_people: u32,
+    pub capsules: Vec<GpuPointLight>,
     /// Indoor volumes near the camera (at most [`MAX_SKY_VOLUMES`]).
     pub sky_volumes: Vec<GpuSkyVolume>,
     pub debug_view: DebugView,
@@ -911,6 +916,8 @@ pub fn build_view(
     }
     lights.sort_by(|a, b| a.0.total_cmp(&b.0));
     lights.truncate(settings.max_point_lights as usize);
+    let (capsule_people, capsules) =
+        crate::capsules::gather(world, origin, &frustum, lights.len() as u32);
 
     // Indoor volumes: nearest first (by distance from the camera to the box's bounding sphere).
     let mut volumes: Vec<(f32, GpuSkyVolume)> = Vec::new();
@@ -996,6 +1003,8 @@ pub fn build_view(
         delta,
         frame_index,
         point_lights: lights.into_iter().map(|(_, l)| l).collect(),
+        capsule_people,
+        capsules,
         sky_volumes: volumes.into_iter().map(|(_, v)| v).collect(),
         debug_view: settings.debug_view,
         sun_angular_radius,
@@ -1240,7 +1249,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         gust_offset: v.gust_offset(),
         canopy: [0.0; 4],
         canopy_params: [0.0; 4],
-        distant_shadows: [settings.distant_shadows.max(0.0), 0.0, 0.0, 0.0],
+        distant_shadows: [
+            settings.distant_shadows.max(0.0),
+            v.capsule_people as f32,
+            0.0,
+            0.0,
+        ],
     }
 }
 

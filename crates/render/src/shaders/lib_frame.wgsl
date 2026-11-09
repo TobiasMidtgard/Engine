@@ -505,6 +505,76 @@ fn distant_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return mix(1.0, lit, fade);
 }
 
+// ---------------------------------------------------------------- capsule shadows
+// People stood in for by capsules along their bones (capsules.rs): how much they hide of the sky
+// and of the sun just above a point, so feet stand on the ground and an arm darkens the side it
+// hangs against, where the shadow maps are too coarse (Unreal's capsule shadows; The Last of Us'
+// ellipsoid occlusion). Returns the sun's visibility (x) and the sky's (y), 1 away from people.
+// `n` is the surface's normal at camera-relative `rel`. A capsule the point lies on (within a
+// sixth of its radius of its surface) is the point's own limb and is skipped.
+const CAPSULE_REACH_M: f32 = 1.0;      // capsules.rs REACH_M
+const CAPSULE_SUN_SOFTNESS: f32 = 0.08; // penumbra growth along the sun ray (about 4.5 degrees)
+
+fn capsule_occlusion(rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let people = min(u32(frame.distant_shadows.y), 32u);
+    var sun = 1.0;
+    var sky = 1.0;
+    if (people == 0u) { return vec2<f32>(sun, sky); }
+    let base = frame.counts.x;
+    let l = frame.sun_dir.xyz;
+    let sun_on = frame.sun_color.w > 0.5 && dot(n, l) > 0.0;
+    for (var p = 0u; p < people; p++) {
+        let head = point_lights[base + p];
+        let center = head.position_range.xyz;
+        let reach = head.position_range.w;
+        let d = rel - center;
+        // Near enough for the sky, or the sun ray passes through the person's sphere.
+        let along = -dot(d, l);
+        let near_sky = dot(d, d) < reach * reach;
+        let near_sun = sun_on && along > -reach && dot(d, d) - along * along < reach * reach;
+        if (!near_sky && !near_sun) { continue; }
+        let first = u32(head.color_radius.x);
+        let count = min(u32(head.color_radius.y), 32u);
+        for (var i = 0u; i < count; i++) {
+            let c = point_lights[first + i];
+            let a = c.position_range.xyz;
+            let r = c.position_range.w;
+            let ab = c.color_radius.xyz - a;
+            let len2 = max(dot(ab, ab), 1e-8);
+            // The capsule's point nearest `rel`.
+            let q = a + ab * saturate(dot(rel - a, ab) / len2);
+            let to = q - rel;
+            let dist = length(to);
+            if (dist < r * 1.15) { continue; }
+            if (near_sky) {
+                // A sphere's cosine-weighted share of the sky above the point (exact while it is
+                // all above the horizon), faded out toward the reach.
+                let fade = 1.0 - smoothstep(r + 0.5 * CAPSULE_REACH_M, r + CAPSULE_REACH_M, dist);
+                let occ = saturate(dot(n, to) / dist) * r * r / (dist * dist);
+                sky *= 1.0 - saturate(occ) * fade;
+            }
+            if (near_sun) {
+                // The capsule's point nearest the sun ray from `rel`, and how far the ray passes
+                // from it; soft with the distance along the ray.
+                let w = rel - a;
+                let ab_l = dot(ab, l);
+                let denom = len2 - ab_l * ab_l;
+                let s = select(0.0, saturate((dot(w, ab) - dot(w, l) * ab_l) / denom), denom > 1e-8);
+                let qs = a + ab * s;
+                let t = dot(qs - rel, l);
+                if (t > 0.0 && t < CAPSULE_REACH_M + r) {
+                    let miss = length(qs - (rel + l * t));
+                    let pen = 0.01 + t * CAPSULE_SUN_SOFTNESS;
+                    let vis = smoothstep(r - pen, r + pen, miss);
+                    // Fades out toward the reach, where the cascades carry the shadow on.
+                    sun = min(sun, mix(vis, 1.0, smoothstep(0.6 * CAPSULE_REACH_M, CAPSULE_REACH_M, t)));
+                }
+            }
+        }
+    }
+    return vec2<f32>(sun, sky);
+}
+
 // ---------------------------------------------------------------- cloud shadows
 // Share of the sunlight (0..1) the clouds let through to camera-relative `rel`: multiply
 // sunlight by it, with the shadow maps and `sun_transmittance`. `shade_surface`,
@@ -1252,12 +1322,14 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_above = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
     let in_fog = height_fog_sunlight(rel);
+    // People's capsules: their shadow just above the point and the sky they hide.
+    let capsules = capsule_occlusion(rel, n);
     let sun_light = sun_above * in_fog.x;
     let sides = thin_surface_sides(face, l);
     if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
         let lit_side = select(-face, face, sides.x > 0.0);
-        var shadow = shadow_factor(rel, lit_side) * sun_visibility;
+        var shadow = min(shadow_factor(rel, lit_side), capsules.x) * sun_visibility;
         if (shadow > 0.0) { shadow *= distant_shadow(rel, lit_side); }
         if (shadow > 0.0 && n_dot_l > 0.0) {
             // Diffuse light follows the shading normal, whichever way the sheet faces: foliage
@@ -1281,7 +1353,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
             color += through_color * (thin_surface_through(n_dot_l_raw, v, l) * sides.y * shadow) * sun_light;
         }
     } else if (!thin && dot(sun_light, sun_light) > 0.0) {
-        var shadow = shadow_factor(rel, n) * sun_visibility;
+        var shadow = min(shadow_factor(rel, n), capsules.x) * sun_visibility;
         if (shadow > 0.0 && n_dot_l_raw > 0.0) {
             shadow *= contact_shadow(rel, n) * distant_shadow(rel, n);
         }
@@ -1387,7 +1459,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let ssr = screen_reflection(rel);
     let spec_env = mix(sample_env_rough(dominant, s.roughness) * spec_sky + fill, ssr.rgb, ssr.a);
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
-    let visibility = min(s.occlusion, screen_ao(rel));
+    let visibility = min(s.occlusion, screen_ao(rel)) * capsules.y;
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
     // Sky light shining through a thin sheet from behind.
     if (translucent) {

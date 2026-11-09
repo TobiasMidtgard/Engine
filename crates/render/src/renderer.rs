@@ -2030,10 +2030,14 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&overlay_uniform),
         );
-        let light_bytes: &[u8] = if view.point_lights.is_empty() {
+        let lights_and_capsules: Vec<GpuPointLight>;
+        let light_bytes: &[u8] = if view.point_lights.is_empty() && view.capsules.is_empty() {
             &[0u8; 32]
-        } else {
+        } else if view.capsules.is_empty() {
             bytemuck::cast_slice(&view.point_lights)
+        } else {
+            lights_and_capsules = [view.point_lights.as_slice(), &view.capsules].concat();
+            bytemuck::cast_slice(&lights_and_capsules)
         };
         let occlusion_resized =
             view.sky_occlusion.enabled && view.sky_occlusion.map_size != self.shadow.occlusion_size;
