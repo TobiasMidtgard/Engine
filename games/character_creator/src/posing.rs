@@ -12,6 +12,48 @@ use engine_character::rig::{BoneKind, Rig};
 use engine_character::{Appearance, anatomy, hands};
 use serde::{Deserialize, Serialize};
 
+/// What a hand holds in the tool (`crate::props` draws it in the hand's grip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Held {
+    #[default]
+    Nothing,
+    Sword,
+    Dagger,
+    Spear,
+    Torch,
+}
+
+impl Held {
+    pub const ALL: [Held; 5] = [
+        Held::Nothing,
+        Held::Sword,
+        Held::Dagger,
+        Held::Spear,
+        Held::Torch,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Held::Nothing => "Nothing",
+            Held::Sword => "Sword",
+            Held::Dagger => "Dagger",
+            Held::Spear => "Spear",
+            Held::Torch => "Torch",
+        }
+    }
+
+    /// The handle's radius, cm (what the grip closes round).
+    pub fn handle_cm(self) -> Option<f32> {
+        match self {
+            Held::Nothing => None,
+            Held::Sword => Some(1.6),
+            Held::Dagger => Some(1.35),
+            Held::Spear => Some(1.6),
+            Held::Torch => Some(2.0),
+        }
+    }
+}
+
 /// One hand's shape in the tool.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,6 +63,8 @@ pub struct HandEdit {
     pub weight: f32,
     /// A grip's handle radius, cm.
     pub handle_cm: f32,
+    /// What the hand holds (not mirrored: one hand can hold a sword, the other nothing).
+    pub held: Held,
 }
 
 impl Default for HandEdit {
@@ -29,6 +73,7 @@ impl Default for HandEdit {
             shape: HandShape::Relaxed,
             weight: 1.0,
             handle_cm: 1.7,
+            held: Held::Nothing,
         }
     }
 }
@@ -120,8 +165,16 @@ impl PoseEdit {
             }
         }
         for side in 0..2 {
-            if self.hands[side] != before.hands[side] {
-                self.hands[1 - side] = self.hands[side];
+            let shape = |h: &HandEdit| HandEdit {
+                held: Held::Nothing,
+                ..*h
+            };
+            if shape(&self.hands[side]) != shape(&before.hands[side]) {
+                let held = self.hands[1 - side].held;
+                self.hands[1 - side] = HandEdit {
+                    held,
+                    ..self.hands[side]
+                };
             }
         }
     }
@@ -298,6 +351,14 @@ mod tests {
         p.tidy();
         assert_eq!(p.joints["lower_arm_l"], [150.0, 0.0, 0.0]);
         assert_eq!(p.joints["head"], [0.0; 3]);
+        let before = p.clone();
+        p.hands[1].held = Held::Sword;
+        p.mirrored_from(&before);
+        assert_eq!(
+            p.hands[0].held,
+            Held::Nothing,
+            "a held item stays in its own hand"
+        );
         p.reset(Some("upper_arm_r"));
         assert_eq!(p.joints["upper_arm_r"], [0.0; 3]);
         assert_eq!(p.joints["upper_arm_l"], [40.0, 10.0, 0.0]);

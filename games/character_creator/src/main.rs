@@ -17,6 +17,7 @@ mod joints;
 mod panel;
 mod pose;
 mod posing;
+mod props;
 mod shots;
 mod studio;
 
@@ -35,11 +36,13 @@ fn main() {
         // Long hair swings and settles as the person moves.
         .add_plugins(engine_softbody::SoftBodyPlugin)
         .init_resource::<studio::CameraFocus>()
+        .init_resource::<props::HeldProps>()
         .add_systems(Startup, studio::setup)
         .add_systems(
             Update,
             (pose::drive, studio::face_camera, studio::orbit_camera).chain(),
-        );
+        )
+        .add_systems(Update, props::update.after(pose::drive));
     // Portraits keep full detail however far the camera pulls back; `--lod-scale s` shows the
     // game's detail by distance instead, as if the camera stood s times farther away.
     let lod_scale = std::env::args()

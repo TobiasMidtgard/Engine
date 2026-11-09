@@ -308,6 +308,13 @@ fn tab_content(ui: &CreatorUi, a: &Appearance, p: &PoseEdit) -> Vec<El> {
                     "creator.shape",
                 ));
             }
+            out.push(heading("Holds"));
+            out.push(styles(
+                crate::posing::Held::ALL
+                    .iter()
+                    .map(|x| (x.name(), *x == h.held)),
+                "creator.held",
+            ));
             out.push(bound_slider(
                 "Into the shape",
                 format!("creator_pose.hands.{}.weight", ui.hand),
@@ -419,6 +426,18 @@ fn tab_content(ui: &CreatorUi, a: &Appearance, p: &PoseEdit) -> Vec<El> {
                     1.0,
                     0.02,
                 ));
+            }
+            // Hide groups: what armor or a long coat covers is left out of the body.
+            out.push(heading("Hidden under armor"));
+            for row in engine_character::cover::REGIONS.chunks(4) {
+                out.push(El::new().class("row").children(row.iter().map(|r| {
+                    El::button(
+                        slider_label("", &r.replace('_', " ")),
+                        format!("creator.hide:{r}"),
+                    )
+                    .class("chip")
+                    .selected(a.hide.iter().any(|h| h == r))
+                })));
             }
         }
         "Skin" => {
@@ -595,6 +614,34 @@ pub fn apply_actions(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>)
                 ui.hand = side;
                 ui.rebuild = true;
                 world.resource_mut::<CameraFocus>().0 = Some(["hand_l", "hand_r"][side].into());
+            }
+            "hide" => {
+                if engine_character::cover::REGIONS.contains(&arg) {
+                    if let Some(i) = a.hide.iter().position(|h| h == arg) {
+                        a.hide.remove(i);
+                    } else {
+                        a.hide.push(arg.to_string());
+                    }
+                }
+            }
+            "held" => {
+                if let Some(h) = crate::posing::Held::ALL
+                    .into_iter()
+                    .find(|h| h.name() == arg)
+                {
+                    let side = world.resource::<CreatorUi>().hand;
+                    let hand = &mut p.hands[side];
+                    hand.held = h;
+                    // The hand closes round the handle (and opens again when it lets go).
+                    match h.handle_cm() {
+                        Some(cm) => {
+                            hand.shape = engine::world::character::HandShape::PowerGrip;
+                            hand.weight = 1.0;
+                            hand.handle_cm = cm;
+                        }
+                        None => hand.shape = engine::world::character::HandShape::Relaxed,
+                    }
+                }
             }
             "shape" => {
                 if let Some(s) = hands::SHAPES.iter().find(|s| hands::shape_name(**s) == arg) {

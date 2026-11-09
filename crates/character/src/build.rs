@@ -118,7 +118,12 @@ pub fn build(
         head: shift(lm0.head),
         mouth: shift(lm0.mouth),
     };
-    let headgear = Headgear::from_id(&a.headgear);
+    // A hidden head is a closed helm's: no hair, eyes or mouth either.
+    let headgear = if a.hide.iter().any(|h| h == "head") {
+        Headgear::ClosedHelm
+    } else {
+        Headgear::from_id(&a.headgear)
+    };
     let margins = regions
         .lid_margins
         .clone()
@@ -164,6 +169,7 @@ pub fn build(
         skin.add_part(pack, &hood::build(pack, &morphed, lm0.head));
     }
     headgear.cover_skin(&mut skin, lm0.head);
+    crate::cover::hide(&mut skin, &pack.bones, &a.hide);
     let hair_shadow = strands::shadow_grid(&strands, &skin);
     let face = if opts.face {
         face::build(pack, &skin, a)

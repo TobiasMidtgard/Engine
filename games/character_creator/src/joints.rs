@@ -158,7 +158,7 @@ pub fn update(world: &mut World) {
     }
 }
 
-fn points_of(
+pub fn points_of(
     t: &Transform,
     built: &BuiltCharacter,
     pose: &engine::world::animation::SkeletonPose,

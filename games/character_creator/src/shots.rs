@@ -239,6 +239,9 @@ impl ShotPlan {
         let views = value("--views").unwrap_or_else(|| "front,34,profile".into());
         let body_pose = value("--pose").unwrap_or_else(|| "stand".into());
         let headgear = value("--headgear");
+        // `--hide torso,upper_arms`: body regions left out, as under armor.
+        let hide: Option<Vec<String>> =
+            value("--hide").map(|s| s.split(',').map(|r| r.trim().to_string()).collect());
         let outfit = value("--outfit");
         let colors = value("--colors");
         let grip = value("--grip").and_then(|g| g.parse::<f32>().ok());
@@ -302,6 +305,9 @@ impl ShotPlan {
             }
             if let Some(h) = &headgear {
                 a.headgear = h.clone();
+            }
+            if let Some(h) = &hide {
+                a.hide = h.clone();
             }
             if let Some(o) = &outfit {
                 let ids: Vec<&str> = o.split(',').map(str::trim).collect();
