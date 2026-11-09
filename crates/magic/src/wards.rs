@@ -111,6 +111,8 @@ pub const REGROW_RATE: f32 = 0.2;
 /// Seconds a holder staggers when its shield breaks (Skyrim), and its time scale meanwhile.
 pub const STAGGER_SECS: f32 = 0.6;
 pub const STAGGER_SCALE: f32 = 0.35;
+/// How long a held shield's `shielding` outlasts the last step it rode before its holder, s.
+const HOLDING_SECS: f32 = 0.1;
 /// Seconds the ring of a perfect block pulses off the face.
 pub const PULSE_SECS: f32 = 0.35;
 
@@ -1994,8 +1996,10 @@ pub fn tend_wards(
 /// it is drawn. A holder that is gone lowers it.
 pub fn hold_shields(
     time: Res<Time>,
+    mut commands: Commands,
     mut shields: Query<(&mut Barrier, &mut HeldShield)>,
     bodies: Query<(&Transform, Option<&CharacterController>)>,
+    mut holders: Query<&mut Afflictions>,
 ) {
     let dt = time.delta_secs();
     for (mut b, mut h) in &mut shields {
@@ -2003,6 +2007,18 @@ pub fn hold_shields(
             b.life = b.life.min(b.age);
             continue;
         };
+        // The holder shows it holds a shield up (`Statuses::shielding`): anim raises the off
+        // hand and movement walks slower.
+        if b.stands() {
+            match holders.get_mut(h.holder) {
+                Ok(mut a) => a.shielding = a.shielding.max(HOLDING_SECS),
+                Err(_) => {
+                    let mut a = Afflictions::default();
+                    a.shielding = HOLDING_SECS;
+                    commands.entity(h.holder).try_insert(a);
+                }
+            }
+        }
         // Read the bodies' own transforms: a moving holder's global one is a step old here.
         let aim_point = match h.aim {
             Aim::Point(p) => Some(p),

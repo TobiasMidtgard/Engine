@@ -2806,6 +2806,11 @@ fn a_broken_shield_staggers_its_holder_locks_it_out_and_a_held_one_regrows() {
     );
     run(&mut app, 0.6);
     let (e, _) = barriers(&mut app)[0].clone();
+    let shows = |app: &App| *app.world.get::<Statuses>(warden).unwrap();
+    assert!(
+        shows(&app).shielding && !shows(&app).staggered,
+        "it shows it holds a shield up"
+    );
     // Two bolts, then quiet: it regrows to full.
     for _ in 0..2 {
         cast(&mut app, foe, bolt(), Aim::Entity(warden));
@@ -2837,6 +2842,11 @@ fn a_broken_shield_staggers_its_holder_locks_it_out_and_a_held_one_regrows() {
     assert!(a.ward_lock > 0.0, "locked out");
     assert!(a.staggered > 0.0, "staggered for a moment");
     assert!(a.time_scale() < 0.5, "slowed while it staggers");
+    run(&mut app, 0.1);
+    assert!(
+        shows(&app).staggered && !shows(&app).shielding,
+        "and shows it staggers"
+    );
     // Raised again while locked out, it sputters.
     cast(&mut app, warden, shield(), Aim::Entity(foe));
     run(&mut app, 0.5);

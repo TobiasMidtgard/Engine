@@ -117,6 +117,9 @@ pub struct Afflictions {
     pub ward_broke: bool,
     /// Seconds left staggering (a held shield broke in its hands).
     pub staggered: f32,
+    /// Holding a shield up: [`crate::wards::hold_shields`] keeps this a moment ahead while it
+    /// rides before the body, so it lapses a step or two after the shield goes.
+    pub shielding: f32,
     /// Haste or slow: time factor and seconds left.
     pub tempo: Option<(f32, f32)>,
     /// Seconds left unseen.
@@ -430,6 +433,7 @@ impl Afflictions {
         }
         self.ward_lock = (self.ward_lock - dt).max(0.0);
         self.staggered = (self.staggered - dt).max(0.0);
+        self.shielding = (self.shielding - dt).max(0.0);
         if let Some((f, s)) = self.tempo {
             self.tempo = (s - dt > 0.0).then_some((f, s - dt));
         }
@@ -481,8 +485,8 @@ impl Afflictions {
             // Three seconds of terror is full fright.
             dread: (self.dread / 3.0).clamp(0.0, 1.0),
             rooted: self.rooted > 0.0,
-            // Magic fills these once shields that break and shields held up are afflictions.
-            ..Default::default()
+            staggered: self.staggered > 0.0,
+            shielding: self.shielding > 0.0,
         }
     }
 }
