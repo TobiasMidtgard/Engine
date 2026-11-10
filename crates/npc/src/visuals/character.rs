@@ -6,6 +6,19 @@
 //!   related, a sex picked from the seed, and an age range by its skill (a rookie 18–26, a
 //!   master 34–52). The character module answers with an `Appearance`; one already there is
 //!   kept.
+//! * **Kit.** The request carries the team's kit ([`team_kit`]), so the first build is
+//!   already dressed: a top dyed the team's colour (short sleeves for a rookie), trousers in
+//!   undyed or earthy cloth by its seed, a bright armband of the team's colour on the left
+//!   arm, and a hood (in the top's colour) for archers and riflemen. A look given outright is
+//!   kept.
+//! * **Hands.** `HandControls` from what each hand holds ([`super::humanoid::hand_controls`]):
+//!   a power grip round the handle (sword grips, the carbine's pistol grip and handguard, the
+//!   bow's riser, a magazine), through the shield's straps, the bow hand hooking the string or
+//!   pinching the next arrow, bare fists balled; a hand off its handle relaxes.
+//! * **Size.** While a character module draws the fighter and has written its `BodyFit`, the
+//!   stand-in's pose (and what it holds) is stretched in height to that person's shoulder
+//!   height ([`size_of`]), so a short fighter's hands meet the weapon where its arms reach and
+//!   the feet stay where the gait plants them.
 //! * **Pose and face.** One writer per entity: on fighters without a `BodyRequest` (whose
 //!   pose the animation module writes), this module writes `SkeletonPose` every step from the
 //!   stand-in's pose, on the animation module's humanoid skeleton (its bone names and parents,
@@ -38,7 +51,9 @@ use std::sync::{Arc, LazyLock};
 
 use engine_core::prelude::*;
 use engine_world::animation::{BodyRequest, BonePose, SkeletonPose};
-use engine_world::character::{ARKIT, Appearance, AppearanceRequest, FaceControls, arkit};
+use engine_world::character::{
+    ARKIT, Appearance, AppearanceRequest, BodyFit, FaceControls, HandControls, Outfit, arkit,
+};
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::{DamageEvent, DamageKind};
 
@@ -218,12 +233,33 @@ fn controls(s: &Skeleton, x: &Expression, out: &mut FaceControls) {
     out.gaze_pitch = ahead.y.clamp(-1.0, 1.0).asin();
 }
 
+/// The stand-in's shoulder height standing at rest (m).
+const STAND_IN_SHOULDERS: f32 = crate::art::fighter::rig::HIP_Y
+    + crate::art::fighter::rig::WAIST.y
+    + crate::art::fighter::rig::SHOULDER.y;
+
+/// A person's size as a share of the stand-in's, by the height of their shoulders standing at
+/// rest (what decides where their hands reach), kept within 0.8..1.15; 1 for a skeleton
+/// without shoulders.
+pub(crate) fn size_of(fit: &BodyFit) -> f32 {
+    let at = |name: &str| {
+        let i = fit.names.iter().position(|n| n == name)?;
+        fit.rest.get(i).map(|b| b.translation.y)
+    };
+    match (at("upper_arm_l"), at("upper_arm_r")) {
+        (Some(l), Some(r)) if l + r > 0.0 => (0.5 * (l + r) / STAND_IN_SHOULDERS).clamp(0.8, 1.15),
+        _ => 1.0,
+    }
+}
+
 /// What the pose and face writer reads and writes of a fighter.
 type BodyItem<'a> = (
     Entity,
     &'a StandInState,
     Option<&'a mut SkeletonPose>,
     Option<&'a mut FaceControls>,
+    Option<&'a mut HandControls>,
+    Option<&'a crate::agent::NpcWeapon>,
 );
 
 type BodyFilter = (
@@ -232,10 +268,10 @@ type BodyFilter = (
     Without<crate::rest::Resting>,
 );
 
-/// Write each fighter's `SkeletonPose` and `FaceControls` from its stand-in's pose (not where
-/// a `BodyRequest` has the animation module write the pose).
+/// Write each fighter's `SkeletonPose`, `FaceControls` and `HandControls` from its stand-in's
+/// pose (not where a `BodyRequest` has the animation module write the pose).
 pub(crate) fn write_bodies(mut commands: Commands, mut q: Query<BodyItem, BodyFilter>) {
-    for (e, st, pose, face) in &mut q {
+    for (e, st, pose, face, hands, weapon) in &mut q {
         let Some((s, x)) = st.motion.body() else {
             continue;
         };
@@ -263,6 +299,17 @@ pub(crate) fn write_bodies(mut commands: Commands, mut q: Query<BodyItem, BodyFi
                 commands.entity(e).try_insert(face);
             }
         }
+        let held = super::humanoid::hand_controls(s, &weapon.copied().unwrap_or_default());
+        match hands {
+            Some(mut hands) => {
+                if *hands != held {
+                    *hands = held;
+                }
+            }
+            None => {
+                commands.entity(e).try_insert(held);
+            }
+        }
     }
 }
 
@@ -279,6 +326,7 @@ pub(crate) fn appearance_request(
     squad: Option<Squad>,
     faction: Option<Faction>,
     skills: Option<&NpcSkills>,
+    weapon: Option<&crate::agent::NpcWeapon>,
 ) -> AppearanceRequest {
     let family = squad.map(|s| {
         let team = faction.map_or(0, |f| u64::from(f.0));
@@ -291,13 +339,15 @@ pub(crate) fn appearance_request(
     };
     let level = skills.map_or(0.5, |s| s.level()).clamp(0.0, 1.0);
     let young = 18.0 + 16.0 * level;
+    let (outfit, headgear) = team_kit(seed, faction.as_ref(), skills, weapon);
     AppearanceRequest {
         seed: seed.0,
         family,
         sex: Some(sex),
         age: Some([young, young + 8.0 + 10.0 * level]),
         ancestry: None,
-        ..Default::default()
+        outfit: Some(outfit),
+        headgear: Some(headgear),
     }
 }
 
@@ -307,6 +357,7 @@ type Unasked<'a> = (
     Option<&'a Squad>,
     Option<&'a Faction>,
     Option<&'a NpcSkills>,
+    Option<&'a crate::agent::NpcWeapon>,
 );
 
 /// Give each new fighter its `AppearanceRequest`.
@@ -327,8 +378,8 @@ pub(crate) fn request_appearances(
     if !settings.character_looks {
         return;
     }
-    for (e, &seed, squad, faction, skills) in &q {
-        let request = appearance_request(seed, squad.copied(), faction.copied(), skills);
+    for (e, &seed, squad, faction, skills, weapon) in &q {
+        let request = appearance_request(seed, squad.copied(), faction.copied(), skills, weapon);
         commands.entity(e).try_insert(request);
     }
 }
@@ -342,6 +393,50 @@ fn marks(kind: DamageKind) -> (f32, f32) {
         DamageKind::Fall => (0.2, 1.0),
         DamageKind::Fire | DamageKind::Cold | DamageKind::Magic => (0.2, 0.2),
     }
+}
+
+/// sRGB 0..255 to linear 0..1.
+fn linear(hex: u32) -> [f32; 3] {
+    let c = |v: u32| {
+        let v = (v & 0xff) as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [c(hex >> 16), c(hex >> 8), c(hex)]
+}
+
+/// Undyed and earthy cloth for the trousers: linen, wool, leather brown, slate, olive, ink.
+const TROUSERS: [u32; 6] = [0x8c8270, 0x6e6252, 0x4a3a2a, 0x3b3d42, 0x4a4c33, 0x26282e];
+
+/// The team's kit for a fighter whose look leaves the clothes as they come (see the module
+/// docs): a top dyed the team's colour (a short-sleeved one for a rookie), trousers in an
+/// undyed or earthy cloth picked by its seed, an armband in the team's colour on the left arm,
+/// and a hood for those who fight from range.
+pub(crate) fn team_kit(
+    seed: Seed,
+    faction: Option<&Faction>,
+    skills: Option<&NpcSkills>,
+    weapon: Option<&crate::agent::NpcWeapon>,
+) -> (Outfit, String) {
+    let team = linear(super::faction_color(faction));
+    // Dyed wool takes the colour deep and a little dull; the armband is bright.
+    let grey = (team[0] + team[1] + team[2]) / 3.0;
+    let dyed = team.map(|c| 0.55 * (0.8 * c + 0.2 * grey));
+    let level = skills.map_or(0.5, |s| s.level());
+    let trousers = TROUSERS[(mix(seed.0 ^ 0x7a05) % TROUSERS.len() as u64) as usize];
+    let outfit = Outfit {
+        top: if level < 0.35 { "tshirt" } else { "shirt" }.into(),
+        top_color: dyed,
+        bottom: "trousers".into(),
+        bottom_color: linear(trousers),
+        accent: team,
+        accent_on: "armband_l".into(),
+    };
+    let ranged = weapon.is_some_and(|w| w.style == crate::agent::WeaponStyle::Ranged);
+    (outfit, if ranged { "hood" } else { "none" }.into())
 }
 
 type WearItem<'a> = (

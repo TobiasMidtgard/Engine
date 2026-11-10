@@ -668,10 +668,10 @@ pub struct NpcSettings {
     pub ally_revive_health: f32,
     /// Squad mates farther than this from a downed NPC leave it be, meters.
     pub ally_revive_range: f32,
-    /// Fighters ask a character module for their looks (an `AppearanceRequest`) and, while it
-    /// draws them, hide their own bodies. Off until the character contract carries what fighters
-    /// need to be drawn by it: their body size (so held weapons meet the hands), a grip, armour
-    /// and team colours.
+    /// Fighters ask a character module for their looks (an `AppearanceRequest`), come dressed
+    /// in their team's kit, and while it draws them hide their own bodies (what they hold
+    /// stays), their pose sized to each person and their hands closed on what they hold
+    /// (`visuals/character.rs`). On by default; off, every fighter keeps its stand-in body.
     pub character_looks: bool,
     /// Fighters' path searches run beside the frame and are answered the next step (`Some(true)`)
     /// or at once (`Some(false)`). `None` decides by the run: beside in play, at once in tests
@@ -692,7 +692,7 @@ impl Default for NpcSettings {
             ally_revive_secs: 2.0,
             ally_revive_health: 0.4,
             ally_revive_range: 20.0,
-            character_looks: false,
+            character_looks: true,
             paths_beside: None,
         }
     }

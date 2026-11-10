@@ -9,9 +9,11 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_npc::*;
 use engine_render::MeshRenderer;
+use engine_world::animation::BonePose;
 use engine_world::animation::{AnimationEvent, SkeletonPose};
 use engine_world::character::{
-    Appearance, AppearanceBodies, AppearanceRequest, FaceControls, draws_appearances,
+    Appearance, AppearanceBodies, AppearanceRequest, BodyFit, FaceControls, HandControls,
+    HandShape, Outfit, draws_appearances,
 };
 use engine_world::locomotion::MoveIntent;
 use engine_world::{DamageEvent, DamageKind, GroundContact, WorldPlugin};
@@ -496,14 +498,33 @@ fn each_footstep_is_an_animation_event_on_its_foot() {
 }
 
 #[test]
-fn fighters_ask_for_no_looks_by_default() {
-    let mut app = App::new();
-    app.world
-        .resource_mut::<Time>()
-        .set_source(TimeSource::Manual {
-            step_secs: 1.0 / 60.0,
-        });
-    app.add_plugins((WorldPlugin, NpcPlugin));
+fn fighters_ask_for_looks_by_default_and_keep_their_bodies_with_looks_off() {
+    let fresh = || {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.add_plugins((WorldPlugin, NpcPlugin));
+        app
+    };
+    let mut app = fresh();
+    let e = fighter(
+        &mut app,
+        DVec3::ZERO,
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::sword_and_shield(),
+    );
+    run(&mut app, 0.2);
+    assert!(
+        app.world.get::<AppearanceRequest>(e).is_some(),
+        "on by default"
+    );
+
+    let mut app = fresh();
+    app.world.resource_mut::<NpcSettings>().character_looks = false;
     let e = fighter(
         &mut app,
         DVec3::ZERO,
@@ -523,4 +544,194 @@ fn fighters_ask_for_no_looks_by_default() {
     for p in [Part::Fighter(18), Part::Fighter(19), Part::Fighter(20)] {
         assert!(shown.contains(&p), "{p:?} hidden without a look asked for");
     }
+}
+
+/// What a character module would answer a request with: a plain look in the clothes everyone
+/// starts in.
+fn answer(app: &mut App, e: Entity) {
+    let seed = app.world.get::<AppearanceRequest>(e).expect("asked").seed;
+    app.world.entity_mut(e).insert(Appearance {
+        seed,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn a_look_is_asked_for_in_the_team_kit_and_one_given_is_kept() {
+    let mut app = app();
+    let at = |x: f64| DVec3::new(x, 0.0, 0.0);
+    let red = fighter(
+        &mut app,
+        at(0.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::sword(),
+    );
+    let red_gun = fighter(
+        &mut app,
+        at(2.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::rifle(),
+    );
+    let blue = fighter(
+        &mut app,
+        at(4.0),
+        Vec3::NEG_Z,
+        Faction::RIVAL,
+        NpcWeapon::bow(),
+    );
+    let given = fighter(
+        &mut app,
+        at(6.0),
+        Vec3::NEG_Z,
+        Faction::RIVAL,
+        NpcWeapon::sword(),
+    );
+    app.world.entity_mut(given).insert(Appearance::default());
+    run(&mut app, 0.1);
+    let ask = |e: Entity| {
+        let r = app.world.get::<AppearanceRequest>(e).expect("asked");
+        (
+            r.outfit.clone().expect("a kit"),
+            r.headgear.clone().expect("headgear"),
+        )
+    };
+    let ((r, r_head), (g, g_head), (b, b_head)) = (ask(red), ask(red_gun), ask(blue));
+    // Dyed the team's colour: red's top is red, blue's blue; team mates match.
+    let warm = |o: &Outfit| o.top_color[0] - o.top_color[2];
+    assert!(warm(&r) > 0.05 && warm(&b) < -0.05, "{r:?} {b:?}");
+    assert_eq!(r.top_color, g.top_color);
+    assert_eq!(r.accent_on, "armband_l");
+    assert!(r.accent[0] > r.top_color[0], "the armband is brighter");
+    // Hoods on those who fight from range.
+    assert_eq!(r_head, "none");
+    assert_eq!(g_head, "hood");
+    assert_eq!(b_head, "hood");
+    // Given outright: no request, kept as it is.
+    run(&mut app, 0.1);
+    assert!(app.world.get::<AppearanceRequest>(given).is_none());
+    assert_eq!(
+        *app.world.get::<Appearance>(given).unwrap(),
+        Appearance::default()
+    );
+}
+
+#[test]
+fn hands_close_on_what_they_hold() {
+    let mut app = app();
+    let at = |x: f64| DVec3::new(x, 0.0, 0.0);
+    let longsword = fighter(
+        &mut app,
+        at(0.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::sword(),
+    );
+    let shield = fighter(
+        &mut app,
+        at(3.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::sword_and_shield(),
+    );
+    let rifle = fighter(
+        &mut app,
+        at(6.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::rifle(),
+    );
+    let bow = fighter(
+        &mut app,
+        at(9.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::bow(),
+    );
+    let fists = fighter(
+        &mut app,
+        at(12.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::claws(),
+    );
+    for e in [longsword, shield, rifle, bow, fists] {
+        app.world.get_mut::<Npc>(e).unwrap().active = false;
+    }
+    run(&mut app, 1.0);
+    let hands = |e: Entity| *app.world.get::<HandControls>(e).expect("hands written");
+    let closed = |h: &HandControls, k: usize, shape: HandShape| {
+        let p = h.hands[k];
+        assert_eq!(p.shape, shape, "{h:?}");
+        assert!(p.weight > 0.9 && h.grip[k] > 0.9, "{h:?}");
+    };
+    // At ease the longsword hangs from the right hand, the left free.
+    let h = hands(longsword);
+    closed(&h, 1, HandShape::PowerGrip);
+    assert!(h.hands[0].weight < 0.1 && h.grip[0] < 0.1, "{h:?}");
+    assert!((0.01..0.03).contains(&h.hands[1].handle_radius_m));
+    let h = hands(shield);
+    closed(&h, 0, HandShape::ShieldStrap);
+    closed(&h, 1, HandShape::PowerGrip);
+    // The carbine carried at ease hangs from the right hand; the left is free.
+    let h = hands(rifle);
+    closed(&h, 1, HandShape::PowerGrip);
+    let h = hands(bow);
+    closed(&h, 0, HandShape::PowerGrip);
+    let h = hands(fists);
+    assert!(
+        h.hands
+            .iter()
+            .all(|p| p.shape == HandShape::Fist && p.weight > 0.8)
+    );
+}
+
+#[test]
+fn the_pose_is_sized_to_the_person_drawn() {
+    let mut app = app();
+    let e = held_still(&mut app);
+    run(&mut app, 0.5);
+    draws_appearances(&mut app, "test");
+    answer(&mut app, e);
+    run(&mut app, 0.5);
+    let measure = |app: &App| {
+        let pose = app.world.get::<SkeletonPose>(e).unwrap();
+        let hand = bone(pose, "hand_r").0;
+        let foot = bone(pose, "foot_l").0;
+        let sword = parts(app, e)
+            .into_iter()
+            .find(|p| p.0 == Part::Fighter(28))
+            .map(|p| p.1.translation.as_vec3())
+            .unwrap();
+        (hand, foot, sword)
+    };
+    let (hand, foot, sword) = measure(&app);
+    // A person nine tenths the stand-in's size: their shoulders that much lower.
+    let shoulders = 0.9 * 1.43;
+    let mut rest = vec![BonePose::default(); 3];
+    rest[1].translation = Vec3::new(-0.17, shoulders, 0.0);
+    rest[2].translation = Vec3::new(0.17, shoulders, 0.0);
+    app.world.entity_mut(e).insert(BodyFit {
+        names: vec!["root".into(), "upper_arm_l".into(), "upper_arm_r".into()],
+        parents: vec![None, Some(0), Some(0)],
+        rest,
+        height: 1.6,
+    });
+    run(&mut app, 0.2);
+    let (hand2, foot2, sword2) = measure(&app);
+    assert!((hand2.y - 0.9 * hand.y).abs() < 0.03, "{hand} -> {hand2}");
+    assert!((hand2.x - hand.x).abs() < 0.03 && (hand2.z - hand.z).abs() < 0.03);
+    assert!(
+        (foot2.y - foot.y).abs() < 0.02,
+        "the feet stay down: {foot} -> {foot2}"
+    );
+    // The sword stays in the hand.
+    let grip = |h: Vec3, s: Vec3| (s - h).length();
+    assert!(
+        (grip(hand2, sword2) - grip(hand, sword)).abs() < 0.015,
+        "{} -> {}",
+        grip(hand, sword),
+        grip(hand2, sword2)
+    );
 }

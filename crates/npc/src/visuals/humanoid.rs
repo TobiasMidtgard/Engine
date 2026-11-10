@@ -23,6 +23,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
+use engine_world::character::HandControls;
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackKind, DamageEvent, DamageKind};
 
@@ -947,6 +948,9 @@ pub(super) struct Seen<'a> {
     /// Reviving a downed mate: where its chest lies as last posed (the front over the
     /// breastbone), and where the knees go beside it.
     pub patient: Option<(DVec3, DVec3)>,
+    /// The height of the person another module draws in the stand-in's place, as a share of
+    /// the stand-in's (1 without one): the pose is stretched to it ([`Skeleton::sized`]).
+    pub size: f32,
 }
 
 /// Everything the pose depends on.
@@ -5653,6 +5657,12 @@ pub(super) fn humanoid(
         tend,
         seed,
     });
+    // Sized to the person drawn in its place (see `Seen::size`).
+    let skeleton = if (seen.size - 1.0).abs() > 1e-4 {
+        skeleton.sized(seen.size)
+    } else {
+        skeleton
+    };
     m.lying = fall.filter(|_| is_down).map(|f| Lying::of(&skeleton, f));
     m.body = Some((skeleton, expression));
     m.sway.step(now, &skeleton, m.vel, m.yaw);
@@ -5937,6 +5947,100 @@ pub(super) fn held(part: Part) -> bool {
         PLAIN_SHIELD,
     ];
     slot(part).is_some_and(|i| HELD.iter().any(|&h| slot(h) == Some(i)))
+}
+
+/// How each hand closes on what it holds (left, then right), for a body another module draws
+/// with its own fingers: a hand whose grip center is on a handle closes round it (a power grip
+/// on a sword's or the carbine's grips, the bow's riser and a magazine, through the straps on
+/// the shield's handle), the bow hand's fingers hook the string while an arrow is nocked or
+/// drawn and pinch the next arrow, bare fists stay balled; a hand off its handle (reaching for
+/// it, or the weapon dropped) eases back to relaxed over 3.5..12 cm.
+pub(super) fn hand_controls(s: &Skeleton, w: &NpcWeapon) -> HandControls {
+    use engine_world::character::{HandPose, HandShape};
+    let kind = Kind::of(w);
+    let on = |k: usize, p: Vec3| 1.0 - step(0.035, 0.12, s.hand[k].at(grip(k)).distance(p));
+    let pose = |shape, weight: f32, r: f32| HandPose {
+        shape,
+        weight: weight.clamp(0.0, 1.0),
+        handle_radius_m: r,
+        curl: None,
+    };
+    let grip_on = |k: usize, p: Vec3, r: f32| pose(HandShape::PowerGrip, on(k, p), r);
+    let hands = match kind {
+        Kind::Longsword => [
+            grip_on(0, s.weapon.at(weapons::LONGSWORD_LEFT_GRIP), 0.016),
+            grip_on(1, s.weapon.pos, 0.016),
+        ],
+        Kind::SwordShield => [
+            pose(HandShape::ShieldStrap, on(0, s.shield.pos), 0.016),
+            grip_on(1, s.weapon.pos, 0.015),
+        ],
+        Kind::Rifle => {
+            let guard = grip_on(0, s.weapon.at(weapons::RIFLE_LEFT_GRIP), 0.024);
+            let mag = s
+                .held
+                .map(|m| grip_on(0, m.at(weapons::RIFLE_MAG_GRIP), 0.02))
+                .filter(|m| m.weight > guard.weight);
+            [mag.unwrap_or(guard), grip_on(1, s.weapon.pos, 0.016)]
+        }
+        Kind::Bow => {
+            let string = if s.nocked || s.draw > 0.01 {
+                pose(HandShape::Bow, 1.0, 0.0)
+            } else {
+                let arrow = s.held.map_or(0.0, |a| on(1, a.pos));
+                pose(HandShape::Pinch, arrow, 0.0)
+            };
+            [grip_on(0, s.weapon.pos, 0.018), string]
+        }
+        Kind::Fists => [pose(HandShape::Fist, 0.9, 0.0); 2],
+    };
+    // Without finger bones, how far each hand closes.
+    let grip = |h: &HandPose| match h.shape {
+        HandShape::Relaxed | HandShape::Open | HandShape::Point => 0.0,
+        HandShape::Pinch => 0.5 * h.weight,
+        _ => h.weight,
+    };
+    HandControls {
+        grip: [grip(&hands[0]), grip(&hands[1])],
+        hands,
+    }
+}
+
+impl Skeleton {
+    /// The skeleton stretched up or down by `k` from the ground (heights only), so a person
+    /// `k` times the stand-in's size stands in it: their shoulders, hips and hands at the
+    /// heights they reach, the feet where the gait plants them (stretched across too, they
+    /// would slide), and what is held moving with the hands.
+    pub(super) fn sized(mut self, k: f32) -> Self {
+        let up = |b: &mut Bone| b.pos.y *= k;
+        for b in [
+            &mut self.pelvis,
+            &mut self.chest,
+            &mut self.head,
+            &mut self.weapon,
+            &mut self.shield,
+        ] {
+            up(b);
+        }
+        for k2 in 0..2 {
+            for b in [
+                &mut self.thigh[k2],
+                &mut self.shin[k2],
+                &mut self.foot[k2],
+                &mut self.upper[k2],
+                &mut self.fore[k2],
+                &mut self.hand[k2],
+                &mut self.tabard[k2],
+            ] {
+                up(b);
+            }
+            self.want[k2].y *= k;
+        }
+        if let Some(h) = &mut self.held {
+            up(h);
+        }
+        self
+    }
 }
 
 /// Every part's pose.
@@ -6899,6 +7003,7 @@ mod tests {
                     foe: &foe,
                     memory: memory.as_ref(),
                     patient: (self.patient)(now),
+                    size: 1.0,
                 };
                 let loco = LocomotionState {
                     velocity: (self.vel)(now),

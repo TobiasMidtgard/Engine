@@ -76,7 +76,7 @@ mod humanoid;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
-use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest};
+use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest, BodyFit};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
@@ -443,6 +443,8 @@ type PoseItem<'a> = (
         // A look a character module may draw instead of the stand-in body.
         Has<Appearance>,
         Has<AppearanceRequest>,
+        // That person's own skeleton (the pose is sized to it).
+        Option<&'a BodyFit>,
     ),
 );
 
@@ -519,7 +521,7 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let (animal, mind, bird, motor, memory, looks, asks) = animal;
+        let (animal, mind, bird, motor, memory, looks, asks, fit) = animal;
         let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks || asks);
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
@@ -546,6 +548,11 @@ pub(crate) fn pose_stand_ins(
                     foe: &foe,
                     memory,
                     patient,
+                    size: if drawn_elsewhere {
+                        fit.map_or(1.0, character::size_of)
+                    } else {
+                        1.0
+                    },
                 };
                 let pose = humanoid::humanoid(
                     now,
