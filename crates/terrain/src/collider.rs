@@ -1054,16 +1054,20 @@ mod tests {
         let (mut app, _) = app_with_planet();
         // The first frame builds only the tile under the focus; the rest of the block is
         // still on its way.
-        let t = std::time::Instant::now();
         app.update();
-        let first = t.elapsed();
         let state = app.world.resource::<TerrainColliders>();
         assert_eq!(state.built, 1);
         assert!(!state.is_settled());
-        // Frames go on while the others build: three of them take less than building one tile.
-        let t = std::time::Instant::now();
+        // Frames go on while the others build: none of the next three waits for a tile or
+        // builds one itself. (Counted, not timed: on a machine busy with the tests beside
+        // this one, three frames can take longer than the first did.)
         app.update_n(3);
-        assert!(t.elapsed() < first, "frames waited for tiles");
+        let state = app.world.resource::<TerrainColliders>();
+        assert_eq!(
+            (state.built >= 1, state.waits),
+            (true, 0),
+            "frames waited for tiles"
+        );
         settle(&mut app);
         assert_eq!(app.world.resource::<TerrainColliders>().len(), 9);
     }
