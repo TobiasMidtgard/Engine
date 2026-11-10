@@ -229,15 +229,31 @@ fn main() {
         for b in &bodies {
             let base = (b.sim.origin - yard).as_vec3();
             geo.add_body(b, base, 0.5, px(b));
-            geo.add_hair(b, base, 0.5, 1.0, 1.0);
         }
     }
     println!(
-        "render geometry on one thread: {:.2} ms per frame, {} vertices, {} guide points",
+        "render geometry on one thread: {:.2} ms per frame, {} vertices",
         t.elapsed().as_secs_f64() * 100.0,
         geo.vertices.len(),
-        geo.points.len()
     );
+    // Hair and fur go to the strand renderer: their grooms are built once, on a worker.
+    for b in bodies
+        .iter()
+        .filter(|b| b.strands.is_some() && !b.drawn_elsewhere)
+    {
+        let t = Instant::now();
+        let Some(input) = engine_softbody::strand_draw::GroomInput::of(b) else {
+            continue;
+        };
+        let groom = engine_softbody::strand_draw::build_groom(&input);
+        println!(
+            "groom: {} strands, {} points, {} guide points, built in {:.1} ms",
+            groom.strand_count(),
+            groom.points.len(),
+            groom.guides.len(),
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     // Resting bodies keep their mesh from frame to frame (`KeptMesh`), as the prepare does.
     let mut kept: Vec<engine_softbody::render::KeptMesh> =
         bodies.iter().map(|_| Default::default()).collect();
@@ -293,7 +309,6 @@ fn main() {
                     for b in chunk {
                         let base = (b.sim.origin - yard).as_vec3();
                         part.add_body(b, base, 0.5, px(b));
-                        part.add_hair(b, base, 0.5, 1.0, 1.0);
                     }
                 });
             }

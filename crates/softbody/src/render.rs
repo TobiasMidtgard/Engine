@@ -1,4 +1,4 @@
-//! Drawing soft bodies: one render feature for cloth, soft volumes, rope tubes and hair.
+//! Drawing soft bodies: one render feature for cloth, soft volumes and rope tubes.
 //!
 //! Every frame the CPU interpolates each body between its last two simulation steps
 //! (`FixedTime::alpha`), relative to the camera, and builds:
@@ -6,13 +6,10 @@
 //! - **surfaces** (cloth, jelly) with area-weighted normals, the stretch along the pattern's
 //!   u and v (from the rest shape) that drives fine wrinkles, and burn state;
 //! - **tubes** swept around each rope chain (Catmull-Rom, parallel-transport frames, capped
-//!   ends, twisted-ply pattern);
-//! - **hair guides**: the simulated guide points, from which the vertex shader grows every
-//!   drawn strand (see `shaders/strand_common.wgsl` for the format). Strands thin out with
-//!   distance and get thicker to keep the same coverage.
+//!   ends, twisted-ply pattern).
 //!
-//! Hair and fur use their own strand drawing here until the shared strand renderer (owned by
-//! Rendering and lighting) exists; [`Geometry::add_hair`] produces exactly the buffers it needs.
+//! Hair and fur are drawn by the shared strand renderer (`engine_render::strands`), from the
+//! grooms and posed guides [`crate::strand_draw`] gives it.
 
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
@@ -37,28 +34,17 @@ pub const SURFACE_COMMON: &str = include_str!("shaders/surface_common.wgsl");
 pub const SURFACE_SHADER: &str = include_str!("shaders/surface.wgsl");
 /// Shadow casting for surfaces (after [`SURFACE_COMMON`]).
 pub const SHADOW_SHADER: &str = include_str!("shaders/shadow.wgsl");
-/// Strand expansion shared by both hair passes.
-pub const STRAND_COMMON: &str = include_str!("shaders/strand_common.wgsl");
-/// Hair color pass (needs `lib_frame`, after [`STRAND_COMMON`]).
-pub const STRAND_SHADER: &str = include_str!("shaders/strands.wgsl");
-/// Hair shadow pass (after [`STRAND_COMMON`]).
-pub const STRAND_SHADOW_SHADER: &str = include_str!("shaders/strands_shadow.wgsl");
 
 /// Sides around a rope tube.
 const TUBE_SIDES: usize = 8;
 /// Drawn rings per simulated rope segment.
 const TUBE_SUBDIV: usize = 3;
-/// Projected radius (px) at which hair is drawn with every strand.
-const HAIR_FULL_DENSITY_PX: f32 = 120.0;
 /// Rings from pole to pole on a bead drawn in full.
 const BEAD_LAT: usize = 8;
 /// Bead radius on screen (pixels) from which beads are drawn in full.
 const BEAD_FULL_PX: f32 = 12.0;
 /// Cloth cells larger than this on screen (pixels) are drawn subdivided along curved edges.
 const REFINE_CELL_PX: f32 = 6.0;
-/// Hair and fur smaller than this on screen (bounding radius, pixels) cast no shadow: fur 0.6 m
-/// across stops at about 45 m at 1440p.
-const HAIR_SHADOW_PX: f32 = 16.0;
 
 /// One surface vertex. Must match `VertexIn` in `surface.wgsl` and `shadow.wgsl`.
 #[repr(C)]
@@ -135,52 +121,6 @@ impl GpuSoftMaterial {
     }
 }
 
-/// Must match `struct StrandGuide` in `strand_common.wgsl`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Pod, Zeroable)]
-pub struct GpuStrandGuide {
-    /// First point in the point buffer, and point count (root first).
-    pub first: u32,
-    pub count: u32,
-    pub groom: u32,
-    pub seed: u32,
-    /// Root normal (world), w = guide length (m).
-    pub normal: [f32; 4],
-    /// Root tangent (world): the strand offsets are placed around the guide with it.
-    pub tangent: [f32; 4],
-}
-
-/// Must match `struct Groom` in `strand_common.wgsl`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Pod, Zeroable)]
-pub struct GpuGroom {
-    /// Linear rgb albedo, root thickness (m).
-    pub color: [f32; 4],
-    /// Spread (m), clumping (0..1), curl radius (m), curl turns per meter.
-    pub shape: [f32; 4],
-    /// First guide, strands per guide, first strand (instance), drawn segments per strand.
-    pub counts: [u32; 4],
-    /// Length variation (0..1), brightness at the root (self-shadowing in the hair).
-    pub extra: [f32; 4],
-}
-
-impl GpuGroom {
-    /// Filler after the last groom: never matched by any instance.
-    const UNUSED: Self = Self {
-        color: [0.0; 4],
-        shape: [0.0; 4],
-        counts: [0, 1, u32::MAX, 1],
-        extra: [0.0; 4],
-    };
-}
-
-/// One hair groom to draw: strands are instances, each a strip of `vertices`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HairBatch {
-    pub vertices: u32,
-    pub instances: Range<u32>,
-}
-
 /// CPU-side geometry for one frame. Pure data, so it is tested without a GPU.
 #[derive(Default)]
 pub struct Geometry {
@@ -189,11 +129,6 @@ pub struct Geometry {
     pub materials: Vec<GpuSoftMaterial>,
     /// Bullet holes of every cloth: uv, radius (m), seed.
     pub holes: Vec<[f32; 4]>,
-    /// Hair guide points, camera-relative (w unused).
-    pub points: Vec<[f32; 4]>,
-    pub guides: Vec<GpuStrandGuide>,
-    pub grooms: Vec<GpuGroom>,
-    pub strands: u32,
     /// Where this geometry's materials and bullet holes start in the buffers it is appended
     /// to (see [`Geometry::append`]), so vertices name their final material from the start.
     pub material_base: u32,
@@ -221,9 +156,9 @@ pub struct KeptMesh {
 }
 
 impl KeptMesh {
-    /// Only a body that isn't stepped stays as it is; hair rides its bones even then.
+    /// Only a body that isn't stepped stays as it is.
     fn can_keep(body: &SoftBodySim) -> bool {
-        body.frozen && body.strands.is_none() && body.sim.step_start == body.sim.pos
+        body.frozen && body.sim.step_start == body.sim.pos
     }
 
     /// What else the mesh depends on: its detail on screen (cloth refinement, bead facets)
@@ -297,10 +232,6 @@ impl Geometry {
         self.indices.clear();
         self.materials.clear();
         self.holes.clear();
-        self.points.clear();
-        self.guides.clear();
-        self.grooms.clear();
-        self.strands = 0;
     }
 
     /// The materials and bullet holes [`add_body`](Self::add_body) adds for `body`: what to
@@ -318,38 +249,21 @@ impl Geometry {
 
     /// Append `other` (built on its own, e.g. on another thread, with its `material_base` and
     /// `hole_base` set to where it lands here) after this geometry, moving its indices into
-    /// the joined buffers. Returns what to add to `other`'s index ranges and strand instances.
-    pub fn append(&mut self, other: &Geometry) -> (u32, u32) {
+    /// the joined buffers. Returns what to add to `other`'s index ranges.
+    pub fn append(&mut self, other: &Geometry) -> u32 {
         debug_assert_eq!(
             other.material_base,
             self.material_base + self.materials.len() as u32
         );
         debug_assert_eq!(other.hole_base, self.hole_base + self.holes.len() as u32);
         let vertex = self.vertices.len() as u32;
-        let point = self.points.len() as u32;
-        let guide = self.guides.len() as u32;
-        let groom = self.grooms.len() as u32;
-        let offsets = (self.indices.len() as u32, self.strands);
+        let offset = self.indices.len() as u32;
         self.vertices.extend_from_slice(&other.vertices);
         self.indices
             .extend(other.indices.iter().map(|i| i + vertex));
         self.materials.extend_from_slice(&other.materials);
         self.holes.extend_from_slice(&other.holes);
-        self.points.extend_from_slice(&other.points);
-        self.guides
-            .extend(other.guides.iter().map(|g| GpuStrandGuide {
-                first: g.first + point,
-                groom: g.groom + groom,
-                ..*g
-            }));
-        self.grooms.extend(other.grooms.iter().map(|g| {
-            let mut g = *g;
-            g.counts[0] += guide;
-            g.counts[2] += offsets.1;
-            g
-        }));
-        self.strands += other.strands;
-        offsets
+        offset
     }
 
     fn interpolate(&mut self, body: &SoftBodySim, base: Vec3, alpha: f32) {
@@ -816,91 +730,6 @@ impl Geometry {
             s += spacing;
         }
     }
-
-    /// Append a body's hair guides and groom. `density` (0..1] thins the strands out (they
-    /// get thicker to keep the same coverage) and `detail` (0..1] lowers the drawn segments.
-    pub fn add_hair(
-        &mut self,
-        body: &SoftBodySim,
-        base: Vec3,
-        alpha: f32,
-        density: f32,
-        detail: f32,
-    ) -> Option<HairBatch> {
-        let s = body.strands.as_ref()?;
-        if s.guides.is_empty() {
-            return None;
-        }
-        self.interpolate(body, base, alpha);
-        let groom = self.grooms.len() as u32;
-        let first_guide = self.guides.len() as u32;
-        let mut max_points = 2;
-        for (k, g) in s.guides.iter().enumerate() {
-            let range = g.first as usize..(g.first + g.count) as usize;
-            let Some(pts) = self.particles.get(range.clone()) else {
-                continue;
-            };
-            let first = self.points.len() as u32;
-            // w: how wet the guide is there.
-            let wet = body.wet.get(range.clone()).unwrap_or(&[]);
-            self.points.extend(
-                pts.iter()
-                    .enumerate()
-                    .map(|(k, p)| [p.x, p.y, p.z, wet.get(k).copied().unwrap_or(0.0)]),
-            );
-            let length: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
-            let rot = body
-                .sim
-                .frames
-                .get(g.frame as usize)
-                .map_or(Quat::IDENTITY, |f| f.pose(alpha).1);
-            let n = rot * g.normal;
-            let t = rot * g.tangent;
-            self.guides.push(GpuStrandGuide {
-                first,
-                count: g.count,
-                groom,
-                seed: k as u32,
-                normal: [n.x, n.y, n.z, length],
-                tangent: [t.x, t.y, t.z, 0.0],
-            });
-            max_points = max_points.max(g.count);
-        }
-        let guides = self.guides.len() as u32 - first_guide;
-        if guides == 0 {
-            return None;
-        }
-        let full = s.style.strands_per_guide.max(1);
-        let spg = ((full as f32 * density.clamp(0.0, 1.0)).ceil() as u32).clamp(1, full);
-        let thickness = s.style.thickness * (full as f32 / spg as f32).sqrt();
-        let segments =
-            ((((max_points - 1) * 3) as f32 * detail.clamp(0.25, 1.0)) as u32).clamp(3, 32);
-        let [r, g, b] = s.color;
-        let first_strand = self.strands;
-        let count = guides * spg;
-        self.grooms.push(GpuGroom {
-            color: [r, g, b, thickness],
-            shape: [
-                s.style.spread,
-                s.style.clumping,
-                s.style.curl,
-                s.style.curl_frequency,
-            ],
-            counts: [first_guide, spg, first_strand, segments],
-            // Long hair is dark deep inside; short fur lets light through to the skin.
-            extra: [
-                s.style.length_variation,
-                0.3 + 0.45 * ((0.15 - s.style.length) / 0.12).clamp(0.0, 1.0),
-                0.0,
-                0.0,
-            ],
-        });
-        self.strands += count;
-        Some(HairBatch {
-            vertices: 2 * (segments + 1),
-            instances: first_strand..first_strand + count,
-        })
-    }
 }
 
 /// Catmull-Rom point and tangent between `p1` and `p2`.
@@ -929,14 +758,6 @@ fn push_range(list: &mut Vec<Range<u32>>, r: Range<u32>) {
 /// One body's geometry within its part.
 struct Built {
     range: Range<u32>,
-    hair: Option<HairBatch>,
-}
-
-struct HairDraw {
-    batch: HairBatch,
-    in_view: bool,
-    /// Bit per shadow cascade.
-    cascades: u8,
 }
 
 #[derive(Default)]
@@ -945,7 +766,6 @@ struct Draws {
     transparent: Vec<Range<u32>>,
     /// Per shadow cascade, plus the sky occlusion map last.
     shadow: [Vec<Range<u32>>; MAX_CASCADES + 1],
-    hair: Vec<HairDraw>,
 }
 
 impl Draws {
@@ -953,7 +773,6 @@ impl Draws {
         self.opaque.clear();
         self.transparent.clear();
         self.shadow.iter_mut().for_each(Vec::clear);
-        self.hair.clear();
     }
 }
 
@@ -961,19 +780,12 @@ struct Gpu {
     opaque: wgpu::RenderPipeline,
     transparent: wgpu::RenderPipeline,
     shadow: wgpu::RenderPipeline,
-    strands: wgpu::RenderPipeline,
-    strands_shadow: wgpu::RenderPipeline,
     material_layout: wgpu::BindGroupLayout,
-    strand_layout: wgpu::BindGroupLayout,
     vertices: GrowBuffer,
     indices: GrowBuffer,
     materials: GrowBuffer,
     holes: GrowBuffer,
-    points: GrowBuffer,
-    guides: GrowBuffer,
-    grooms: GrowBuffer,
     material_group: wgpu::BindGroup,
-    strand_group: wgpu::BindGroup,
 }
 
 fn storage_layout(device: &wgpu::Device, label: &str, count: u32) -> wgpu::BindGroupLayout {
@@ -1023,7 +835,6 @@ struct PipelineSpec<'a> {
     fs: Option<&'a str>,
     layouts: &'a [Option<&'a wgpu::BindGroupLayout>],
     vertex: bool,
-    strip: bool,
     blend: bool,
     shadow: bool,
 }
@@ -1051,11 +862,7 @@ fn pipeline(gpu: &GpuShared, s: PipelineSpec) -> wgpu::RenderPipeline {
             buffers: if s.vertex { &buffers } else { &[] },
         },
         primitive: wgpu::PrimitiveState {
-            topology: if s.strip {
-                wgpu::PrimitiveTopology::TriangleStrip
-            } else {
-                wgpu::PrimitiveTopology::TriangleList
-            },
+            topology: wgpu::PrimitiveTopology::TriangleList,
             cull_mode: None,
             unclipped_depth: s.shadow && gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
             ..Default::default()
@@ -1077,7 +884,7 @@ fn pipeline(gpu: &GpuShared, s: PipelineSpec) -> wgpu::RenderPipeline {
     })
 }
 
-/// Draws every [`SoftBodySim`]: cloth, jelly, rope tubes and hair, with shadows.
+/// Draws every [`SoftBodySim`] but hair: cloth, jelly and rope tubes, with shadows.
 #[derive(Default)]
 pub struct SoftBodyFeature {
     gpu: Option<Gpu>,
@@ -1103,7 +910,6 @@ impl RenderFeature for SoftBodyFeature {
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
         let material_layout = storage_layout(device, "softbody materials", 2);
-        let strand_layout = storage_layout(device, "softbody strands", 3);
         let surface = gpu.shader(
             "softbody surface",
             &format!("{SURFACE_COMMON}\n{SURFACE_SHADER}"),
@@ -1114,16 +920,6 @@ impl RenderFeature for SoftBodyFeature {
             &format!("{SURFACE_COMMON}\n{SHADOW_SHADER}"),
             false,
         );
-        let strands = gpu.shader(
-            "softbody strands",
-            &format!("{STRAND_COMMON}\n{STRAND_SHADER}"),
-            true,
-        );
-        let strands_shadow = gpu.shader(
-            "softbody strands shadow",
-            &format!("{STRAND_COMMON}\n{STRAND_SHADOW_SHADER}"),
-            false,
-        );
         let scene = [Some(&gpu.frame_layout), Some(&material_layout)];
         let surface_spec = |label, blend| PipelineSpec {
             label,
@@ -1132,7 +928,6 @@ impl RenderFeature for SoftBodyFeature {
             fs: Some("fs_main"),
             layouts: &scene,
             vertex: true,
-            strip: false,
             blend,
             shadow: false,
         };
@@ -1147,35 +942,6 @@ impl RenderFeature for SoftBodyFeature {
                 fs: Some("fs_shadow"),
                 layouts: &[Some(&gpu.shadow_view_layout), Some(&material_layout)],
                 vertex: true,
-                strip: false,
-                blend: false,
-                shadow: true,
-            },
-        );
-        let strands = pipeline(
-            gpu,
-            PipelineSpec {
-                label: "softbody strands",
-                module: &strands,
-                vs: "vs_strand",
-                fs: Some("fs_strand"),
-                layouts: &[Some(&gpu.frame_layout), Some(&strand_layout)],
-                vertex: false,
-                strip: true,
-                blend: false,
-                shadow: false,
-            },
-        );
-        let strands_shadow = pipeline(
-            gpu,
-            PipelineSpec {
-                label: "softbody strands shadow",
-                module: &strands_shadow,
-                vs: "vs_strand_shadow",
-                fs: None,
-                layouts: &[Some(&gpu.shadow_view_layout), Some(&strand_layout)],
-                vertex: false,
-                strip: true,
                 blend: false,
                 shadow: true,
             },
@@ -1186,38 +952,22 @@ impl RenderFeature for SoftBodyFeature {
         let indices = buffer("softbody indices", wgpu::BufferUsages::INDEX, 1 << 20);
         let materials = buffer("softbody materials", storage, 64 * 112);
         let holes = buffer("softbody holes", storage, 4096);
-        let points = buffer("softbody strand points", storage, 1 << 16);
-        let guides = buffer("softbody strand guides", storage, 1 << 14);
-        let grooms = buffer("softbody grooms", storage, 1 << 10);
         let material_group = storage_group(
             device,
             "softbody materials",
             &material_layout,
             &[&materials, &holes],
         );
-        let strand_group = storage_group(
-            device,
-            "softbody strands",
-            &strand_layout,
-            &[&points, &guides, &grooms],
-        );
         self.gpu = Some(Gpu {
             opaque,
             transparent,
             shadow,
-            strands,
-            strands_shadow,
             material_layout,
-            strand_layout,
             vertices,
             indices,
             materials,
             holes,
-            points,
-            guides,
-            grooms,
             material_group,
-            strand_group,
         });
         self.cloths = Some(GpuCloths::new(gpu));
     }
@@ -1256,10 +1006,6 @@ impl RenderFeature for SoftBodyFeature {
         self.draws.clear();
         self.stats = FeatureStats::default();
         let alpha = world.get_resource::<FixedTime>().map_or(1.0, |f| f.alpha());
-        // Fewer strands at lower quality, like grass and other small detail.
-        let thin = world
-            .get_resource::<engine_world::Scalability>()
-            .map_or(1.0, |s| s.density.clamp(0.1, 2.0));
         let Some(query) = self.query.as_mut() else {
             return;
         };
@@ -1282,7 +1028,8 @@ impl RenderFeature for SoftBodyFeature {
         let mut seen: Vec<Seen> = Vec::new();
         let see = tracing::info_span!("softbody: see").entered();
         for (entity, body) in query.iter(world) {
-            if body.sim.is_empty() || body.drawn_elsewhere {
+            // Hair and fur: drawn by the strand renderer (`crate::strand_draw`).
+            if body.sim.is_empty() || body.drawn_elsewhere || body.strands.is_some() {
                 continue;
             }
             let center = view.relative(body.center);
@@ -1292,26 +1039,20 @@ impl RenderFeature for SoftBodyFeature {
             let in_view = view.frustum.intersects_sphere(center, radius) && px > 0.3;
             // A map leaves out casters narrower than a few of its texels, whose shadow its
             // filter wouldn't keep, as it does the renderer's meshes
-            // (`RenderSettings::shadow_caster_min_texels`). Hair and fur cast only while big
-            // on screen: their own shadow is a fringe of centimetres on the body growing them
-            // (which casts its own), and a groom costs as much to build far off as near (the
-            // dog's fur in the fortress's and the plaza's far cascades, 90-480 m away).
+            // (`RenderSettings::shadow_caster_min_texels`).
             let mut mask = 0u8;
             let size = 2.0 * radius;
-            if body.strands.is_none() || px >= HAIR_SHADOW_PX {
-                let cascades = &view.cascades;
-                for c in 0..cascades.count as usize {
-                    let texel = 2.0 * cascades.half_extent[c] / cascades.map_size.max(1) as f32;
-                    if size >= min_caster_texels * texel
-                        && cascades.sphere_in_cascade(c, center, radius)
-                    {
-                        mask |= 1 << c;
-                    }
+            let cascades = &view.cascades;
+            for c in 0..cascades.count as usize {
+                let texel = 2.0 * cascades.half_extent[c] / cascades.map_size.max(1) as f32;
+                if size >= min_caster_texels * texel
+                    && cascades.sphere_in_cascade(c, center, radius)
+                {
+                    mask |= 1 << c;
                 }
             }
             let sky = &view.sky_occlusion;
-            if body.strands.is_none()
-                && sky.enabled
+            if sky.enabled
                 && size >= min_sky_texels * sky.extent / sky.map_size.max(1) as f32
                 && sky.contains_sphere(center, radius)
             {
@@ -1346,7 +1087,6 @@ impl RenderFeature for SoftBodyFeature {
         let building = tracing::info_span!(
             "softbody: build",
             bodies = seen.len(),
-            hair = seen.iter().filter(|s| s.body.strands.is_some()).count(),
             shadow_only = seen.iter().filter(|s| !s.in_view).count()
         )
         .entered();
@@ -1360,25 +1100,16 @@ impl RenderFeature for SoftBodyFeature {
             .iter()
             .map(|s| self.kept.remove(&s.entity).unwrap_or_default())
             .collect();
-        let build = |seen: &[Seen],
-                     kept: &mut [KeptMesh],
-                     (geo, built): &mut (Geometry, Vec<Built>)| {
-            geo.clear();
-            built.clear();
-            for (s, kept) in seen.iter().zip(kept) {
-                kept.seen = frame;
-                let range = geo.add_body_reusing(s.body, s.base, alpha, s.px, Some(kept));
-                let hair = s.body.strands.as_ref().and_then(|_| {
-                    let _span =
-                        tracing::info_span!("softbody: build hair", px = s.px, in_view = s.in_view)
-                            .entered();
-                    let density = (s.px / HAIR_FULL_DENSITY_PX * thin).clamp(0.06, 1.0);
-                    let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
-                    geo.add_hair(s.body, s.base, alpha, density, detail)
-                });
-                built.push(Built { range, hair });
-            }
-        };
+        let build =
+            |seen: &[Seen], kept: &mut [KeptMesh], (geo, built): &mut (Geometry, Vec<Built>)| {
+                geo.clear();
+                built.clear();
+                for (s, kept) in seen.iter().zip(kept) {
+                    kept.seen = frame;
+                    let range = geo.add_body_reusing(s.body, s.base, alpha, s.px, Some(kept));
+                    built.push(Built { range });
+                }
+            };
         // On softbody's own small pool: this runs inside the renderer's shared prepares, a
         // task of the compute pool, and a scope opened there waits by running other whole
         // features' prepares (crate::solver::leaf_pool), which held it 5-9 ms on the cloud VM
@@ -1427,17 +1158,14 @@ impl RenderFeature for SoftBodyFeature {
         let geo = &mut self.geometry;
         let mut built = Vec::with_capacity(seen.len());
         for (part, bodies) in parts.iter() {
-            let (index, strand) = geo.append(part);
-            built.extend(bodies.iter().map(|b| {
-                let range = b.range.start + index..b.range.end + index;
-                let hair = b.hair.as_ref().map(|h| HairBatch {
-                    vertices: h.vertices,
-                    instances: h.instances.start + strand..h.instances.end + strand,
-                });
-                (range, hair)
-            }));
+            let index = geo.append(part);
+            built.extend(
+                bodies
+                    .iter()
+                    .map(|b| b.range.start + index..b.range.end + index),
+            );
         }
-        for (s, (range, hair)) in seen.iter().zip(built) {
+        for (s, range) in seen.iter().zip(built) {
             if !range.is_empty() {
                 if s.in_view {
                     let list = if transparent(s) {
@@ -1454,24 +1182,9 @@ impl RenderFeature for SoftBodyFeature {
                     }
                 }
             }
-            if let Some(batch) = hair {
-                if s.in_view {
-                    self.stats.instances += batch.instances.len() as u32;
-                    self.stats.triangles +=
-                        batch.instances.len() as u64 * (batch.vertices as u64 - 2);
-                }
-                self.draws.hair.push(HairDraw {
-                    batch,
-                    in_view: s.in_view,
-                    cascades: s.mask & !(1 << SKY_OCCLUSION_VIEW),
-                });
-            }
         }
         self.bodies = seen.len() as u32;
-        self.stats.draw_calls = (self.draws.opaque.len()
-            + self.draws.transparent.len()
-            + self.draws.hair.iter().filter(|h| h.in_view).count())
-            as u32;
+        self.stats.draw_calls = (self.draws.opaque.len() + self.draws.transparent.len()) as u32;
         drop(building);
         if let Some(cloths) = self.cloths.as_mut() {
             let _span = tracing::info_span!("softbody: cloths").entered();
@@ -1486,9 +1199,7 @@ impl RenderFeature for SoftBodyFeature {
         let _upload = tracing::info_span!(
             "softbody: upload",
             vertex_kb = std::mem::size_of_val(geo.vertices.as_slice()) / 1024,
-            index_kb = std::mem::size_of_val(geo.indices.as_slice()) / 1024,
-            point_kb = std::mem::size_of_val(geo.points.as_slice()) / 1024,
-            guide_kb = std::mem::size_of_val(geo.guides.as_slice()) / 1024
+            index_kb = std::mem::size_of_val(geo.indices.as_slice()) / 1024
         )
         .entered();
         let (device, queue) = (&gpu.device, &gpu.queue);
@@ -1509,33 +1220,6 @@ impl RenderFeature for SoftBodyFeature {
                 &g.material_layout,
                 &[&g.materials, &g.holes],
             );
-        }
-        if !geo.grooms.is_empty() {
-            // Fill the whole buffer: the shader finds a strand's groom by scanning all slots.
-            let size = std::mem::size_of::<GpuGroom>();
-            let slots = (geo.grooms.len() * size)
-                .max(g.grooms.capacity() as usize)
-                .max(256)
-                .next_power_of_two()
-                / size;
-            geo.grooms.resize(slots, GpuGroom::UNUSED);
-            let mut grown = g
-                .points
-                .write(device, queue, bytemuck::cast_slice(&geo.points));
-            grown |= g
-                .guides
-                .write(device, queue, bytemuck::cast_slice(&geo.guides));
-            grown |= g
-                .grooms
-                .write(device, queue, bytemuck::cast_slice(&geo.grooms));
-            if grown {
-                g.strand_group = storage_group(
-                    device,
-                    "softbody strands",
-                    &g.strand_layout,
-                    &[&g.points, &g.guides, &g.grooms],
-                );
-            }
         }
     }
 
@@ -1561,22 +1245,6 @@ impl RenderFeature for SoftBodyFeature {
         }
         let bit = 1 << cascade.min(MAX_CASCADES);
         self.draw_gpu_cloths(pass, &g.shadow, &g.material_group, |d| d.shadows & bit != 0);
-        if cascade < MAX_CASCADES {
-            let mut bound = false;
-            for h in self
-                .draws
-                .hair
-                .iter()
-                .filter(|h| h.cascades & (1 << cascade) != 0)
-            {
-                if !bound {
-                    pass.set_pipeline(&g.strands_shadow);
-                    pass.set_bind_group(1, &g.strand_group, &[]);
-                    bound = true;
-                }
-                pass.draw(0..h.batch.vertices, h.batch.instances.clone());
-            }
-        }
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
@@ -1601,17 +1269,6 @@ impl RenderFeature for SoftBodyFeature {
         self.draw_gpu_cloths(pass, pipeline, &g.material_group, |d| {
             d.in_view && d.transparent == transparent
         });
-        if phase == RenderPhase::Opaque {
-            let mut bound = false;
-            for h in self.draws.hair.iter().filter(|h| h.in_view) {
-                if !bound {
-                    pass.set_pipeline(&g.strands);
-                    pass.set_bind_group(1, &g.strand_group, &[]);
-                    bound = true;
-                }
-                pass.draw(0..h.batch.vertices, h.batch.instances.clone());
-            }
-        }
     }
 
     fn stats(&self) -> FeatureStats {
@@ -1622,8 +1279,6 @@ impl RenderFeature for SoftBodyFeature {
         serde_json::json!({
             "bodies": self.bodies,
             "vertices": self.geometry.vertices.len(),
-            "strands": self.geometry.strands,
-            "guides": self.geometry.guides.len(),
             "gpu_cloths": self.cloths.as_ref().map_or(0, GpuCloths::count),
             "gpu_cloth_ms": self.cloths.as_ref().and_then(GpuCloths::gpu_ms),
         })
@@ -1676,12 +1331,6 @@ mod tests {
                 format!("{SURFACE_COMMON}\n{SHADOW_SHADER}"),
                 false,
             ),
-            ("strands", format!("{STRAND_COMMON}\n{STRAND_SHADER}"), true),
-            (
-                "strands shadow",
-                format!("{STRAND_COMMON}\n{STRAND_SHADOW_SHADER}"),
-                false,
-            ),
         ];
         for (label, src, frame) in cases {
             validate_wgsl(label, &compose_shader(&src, frame)).unwrap();
@@ -1692,8 +1341,6 @@ mod tests {
     fn gpu_structs_match_wgsl_sizes() {
         assert_eq!(std::mem::size_of::<SoftVertex>(), 56);
         assert_eq!(std::mem::size_of::<GpuSoftMaterial>(), 112);
-        assert_eq!(std::mem::size_of::<GpuStrandGuide>(), 48);
-        assert_eq!(std::mem::size_of::<GpuGroom>(), 64);
     }
 
     fn flat_cloth() -> SoftBodySim {

@@ -408,6 +408,9 @@ pub struct Strands {
     pub style: HairStyle,
     /// Linear RGB.
     pub color: [f32; 3],
+    /// The frame the drawn groom rides (`crate::strand_draw`): the one nearest the skeleton's
+    /// root that carries hair.
+    pub anchor: u16,
 }
 
 /// The skin hair grows from, in bone space. Rest shapes are kept outside it.
@@ -1130,6 +1133,7 @@ pub fn build(
         guides,
         style,
         color: style.color(),
+        anchor: head,
     });
     Ok(body)
 }

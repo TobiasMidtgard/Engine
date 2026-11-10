@@ -323,10 +323,12 @@ pub fn build(
     body.frames = frames;
     body.time_owner = Some(person);
     body.drawn_elsewhere = true;
+    let anchor = out.first().map_or(0, |g| g.frame);
     body.strands = Some(Strands {
         guides: out,
         style,
         color: style.color(),
+        anchor,
     });
     Ok(body)
 }

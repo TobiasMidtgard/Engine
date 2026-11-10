@@ -35,9 +35,7 @@ fn geometry_built_in_parts_joins_into_the_same_buffers() {
 
     let build = |geo: &mut Geometry, b: &SoftBodySim| {
         let base = b.sim.origin.as_vec3();
-        let range = geo.add_body(b, base, 0.5, f32::INFINITY);
-        let hair = geo.add_hair(b, base, 0.5, 0.7, 1.0);
-        (range, hair.map(|h| h.instances))
+        geo.add_body(b, base, 0.5, f32::INFINITY)
     };
     let mut whole = Geometry::default();
     let expected: Vec<_> = bodies.iter().map(|b| build(&mut whole, b)).collect();
@@ -49,23 +47,14 @@ fn geometry_built_in_parts_joins_into_the_same_buffers() {
         part.material_base = joined.materials.len() as u32;
         part.hole_base = joined.holes.len() as u32;
         let built: Vec<_> = run.iter().map(|b| build(&mut part, b)).collect();
-        let (index, strand) = joined.append(&part);
-        got.extend(built.into_iter().map(|(r, h)| {
-            (
-                r.start + index..r.end + index,
-                h.map(|h| h.start + strand..h.end + strand),
-            )
-        }));
+        let index = joined.append(&part);
+        got.extend(built.into_iter().map(|r| r.start + index..r.end + index));
     }
     assert_eq!(got, expected);
     assert_eq!(joined.vertices, whole.vertices);
     assert_eq!(joined.indices, whole.indices);
     assert_eq!(joined.materials, whole.materials);
     assert_eq!(joined.holes, whole.holes);
-    assert_eq!(joined.points, whole.points);
-    assert_eq!(joined.guides, whole.guides);
-    assert_eq!(joined.grooms, whole.grooms);
-    assert_eq!(joined.strands, whole.strands);
 }
 
 #[test]

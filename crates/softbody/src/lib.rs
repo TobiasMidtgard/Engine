@@ -4,6 +4,7 @@ pub mod api;
 pub mod body;
 pub mod character;
 pub mod cloth;
+pub mod coat;
 pub mod collide;
 pub mod demo;
 pub mod field;
@@ -15,6 +16,7 @@ pub mod render;
 pub mod rope;
 pub mod settings;
 pub mod solver;
+pub mod strand_draw;
 pub mod sway;
 pub mod systems;
 pub mod volume;
@@ -59,6 +61,7 @@ impl Plugin for SoftBodyPlugin {
             .init_resource::<systems::SurfaceMove>()
             .init_resource::<systems::SurfaceSeen>()
             .init_resource::<systems::FrameShift>()
+            .init_resource::<coat::CoatGrooms>()
             .init_resource::<gpu_cloth::GpuClothShift>()
             .register_resource::<SoftBodyConfig>(
                 "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier), beside_frame (heavy bodies solved beside the frame, a step behind; null = in play only).",
@@ -136,6 +139,14 @@ impl Plugin for SoftBodyPlugin {
                 )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
+            )
+            // Hair and fur for the strand renderer: their entities placed before transforms
+            // propagate, beside the rest of the frame.
+            .add_systems(
+                PostUpdate,
+                (strand_draw::draw_strands, coat::draw_coats)
+                    .after(engine_world::WorldShiftSet::Apply)
+                    .before(UpdateSet::Propagate),
             )
             .add_render_feature(render::SoftBodyFeature::default());
         api::register(app);

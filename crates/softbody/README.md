@@ -70,7 +70,7 @@ No dependencies on other module crates (see ARCHITECTURE.md).
 
 ### Strand data for the shared strand renderer
 
-Hair and fur are drawn by this crate until the shared strand renderer exists. The format it needs is in `src/shaders/strand_common.wgsl` and `render::Geometry::add_hair`: a point buffer (guide particles, camera-relative), one `GpuStrandGuide` per guide (first point, count, groom, seed, root normal and tangent, length) and one `GpuGroom` per groom (color and thickness, spread, clumping, curl, strands per guide, segments, length variation, root shading). Grass can use the same buffers with sway instead of simulation.
+Hair and fur are drawn by the shared strand renderer (`engine_render::strands`). `strand_draw` grows a `StrandGroom` from each hair body's guides (strands blended from the three guides around their root, so they follow bending limbs) and poses it every frame on an entity riding the groom's anchor bone. `coat` grows fur on any entity with an `engine_world::FurCoat` (other modules' animals): roots by area and amount, colour and length from the coat's maps, guides skinned with the bones, one groom per shared coat.
 
 ## Demo
 
