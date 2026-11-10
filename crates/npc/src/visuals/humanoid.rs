@@ -41,7 +41,7 @@ use crate::skills::NpcSkills;
 
 // ============================================================================ parts
 
-// The chest is `Part::Torso`, the helmet and coif `Head` with its brow light `Orb` (it glows
+// The chest is `Part::Torso`, the helmet `Head` with its brow light `Orb` (it glows
 // with the alert level) and rank crest `Band`, the thighs `LegL`/`LegR`, the upper arms
 // `ArmL`/`ArmR`, the blade, carbine or bow riser `Weapon`. The other pieces:
 const PELVIS: Part = Part::Fighter(0);
@@ -85,6 +85,8 @@ const LIDS: Part = Part::Fighter(FACE0 + 2);
 const JAW: Part = Part::Fighter(FACE0 + 3);
 /// A medic's armband, over the left upper arm (only medics have the part).
 const ARMBAND: Part = Part::Fighter(FACE0 + 4);
+/// The mail coif under the helmet (posed with the head).
+const COIF: Part = Part::Fighter(FACE0 + 5);
 const FACE0: u8 = PAINT0 + HUES * PAINTED.len() as u8;
 /// Pieces with painted plates. Those are a mesh of their own (textured by the paint texture
 /// in the team color, as worn as the fighter's skill says), a part posed with its piece: the
@@ -107,9 +109,9 @@ const PAINTED: [Part; 11] = [
 const PAINT0: u8 = 34;
 
 /// Every part's place in a pose: the named parts, the fighter's own up to the painted plates
-/// (which share their pieces'), then the face's and the armband's.
+/// (which share their pieces'), then the face's, the armband's and the coif's.
 const FACE_SLOT: usize = 11 + PAINT0 as usize;
-const SLOTS: usize = FACE_SLOT + 5;
+const SLOTS: usize = FACE_SLOT + 6;
 
 /// Skin tones (sRGB), picked per fighter.
 const SKIN_TONES: [u32; 6] = [0xdcb8a0, 0xc29479, 0xa27760, 0x86614c, 0x5f4537, 0xd4a88f];
@@ -193,9 +195,10 @@ fn slot(part: Part) -> Option<usize> {
 }
 
 /// Armor pieces that flash when hit.
-const ARMOR: [Part; 12] = [
+const ARMOR: [Part; 13] = [
     Part::Torso,
     Part::Head,
+    COIF,
     PELVIS,
     Part::LegL,
     Part::LegR,
@@ -333,6 +336,7 @@ pub(super) fn parts(
     let mut list = vec![
         (Part::Torso, Piece::Chest),
         (Part::Head, Piece::Helmet),
+        (COIF, Piece::Coif),
         (FACE, Piece::Face),
         (EYE_L, Piece::Eye),
         (EYE_R, Piece::Eye),
@@ -5931,25 +5935,27 @@ fn face(f: FaceIn) -> (Look, f32, f32, f32, Expression) {
 /// What a worn piece hangs from, on a body another module draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Worn {
-    /// The helmet and coif (and its paint), the crest and the brow light.
+    /// The helmet (and its paint), the crest and the brow light.
     Head,
-    /// The tabards and the belt's pouches.
+    /// The tabards (from the hips).
+    Tabard,
+    /// The belt's pouches.
     Hips,
     /// The quiver on the back.
     Chest,
 }
 
 /// The pieces a fighter keeps wearing over a body another module draws, and what each hangs
-/// from: its helmet (only where the look leaves the head to a helmet), its team's tabards,
-/// pouches and quiver.
+/// from: its helmet (only where the look leaves the head to a helmet, and without the coif,
+/// which the look has its own of), its team's tabards (only where the look has none), pouches
+/// and quiver.
 pub(super) fn worn(part: Part) -> Option<Worn> {
     let is = |p: Part| slot(p).is_some() && slot(p) == slot(part);
     if [Part::Head, Part::Band, Part::Orb].into_iter().any(is) {
         Some(Worn::Head)
-    } else if [TABARD_FRONT, TABARD_BACK, POUCH_R, POUCH_L]
-        .into_iter()
-        .any(is)
-    {
+    } else if [TABARD_FRONT, TABARD_BACK].into_iter().any(is) {
+        Some(Worn::Tabard)
+    } else if [POUCH_R, POUCH_L].into_iter().any(is) {
         Some(Worn::Hips)
     } else if is(QUIVER) {
         Some(Worn::Chest)
@@ -6095,6 +6101,7 @@ fn place(s: &Skeleton, kind: Kind, flash: bool, spin: f32, sway: &Sway) -> [Plac
     };
     put(Part::Torso, s.chest);
     put(Part::Head, s.head);
+    put(COIF, s.head);
     put(FACE, s.head);
     for (k, part) in [EYE_L, EYE_R].into_iter().enumerate() {
         let e = rig::EYES;

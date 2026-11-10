@@ -79,6 +79,8 @@ pub mod rig {
     pub const EYES: Vec3 = Vec3::new(0.031, 0.166, -0.0795);
     /// The middle of the helmet's dome (head frame): the crest swings about it.
     pub const CREST_PIVOT: Vec3 = super::HELM_O;
+    /// The middle of the head (between the ears) from the neck joint, head frame.
+    pub const HEAD_MIDDLE: Vec3 = super::HEAD_C;
     /// The upper lids turn down about the line through both eyes' centers (head frame): this
     /// far (rad) shuts them.
     pub const LIDS_PIVOT: Vec3 = Vec3::new(0.0, EYES.y, EYES.z);
@@ -3386,19 +3388,13 @@ fn select(m: &Mesh, pick: &dyn Fn(Vec3) -> bool) -> Mesh {
     Mesh::new(verts, idx)
 }
 
-/// The helmet shell (team paint) with its brow band, ear discs and rivets, over the mail coif.
+/// The helmet shell (team paint) with its brow band, ear discs and rivets (worn over the mail
+/// coif, [`coif_piece`]).
 fn helmet() -> PieceMesh {
     let param = helmet_param();
     let mut b = Builder::default();
     let outline = |uv: Vec2| helmet_outline(param, uv);
-    let height = |uv: Vec2, s: f32| {
-        // A keel along the middle and a pair of shallow flutes beside it, both ending above
-        // the brow band, and a rolled lip.
-        let above = smooth(-0.026, -0.036, s);
-        let keel = 0.0035 * (-(uv.y / 0.009).powi(2)).exp();
-        let flute = 0.0015 * (-((uv.y.abs() - 0.035) / 0.008).powi(2)).exp();
-        HELM_T + (keel + flute) * above + lip(s, 0.012, 0.0022)
-    };
+    let height = shell_height;
     let shell = Plate {
         reach: 0.3,
         ..plate(
@@ -3414,7 +3410,7 @@ fn helmet() -> PieceMesh {
     };
     b.paint(&shell, 1.0, Wear::new(0.25, Vec2::ZERO, 1).hits(2, 1));
     let band_out = |uv: Vec2| band_outline(param, uv);
-    let band_h = |_: Vec2, s: f32| BAND_T + lip(s, 0.004, 0.0008);
+    let band_h = band_height;
     let band = Plate {
         roll: 0.0015,
         rim: 2,
@@ -3458,7 +3454,40 @@ fn helmet() -> PieceMesh {
         let m = placed(pod.clone(), Quat::from_rotation_arc(Vec3::Y, n), hit);
         b.add(m, Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
     }
-    // The mail coif under it, bound in leather around the face.
+    b.finish(&helmet_field, 1.0)
+}
+
+/// The helmet shell's thickness over [`helmet_base`] at a place on it (`s`: how far inside its
+/// outline): a keel along the middle and a pair of shallow flutes beside it, both ending above
+/// the brow band, and a rolled lip.
+fn shell_height(uv: Vec2, s: f32) -> f32 {
+    let above = smooth(-0.026, -0.036, s);
+    let keel = 0.0035 * (-(uv.y / 0.009).powi(2)).exp();
+    let flute = 0.0015 * (-((uv.y.abs() - 0.035) / 0.008).powi(2)).exp();
+    HELM_T + (keel + flute) * above + lip(s, 0.012, 0.0022)
+}
+
+/// The brow band's thickness over [`helmet_outer`], with its rolled lip.
+fn band_height(_: Vec2, s: f32) -> f32 {
+    BAND_T + lip(s, 0.004, 0.0008)
+}
+
+/// What the helmet and the coif occlude, for both pieces' ambient occlusion: the shell (as
+/// [`Plate::proxy`] has it), its band and the coif.
+fn helmet_field(p: Vec3) -> f32 {
+    let param = helmet_param();
+    let uv = param.param(p);
+    let s = helmet_outline(param, uv);
+    let shell = (helmet_base(p) - shell_height(uv, s.min(0.0))).max(s);
+    let s = band_outline(param, uv);
+    let band = (helmet_outer(p) - band_height(uv, s.min(0.0))).max(s);
+    shell.min(band).min(coif(p))
+}
+
+/// The mail coif under the helmet, bound in leather around the face. A piece of its own, so a
+/// character drawn by another module (in its own coif) can wear the helmet alone.
+fn coif_piece() -> PieceMesh {
+    let mut b = Builder::default();
     // Above the brow it is all under the helmet; it runs on 15 mm under the rim.
     let mail = sdf_mesh_tol(
         &coif,
@@ -3497,8 +3526,7 @@ fn helmet() -> PieceMesh {
     };
     b.add_fn(shown(binding), Zone::Leather, &edge);
     b.add(shown(stitches), Zone::Cloth, Tint::Rgb(lin(CREAM) * 0.85));
-    let field = |p: Vec3| shell.proxy(p).min(band.proxy(p)).min(coif(p));
-    b.finish(&field, 1.0)
+    b.finish(&helmet_field, 1.0)
 }
 
 /// How the skin tone varies over the face (multiplies the tone per channel): warmer nose and
@@ -5891,6 +5919,8 @@ fn muzzle_flash() -> PieceMesh {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Piece {
     Helmet,
+    /// The mail coif under the helmet, bound in leather around the face.
+    Coif,
     /// The face, its skin tinted by the "team" color (the skin tone).
     Face,
     Visor,
@@ -5935,8 +5965,9 @@ pub enum Piece {
 }
 
 impl Piece {
-    pub const ALL: [Piece; 37] = [
+    pub const ALL: [Piece; 38] = [
         Piece::Helmet,
+        Piece::Coif,
         Piece::Face,
         Piece::Visor,
         Piece::Crest,
@@ -5979,6 +6010,7 @@ impl Piece {
     pub fn name(self) -> &'static str {
         match self {
             Piece::Helmet => "helmet",
+            Piece::Coif => "coif",
             Piece::Face => "face",
             Piece::Visor => "visor",
             Piece::Crest => "crest",
@@ -6172,6 +6204,7 @@ fn build_kit() -> Kit {
     let start = std::time::Instant::now();
     // Longest first, so no long job starts last.
     let mut jobs: Vec<Job> = vec![
+        Job::Pieces(|| vec![(Piece::Coif, coif_piece())]),
         Job::Pieces(|| vec![(Piece::Helmet, helmet())]),
         Job::Pieces(|| vec![(Piece::Chest, chest())]),
         Job::Pieces(|| vec![(Piece::Shield, shield())]),

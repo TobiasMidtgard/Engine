@@ -414,6 +414,13 @@ fn at(pos: Vec3, rot: Quat) -> Placed {
     }
 }
 
+/// Headgear a look leaves to the fighter's helmet: a mail coif for it to sit over, or an
+/// open helm (bare under it).
+const HELMED: [&str; 2] = ["mail_coif", "open_helm"];
+/// How much bigger a helmet is drawn over a person, about the middle of the head: about 1 cm
+/// more over the crown, so it sits over the look's coif rather than in it.
+const HELMET_GROWTH: f32 = 1.09;
+
 const HIDDEN: Placed = Placed {
     pos: Vec3::ZERO,
     rot: Quat::IDENTITY,
@@ -603,33 +610,45 @@ pub(crate) fn pose_stand_ins(
                 Box::new(move |p| pose.place(p))
             }
         };
-        // On a person drawn elsewhere, the pieces it wears move to that person's joints (the
-        // helmet only where the look leaves the head to one).
+        // On a person drawn elsewhere, the pieces it wears move to that person's joints: the
+        // helmet only where the look leaves the head to one (grown to sit over the look's own
+        // coif), the tabards only where the look has none of its own.
         let worn = drawn_elsewhere
             .then(|| fit.zip(st.motion.body()))
             .flatten()
             .and_then(|(f, (s, _))| character::worn_offsets(f, s));
-        let helmed = looks.is_some_and(|l| l.headgear == "open_helm");
+        let helmed = looks.is_some_and(|l| HELMED.contains(&l.headgear.as_str()));
+        let tabarded = looks.is_some_and(|l| l.outfit.accent_on == "tabard");
+        let helmet = placed(Part::Head);
         for child in children.iter() {
             let Ok((part, mut t, mut r)) = parts.get_mut(child) else {
                 continue;
             };
             let mut p = placed(part.part);
+            let mut scale = part.scale;
             let kept = match (worn, humanoid::worn(part.part)) {
                 (Some(_), Some(humanoid::Worn::Head)) if !helmed => None,
+                (Some(_), Some(humanoid::Worn::Tabard)) if tabarded => None,
                 (Some([hips, chest, head]), Some(w)) => {
                     p.pos += match w {
-                        humanoid::Worn::Hips => hips,
+                        humanoid::Worn::Hips | humanoid::Worn::Tabard => hips,
                         humanoid::Worn::Chest => chest,
                         humanoid::Worn::Head => head,
                     };
+                    if w == humanoid::Worn::Head {
+                        // Grown about the middle of the head.
+                        let middle =
+                            helmet.pos + head + helmet.rot * crate::art::fighter::rig::HEAD_MIDDLE;
+                        p.pos = middle + HELMET_GROWTH * (p.pos - middle);
+                        scale *= HELMET_GROWTH;
+                    }
                     Some(w)
                 }
                 _ => None,
             };
             let new = Transform::from_translation(p.pos.as_dvec3())
                 .with_rotation(p.rot)
-                .with_scale(part.scale);
+                .with_scale(scale);
             if *t != new {
                 *t = new;
             }

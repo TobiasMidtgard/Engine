@@ -13,7 +13,7 @@ use engine_world::animation::BonePose;
 use engine_world::animation::{AnimationEvent, SkeletonPose};
 use engine_world::character::{
     Appearance, AppearanceBodies, AppearanceRequest, BodyFit, FaceControls, HandControls,
-    HandShape, Outfit, draws_appearances,
+    HandShape, draws_appearances,
 };
 use engine_world::locomotion::MoveIntent;
 use engine_world::{DamageEvent, DamageKind, GroundContact, WorldPlugin};
@@ -589,6 +589,14 @@ fn a_look_is_asked_for_in_the_team_kit_and_one_given_is_kept() {
         NpcWeapon::sword(),
     );
     app.world.entity_mut(given).insert(Appearance::default());
+    let soldier = fighter(
+        &mut app,
+        at(8.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::sword(),
+    );
+    app.world.entity_mut(soldier).insert(NpcSkills::soldier());
     run(&mut app, 0.1);
     let ask = |e: Entity| {
         let r = app.world.get::<AppearanceRequest>(e).expect("asked");
@@ -598,14 +606,30 @@ fn a_look_is_asked_for_in_the_team_kit_and_one_given_is_kept() {
         )
     };
     let ((r, r_head), (g, g_head), (b, b_head)) = (ask(red), ask(red_gun), ask(blue));
-    // Dyed the team's colour: red's top is red, blue's blue; team mates match.
-    let warm = |o: &Outfit| o.top_color[0] - o.top_color[2];
-    assert!(warm(&r) > 0.05 && warm(&b) < -0.05, "{r:?} {b:?}");
-    assert_eq!(r.top_color, g.top_color);
-    assert_eq!(r.accent_on, "armband_l");
-    assert!(r.accent[0] > r.top_color[0], "the armband is brighter");
-    // Helmets on those who fight hand to hand, hoods on those who fight from range.
-    assert_eq!(r_head, "open_helm", "melee fighters keep their helmets");
+    // A tabard in the team's colour: red's is red, blue's blue; team mates match.
+    let warm = |c: [f32; 3]| c[0] - c[2];
+    assert!(
+        warm(r.accent) > 0.05 && warm(b.accent) < -0.05,
+        "{r:?} {b:?}"
+    );
+    assert_eq!(r.accent, g.accent);
+    for o in [&r, &g, &b] {
+        assert_eq!(o.accent_on, "tabard");
+        assert_eq!(o.bottom, "hose");
+        // Undyed or earthy cloth under it, darker than the team's colour.
+        assert!(
+            o.top_color.iter().sum::<f32>() < o.accent.iter().sum::<f32>(),
+            "{o:?}"
+        );
+    }
+    // Mail over the gambeson on a veteran who fights hand to hand; padding alone on one who
+    // fights from range or a lesser swordsman.
+    assert_eq!(r.top, "mail");
+    assert_eq!(g.top, "gambeson");
+    assert_eq!(ask(soldier).0.top, "gambeson");
+    // A coif for the helmet on those who fight hand to hand, hoods on those who fight from
+    // range.
+    assert_eq!(r_head, "mail_coif", "melee fighters keep their helmets");
     assert_eq!(g_head, "hood");
     assert_eq!(b_head, "hood");
     // Given outright: no request, kept as it is.

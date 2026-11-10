@@ -7,11 +7,11 @@
 //!   master 34–52). The character module answers with an `Appearance`; one already there is
 //!   kept.
 //! * **Kit.** The request carries the team's kit ([`team_kit`]), so the first build is
-//!   already dressed: a top dyed the team's colour (short sleeves for a rookie), trousers in
-//!   undyed or earthy cloth by its seed, a bright armband of the team's colour on the left
-//!   arm, an open helmet for those who fight hand to hand (the person's hair, ears and neck
-//!   left to the fighter's own helmet and coif) and a hood (in the top's colour) for archers
-//!   and riflemen. A look given outright is kept.
+//!   already dressed in armour layers: a quilted gambeson in undyed or earthy cloth (mail over
+//!   it on a veteran or better who fights hand to hand), wool hose and tall boots, a tabard in
+//!   the team's colour over chest and back, and a mail coif for the fighter's own helmet to
+//!   sit over (a hood for archers and riflemen). The cloths come from its seed. A look given
+//!   outright is kept.
 //! * **Detail.** Each fighter is built at a `CharacterQuality` for its distance from the
 //!   camera (the nearest simulation focus), re-ranked twice a second: the two nearest within
 //!   5 m in close-up, up to six within 18 m in mid, the rest as a crowd (no hair, no face
@@ -35,9 +35,11 @@
 //!   asking for one) has its stand-in body hidden; what it holds stays (the weapon, the
 //!   shield, a magazine or arrow in hand). Once the person is built (its `BodyFit`), what
 //!   it wears over the clothes stays too, moved onto that person's joints as the character
-//!   module poses them ([`drawn_joints`]): the team's tabards and the pouches on its hips,
-//!   the quiver on its chest, and the helmet with its crest and brow light on its head where
-//!   the look's headgear is `open_helm`. Without the resource nothing changes.
+//!   module poses them ([`drawn_joints`]): the pouches on its hips (and the team's tabards,
+//!   where the look has no tabard of its own), the quiver on its chest, and the helmet shell
+//!   with its crest and brow light on its head where the look's headgear is `mail_coif` (or
+//!   `open_helm`), drawn 9% larger about the middle of the head so it sits over the coif; the
+//!   fighter's own coif is left to the look. Without the resource nothing changes.
 //! * **Wear.** Blows and falls wear the look of a fighter with an `Appearance`: blood (cuts,
 //!   stabs, shots, burns less), bruises (blunt blows and falls) and dirt (going down, lying
 //!   on the ground, kneeling by a mate, dashing). A fighter sent home fresh is clean again;
@@ -605,13 +607,22 @@ fn linear(hex: u32) -> [f32; 3] {
     [c(hex >> 16), c(hex >> 8), c(hex)]
 }
 
-/// Undyed and earthy cloth for the trousers: linen, wool, leather brown, slate, olive, ink.
-const TROUSERS: [u32; 6] = [0x8c8270, 0x6e6252, 0x4a3a2a, 0x3b3d42, 0x4a4c33, 0x26282e];
+/// Undyed and earthy cloth for the gambeson (the padding under mail): linen and oatmeal, and
+/// wool in tan, grey, dark brown, olive drab and charcoal (as the stand-ins' own, linear RGB
+/// of these sRGB colours).
+const GAMBESONS: [u32; 7] = [
+    0xbcb09a, 0x7f6449, 0x7c7a73, 0xa08c6c, 0x5f4a38, 0x6b6649, 0x5c5b56,
+];
+/// Wool for the hose: dark brown, charcoal, olive-brown and umber.
+const HOSE: [u32; 4] = [0x5a4836, 0x4a4a4d, 0x585340, 0x463a30];
+/// The skill from which a fighter who closes in wears mail over the gambeson.
+const MAIL_FROM: f32 = 0.6;
 
 /// The team's kit for a fighter whose look leaves the clothes as they come (see the module
-/// docs): a top dyed the team's colour (a short-sleeved one for a rookie), trousers in an
-/// undyed or earthy cloth picked by its seed, an armband in the team's colour on the left arm,
-/// and a hood for those who fight from range.
+/// docs): a gambeson in an undyed or earthy cloth (with mail over it on a veteran or better
+/// who fights up close), hose and boots, a tabard in the team's colour, and a mail coif for
+/// the helmet to sit over (a hood for those who fight from range). The cloths are picked by
+/// the seed.
 pub(crate) fn team_kit(
     seed: Seed,
     faction: Option<&Faction>,
@@ -619,21 +630,24 @@ pub(crate) fn team_kit(
     weapon: Option<&crate::agent::NpcWeapon>,
 ) -> (Outfit, String) {
     let team = linear(super::faction_color(faction));
-    // Dyed wool takes the colour deep and a little dull; the armband is bright.
-    let grey = (team[0] + team[1] + team[2]) / 3.0;
-    let dyed = team.map(|c| 0.55 * (0.8 * c + 0.2 * grey));
     let level = skills.map_or(0.5, |s| s.level());
-    let trousers = TROUSERS[(mix(seed.0 ^ 0x7a05) % TROUSERS.len() as u64) as usize];
-    let outfit = Outfit {
-        top: if level < 0.35 { "tshirt" } else { "shirt" }.into(),
-        top_color: dyed,
-        bottom: "trousers".into(),
-        bottom_color: linear(trousers),
-        accent: team,
-        accent_on: "armband_l".into(),
-    };
     let ranged = weapon.is_some_and(|w| w.style == crate::agent::WeaponStyle::Ranged);
-    (outfit, if ranged { "hood" } else { "open_helm" }.into())
+    let pick =
+        |cloths: &[u32], salt: u64| cloths[(mix(seed.0 ^ salt) % cloths.len() as u64) as usize];
+    let outfit = Outfit {
+        top: if !ranged && level >= MAIL_FROM {
+            "mail"
+        } else {
+            "gambeson"
+        }
+        .into(),
+        top_color: linear(pick(&GAMBESONS, 0x9a3b)),
+        bottom: "hose".into(),
+        bottom_color: linear(pick(&HOSE, 0x7a05)),
+        accent: team,
+        accent_on: "tabard".into(),
+    };
+    (outfit, if ranged { "hood" } else { "mail_coif" }.into())
 }
 
 type WearItem<'a> = (
