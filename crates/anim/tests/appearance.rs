@@ -141,3 +141,109 @@ fn paddock_spectators_watch_the_hammer_and_wince() {
         "the watcher's eyes didn't drop to the tire ({gaze_down})"
     );
 }
+
+/// A drawn person's own proportions (`BodyFit`, written by the character module): the logic
+/// skeleton is fitted to them, so feet and hands land where the drawn body's are.
+#[test]
+fn a_person_with_a_body_fit_gets_a_skeleton_of_their_proportions() {
+    use engine_world::animation::BonePose;
+    use engine_world::character::BodyFit;
+    let mut app = app(true);
+    let e = person(&mut app);
+    app.update();
+    let stock = app
+        .world
+        .get::<engine_anim::Animator>(e)
+        .unwrap()
+        .skeleton
+        .clone();
+    // The stock rest, with legs and forearms 10% longer (and everything above the knees
+    // raised to match).
+    let mut fit = BodyFit {
+        names: stock.names.to_vec(),
+        parents: stock.parents.to_vec(),
+        rest: stock
+            .rest_model
+            .iter()
+            .map(|x| BonePose {
+                translation: x.t,
+                rotation: x.r,
+                scale: Vec3::ONE,
+            })
+            .collect(),
+        height: 1.75,
+    };
+    let bone = |n: &str| stock.index_of(n).unwrap();
+    let shin = stock.rest_model[bone("lower_leg_l")].t.y - stock.rest_model[bone("foot_l")].t.y;
+    for (i, name) in stock.names.iter().enumerate() {
+        let is_foot = name.starts_with("foot") || name.starts_with("toe");
+        if !is_foot {
+            fit.rest[i].translation.y += 0.1 * shin;
+        }
+        if name.starts_with("hand") {
+            fit.rest[i].translation.y -= 0.025;
+        }
+    }
+    let forearm = fit.rest[bone("lower_arm_r")]
+        .translation
+        .distance(fit.rest[bone("hand_r")].translation);
+    app.world.entity_mut(e).insert(fit);
+    for _ in 0..3 {
+        app.update();
+    }
+    let a = app.world.get::<engine_anim::Animator>(e).unwrap();
+    assert!(
+        a.skeleton.name.starts_with(engine_anim::body::FIT_PREFIX),
+        "{}",
+        a.skeleton.name
+    );
+    let s = &a.skeleton;
+    let len = |p: &str, c: &str| {
+        s.rest_model[s.index_of(p).unwrap()]
+            .t
+            .distance(s.rest_model[s.index_of(c).unwrap()].t)
+    };
+    let stock_len = |p: &str, c: &str| {
+        stock.rest_model[bone(p)]
+            .t
+            .distance(stock.rest_model[bone(c)].t)
+    };
+    assert!(
+        (len("lower_leg_l", "foot_l") - 1.1 * stock_len("lower_leg_l", "foot_l")).abs() < 0.002
+    );
+    assert!((len("lower_arm_r", "hand_r") - forearm).abs() < 0.002);
+    assert!(forearm > stock_len("lower_arm_r", "hand_r") + 0.015);
+    // Standing, the feet still reach the ground.
+    for _ in 0..30 {
+        app.update();
+    }
+    let a = app.world.get::<engine_anim::Animator>(e).unwrap();
+    let foot = a.model[a.skeleton.index_of("foot_l").unwrap()].t;
+    assert!(foot.y < 0.15, "{foot}");
+}
+
+/// What each hand holds picks its shape from the hand pose library, and an empty hand hangs
+/// relaxed (the natural finger cascade).
+#[test]
+fn hands_take_their_shapes_from_what_they_hold() {
+    use engine_anim::grip::{Handle, HeldItems};
+    use engine_world::character::{HandControls, HandShape};
+    let mut app = app(true);
+    let e = person(&mut app);
+    app.update();
+    let mut held = HeldItems::default().hold(1, Handle::default());
+    held.hands[0] = Some(Handle::default());
+    held.presets[0] = "shield".into();
+    app.world.entity_mut(e).insert(held);
+    app.update();
+    app.update();
+    let h = *app.world.get::<HandControls>(e).unwrap();
+    assert_eq!(h.hands[0].shape, HandShape::ShieldStrap);
+    assert_eq!(h.hands[1].shape, HandShape::PowerGrip);
+    assert!((h.hands[1].handle_radius_m - Handle::default().radius).abs() < 1e-6);
+    app.world.entity_mut(e).remove::<HeldItems>();
+    app.update();
+    app.update();
+    let h = *app.world.get::<HandControls>(e).unwrap();
+    assert_eq!(h.hands[1].shape, HandShape::Relaxed, "{h:?}");
+}

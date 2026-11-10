@@ -15,6 +15,7 @@ use engine_world::physics::{PhysicsQueries, QueryFilter};
 use engine_world::{Ground, SurfaceId};
 
 use crate::animator::{Animator, PoseEdit};
+use crate::skeleton::Skeleton;
 use crate::xform::{Xf, rotation_between, smoothing, twist_angle};
 
 /// How fast a planted foot's hold takes over, and how long a released one takes to rejoin
@@ -60,7 +61,8 @@ pub fn two_bone(
     let target = c.lerp(target, weight.min(1.0));
     let l1 = (b - a).length();
     let l2 = (c - b).length();
-    if l1 < 1e-5 || l2 < 1e-5 {
+    // A broken pose (NaN from upstream) or target is left alone rather than panicking.
+    if !(l1 >= 1e-5 && l2 >= 1e-5 && target.is_finite()) {
         return (c - target).length();
     }
     let to_target = target - a;
@@ -89,6 +91,209 @@ pub fn two_bone(
         lower,
         rotation_between((c2 - b2).normalize(), (goal_end - b2).normalize_or(c2 - b2)),
     );
+    (pose.position(end) - target).length()
+}
+
+/// Where the soft reach starts, as a share of the chain's length: a target farther than this
+/// is approached ever more slowly, so the limb never snaps straight (Unreal's Basic IK starts
+/// stretching at 0.75 of the length; soft IK's falloff the same idea without the stretch).
+pub const SOFT_REACH: f32 = 0.97;
+
+/// The most [`two_bone_live`] rolls a hinged limb's upper bone about its length to bend it
+/// toward a pole, radians (a shoulder or hip turns about this far either way).
+pub const MAX_ROLL: f32 = 100.0 * std::f32::consts::PI / 180.0;
+
+/// How [`two_bone_live`] solves a limb.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Limb {
+    /// The way the middle joint bends when the animation has the limb straight (or nearly):
+    /// a model-space direction, e.g. forward for knees.
+    pub pole: Vec3,
+    /// 0 bends where the animation bends the middle joint, 1 toward `pole` whatever the
+    /// animation does.
+    pub pole_weight: f32,
+    /// Share of the way to the target, 0..1.
+    pub weight: f32,
+    /// The end bone's model rotation to put back after the solve (a hand that keeps its grip,
+    /// a foot flat on the ground), and how much of it.
+    pub end_rotation: Option<(Quat, f32)>,
+    /// Approach far targets softly (see [`SOFT_REACH`]).
+    pub soft: bool,
+    /// The middle joint's hinge axis in the upper bone's own frame (see [`rest_hinge`]): the
+    /// upper bone rolls so the limb bends about it, as an elbow or a knee only can. Without
+    /// it the animated pose's own hinge is kept (when the limb is bent).
+    pub hinge: Option<Vec3>,
+}
+
+/// The hinge axis (in `upper`'s own frame) of a limb whose middle joint points `points` in
+/// the rest pose (model space: forward for knees, back for elbows): bending turns the lower
+/// bone about it by a positive angle. `None` for a degenerate limb.
+pub fn rest_hinge(s: &Skeleton, upper: usize, lower: usize, points: Vec3) -> Option<Vec3> {
+    let dir = s.rest_model[lower].t - s.rest_model[upper].t;
+    let h = points.cross(dir);
+    (h.length_squared() > 1e-10).then(|| s.rest_model[upper].r.conjugate() * h.normalize())
+}
+
+impl Limb {
+    /// Bend as the animation bends, falling back to `pole` for a straight limb.
+    pub fn animated(pole: Vec3) -> Self {
+        Self {
+            pole,
+            pole_weight: 0.0,
+            weight: 1.0,
+            end_rotation: None,
+            soft: true,
+            hinge: None,
+        }
+    }
+
+    /// A limb posed exactly where asked (a clip builder's): bent toward `pole`, about its
+    /// `hinge`, reaching hard.
+    pub fn posed(pole: Vec3, hinge: Option<Vec3>) -> Self {
+        Self {
+            pole_weight: 1.0,
+            soft: false,
+            hinge,
+            ..Self::animated(pole)
+        }
+    }
+}
+
+/// The distance a two-bone chain of length `reach` actually goes for a target `d` away: `d`
+/// up to `SOFT_REACH · reach`, then easing toward `reach` without ever arriving.
+pub fn soft_distance(d: f32, reach: f32) -> f32 {
+    let start = SOFT_REACH * reach;
+    if d <= start {
+        return d;
+    }
+    let room = reach - start;
+    start + room * (1.0 - (-(d - start) / room).exp())
+}
+
+/// Two-bone IK for a live pose (feet, reaching hands): like [`two_bone`], with what makes a
+/// limb read right frame after frame (characters week research, IK 1.2 and 7.1):
+/// - the bend comes from where the animation already bends the middle joint (blended toward
+///   `limb.pole` by `pole_weight`), so knees and elbows never flip across a fixed pole;
+/// - the upper bone keeps its hinge: after the swing it turns about its own length so the
+///   middle joint's hinge axis lies across the new bend, the way Unreal's Basic IK aims a
+///   secondary axis at the pole (no roll drift for armor plates and twist bones to show);
+/// - far targets are reached softly ([`soft_distance`]);
+/// - the end bone's rotation can be put back.
+///
+/// Returns how far the end ended up from the target (meters).
+pub fn two_bone_live(
+    pose: &mut PoseEdit,
+    upper: usize,
+    lower: usize,
+    end: usize,
+    target: Vec3,
+    limb: Limb,
+) -> f32 {
+    if limb.weight <= 0.0 {
+        return 0.0;
+    }
+    let a = pose.position(upper);
+    let b = pose.position(lower);
+    let c = pose.position(end);
+    let end_rotation = limb.end_rotation;
+    let target = c.lerp(target, limb.weight.min(1.0));
+    let l1 = (b - a).length();
+    let l2 = (c - b).length();
+    if !(l1 >= 1e-5 && l2 >= 1e-5 && target.is_finite()) {
+        return (c - target).length();
+    }
+    let to_target = target - a;
+    let reach = l1 + l2;
+    let wanted = to_target.length();
+    let d = if limb.soft {
+        soft_distance(wanted, reach)
+    } else {
+        wanted
+    };
+    let dist = d.clamp((l1 - l2).abs() + 1e-4, reach - 1e-4);
+    let dir = to_target.normalize_or(c - a);
+    let across = |v: Vec3| v - dir * dir.dot(v);
+    // Where the middle joint bends. A limb with a hinge bends about it as the upper bone is
+    // rolled now: the animation's roll says where the knee or elbow points (on its hinge, the
+    // same as the animated bend; off it, put back onto it), and it stays meaningful when the
+    // limb is straight. Without a hinge, the animated bend where there is one, else the pole.
+    let animated = across(b - a);
+    let hint = across(limb.pole).normalize_or_zero();
+    let own = limb
+        .hinge
+        .map(|h| across(dir.cross(pose.model[upper].r * h)).normalize_or_zero())
+        .filter(|v| *v != Vec3::ZERO);
+    let pole_weight = limb.pole_weight.clamp(0.0, 1.0);
+    let bend = match own {
+        // Turned toward the pole about the limb's line, but by no more than the upper bone
+        // can roll (`MAX_ROLL`): a pole behind the hinge cannot bend the limb backward.
+        Some(own) if hint != Vec3::ZERO => {
+            let turn = own.cross(hint).dot(dir).atan2(own.dot(hint));
+            let turn = turn.clamp(-MAX_ROLL, MAX_ROLL) * pole_weight;
+            Quat::from_axis_angle(dir, turn) * own
+        }
+        Some(own) => own,
+        None => {
+            // Trust the animated bend not at all for a straight limb (its direction is
+            // noise), fully once clearly bent, eased between so the plane never jumps.
+            let t = ((animated.length() / l1 - 0.02) / 0.1).clamp(0.0, 1.0);
+            let trust = t * t * (3.0 - 2.0 * t);
+            hint.lerp(animated.normalize_or_zero().lerp(hint, pole_weight), trust)
+        }
+    };
+    let bend = if bend.length_squared() < 1e-8 {
+        dir.any_orthonormal_vector()
+    } else {
+        bend.normalize()
+    };
+    // The hinge the middle joint bends about, where the limb has one. Without it the limb
+    // keeps the animated roll: the swing carries the animated hinge along already, and
+    // rolling to it again would only add noise.
+    let hinge_before = limb
+        .hinge
+        .map_or(Vec3::ZERO, |h| pose.model[upper].r * h * (l1 * l2));
+    let cos_a = ((l1 * l1 + dist * dist - l2 * l2) / (2.0 * l1 * dist)).clamp(-1.0, 1.0);
+    let sin_a = (1.0 - cos_a * cos_a).sqrt();
+    let b_goal = a + (dir * cos_a + bend * sin_a) * l1;
+    let swing = rotation_between((b - a).normalize(), (b_goal - a).normalize());
+    pose.rotate_model(upper, swing);
+    let goal_end = a + dir * dist;
+    // Keep the hinge: turn the upper bone about its length so the middle joint's hinge
+    // axis (carried by the swing) lies across the new bend plane.
+    let upper_axis = (b_goal - a).normalize();
+    let hinge_goal = upper_axis.cross(goal_end - b_goal);
+    if hinge_before.length() > 1e-3 * l1 * l2 && hinge_goal.length() > 1e-3 * l1 * l2 {
+        let carried = swing * hinge_before.normalize();
+        let along = |v: Vec3| (v - upper_axis * upper_axis.dot(v)).normalize_or_zero();
+        let (from, to) = (along(carried), along(hinge_goal.normalize()));
+        if from != Vec3::ZERO && to != Vec3::ZERO {
+            let angle = from.cross(to).dot(upper_axis).atan2(from.dot(to));
+            // A nearly straight limb has hardly a bend plane to roll to (and its direction is
+            // noise): roll in only as it bends, from 6° to 20° at the middle joint.
+            let flex = (upper_axis.dot((goal_end - b_goal).normalize_or(upper_axis)))
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            let k = ((flex - 6.0) / 14.0).clamp(0.0, 1.0);
+            // The bend is kept within `MAX_ROLL` of the hinge above; should the swing still
+            // leave nearly a half turn to roll, which way round would flip with noise, so
+            // fade the roll out from 120° to none at 170° instead.
+            let k = k * ((170.0 - angle.abs().to_degrees()) / 50.0).clamp(0.0, 1.0);
+            pose.rotate_model(upper, Quat::from_axis_angle(upper_axis, angle * k));
+        }
+    }
+    let b2 = pose.position(lower);
+    let c2 = pose.position(end);
+    pose.rotate_model(
+        lower,
+        rotation_between((c2 - b2).normalize(), (goal_end - b2).normalize_or(c2 - b2)),
+    );
+    if let Some((r, w)) = end_rotation
+        && w > 0.0
+    {
+        let now = pose.model[end].r;
+        pose.set_model_rotation(end, now.slerp(r, w.min(1.0)));
+    }
     (pose.position(end) - target).length()
 }
 
@@ -639,11 +844,19 @@ impl Default for LookAt {
 #[serde(default)]
 pub struct ReachIk {
     pub chains: Vec<Reach>,
+    /// How far each fully weighted chain reaching for another bone (an off hand on a
+    /// two-handed grip) ended from its seat this frame: meters, and degrees turned off it
+    /// when it turns to it. For the pose validator.
+    #[serde(skip)]
+    pub misses: Vec<(f32, f32)>,
 }
 
 impl ReachIk {
     pub fn new(chains: Vec<Reach>) -> Self {
-        Self { chains }
+        Self {
+            chains,
+            misses: Vec::new(),
+        }
     }
 }
 
@@ -945,7 +1158,21 @@ pub fn solve_feet(
         }
         let goal = base + up_model * (ik.foot_offsets[n] * weight - ik.pelvis_offset);
         let animated = (edit.model[upper].r, edit.model[lower].r);
-        two_bone(&mut edit, upper, lower, foot, goal, knee, 1.0);
+        // A planted foot must land exactly on its hold (no soft reach): the pelvis drop
+        // above keeps the goal within the leg's length.
+        two_bone_live(
+            &mut edit,
+            upper,
+            lower,
+            foot,
+            goal,
+            Limb {
+                soft: false,
+                // Knees point forward at rest and bend only about that hinge.
+                hinge: rest_hinge(&skeleton, upper, lower, Vec3::NEG_Z),
+                ..Limb::animated(knee)
+            },
+        );
         if weight < 1.0 {
             // Fade the knee's re-aim toward `knee` too, not only the goal: at weight 0 the
             // leg keeps its animated bend (knees up while sitting on the floor).
@@ -1031,17 +1258,19 @@ pub(crate) fn look_at_system(
 pub(crate) fn reach_ik_system(
     mut q: Query<(
         &mut Animator,
-        &ReachIk,
+        &mut ReachIk,
         &GlobalTransform,
         Option<&crate::retarget::Retarget>,
         Option<&crate::grip::HeldItems>,
     )>,
 ) {
-    for (mut animator, reach, gt, retarget, held) in &mut q {
+    for (mut animator, mut reach, gt, retarget, held) in &mut q {
         let retargeter = retarget.map(|r| &*r.retargeter);
         if !animator.posed() {
             continue;
         }
+        let reach = &mut *reach;
+        reach.misses.clear();
         for chain in &reach.chains {
             let mut weight = chain.weight;
             if !chain.weight_curve.is_empty() {
@@ -1083,10 +1312,38 @@ pub(crate) fn reach_ik_system(
             };
             let w = weight.min(1.0);
             let mut edit = animator.edit();
-            two_bone(&mut edit, a, b, c, frame.t, chain.pole, w);
+            // A hand on a grip bends its elbow where the clip does (the pole only for a
+            // straight arm) and reaches exactly: no soft approach for a seat on a handle.
+            let on_bone = !chain.target_bone.is_empty();
+            let limb = Limb {
+                weight: w,
+                soft: !on_bone,
+                // The anatomical hinge, not the pole: an elbow points back at rest (a knee,
+                // for a leg chain, forward) whichever way this reach wants it to point.
+                hinge: rest_hinge(
+                    &s,
+                    a,
+                    b,
+                    if chain.upper.contains("leg") {
+                        Vec3::NEG_Z
+                    } else {
+                        Vec3::Z
+                    },
+                ),
+                ..Limb::animated(chain.pole)
+            };
+            let miss = two_bone_live(&mut edit, a, b, c, frame.t, limb);
             if chain.turn > 0.0 {
                 let r = edit.model[c].r.slerp(frame.r, (chain.turn * w).min(1.0));
                 edit.set_model_rotation(c, r);
+            }
+            if on_bone && w > 0.99 {
+                let turned = if chain.turn > 0.99 {
+                    edit.model[c].r.angle_between(frame.r).to_degrees()
+                } else {
+                    0.0
+                };
+                reach.misses.push((miss, turned));
             }
         }
     }
@@ -1125,6 +1382,83 @@ mod tests {
         // Bone lengths are preserved.
         assert!(((a.model[2].t - a.model[1].t).length() - 0.5).abs() < 1e-4);
         assert!(((a.model[3].t - a.model[2].t).length() - 0.45).abs() < 1e-4);
+    }
+
+    /// The leg bent by the animation: the knee forward and a little out (+X), as a clip has it.
+    fn bent_leg() -> Animator {
+        let mut a = Animator::procedural(leg());
+        a.refresh_model();
+        {
+            let mut e = a.edit();
+            e.rotate_model(1, Quat::from_rotation_z(0.25) * Quat::from_rotation_x(0.5));
+            // The shin bends about the thigh's own X (the knee's hinge).
+            let thigh = e.model[1].r;
+            e.set_model_rotation(2, thigh * Quat::from_rotation_x(-1.0));
+        }
+        a.refresh_model();
+        a
+    }
+
+    #[test]
+    fn live_two_bone_keeps_the_animated_bend_and_its_hinge() {
+        let mut a = bent_leg();
+        let (hip, knee, ankle) = (a.model[1].t, a.model[2].t, a.model[3].t);
+        let before = (knee - (hip + ankle) * 0.5).normalize();
+        // The ankle pulled up and back a little: a pole straight forward would swing the knee
+        // in; the live solve keeps it out where the clip had it.
+        let target = ankle + Vec3::new(0.0, 0.12, 0.05);
+        let err = two_bone_live(&mut a.edit(), 1, 2, 3, target, Limb::animated(Vec3::NEG_Z));
+        assert!(err < 1e-3, "error {err}");
+        let (hip, knee, ankle) = (a.model[1].t, a.model[2].t, a.model[3].t);
+        let after = (knee - (hip + ankle) * 0.5).normalize();
+        assert!(after.dot(before) > 0.97, "{before} -> {after}");
+        // The knee is still a hinge: the shin turns about the thigh's own X axis only.
+        let local = a.model[1].r.conjugate() * a.model[2].r;
+        let (axis, _) = local.to_axis_angle();
+        assert!(axis.x.abs() > 0.99, "knee axis {axis}");
+        assert!(((knee - hip).length() - 0.5).abs() < 1e-4);
+        assert!(((ankle - knee).length() - 0.45).abs() < 1e-4);
+    }
+
+    #[test]
+    fn live_two_bone_eases_into_full_reach_and_never_snaps_straight() {
+        let mut a = bent_leg();
+        let hip = a.model[1].t;
+        let mut last_bend = f32::MAX;
+        // Targets marching out past the leg's reach (0.95 m): the knee straightens smoothly
+        // and never locks.
+        for k in 0..12 {
+            let d = 0.85 + 0.02 * k as f32;
+            let target = hip + Vec3::new(0.0, -d, 0.0);
+            two_bone_live(&mut a.edit(), 1, 2, 3, target, Limb::animated(Vec3::NEG_Z));
+            let (h, kn, an) = (a.model[1].t, a.model[2].t, a.model[3].t);
+            let bend = (kn - h).normalize().angle_between((an - kn).normalize());
+            assert!(bend > 1e-3, "locked straight at {d}");
+            assert!(bend <= last_bend + 1e-4, "bend grew at {d}");
+            last_bend = bend;
+        }
+        assert!(soft_distance(10.0, 1.0) <= 1.0);
+        assert!(soft_distance(0.99, 1.0) < 0.99);
+        assert_eq!(soft_distance(0.5, 1.0), 0.5);
+    }
+
+    #[test]
+    fn live_two_bone_puts_the_end_rotation_back() {
+        let mut a = bent_leg();
+        let keep = a.model[3].r;
+        let target = a.model[3].t + Vec3::new(0.05, 0.1, 0.0);
+        two_bone_live(
+            &mut a.edit(),
+            1,
+            2,
+            3,
+            target,
+            Limb {
+                end_rotation: Some((keep, 1.0)),
+                ..Limb::animated(Vec3::NEG_Z)
+            },
+        );
+        assert!(a.model[3].r.angle_between(keep) < 1e-3);
     }
 
     #[test]

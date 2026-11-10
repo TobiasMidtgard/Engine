@@ -28,7 +28,7 @@ use engine_world::{DamageEvent, DamageKind};
 
 use crate::animator::Animator;
 use crate::hit::HitReaction;
-use crate::ik::{to_model, two_bone};
+use crate::ik::to_model;
 use crate::knockdown::Knockdown;
 
 /// How long `kneel_hurt` keeps the body off its feet, s (the clip is 4 s; it stands from
@@ -371,7 +371,19 @@ pub(crate) fn hurt_system(
                     // the right way.
                     let pole = b - (a + c) * 0.5 + Vec3::new(0.05 * x, 0.0, 0.05);
                     let target = belly + Vec3::new(0.08 * x, 0.0, 0.0);
-                    two_bone(&mut edit, upper, lower, hand, target, pole, cover);
+                    let hinge = crate::ik::rest_hinge(edit.skeleton, upper, lower, Vec3::Z);
+                    crate::ik::two_bone_live(
+                        &mut edit,
+                        upper,
+                        lower,
+                        hand,
+                        target,
+                        crate::ik::Limb {
+                            weight: cover,
+                            hinge,
+                            ..crate::ik::Limb::animated(pole)
+                        },
+                    );
                 }
             }
         }

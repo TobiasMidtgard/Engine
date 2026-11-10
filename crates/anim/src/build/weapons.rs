@@ -27,7 +27,7 @@ use super::humanoid::{CLAVICLE, FOOT, HAND, LOWER_ARM, LOWER_LEG, TOE, UPPER_ARM
 use super::{PoseBuilder, keyed};
 use crate::animator::PoseEdit;
 use crate::clip::AnimationClip;
-use crate::ik::two_bone;
+use crate::ik::{Limb, rest_hinge, two_bone_live};
 use crate::skeleton::Skeleton;
 use crate::xform::Xf;
 
@@ -538,6 +538,33 @@ fn arc(from: Vec3, to: Vec3, e: f32, reach: f32) -> Vec3 {
     CHEST + dir * radius
 }
 
+/// Which way to bend an elbow so the forearm runs into the hand (`r`, model rotation) at
+/// `wrist`, the wrist straight rather than broken sideways: toward where the elbow would be
+/// on the hand's line, behind the wrist, blended with the hold's own `elbow` hint (which way
+/// the elbow points when that line leaves a choice). Model space.
+fn wrist_pole(
+    edit: &PoseEdit,
+    upper: usize,
+    lower: usize,
+    hand: usize,
+    wrist: Vec3,
+    r: Quat,
+    elbow: Vec3,
+) -> Vec3 {
+    let shoulder = edit.position(upper);
+    let forearm = edit.position(hand).distance(edit.position(lower));
+    // The hand points down its −Y: the forearm in line with it ends a forearm's length
+    // back up its +Y.
+    let ideal = wrist + r * Vec3::Y * forearm;
+    let dir = (wrist - shoulder).normalize_or(Vec3::NEG_Y);
+    let across = ideal - shoulder;
+    let across = across - dir * dir.dot(across);
+    match across.try_normalize() {
+        Some(a) => (a * 0.35 + elbow.normalize_or_zero() * 0.65).normalize_or(elbow),
+        None => elbow,
+    }
+}
+
 /// Pose the skeleton: the body by its angles, then legs and arms by two-bone IK onto the feet
 /// and holds.
 fn solve(s: &Skeleton, rigs: [Rig; 2], body: &Body, hands: &[Hold; 2]) -> Vec<(&'static str, Xf)> {
@@ -586,14 +613,15 @@ fn solve(s: &Skeleton, rigs: [Rig; 2], body: &Body, hands: &[Hold; 2]) -> Vec<(&
         let joint = f.at + yaw * toes;
         let target = joint - tilt * toes;
         let out = [-0.12, 0.12][side];
-        two_bone(
+        let pole = yaw * Vec3::new(out, 0.0, -1.0);
+        let hinge = rest_hinge(s, upper, lower, Vec3::NEG_Z);
+        two_bone_live(
             &mut edit,
             upper,
             lower,
             ankle,
             target,
-            yaw * Vec3::new(out, 0.0, -1.0),
-            1.0,
+            Limb::posed(pole, hinge),
         );
         edit.set_model_rotation(ankle, tilt);
         edit.set_model_rotation(toe, yaw);
@@ -609,7 +637,17 @@ fn solve(s: &Skeleton, rigs: [Rig; 2], body: &Body, hands: &[Hold; 2]) -> Vec<(&
         match rigs[side] {
             Rig::Held { axis, face } => {
                 let r = h.frame() * frame(axis, face).inverse();
-                let _miss = two_bone(&mut edit, upper, lower, hand, h.at - r * GRIP, h.elbow, 1.0);
+                let hinge = rest_hinge(s, upper, lower, Vec3::Z);
+                let wrist = h.at - r * GRIP;
+                let pole = wrist_pole(&edit, upper, lower, hand, wrist, r, h.elbow);
+                let _miss = two_bone_live(
+                    &mut edit,
+                    upper,
+                    lower,
+                    hand,
+                    wrist,
+                    Limb::posed(pole, hinge),
+                );
                 #[cfg(test)]
                 tests::note_miss(side, _miss);
                 edit.set_model_rotation(hand, r);
@@ -618,7 +656,15 @@ fn solve(s: &Skeleton, rigs: [Rig; 2], body: &Body, hands: &[Hold; 2]) -> Vec<(&
                 // The fist is a hand's length past the wrist along a straight forearm.
                 let mut wrist = h.at;
                 for _ in 0..2 {
-                    two_bone(&mut edit, upper, lower, hand, wrist, h.elbow, 1.0);
+                    let hinge = rest_hinge(s, upper, lower, Vec3::Z);
+                    two_bone_live(
+                        &mut edit,
+                        upper,
+                        lower,
+                        hand,
+                        wrist,
+                        Limb::posed(h.elbow, hinge),
+                    );
                     let along =
                         (edit.position(hand) - edit.position(lower)).normalize_or(Vec3::NEG_Y);
                     wrist = h.at - along * -GRIP.y;
@@ -729,7 +775,7 @@ fn sword_slash(s: &Skeleton) -> AnimationClip {
                 STANCE
                     .hips([0.0, -0.1, -0.08], [6.0, 12.0, 0.0], [6.0, 18.0, -4.0])
                     .foot(1, STANCE.feet[1].heel(15.0)),
-                Stroke::To(shield_low().at(Vec3::new(-0.2, 1.08, -0.28))),
+                Stroke::To(shield_low().at(Vec3::new(-0.36, 1.2, -0.14))),
                 Stroke::Cut {
                     axis: Vec3::new(-0.85, 0.5, 0.0),
                     degrees: 215.0,
@@ -769,12 +815,25 @@ fn sword_backhand(s: &Skeleton) -> AnimationClip {
                 Stroke::To(shield_low()),
                 Stroke::To(sword_ready()),
             ),
+            // The point lifts and the shield drops aside first, so the blade goes over and
+            // behind it to the hip instead of through it.
+            key(
+                wound * 0.5,
+                STANCE.hips([0.0, -0.09, 0.02], [3.0, 2.0, 0.0], [2.0, 12.0, 0.0]),
+                Stroke::To(shield_low().at(Vec3::new(-0.34, 1.02, -0.3))),
+                Stroke::To(Hold::new(
+                    Vec3::new(0.06, 1.28, -0.24),
+                    Vec3::new(-0.15, 0.95, 0.25),
+                    Vec3::NEG_Z,
+                    Vec3::new(0.8, -0.4, -0.4),
+                )),
+            ),
             // The sword across to the left hip, the trunk coiled to the left, the shield out
             // of its way.
             key(
                 wound,
                 STANCE.hips([0.0, -0.09, 0.02], [3.0, 20.0, 0.0], [2.0, 22.0, 0.0]),
-                Stroke::To(shield_low().at(Vec3::new(-0.3, 1.15, -0.2))),
+                Stroke::To(shield_low().at(Vec3::new(-0.4, 1.24, -0.18))),
                 Stroke::To(Hold::new(
                     Vec3::new(-0.22, 1.02, -0.22),
                     low,
@@ -787,7 +846,8 @@ fn sword_backhand(s: &Skeleton) -> AnimationClip {
                 STANCE
                     .hips([0.0, -0.08, -0.06], [4.0, -26.0, 0.0], [4.0, -18.0, 3.0])
                     .foot(1, STANCE.feet[1].heel(8.0)),
-                Stroke::To(shield_low()),
+                // The shield lifts out to the left while the blade rises under it.
+                Stroke::To(shield_low().at(Vec3::new(-0.42, 1.27, -0.18))),
                 Stroke::Cut {
                     axis: Vec3::new(0.85, -0.5, 0.0),
                     degrees: 210.0,
@@ -955,7 +1015,13 @@ fn shield_bash(s: &Skeleton) -> AnimationClip {
         Vec3::new(0.05, 0.05, -1.0),
         Vec3::new(-1.0, -0.2, 0.2),
     );
-    let sword_back = sword_ready().at(Vec3::new(0.3, 1.05, -0.12));
+    // The sword drawn back by the right hip, point up, clear of the shield's back.
+    let sword_back = Hold::new(
+        Vec3::new(0.32, 1.08, -0.04),
+        Vec3::new(0.05, 0.92, 0.38),
+        Vec3::NEG_Z,
+        Vec3::new(0.6, -0.7, 0.4),
+    );
     Moves::new(
         [HANDLE, SWORD],
         vec![
@@ -1865,6 +1931,74 @@ mod tests {
         let hand = m[s.bone("hand_r")];
         let fist = hand.transform_point(GRIP);
         (fist, fist + hand.r * BLADE_AXIS * length)
+    }
+
+    /// How deep a sword's blade cuts into the bearer's own shield at `t` (m: how far inside
+    /// the rim the blade crosses the shield's face, 0 if it passes clear).
+    fn blade_in_shield(s: &Skeleton, clip: &AnimationClip, t: f32) -> f32 {
+        let m = model_at(s, clip, t);
+        let hand = m[s.bone("hand_r")];
+        let fist = hand.transform_point(GRIP);
+        let axis = hand.r * BLADE_AXIS;
+        let (a, b) = (fist + axis * SWORD_BLADE[0], fist + axis * SWORD_BLADE[1]);
+        let left = m[s.bone("hand_l")];
+        let center = left.transform_point(SHIELD_CENTER);
+        let normal = (left.r * HANDLE_FACE).normalize();
+        // Where the blade crosses the shield's plane, and any of it lying within the
+        // shield's thickness of the plane.
+        let (da, db) = ((a - center).dot(normal), (b - center).dot(normal));
+        let depth = |p: Vec3| {
+            let d = (p - center).dot(normal);
+            SHIELD_RADIUS - (p - center - normal * d).length()
+        };
+        let mut worst: f32 = 0.0;
+        if da.signum() != db.signum() {
+            worst = worst.max(depth(a.lerp(b, da / (da - db))));
+        }
+        for k in 0..=20 {
+            let u = k as f32 / 20.0;
+            if (da + (db - da) * u).abs() < 0.02 {
+                worst = worst.max(depth(a.lerp(b, u)));
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn a_sword_never_cuts_through_its_own_shield() {
+        let s = humanoid::skeleton();
+        let mut report = Vec::new();
+        for clip in [
+            sword_slash(&s),
+            sword_backhand(&s),
+            sword_thrust(&s),
+            sword_overhead(&s),
+            shield_bash(&s),
+            sword_stance(&s),
+            shield_guard(&s),
+            shield_deflect(&s),
+            sword_riposte(&s),
+        ] {
+            let steps = (clip.duration * 60.0).ceil() as usize;
+            let mut worst = (0.0f32, 0.0f32);
+            for k in 0..=steps {
+                let t = clip.duration * k as f32 / steps.max(1) as f32;
+                let d = blade_in_shield(&s, &clip, t);
+                if d > worst.0 {
+                    worst = (d, t);
+                }
+            }
+            report.push(format!(
+                "{}: {:.3} m at {:.2} s",
+                clip.name, worst.0, worst.1
+            ));
+        }
+        eprintln!("{}", report.join("\n"));
+        assert!(
+            report.iter().all(|r| r.contains(": 0.000")),
+            "{}",
+            report.join("\n")
+        );
     }
 
     #[test]

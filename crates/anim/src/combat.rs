@@ -53,7 +53,7 @@ use crate::build::humanoid::{Approach as Travel, Evasion, Punch};
 use crate::build::weapons::{self, WeaponMove};
 use crate::hit::HitReaction;
 use crate::hurt::Hurt;
-use crate::ik::{to_model, two_bone};
+use crate::ik::to_model;
 use crate::knockdown::Knockdown;
 use crate::paired::Riposted;
 
@@ -1254,14 +1254,19 @@ pub(crate) fn aim_strikes(mut q: Query<(&mut Animator, &Attacker, &GlobalTransfo
         let pole = b - (a + c) * 0.5;
         // The wrist goes a fist's length short, so the knuckles land on the aim.
         let forearm = (c - b).normalize_or_zero();
-        two_bone(
+        // The clip's own bend and roll (a hook's elbow out, a jab's down): no hinge to roll
+        // to, and no soft reach (the aim already stops a fist short).
+        crate::ik::two_bone_live(
             &mut animator.edit(),
             upper,
             lower,
             end,
             to_model(gt, *aim) - forearm * FIST_LEN,
-            pole,
-            weight.min(1.0),
+            crate::ik::Limb {
+                weight: weight.min(1.0),
+                soft: false,
+                ..crate::ik::Limb::animated(pole)
+            },
         );
     }
 }

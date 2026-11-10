@@ -920,6 +920,9 @@ pub struct SkinningFeature {
     material_data: Vec<GpuSkinMaterial>,
     /// Items per shadow view: the sun cascades, then the sky occlusion view (always empty).
     shadow: [Vec<u32>; MAX_CASCADES + 1],
+    /// Items per inset shadow map (`ViewData::shadow_insets`): the casters each person's own
+    /// sun shadow map keeps (`ShadowInset::casts`).
+    inset_shadow: Vec<Vec<u32>>,
     stats: FeatureStats,
 }
 
@@ -1266,6 +1269,64 @@ impl SkinningFeature {
         }));
     }
 
+    /// Depth-only draws of `list`'s items (a cascade's or an inset map's casters).
+    fn draw_depth(&self, pass: &mut wgpu::RenderPass<'_>, list: &[u32]) {
+        let (Some(p), Some(surfaces)) = (&self.pipelines, &self.surfaces) else {
+            return;
+        };
+        if list.is_empty() || !self.bind_shared(pass) {
+            return;
+        }
+        // Opaque surfaces: depth only; adjacent index ranges merge into one draw.
+        pass.set_pipeline(&p.shadow);
+        let mut any_masked = false;
+        for &i in list {
+            let item = &self.items[i as usize];
+            let parts = self.parts_of(item);
+            any_masked |= parts.iter().any(|p| p.masked);
+            if parts.iter().all(|p| p.masked) || !self.bind_vertices(pass, item) {
+                continue;
+            }
+            let mut run: Option<std::ops::Range<u32>> = None;
+            for part in parts.iter().filter(|p| !p.masked) {
+                match &mut run {
+                    Some(r) if r.end == part.first => r.end += part.count,
+                    _ => {
+                        if let Some(r) = run.take() {
+                            pass.draw_indexed(r, 0, i..i + 1);
+                        }
+                        run = Some(part.first..part.first + part.count);
+                    }
+                }
+            }
+            if let Some(r) = run {
+                pass.draw_indexed(r, 0, i..i + 1);
+            }
+        }
+        if !any_masked {
+            return;
+        }
+        // Alpha-masked surfaces: cut out by base color alpha, like in the scene.
+        pass.set_pipeline(&p.shadow_masked);
+        let mut current = u32::MAX;
+        for &i in list {
+            let item = &self.items[i as usize];
+            let parts = self.parts_of(item);
+            if !parts.iter().any(|p| p.masked) || !self.bind_vertices(pass, item) {
+                continue;
+            }
+            for part in parts.iter().filter(|p| p.masked) {
+                if part.surface != current
+                    && let Some(set) = surfaces.set(part.surface)
+                {
+                    pass.set_bind_group(1, &set.group, &[]);
+                    current = part.surface;
+                }
+                pass.draw_indexed(part.first..part.first + part.count, 0, i..i + 1);
+            }
+        }
+    }
+
     /// Bind the buffers every instance shares (instances, indices); false before init.
     fn bind_shared(&self, pass: &mut wgpu::RenderPass<'_>) -> bool {
         let (Some(s), Some(instances)) = (&self.statics, &self.instances) else {
@@ -1551,6 +1612,9 @@ impl RenderFeature for SkinningFeature {
         for s in &mut self.shadow {
             s.clear();
         }
+        for s in &mut self.inset_shadow {
+            s.clear();
+        }
         if let Some(surfaces) = &mut self.surfaces {
             surfaces.frame += 1;
         }
@@ -1777,6 +1841,19 @@ impl RenderFeature for SkinningFeature {
                     }
                 }
             }
+            // The people nearest the camera get sun shadow maps of their own: the bodies,
+            // clothes, hair cards and held props overlapping each one's sphere draw there.
+            if self.inset_shadow.len() < view.shadow_insets.len() {
+                self.inset_shadow
+                    .resize_with(view.shadow_insets.len(), Vec::new);
+            }
+            for (k, map) in view.shadow_insets.iter().enumerate() {
+                for (i, item) in self.items.iter().enumerate() {
+                    if item.casts && map.casts(item.center, item.radius) {
+                        self.inset_shadow[k].push(i as u32);
+                    }
+                }
+            }
         }
 
         // Upload.
@@ -1967,60 +2044,19 @@ impl RenderFeature for SkinningFeature {
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        let (Some(p), Some(surfaces)) = (&self.pipelines, &self.surfaces) else {
-            return;
-        };
-        let list = &self.shadow[cascade];
-        if list.is_empty() || !self.bind_shared(pass) {
-            return;
+        if let Some(list) = self.shadow.get(cascade) {
+            self.draw_depth(pass, list);
         }
-        // Opaque surfaces: depth only; adjacent index ranges merge into one draw.
-        pass.set_pipeline(&p.shadow);
-        let mut any_masked = false;
-        for &i in list {
-            let item = &self.items[i as usize];
-            let parts = self.parts_of(item);
-            any_masked |= parts.iter().any(|p| p.masked);
-            if parts.iter().all(|p| p.masked) || !self.bind_vertices(pass, item) {
-                continue;
-            }
-            let mut run: Option<std::ops::Range<u32>> = None;
-            for part in parts.iter().filter(|p| !p.masked) {
-                match &mut run {
-                    Some(r) if r.end == part.first => r.end += part.count,
-                    _ => {
-                        if let Some(r) = run.take() {
-                            pass.draw_indexed(r, 0, i..i + 1);
-                        }
-                        run = Some(part.first..part.first + part.count);
-                    }
-                }
-            }
-            if let Some(r) = run {
-                pass.draw_indexed(r, 0, i..i + 1);
-            }
-        }
-        if !any_masked {
-            return;
-        }
-        // Alpha-masked surfaces: cut out by base color alpha, like in the scene.
-        pass.set_pipeline(&p.shadow_masked);
-        let mut current = u32::MAX;
-        for &i in list {
-            let item = &self.items[i as usize];
-            let parts = self.parts_of(item);
-            if !parts.iter().any(|p| p.masked) || !self.bind_vertices(pass, item) {
-                continue;
-            }
-            for part in parts.iter().filter(|p| p.masked) {
-                if part.surface != current
-                    && let Some(set) = surfaces.set(part.surface)
-                {
-                    pass.set_bind_group(1, &set.group, &[]);
-                    current = part.surface;
-                }
-                pass.draw_indexed(part.first..part.first + part.count, 0, i..i + 1);
-            }
+    }
+
+    fn draw_inset_shadow(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        inset: usize,
+        _ctx: &FrameContext,
+    ) {
+        if let Some(list) = self.inset_shadow.get(inset) {
+            self.draw_depth(pass, list);
         }
     }
 

@@ -29,11 +29,13 @@ use std::sync::Mutex;
 use engine_core::prelude::*;
 use engine_world::LocomotionState;
 use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose};
-use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest, HandControls};
+use engine_world::character::{
+    Appearance, AppearanceBodies, AppearanceRequest, BodyFit, HandControls, HandPose, HandShape,
+};
 
-use crate::animator::{Animator, AnimatorSettings};
+use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::build::dog;
-use crate::build::humanoid::Outfit;
+use crate::build::humanoid::{self, Outfit};
 use crate::character::{AppliedHumanModel, HumanModel};
 use crate::demo::{
     character_model, fetched_path, give_dog_body, give_horse_body, give_humanoid_body,
@@ -298,6 +300,60 @@ pub(crate) fn drive_bodies(
     }
 }
 
+/// Fit each person's logic skeleton to the body the character module draws ([`BodyFit`]):
+/// their limb lengths, hips and shoulders, so feet plant and hands meet their grips on the
+/// drawn proportions instead of the stock humanoid's. People with the same build share one
+/// fitted skeleton (named after the build, to the millimetre); the animator is rebuilt on it.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fit_bodies(
+    mut library: ResMut<AnimationLibrary>,
+    mut q: Query<
+        (&Body, &BodyFit, &mut AnimatorSettings),
+        Or<(Changed<BodyFit>, Added<AnimatorSettings>, Added<Body>)>,
+    >,
+) {
+    use std::hash::{Hash, Hasher};
+    for (body, fit, mut settings) in &mut q {
+        if body.kind != BodyKind::Human
+            || !(settings.skeleton == humanoid::SKELETON
+                || settings.skeleton.starts_with(FIT_PREFIX))
+        {
+            continue;
+        }
+        // The spring chain of the stock ponytail keeps its own offsets (hair is drawn by the
+        // character module).
+        let joint = |bone: &str| -> Option<Vec3> {
+            if bone.starts_with("ponytail") {
+                return None;
+            }
+            let i = fit.names.iter().position(|n| n == bone)?;
+            let t = fit.rest.get(i)?.translation;
+            t.is_finite().then_some(t)
+        };
+        let base = humanoid::skeleton();
+        if joint("hips").is_none() || joint("hand_r").is_none() || joint("foot_l").is_none() {
+            continue;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for name in base.names.iter() {
+            if let Some(p) = joint(name) {
+                name.hash(&mut h);
+                ((p * 1000.0).round().as_ivec3()).to_array().hash(&mut h);
+            }
+        }
+        let name = format!("{FIT_PREFIX}{:016x}", h.finish());
+        if !library.skeletons.contains_key(&name) {
+            library.add_skeleton(humanoid::fit_skeleton(&name, joint));
+        }
+        if settings.skeleton != name {
+            settings.skeleton = name;
+        }
+    }
+}
+
+/// Skeletons [`fit_bodies`] fits start with this.
+pub const FIT_PREFIX: &str = "humanoid.fit.";
+
 /// Acceleration (m/s²) at which a person leans fully into a start or back into a stop.
 pub const FULL_LEAN_ACCEL: f32 = 4.0;
 
@@ -347,9 +403,56 @@ pub(crate) fn hand_controls_system(
             }
         }
         let grip = held.map(|h| closed.max(h).clamp(0.0, 1.0));
-        if out.grip != grip {
+        let fist = animator.curve("fist");
+        let hands = [0, 1].map(|side| hand_pose(items, side, grip[side], fist));
+        if out.grip != grip || out.hands != hands {
             out.grip = grip;
+            out.hands = hands;
         }
+    }
+}
+
+/// The hand pose library shape for one hand: closed on what it holds (a shield's strap, a
+/// bow's grip, a handle of its own radius), else a fist as far as the `fist` curve says, a
+/// grip as far as the other closing curves do, or relaxed (the natural cascade).
+fn hand_pose(items: Option<&HeldItems>, side: usize, grip: f32, fist: f32) -> HandPose {
+    if let Some(items) = items
+        && let Some(handle) = items.hands[side]
+    {
+        let preset = items.presets[side].as_str();
+        let shape = if preset.contains("shield") {
+            HandShape::ShieldStrap
+        } else if preset.contains("bow") {
+            HandShape::Bow
+        } else {
+            HandShape::PowerGrip
+        };
+        return HandPose {
+            shape,
+            weight: 1.0,
+            handle_radius_m: handle.radius,
+            curl: None,
+        };
+    }
+    if fist > 0.01 && fist >= grip - 1e-3 {
+        return HandPose {
+            shape: HandShape::Fist,
+            weight: fist.min(1.0),
+            ..Default::default()
+        };
+    }
+    if grip > 0.01 {
+        return HandPose {
+            shape: HandShape::PowerGrip,
+            weight: grip.min(1.0),
+            handle_radius_m: crate::grip::STANDARD_RADIUS,
+            curl: None,
+        };
+    }
+    HandPose {
+        shape: HandShape::Relaxed,
+        weight: 1.0,
+        ..Default::default()
     }
 }
 

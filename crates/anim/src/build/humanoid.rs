@@ -3036,7 +3036,20 @@ impl Key {
                 key.knee[limb - 2]
             };
             let held = edit.model[end].r;
-            crate::ik::two_bone(&mut edit, upper, lower, end, target, pole, weight);
+            // Elbows point back and knees forward at rest: each bends about its own hinge.
+            let points = if limb < 2 { Vec3::Z } else { Vec3::NEG_Z };
+            let hinge = crate::ik::rest_hinge(s, upper, lower, points);
+            crate::ik::two_bone_live(
+                &mut edit,
+                upper,
+                lower,
+                end,
+                target,
+                crate::ik::Limb {
+                    weight,
+                    ..crate::ik::Limb::posed(pole, hinge)
+                },
+            );
             edit.set_model_rotation(end, held);
         }
         let out = GET_UP_BONES

@@ -25,7 +25,7 @@ use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
 
 use crate::animator::{Animator, PoseEdit};
-use crate::ik::{FootIk, two_bone};
+use crate::ik::FootIk;
 use crate::xform::smoothing;
 
 /// How much of a leg's length its hip-to-ankle span may reach before the hips drop.
@@ -189,7 +189,18 @@ impl LocomotionWarp {
             let turn = Quat::from_rotation_y(self.angle);
             for (&(upper, lower, foot, knee), &(target, _)) in legs.iter().zip(&targets) {
                 let keep = pose.model[foot].r;
-                two_bone(pose, upper, lower, foot, target, turn * knee, 1.0);
+                crate::ik::two_bone_live(
+                    pose,
+                    upper,
+                    lower,
+                    foot,
+                    target,
+                    crate::ik::Limb {
+                        soft: false,
+                        hinge: crate::ik::rest_hinge(pose.skeleton, upper, lower, knee),
+                        ..crate::ik::Limb::animated(turn * knee)
+                    },
+                );
                 pose.set_model_rotation(foot, keep);
             }
         }

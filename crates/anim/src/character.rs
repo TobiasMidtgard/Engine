@@ -113,9 +113,12 @@ pub fn biped_map() -> RetargetMap {
                 })
                 .collect(),
             curves: vec!["grip".into(), "flex".into(), "fist".into()],
-            curl_deg: [72.0, 95.0, 55.0],
+            // A closed fist (MCP 85-90°, PIP 100-110°, DIP 60-80°; research-ik-hands-
+            // skinning.md 2.3), from the natural cascade of a relaxed hand.
+            curl_deg: [86.0, 102.0, 64.0],
             thumb_curl_deg: [10.0, 35.0, 40.0],
             relaxed: 0.12,
+            cascade_deg: Some(crate::retarget::RELAXED_CASCADE_DEG),
         });
     }
     RetargetMap {

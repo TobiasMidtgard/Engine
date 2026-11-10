@@ -37,6 +37,7 @@ pub mod shuttle;
 pub mod skeleton;
 pub mod skin;
 pub mod stunt;
+pub mod validate;
 pub mod warp;
 pub mod xform;
 
@@ -98,6 +99,10 @@ pub struct AnimationPlugin;
 
 impl Plugin for AnimationPlugin {
     fn build(&self, app: &mut App) {
+        // `ANIM_POSE_AUDIT=<file>`: check every humanoid's pose and write the worst values.
+        if let Some(audit) = validate::PoseAudit::from_env() {
+            app.insert_resource(audit);
+        }
         app.init_resource::<AnimationLibrary>()
             .init_resource::<combat::AttackSets>()
             .init_resource::<grip::GripPresets>()
@@ -159,6 +164,7 @@ impl Plugin for AnimationPlugin {
                     )
                         .chain_ignore_deferred(),
                     (
+                        body::fit_bodies,
                         animator::build_animators,
                         animator::queue_triggers,
                         freeflow::pick_targets,
@@ -207,13 +213,17 @@ impl Plugin for AnimationPlugin {
                     .chain()
                     .in_set(AnimSet::Procedural),
                 (
+                    // Pelvis and legs, then arms aiming, then hands on what they hold, then
+                    // the head: later chains hang off bones earlier ones moved (a two-hand
+                    // grip after the strike's aim, or the off hand drifts).
+                    validate::heal_poses,
                     warp::warp_system,
                     ik::foot_ik_system,
                     parkour::wall_ik,
-                    ik::look_at_system,
                     actions::reach_heads,
-                    ik::reach_ik_system,
                     combat::aim_strikes,
+                    ik::reach_ik_system,
+                    ik::look_at_system,
                 )
                     .chain()
                     .in_set(AnimSet::Ik),
@@ -230,6 +240,7 @@ impl Plugin for AnimationPlugin {
                     grip::apply_grip_presets,
                     animator::publish_pose,
                     retarget::retarget_poses,
+                    (validate::add_pose_checks, validate::audit_poses),
                     face::face_system,
                     (face::appearance_face_system, body::hand_controls_system),
                     (

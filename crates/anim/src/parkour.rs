@@ -18,7 +18,7 @@ use crate::build::humanoid::{
     TRIGGER_DOUBLE_JUMP, TRIGGER_JUMP, TRIGGER_LAND, TRIGGER_LAND_HARD, TRIGGER_WALL_KICK,
     WALL_CURVES, WALL_DISTANCE, WALL_INSET,
 };
-use crate::ik::{IkShape, IkSurface, IkSurfaces, two_bone};
+use crate::ik::{IkShape, IkSurface, IkSurfaces};
 
 /// How far to either side a wall is looked for, from the body's axis, m.
 const WALL_REACH: f32 = 1.4;
@@ -292,8 +292,17 @@ pub(crate) fn wall_ik(mut q: Query<(&GlobalTransform, &mut Animator, &Parkour)>)
             }
             let target = pc + Vec3::X * shift * w;
             let held = edit.model[c].r;
-            two_bone(&mut edit, a, b, c, target, pole, 1.0);
-            edit.set_model_rotation(c, held);
+            crate::ik::two_bone_live(
+                &mut edit,
+                a,
+                b,
+                c,
+                target,
+                crate::ik::Limb {
+                    end_rotation: Some((held, 1.0)),
+                    ..crate::ik::Limb::animated(pole)
+                },
+            );
         }
     }
 }

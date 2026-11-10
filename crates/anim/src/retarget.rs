@@ -57,7 +57,22 @@ pub struct HandRig {
     pub thumb_curl_deg: [f32; 3],
     /// How closed the hand is at rest (0..1).
     pub relaxed: f32,
+    /// The relaxed hand's bend per finger and joint (thumb first, knuckle out, degrees): the
+    /// natural cascade, index to little finger curling more. With it a hand at its `relaxed`
+    /// closure takes these angles and closes from them toward the fist; without it every
+    /// finger curls `relaxed` of its fist curl.
+    pub cascade_deg: Option<[[f32; 3]; 5]>,
 }
+
+/// The relaxed hand's cascade (degrees, thumb first, knuckle out), as the character module's
+/// hand pose library has it (`engine_character::hands::RELAXED`).
+pub const RELAXED_CASCADE_DEG: [[f32; 3]; 5] = [
+    [12.0, 12.0, 10.0],
+    [20.0, 25.0, 10.0],
+    [28.0, 32.0, 12.0],
+    [36.0, 40.0, 15.0],
+    [44.0, 48.0, 18.0],
+];
 
 enum Drive {
     Mapped { source: u16, correction: Quat },
@@ -70,7 +85,9 @@ struct FingerBone {
     hand: usize,
     /// Curl axis in the bone's own rest frame.
     axis: Vec3,
+    /// Its curl in a fist, and in the relaxed hand (radians).
     angle: f32,
+    relaxed: Option<f32>,
 }
 
 /// A prepared mapping from a logic skeleton to a target skeleton.
@@ -261,6 +278,9 @@ impl Retargeter {
                         hand: h,
                         axis,
                         angle: curls.get(k).copied().unwrap_or(0.0).to_radians(),
+                        relaxed: hand
+                            .cascade_deg
+                            .and_then(|c| c.get(f)?.get(k).map(|d| d.to_radians())),
                     });
                 }
             }
@@ -405,8 +425,18 @@ impl Retargeter {
                     Some(w) => w.get(b).copied().unwrap_or(f.angle),
                     None => f.angle,
                 };
-                if c > 0.0 {
-                    local.r = (local.r * Quat::from_axis_angle(f.axis, angle * c)).normalize();
+                let turn = match f.relaxed {
+                    // From the relaxed cascade at the hand's rest closure to the fist (or
+                    // the wrap round a handle) at 1.
+                    Some(relaxed) => {
+                        let rest = self.hands[f.hand].relaxed;
+                        let s = ((c - rest) / (1.0 - rest).max(1e-3)).clamp(0.0, 1.0);
+                        relaxed + (angle - relaxed) * s
+                    }
+                    None => angle * c,
+                };
+                if turn != 0.0 {
+                    local.r = (local.r * Quat::from_axis_angle(f.axis, turn)).normalize();
                 }
                 debug_assert_eq!(f.bone as usize, b);
             }
@@ -1021,6 +1051,7 @@ mod tests {
                 curl_deg: [80.0, 90.0, 60.0],
                 thumb_curl_deg: [20.0, 30.0, 30.0],
                 relaxed: 0.0,
+                cascade_deg: None,
             }],
             ..Default::default()
         };
@@ -1052,6 +1083,7 @@ mod tests {
                 hand: "R Hand".into(),
                 curves: vec!["grip".into()],
                 relaxed: 0.1,
+                cascade_deg: None,
                 ..Default::default()
             }],
             ..Default::default()
@@ -1124,6 +1156,7 @@ mod tests {
                 curl_deg: [72.0, 95.0, 55.0],
                 thumb_curl_deg: [10.0, 35.0, 40.0],
                 relaxed: 0.0,
+                cascade_deg: None,
             }],
             ..Default::default()
         };

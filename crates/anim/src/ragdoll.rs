@@ -50,6 +50,10 @@ use crate::graph::FiredEvent;
 use crate::skeleton::Skeleton;
 use crate::xform::{Xf, rotation_between};
 
+/// The fastest an animated part's drive target may move (m/s) and turn (rad/s).
+const MAX_TARGET_SPEED: f32 = 25.0;
+const MAX_TARGET_SPIN: f32 = 60.0;
+
 /// Collision layer of ragdoll parts (a bit of `CollisionLayers::member`). Parts collide with
 /// everything except other parts.
 pub const RAGDOLL_LAYER: u32 = 1 << 29;
@@ -1283,7 +1287,10 @@ pub(crate) fn ragdoll_system(
                 let linear = ((p - p0) / dt as f64).as_vec3();
                 if linear.length() < TELEPORT_SPEED {
                     m.linear = m.linear.lerp(linear, a);
-                    m.angular = m.angular.lerp(rotation_vector(r * r0.inverse()) / dt, a);
+                    m.angular = m.angular.lerp(
+                        (rotation_vector(r * r0.inverse()) / dt).clamp_length_max(MAX_TARGET_SPIN),
+                        a,
+                    );
                 }
             }
         } else {
@@ -1580,9 +1587,14 @@ fn follow_parts(
             let c = (2.0 * DRIVE_DAMPING * w).min(max_damping);
             let (target, aim) = animated[i];
             let (target_velocity, target_spin) = match rig.last.get(i) {
+                // Capped: a body slowed to a crawl (frozen by a spell, LocalTimeScale 0.02)
+                // that is shoved full speed would otherwise ask for thousands of m/s and
+                // blow the bodies up (NaN, Weaving hall).
                 Some(&(p0, r0)) if moving => (
-                    ((target - p0) / dt as f64).as_vec3(),
-                    rotation_vector(aim * r0.inverse()) / dt,
+                    ((target - p0) / dt as f64)
+                        .as_vec3()
+                        .clamp_length_max(MAX_TARGET_SPEED),
+                    (rotation_vector(aim * r0.inverse()) / dt).clamp_length_max(MAX_TARGET_SPIN),
                 ),
                 _ => (Vec3::ZERO, Vec3::ZERO),
             };
