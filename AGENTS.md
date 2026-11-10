@@ -236,7 +236,8 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   stutters (one slow frame among hundreds, which the 5 s table averages away), `--profile`
   also writes `engine-hitches.txt`: one line per frame of 25 ms or more (`ENGINE_HITCH_MS`
   sets another length, `0` none) with its fixed steps, the step time dropped and the spans
-  that ended in it, longest first; `scripts/hitch-summary.py` adds up what held them.
+  that ended in it, longest first (`ENGINE_HITCH_ROWS=<n>` lists at least n a thread);
+  `scripts/hitch-summary.py` adds up what held them.
   `showcase --route lap` flies round every zone as a streaming benchmark (its leg lines
   count zone loads and the ones never needed; `ENGINE_STREAM_LEADS=old` flies it with the
   look-ahead as it was, for a before/after in one build). So:

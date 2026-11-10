@@ -580,6 +580,17 @@ mod hitch {
         }
     }
 
+    /// More rows a line, for a closer look (`ENGINE_HITCH_ROWS`).
+    fn more_rows() -> usize {
+        static ROWS: OnceLock<usize> = OnceLock::new();
+        *ROWS.get_or_init(|| {
+            std::env::var("ENGINE_HITCH_ROWS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0)
+        })
+    }
+
     fn format_line(
         frame: u64,
         at: Duration,
@@ -594,7 +605,7 @@ mod hitch {
             spans
                 .iter()
                 .filter(|n| (n.thread == main) == on_main)
-                .take(rows)
+                .take(rows.max(more_rows()))
                 .map(|n| format!("{} {:.1}", n.key.trim(), ms(n.dur)))
                 .collect::<Vec<_>>()
                 .join("; ")
