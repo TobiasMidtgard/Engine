@@ -1,8 +1,9 @@
 //! The strand renderer (characters week R2): a curtain of fair hair half a meter from the
 //! camera, thinning toward its sides, with a box in front of its right part. The hair shows
 //! where it is dense, fades through partly covered pixels toward its sides (real coverage, not
-//! all-or-nothing pixels), and nothing of it shows through the box. Needs a GPU or lavapipe;
-//! passes with a note when neither is available.
+//! all-or-nothing pixels), and nothing of it shows through the box; seen from 2 and 5 m it
+//! covers the same share of itself (fewer, wider strands). Needs a GPU or lavapipe; passes with
+//! a note when neither is available.
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
@@ -46,6 +47,11 @@ fn curtain() -> StrandGroom {
 }
 
 fn render(hair: bool, shot: &str) -> Option<RgbImage> {
+    render_at(hair, 0.5, shot)
+}
+
+/// The scene with the camera `distance` meters from the curtain.
+fn render_at(hair: bool, distance: f64, shot: &str) -> Option<RgbImage> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -76,7 +82,7 @@ fn render(hair: bool, shot: &str) -> Option<RgbImage> {
             exposure: Exposure::Manual { ev100: 14.0 },
             ..Camera::perspective(40.0)
         },
-        Transform::from_xyz(0.0, 0.0, 0.5).looking_at(DVec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 0.0, distance).looking_at(DVec3::ZERO, Vec3::Y),
     ));
     w.spawn((
         DirectionalLight::default(),
@@ -193,6 +199,59 @@ fn hair_covers_softly_and_hides_behind_solid_things() {
         assert!(
             diff <= Some(2),
             "the hair shows through the box at ({cx}, {cy}): {p:?} -> {h:?}"
+        );
+    }
+}
+
+/// Mean cover of the curtain's left part (x -0.09..0.04 m, y -0.1..0.1 m) seen from `distance`.
+fn mean_cover(plain: &RgbImage, hair: &RgbImage, distance: f32, full: [f32; 3]) -> f32 {
+    let px_per_m = (H as f32 / 2.0) / (20f32.to_radians().tan() * distance);
+    let col = |x: f32| (W as f32 / 2.0 + x * px_per_m).round() as u32;
+    let row = |y: f32| (H as f32 / 2.0 - y * px_per_m).round() as u32;
+    let (mut sum, mut n) = (0.0, 0);
+    for y in row(0.1)..row(-0.1) {
+        for x in col(-0.09)..col(0.04) {
+            sum += cover(plain, hair, x, y, full).clamp(0.0, 1.0);
+            n += 1;
+        }
+    }
+    sum / n.max(1) as f32
+}
+
+#[test]
+fn far_hair_keeps_its_cover() {
+    let Some(plain) = render_at(false, 0.5, "strands_plain.png") else {
+        return;
+    };
+    let Some(near) = render_at(true, 0.5, "strands_curtain.png") else {
+        return;
+    };
+    let px_per_m = (H as f32 / 2.0) / (20f32.to_radians().tan() * 0.5);
+    let mid = near
+        .get_pixel(
+            (W as f32 / 2.0 - 0.01 * px_per_m).round() as u32,
+            (H as f32 / 2.0).round() as u32,
+        )
+        .0;
+    let full = [mid[0] as f32, mid[1] as f32, mid[2] as f32];
+    let close = mean_cover(&plain, &near, 0.5, full);
+    for distance in [2.0f32, 5.0] {
+        let Some(far_plain) = render_at(false, distance as f64, "strands_far_plain.png") else {
+            return;
+        };
+        let Some(far) = render_at(
+            true,
+            distance as f64,
+            &format!("strands_far_{distance}.png"),
+        ) else {
+            return;
+        };
+        let c = mean_cover(&far_plain, &far, distance, full);
+        eprintln!("mean cover: {close:.3} at 0.5 m, {c:.3} at {distance} m");
+        // Fewer strands far away, each wider by as much: the same share of the curtain.
+        assert!(
+            (c - close).abs() < 0.12,
+            "far hair keeps its cover: {close:.3} at 0.5 m, {c:.3} at {distance} m"
         );
     }
 }
