@@ -333,8 +333,8 @@ pub const VIEWS: &[DemoView] = &[
         // golem's ground: the circle's blossoms read on the floor, the golem and the treant side
         // by side before the dais, the dead charging in from the left (chosen offline from the
         // stop's own positions: the treant never in front of the golem).
-        eye: [0.0, 4.2, -2.5],
-        target: [0.8, 1.0, 6.5],
+        eye: [0.0, 4.2, -3.5],
+        target: [1.0, 1.5, 7.0],
         hour: 16.6,
         // The circle open under the golem, the dead burning in it.
         warmup: 6.0,
