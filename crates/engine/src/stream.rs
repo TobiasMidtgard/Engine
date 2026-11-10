@@ -27,8 +27,8 @@
 //! light cell far down a fast source's path waits until the source is nearly there, and a turn
 //! before then costs nothing; a slow one is asked for earlier, but a source too fast for its
 //! cells sees them fade in late over their far-view proxies rather than waking everything for
-//! kilometers ahead. A cell once asked for is held while the path still runs through it,
-//! however its lead has shrunk since. A loaded cell the path has swung away
+//! kilometers ahead. A cell once asked for is held by the lead it was asked with, even when
+//! it then loads faster than last time. A loaded cell the path has swung away
 //! from stays for [`StreamingBudget::linger_s`] before it leaves, so looking around in flight
 //! doesn't load and unload the same cells over and over (`stream.unneeded_loads` counts loads
 //! that left without a source ever coming within their load distance); a jump (a teleport,
@@ -473,6 +473,9 @@ struct Slot {
     needed: bool,
     /// Seconds every source's path has been away from it (beyond the hysteresis margin).
     unwanted_s: f32,
+    /// The load time this load was asked for by (the cell's last, or what cells take lately
+    /// for one never loaded): it is held by the lead that gave, even once its own shrinks.
+    asked_secs: f64,
 }
 
 impl Slot {
@@ -496,6 +499,7 @@ impl Slot {
             took: None,
             needed: false,
             unwanted_s: 0.0,
+            asked_secs: 0.0,
         }
     }
 
@@ -513,6 +517,7 @@ impl Slot {
         self.loaded_at = None;
         self.needed = false;
         self.unwanted_s = 0.0;
+        self.asked_secs = 0.0;
     }
 }
 
@@ -787,7 +792,8 @@ struct Track {
     v: DVec3,
     /// Last frame's raw velocity, m/s.
     raw: DVec3,
-    /// This frame's move was a jump (a teleport, a tour stop, fast travel), not flight.
+    /// This frame's move was a jump (a teleport, a tour stop, fast travel), not flight: see
+    /// [`JUMP_M`].
     jumped: bool,
 }
 
@@ -811,6 +817,11 @@ impl FollowsWorldShift for SourceMotion {
 /// Two frames' velocities further apart than this are a jump (a teleport, a tour stop), not
 /// flight, m/s² (500 g: no flight turns that hard; a jump is one frame's spike).
 const JUMP_ACCEL: f64 = 5_000.0;
+/// A source that moved farther than this in one frame, at over four times the speed it had,
+/// left where it was for good (a teleport, a tour stop, fast travel): the cells it left do
+/// not linger. (Not the acceleration test above: a free camera that starts to sprint, or a
+/// route's next leg, is one frame's spike too, and is still on its way through its cells.)
+const JUMP_M: f64 = 250.0;
 
 impl Track {
     /// Feeds this frame's position. A frame's raw velocity counts only when the frame before
@@ -838,12 +849,9 @@ impl Track {
         } else {
             t.v
         };
-        Track {
-            at,
-            v,
-            raw,
-            jumped: !steady,
-        }
+        let had = t.raw.length().max(t.v.length());
+        let jumped = at.distance(t.at) > JUMP_M && raw.length() > 4.0 * had;
+        Track { at, v, raw, jumped }
     }
 }
 
@@ -1014,12 +1022,15 @@ pub fn stream_system(world: &mut World) {
     let sources = sources(world);
     let budget = *world.resource::<StreamingBudget>();
     // Each slot's: has a build step, failed, what its last load took, how long it has been
-    // unwanted.
-    let slots: Vec<(bool, bool, Option<f64>, f32)> = world
+    // unwanted, the load time it was asked for by.
+    let slots: Vec<(bool, bool, Option<f64>, f32, f64)> = world
         .resource::<CellHooks>()
         .0
         .iter()
-        .map(|s| (s.loader.build.is_some(), s.failed, s.took, s.unwanted_s))
+        .map(|s| {
+            let build = s.loader.build.is_some();
+            (build, s.failed, s.took, s.unwanted_s, s.asked_secs)
+        })
         .collect();
     let lag = load_lag(world);
     let old = before_per_cell_leads();
@@ -1042,22 +1053,12 @@ pub fn stream_system(world: &mut World) {
         let reach_m = budget.stretch_loads * c.load_m * s.scale;
         s.lead(took.unwrap_or(lag), Some(reach_m))
     };
-    // Each cell's distance from the nearest source's path, in units of its load distance. A
-    // cell already asked for is held to the whole path (`keep`), not to the lead it would be
-    // asked with now: once it has loaded quickly, or other cells have, its lead shrinks, and
-    // it would be dropped and asked for again a moment later.
-    let reach = |c: &CellInfo, took: Option<f64>, keep: bool| match &sources {
+    // Each cell's distance from the nearest source's path, in units of its load distance.
+    let reach = |c: &CellInfo, took: Option<f64>| match &sources {
         None => 0.0,
         Some(sources) => sources
             .iter()
-            .map(|s| {
-                let secs = if keep && !old {
-                    s.lead(MAX_LOOKAHEAD_S, None)
-                } else {
-                    lead(s, c, took)
-                };
-                s.reach(c, secs)
-            })
+            .map(|s| s.reach(c, lead(s, c, took)))
             .fold(f64::INFINITY, f64::min),
     };
     // Load order: cells a source stands in first (nearest first), then the rest by when a
@@ -1094,7 +1095,7 @@ pub fn stream_system(world: &mut World) {
     let mut notes = Vec::with_capacity(cells.cells.len());
     let pins = std::mem::take(&mut cells.pins);
     for (i, c) in cells.cells.iter_mut().enumerate() {
-        let (build, failed, took, unwanted) = slots.get(i).copied().unwrap_or_default();
+        let (build, failed, took, unwanted, asked) = slots.get(i).copied().unwrap_or_default();
         if c.retired {
             notes.push((false, 0.0));
             continue;
@@ -1102,7 +1103,13 @@ pub fn stream_system(world: &mut World) {
         let r = match pins.get(&c.key) {
             Some(true) => 0.0,
             Some(false) => f64::INFINITY,
-            None => reach(c, took, c.state != CellState::Unloaded),
+            // A cell already asked for is held by the lead it was asked with, not the one
+            // it would be asked with now: once it has loaded quickly, or other cells have,
+            // its lead shrinks, and it would be dropped and asked for again a moment later.
+            None if c.state != CellState::Unloaded && !old => {
+                reach(c, Some(took.unwrap_or(lag).max(asked)))
+            }
+            None => reach(c, took),
         };
         let kept = c.keep_loaded && pins.get(&c.key) != Some(&false);
         let loaded = matches!(c.state, CellState::Loading | CellState::Loaded);
@@ -1140,11 +1147,6 @@ pub fn stream_system(world: &mut World) {
             if now_in(c) {
                 late += 1;
             }
-            // (In load order by the lead it is asked with, not the path it is held to.)
-            let r = match pins.contains_key(&c.key) {
-                true => r,
-                false => reach(c, took, false),
-            };
             want.push((priority(c, r, took), i, c.state));
         }
     }
@@ -1159,6 +1161,7 @@ pub fn stream_system(world: &mut World) {
         for i in woke {
             if let Some(slot) = hooks.0.get_mut(i) {
                 slot.wanted_at.get_or_insert(now);
+                slot.asked_secs = slot.took.unwrap_or(lag);
             }
         }
     }
@@ -2361,6 +2364,26 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_asked_for_is_held_by_its_own_lead_not_the_whole_path() {
+        let mut app = app();
+        app.stream_cell(hut("ahead", DVec3::new(1_000.0, 0.0, 0.0)));
+        app.world.resource_mut::<CellHooks>().0[0].took = Some(0.1);
+        let ship = flyer(&mut app, 2.0);
+        place(&mut app, ship, 700.0);
+        app.update();
+        // At 100 m/s its 2 s reach the hut from 800 m on: asked for, and loaded.
+        let x = fly(&mut app, ship, 700.0, 100.0, 90);
+        assert_eq!(state(&app, "ahead"), CellState::Loaded, "at {x}");
+        // Slowed to 10 m/s, still heading for it: 20 s of that path would reach the hut, but
+        // its 2 s don't, and it goes once its lingering is over.
+        let x = fly(&mut app, ship, x, 10.0, 60);
+        assert_eq!(state(&app, "ahead"), CellState::Loaded, "lingering at {x}");
+        let x = fly(&mut app, ship, x, 10.0, 300);
+        assert!(x < 920.0, "{x}");
+        assert_eq!(state(&app, "ahead"), CellState::Unloaded, "at {x}");
+    }
+
+    #[test]
     fn a_source_too_fast_for_a_slow_cell_asks_for_it_only_a_few_load_distances_off() {
         let mut app = app();
         app.stream_cell(hut("slow", DVec3::new(2_000.0, 0.0, 0.0)));
@@ -2479,6 +2502,19 @@ mod tests {
             app.update();
         }
         assert_eq!(state(&app, "ahead"), CellState::Unloaded);
+    }
+
+    #[test]
+    fn a_sprint_in_flight_is_not_a_jump() {
+        let (mut app, ship, mut at) = turned_away_from_a_lingering_hut();
+        // From 100 to 600 m/s in one frame, 10 m a frame: still on its way, and the hut
+        // behind it lingers on as it did.
+        for _ in 0..30 {
+            at.z += 600.0 / 60.0;
+            place_at(&mut app, ship, at);
+            app.update();
+        }
+        assert_eq!(state(&app, "ahead"), CellState::Loaded);
     }
 
     #[test]
