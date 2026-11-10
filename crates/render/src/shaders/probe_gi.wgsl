@@ -440,6 +440,9 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     let in_use = select(1.0, 0.0, f32(backfaces) > 0.25 * f32(rays_per_probe));
 
     var keep = pass_.params.x;
+    // An asleep probe traces one turn in SLEEP_TURNS: its trace stands for all of them, so it
+    // keeps as much of its old light as an awake probe does over that many turns.
+    if (!fresh && all(state.xyz == world) && state.w >= 2) { keep = pow(keep, f32(SLEEP_TURNS)); }
     if (fresh) { keep = 0.0; }
     textureStore(atlas_out, texel, 0, vec4<f32>(mix(irradiance, old_irradiance.rgb, keep), 1.0));
     // w: the epoch it was written in (`probe_gi` ignores probes from another).

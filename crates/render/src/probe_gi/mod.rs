@@ -552,6 +552,9 @@ pub(crate) struct ProbeGi {
     grid: Option<Grid>,
     /// Which probes trace each frame, and the epoch (schedule.rs).
     schedule: schedule::Schedule,
+    /// The main light last frame (direction, luminance of its color): when it jumps, every
+    /// probe starts over (`light_jumped`).
+    light: Option<(Vec3, f32)>,
     frame: u64,
     work: Option<Work>,
     stats: Stats,
@@ -609,9 +612,22 @@ fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
     })
 }
 
-/// Diffuse albedo and glow (cd/m², not pre-exposed) of a material, as the probes' rays see it.
-/// Albedo and emissive (cd/m^2) a ray sees on `m`; `texture_mean`: the mean color of its base
-/// color texture, when known.
+/// Whether the main light changed so much in one frame (direction, luminance of its color in
+/// lux) that the probes' light is void: more than four times brighter or darker, or turned more
+/// than 10° while it is brighter than 10 lux (the sun handing over to the moon at dusk turns it
+/// in a frame, but both are dim then). A day passing at any speed the clock runs changes it far
+/// less a frame.
+fn light_jumped(last: (Vec3, f32), now: (Vec3, f32)) -> bool {
+    const RATIO: f32 = 4.0;
+    const TURN_COS: f32 = 0.984_807_8; // cos 10°
+    const LIT_LUX: f32 = 10.0;
+    let (a, b) = (last.1.max(1e-3), now.1.max(1e-3));
+    if a.max(b) / a.min(b) > RATIO && a.max(b) > 1e-2 {
+        return true;
+    }
+    a.max(b) > LIT_LUX && last.0.normalize_or_zero().dot(now.0.normalize_or_zero()) < TURN_COS
+}
+
 /// An RGBA8 image's mean color, linear, from about 4096 of its pixels (as the image cache
 /// measures it).
 fn image_mean(image: &crate::Image) -> Option<Vec3> {
@@ -641,6 +657,8 @@ fn image_mean(image: &crate::Image) -> Option<Vec3> {
     Some(Vec3::from(sum.map(|s| (s / n) as f32)))
 }
 
+/// Diffuse albedo and glow (cd/m², not pre-exposed) of a material as the probes' rays see it;
+/// `texture_mean`: the mean color of its base color texture, when known.
 fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Vec3) {
     let tint = Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2]);
     let albedo = match m.preset {
@@ -741,6 +759,7 @@ impl ProbeGi {
             rays_lately: 0.0,
             grid: None,
             schedule: schedule::Schedule::new(),
+            light: None,
             frame: 0,
             work: None,
             stats: Stats::default(),
@@ -1406,6 +1425,18 @@ impl ProbeGi {
                 Ok("off" | "0")
             )
         });
+        // A jump in the light (the clock set from day to night, a scene's sun switched) voids
+        // every probe's history: blended a tenth a trace, and the asleep ones tracing one turn in
+        // eight, the old light lingered for hundreds of frames (the market at 22:00 lit at
+        // 400 lux by the sky the probes saw when it was still day, 10 Nov).
+        let light = (
+            view.sun_dir,
+            view.sun_color.dot(Vec3::new(0.2126, 0.7152, 0.0722)),
+        );
+        if self.light.is_some_and(|last| light_jumped(last, light)) {
+            self.schedule.relight();
+        }
+        self.light = Some(light);
         let plan = self.schedule.plan(self.grid, grid, per_frame, queue);
         self.grid = Some(grid);
         let traced = plan.traced.len() as u32;
@@ -2048,6 +2079,31 @@ mod tests {
     fn shader_validates() {
         let code = crate::features::compose_shader(include_str!("../shaders/probe_gi.wgsl"), true);
         crate::features::validate_wgsl("probe gi", &code).unwrap();
+    }
+
+    #[test]
+    fn the_light_jumps_when_the_clock_does_not_as_it_runs() {
+        let sun = |deg: f32, lux: f32| {
+            let r = deg.to_radians();
+            (Vec3::new(r.cos(), r.sin(), 0.0), lux)
+        };
+        // Day to night at once (the tour's clock set to 22:00): the sun hands over to the moon.
+        assert!(light_jumped(
+            sun(40.0, 115_700.0),
+            (Vec3::new(-0.5, 0.7, -0.5), 0.25)
+        ));
+        // A storm deck rolling over in a frame, or a scene's sun switched off.
+        assert!(light_jumped(sun(40.0, 100_000.0), sun(40.0, 10_000.0)));
+        assert!(light_jumped(sun(40.0, 100_000.0), sun(40.0, 0.0)));
+        // A day passing, even at a minute a frame (0.25° of sun), and its light with it.
+        assert!(!light_jumped(sun(40.0, 100_000.0), sun(40.25, 99_000.0)));
+        assert!(!light_jumped(sun(2.0, 3_000.0), sun(1.75, 2_400.0)));
+        // Dusk: the sun fading out below 0.01 lux, and the moon taking over, both dim.
+        assert!(!light_jumped(sun(-12.0, 0.004), sun(-12.0, 0.0)));
+        assert!(!light_jumped(
+            sun(-14.0, 0.29),
+            (Vec3::new(-0.5, 0.7, -0.5), 0.3)
+        ));
     }
 
     #[test]

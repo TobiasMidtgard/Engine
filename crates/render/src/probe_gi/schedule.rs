@@ -44,6 +44,8 @@ pub(super) struct Schedule {
     frame: u64,
     /// The next slot the round robin updates.
     cursor: u32,
+    /// Every probe starts over at the next plan (`relight`).
+    relight: bool,
     /// Grid coordinates (as storage indices of an unscrolled grid) nearest the center first,
     /// for the dims they were sorted for.
     nearest: (UVec3, Vec<u32>),
@@ -59,8 +61,15 @@ impl Schedule {
             planned: Vec::new(),
             frame: 0,
             cursor: 0,
+            relight: false,
             nearest: (UVec3::ZERO, Vec::new()),
         }
+    }
+
+    /// Every probe starts over at the next plan, nearest the camera first, as after a jump: the
+    /// light they hold is void (the main light jumped).
+    pub fn relight(&mut self) {
+        self.relight = true;
     }
 
     /// Slots waiting for their first trace.
@@ -83,7 +92,10 @@ impl Schedule {
         }
         let mut plan = Plan::default();
         let mut scrolled = Vec::new();
+        let relight = std::mem::take(&mut self.relight);
         match old {
+            // A new epoch voids every probe, those that scrolled in with the rest.
+            Some(_) if relight => self.reset(grid),
             Some(old) if old.dims == grid.dims && old.spacing == grid.spacing => {
                 if old.origin != grid.origin {
                     let dims = grid.dims;
@@ -295,6 +307,26 @@ mod tests {
         assert!(p.traced.contains(&near));
         let corner = b.slot(UVec3::ZERO);
         assert!(!p.traced.contains(&corner));
+    }
+
+    #[test]
+    fn a_relight_starts_every_probe_over_nearest_first() {
+        let mut s = Schedule::new();
+        let a = grid(IVec3::ZERO);
+        s.plan(None, a, 256, true);
+        while s.pending() > 0 {
+            s.plan(Some(a), a, 256, true);
+        }
+        let epoch = s.epoch;
+        s.relight();
+        let p = s.plan(Some(a), a, 64, true);
+        assert_eq!(s.epoch, epoch + 1, "the old light is void");
+        assert_eq!(p.traced.len(), 64);
+        assert_eq!(s.pending(), a.count() - 64);
+        assert!(p.traced.contains(&a.slot(UVec3::new(4, 2, 4))));
+        // Once only.
+        s.plan(Some(a), a, 64, true);
+        assert_eq!(s.epoch, epoch + 1);
     }
 
     #[test]
