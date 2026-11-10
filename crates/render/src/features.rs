@@ -906,6 +906,9 @@ impl RenderAppExt for App {
     }
 }
 
+/// Past this size [`GrowBuffer::grow_keeping`] grows by a quarter instead of doubling.
+const GROW_STEP_FROM: u64 = 64 << 20;
+
 /// A GPU buffer that grows (to the next power of two) when data doesn't fit.
 pub struct GrowBuffer {
     pub buffer: wgpu::Buffer,
@@ -921,8 +924,16 @@ impl GrowBuffer {
         usage: wgpu::BufferUsages,
         capacity: u64,
     ) -> Self {
+        Self::exact(device, label, usage, capacity.max(256).next_power_of_two())
+    }
+
+    fn exact(
+        device: &wgpu::Device,
+        label: &'static str,
+        usage: wgpu::BufferUsages,
+        capacity: u64,
+    ) -> Self {
         let usage = usage | wgpu::BufferUsages::COPY_DST;
-        let capacity = capacity.max(256).next_power_of_two();
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: capacity,
@@ -967,7 +978,9 @@ impl GrowBuffer {
 
     /// Make room for `size` bytes keeping the first `kept`: a grown buffer gets them by a copy
     /// on the GPU (submitted here), so only new data crosses from the CPU. Needs `COPY_SRC` in
-    /// the usage (else what was kept is lost). Returns true when the buffer was recreated.
+    /// the usage (else what was kept is lost). Doubles up to [`GROW_STEP_FROM`], then grows a
+    /// quarter at a time (in whole MiB), so a large buffer isn't mostly empty. Returns true when
+    /// the buffer was recreated.
     pub fn grow_keeping(
         &mut self,
         device: &wgpu::Device,
@@ -978,7 +991,20 @@ impl GrowBuffer {
         if size <= self.capacity {
             return false;
         }
-        let old = std::mem::replace(self, Self::new(device, self.label, self.usage, size));
+        let capacity = if size > GROW_STEP_FROM {
+            const MIB: u64 = 1 << 20;
+            size.max(self.capacity + self.capacity / 4).div_ceil(MIB) * MIB
+        } else {
+            size.max(256).next_power_of_two()
+        };
+        // Still bindable whole (as storage) where the size allows.
+        let limits = device.limits();
+        let most = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size);
+        let capacity = capacity.min(most.max(size));
+        let grown = Self::exact(device, self.label, self.usage, capacity);
+        let old = std::mem::replace(self, grown);
         let kept = kept.min(old.capacity) & !(wgpu::COPY_BUFFER_ALIGNMENT - 1);
         if kept > 0 && old.usage.contains(wgpu::BufferUsages::COPY_SRC) {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
