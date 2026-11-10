@@ -9,8 +9,9 @@
 //! * **Kit.** The request carries the team's kit ([`team_kit`]), so the first build is
 //!   already dressed: a top dyed the team's colour (short sleeves for a rookie), trousers in
 //!   undyed or earthy cloth by its seed, a bright armband of the team's colour on the left
-//!   arm, and a hood (in the top's colour) for archers and riflemen. A look given outright is
-//!   kept.
+//!   arm, an open helmet for those who fight hand to hand (the person's hair, ears and neck
+//!   left to the fighter's own helmet and coif) and a hood (in the top's colour) for archers
+//!   and riflemen. A look given outright is kept.
 //! * **Hands.** `HandControls` from what each hand holds ([`super::humanoid::hand_controls`]):
 //!   a power grip round the handle (sword grips, the carbine's pistol grip and handguard, the
 //!   bow's riser, a magazine), through the shield's straps, the bow hand hooking the string or
@@ -28,7 +29,11 @@
 //! * **Bodies drawn elsewhere.** While a character module draws appearances
 //!   (`AppearanceBodies` exists, checked every step), a fighter with an `Appearance` (or
 //!   asking for one) has its stand-in body hidden; what it holds stays (the weapon, the
-//!   shield, a magazine or arrow in hand). Without the resource nothing changes.
+//!   shield, a magazine or arrow in hand). Once the person is built (its `BodyFit`), what
+//!   it wears over the clothes stays too, moved onto that person's joints as the character
+//!   module poses them ([`drawn_joints`]): the team's tabards and the pouches on its hips,
+//!   the quiver on its chest, and the helmet with its crest and brow light on its head where
+//!   the look's headgear is `open_helm`. Without the resource nothing changes.
 //! * **Wear.** Blows and falls wear the look of a fighter with an `Appearance`: blood (cuts,
 //!   stabs, shots, burns less), bruises (blunt blows and falls) and dirt (going down, lying
 //!   on the ground, kneeling by a mate, dashing). A fighter sent home fresh is clean again;
@@ -116,9 +121,9 @@ static NAMES: LazyLock<Names> = LazyLock::new(|| {
 /// docs): `hips` from between the hip joints, `chest` from the waist, `head` from the neck,
 /// the ponytail from the head, a clavicle in from its shoulder (right; the left's x mirrored)
 /// and a toe from its ankle.
-const HIPS: Vec3 = Vec3::new(0.0, 0.07, 0.0);
-const CHEST: Vec3 = Vec3::new(0.0, 0.18, 0.0);
-const HEAD: Vec3 = Vec3::new(0.0, 0.10, 0.0);
+pub(super) const HIPS: Vec3 = Vec3::new(0.0, 0.07, 0.0);
+pub(super) const CHEST: Vec3 = Vec3::new(0.0, 0.18, 0.0);
+pub(super) const HEAD: Vec3 = Vec3::new(0.0, 0.10, 0.0);
 const PONYTAIL: [Vec3; 3] = [
     Vec3::new(0.0, 0.14, 0.095),
     Vec3::new(0.0, -0.08, 0.035),
@@ -137,7 +142,7 @@ fn bone(at: Vec3, rot: Quat) -> BonePose {
 
 /// The stand-in's skeleton as the humanoid skeleton's bones, in [`HUMANOID_BONES`] order
 /// (model space).
-fn bones(s: &Skeleton) -> Vec<BonePose> {
+pub(super) fn bones(s: &Skeleton) -> Vec<BonePose> {
     let on = |b: &Bone, p: Vec3| bone(b.at(p), b.rot);
     let mut out = Vec::with_capacity(HUMANOID_BONES.len());
     out.push(bone(Vec3::ZERO, Quat::IDENTITY));
@@ -169,6 +174,83 @@ fn bones(s: &Skeleton) -> Vec<BonePose> {
         out.push(on(&s.foot[k], TOE));
     }
     out
+}
+
+/// Whether a bone of a person's skeleton is a body bone (not a finger's or a twist bone).
+fn body_bone(name: &str) -> bool {
+    const FINGERS: [&str; 5] = ["thumb", "index", "middle", "ring", "pinky"];
+    !name.contains("twist") && !FINGERS.iter().any(|f| name.starts_with(f))
+}
+
+/// Where the person a character module draws from `fit` has its hips, chest and head joints
+/// when posed by `pose` (bones in [`HUMANOID_BONES`] order), model space, as the character
+/// module poses them: each bone keeps its own length and takes the pose's turn from its rest,
+/// the hips go where the pose puts them, and the body is moved so its feet land on the pose's
+/// feet. `None` for a skeleton without those joints.
+pub(crate) fn drawn_joints(fit: &BodyFit, pose: &[BonePose]) -> Option<[Vec3; 3]> {
+    let n = fit.names.len().min(fit.rest.len()).min(fit.parents.len());
+    let ours = |name: &str| {
+        let i = HUMANOID_BONES.iter().position(|(b, _)| *b == name)?;
+        pose.get(i)
+    };
+    let mut turn = vec![Quat::IDENTITY; n];
+    let mut at = vec![Vec3::ZERO; n];
+    let mut posed = vec![false; n];
+    for b in 0..n {
+        let name = fit.names[b].as_str();
+        if !body_bone(name) {
+            continue;
+        }
+        let mine = ours(name);
+        let parent = fit.parents[b].map(usize::from).filter(|&p| p < b);
+        turn[b] = match (mine, parent) {
+            (Some(m), _) => {
+                posed[b] = true;
+                m.rotation * fit.rest[b].rotation.inverse()
+            }
+            (None, Some(p)) => turn[p],
+            (None, None) => Quat::IDENTITY,
+        };
+        at[b] = match parent {
+            Some(p) => at[p] + turn[p] * (fit.rest[b].translation - fit.rest[p].translation),
+            None => mine.map_or(fit.rest[b].translation, |m| m.translation),
+        };
+        // The hips are where the pose puts them.
+        if let (Some(p), Some(m)) = (parent, mine)
+            && fit.parents[p].is_none()
+        {
+            at[b] = m.translation;
+        }
+    }
+    let (mut shift, mut feet) = (Vec3::ZERO, 0.0);
+    for b in 0..n {
+        let name = fit.names[b].as_str();
+        if posed[b]
+            && name.starts_with("foot_")
+            && let Some(m) = ours(name)
+        {
+            shift += m.translation - at[b];
+            feet += 1.0;
+        }
+    }
+    if feet > 0.0 {
+        shift /= feet;
+    }
+    let find = |name: &str| {
+        fit.names[..n]
+            .iter()
+            .position(|b| b == name)
+            .map(|i| at[i] + shift)
+    };
+    Some([find("hips")?, find("chest")?, find("head")?])
+}
+
+/// How far each joint worn pieces hang from (hips, chest, head) is moved on the person a
+/// character module draws from the stand-in's.
+pub(super) fn worn_offsets(fit: &BodyFit, s: &Skeleton) -> Option<[Vec3; 3]> {
+    let drawn = drawn_joints(fit, &bones(s))?;
+    let own = s.worn_joints();
+    Some([0, 1, 2].map(|i| drawn[i] - own[i]))
 }
 
 /// The face as ARKit weights, and the eyes' gaze in the head (yaw toward its left, pitch up).
@@ -239,7 +321,7 @@ const STAND_IN_SHOULDERS: f32 = crate::art::fighter::rig::HIP_Y
     + crate::art::fighter::rig::SHOULDER.y;
 
 /// A person's size as a share of the stand-in's, by the height of their shoulders standing at
-/// rest (what decides where their hands reach), kept within 0.8..1.15; 1 for a skeleton
+/// rest (what decides where their hands reach), kept within 0.75..1.3 (the people drawn run from about 1.5 to 2.1 m); 1 for a skeleton
 /// without shoulders.
 pub(crate) fn size_of(fit: &BodyFit) -> f32 {
     let at = |name: &str| {
@@ -247,7 +329,7 @@ pub(crate) fn size_of(fit: &BodyFit) -> f32 {
         fit.rest.get(i).map(|b| b.translation.y)
     };
     match (at("upper_arm_l"), at("upper_arm_r")) {
-        (Some(l), Some(r)) if l + r > 0.0 => (0.5 * (l + r) / STAND_IN_SHOULDERS).clamp(0.8, 1.15),
+        (Some(l), Some(r)) if l + r > 0.0 => (0.5 * (l + r) / STAND_IN_SHOULDERS).clamp(0.75, 1.3),
         _ => 1.0,
     }
 }
@@ -436,7 +518,7 @@ pub(crate) fn team_kit(
         accent_on: "armband_l".into(),
     };
     let ranged = weapon.is_some_and(|w| w.style == crate::agent::WeaponStyle::Ranged);
-    (outfit, if ranged { "hood" } else { "none" }.into())
+    (outfit, if ranged { "hood" } else { "open_helm" }.into())
 }
 
 type WearItem<'a> = (
@@ -502,4 +584,93 @@ pub(crate) fn wear(
     }
     // Fighters gone from the world.
     down.retain(|&e| q.contains(e));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A standing skeleton on the humanoid bones, every bone unturned (`legs` scales the legs).
+    fn standing(legs: f32) -> Vec<BonePose> {
+        let hip_y = 0.97 * legs;
+        let at = |name: &str| -> Vec3 {
+            let x = |v: f32| if name.ends_with("_l") { -v } else { v };
+            match name.trim_end_matches("_l").trim_end_matches("_r") {
+                "root" => Vec3::ZERO,
+                "hips" => Vec3::new(0.0, hip_y + 0.07, 0.0),
+                "spine" => Vec3::new(0.0, hip_y + 0.12, 0.0),
+                "chest" => Vec3::new(0.0, hip_y + 0.30, 0.0),
+                "neck" => Vec3::new(0.0, hip_y + 0.55, 0.0),
+                "head" => Vec3::new(0.0, hip_y + 0.65, 0.0),
+                "ponytail_1" | "ponytail_2" | "ponytail_3" => Vec3::new(0.0, hip_y + 0.8, 0.1),
+                "clavicle" => Vec3::new(x(0.03), hip_y + 0.46, 0.0),
+                "upper_arm" => Vec3::new(x(0.18), hip_y + 0.46, 0.0),
+                "lower_arm" => Vec3::new(x(0.24), hip_y + 0.2, 0.0),
+                "hand" => Vec3::new(x(0.28), hip_y - 0.05, 0.0),
+                "upper_leg" => Vec3::new(x(0.095), hip_y, 0.0),
+                "lower_leg" => Vec3::new(x(0.095), hip_y * 0.52, 0.0),
+                "foot" => Vec3::new(x(0.095), 0.075, 0.0),
+                "toe" => Vec3::new(x(0.095), 0.025, -0.14),
+                other => panic!("{other}"),
+            }
+        };
+        HUMANOID_BONES
+            .iter()
+            .map(|(n, _)| bone(at(n), Quat::IDENTITY))
+            .collect()
+    }
+
+    fn fit(rest: Vec<BonePose>) -> BodyFit {
+        BodyFit {
+            names: NAMES.0.to_vec(),
+            parents: NAMES.1.to_vec(),
+            rest,
+            height: 1.7,
+        }
+    }
+
+    fn named(pose: &[BonePose], name: &str) -> Vec3 {
+        let i = HUMANOID_BONES.iter().position(|(b, _)| *b == name).unwrap();
+        pose[i].translation
+    }
+
+    #[test]
+    fn a_person_of_the_poses_own_size_has_its_joints_where_the_pose_puts_them() {
+        let rest = standing(1.0);
+        // Bent forward at the waist and the head turned.
+        let mut pose = rest.clone();
+        let bend = Quat::from_rotation_x(-0.5);
+        let waist = named(&rest, "spine");
+        for name in ["spine", "chest", "neck", "head"] {
+            let i = HUMANOID_BONES.iter().position(|(b, _)| *b == name).unwrap();
+            pose[i].translation = waist + bend * (rest[i].translation - waist);
+            pose[i].rotation = bend;
+        }
+        let i = HUMANOID_BONES
+            .iter()
+            .position(|(b, _)| *b == "head")
+            .unwrap();
+        pose[i].rotation = Quat::from_rotation_y(0.7) * bend;
+        let [hips, chest, head] = drawn_joints(&fit(rest), &pose).unwrap();
+        for (got, name) in [(hips, "hips"), (chest, "chest"), (head, "head")] {
+            let want = named(&pose, name);
+            assert!(got.distance(want) < 1e-4, "{name}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn a_short_legged_person_stands_lower_on_the_same_feet() {
+        let pose = standing(1.0);
+        let short = standing(0.9);
+        let [hips, _, head] = drawn_joints(&fit(short.clone()), &pose).unwrap();
+        let drop = named(&pose, "hips").y - named(&short, "hips").y;
+        assert!(
+            (named(&pose, "hips").y - hips.y - drop).abs() < 1e-3,
+            "{hips}"
+        );
+        assert!(
+            (named(&pose, "head").y - head.y - drop).abs() < 1e-3,
+            "{head}"
+        );
+    }
 }

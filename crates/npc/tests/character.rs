@@ -604,8 +604,8 @@ fn a_look_is_asked_for_in_the_team_kit_and_one_given_is_kept() {
     assert_eq!(r.top_color, g.top_color);
     assert_eq!(r.accent_on, "armband_l");
     assert!(r.accent[0] > r.top_color[0], "the armband is brighter");
-    // Hoods on those who fight from range.
-    assert_eq!(r_head, "none");
+    // Helmets on those who fight hand to hand, hoods on those who fight from range.
+    assert_eq!(r_head, "open_helm", "melee fighters keep their helmets");
     assert_eq!(g_head, "hood");
     assert_eq!(b_head, "hood");
     // Given outright: no request, kept as it is.

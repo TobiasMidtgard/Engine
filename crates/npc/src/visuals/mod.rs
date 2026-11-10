@@ -441,7 +441,7 @@ type PoseItem<'a> = (
         Option<&'a NpcMotor>,
         Option<&'a NpcMemory>,
         // A look a character module may draw instead of the stand-in body.
-        Has<Appearance>,
+        Option<&'a Appearance>,
         Has<AppearanceRequest>,
         // That person's own skeleton (the pose is sized to it).
         Option<&'a BodyFit>,
@@ -522,7 +522,7 @@ pub(crate) fn pose_stand_ins(
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
         let (animal, mind, bird, motor, memory, looks, asks, fit) = animal;
-        let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks || asks);
+        let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks.is_some() || asks);
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
@@ -602,18 +602,38 @@ pub(crate) fn pose_stand_ins(
                 Box::new(move |p| pose.place(p))
             }
         };
+        // On a person drawn elsewhere, the pieces it wears move to that person's joints (the
+        // helmet only where the look leaves the head to one).
+        let worn = drawn_elsewhere
+            .then(|| fit.zip(st.motion.body()))
+            .flatten()
+            .and_then(|(f, (s, _))| character::worn_offsets(f, s));
+        let helmed = looks.is_some_and(|l| l.headgear == "open_helm");
         for child in children.iter() {
             let Ok((part, mut t, mut r)) = parts.get_mut(child) else {
                 continue;
             };
-            let p = placed(part.part);
+            let mut p = placed(part.part);
+            let kept = match (worn, humanoid::worn(part.part)) {
+                (Some(_), Some(humanoid::Worn::Head)) if !helmed => None,
+                (Some([hips, chest, head]), Some(w)) => {
+                    p.pos += match w {
+                        humanoid::Worn::Hips => hips,
+                        humanoid::Worn::Chest => chest,
+                        humanoid::Worn::Head => head,
+                    };
+                    Some(w)
+                }
+                _ => None,
+            };
             let new = Transform::from_translation(p.pos.as_dvec3())
                 .with_rotation(p.rot)
                 .with_scale(part.scale);
             if *t != new {
                 *t = new;
             }
-            let visible = p.visible && !(drawn_elsewhere && !humanoid::held(part.part));
+            let visible =
+                p.visible && !(drawn_elsewhere && !humanoid::held(part.part) && kept.is_none());
             if r.visible != visible {
                 r.visible = visible;
             }

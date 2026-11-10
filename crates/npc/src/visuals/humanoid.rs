@@ -5928,6 +5928,48 @@ fn face(f: FaceIn) -> (Look, f32, f32, f32, Expression) {
     (look, lids, jaw, breath * (1.0 + 2.0 * hard), expression)
 }
 
+/// What a worn piece hangs from, on a body another module draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Worn {
+    /// The helmet and coif (and its paint), the crest and the brow light.
+    Head,
+    /// The tabards and the belt's pouches.
+    Hips,
+    /// The quiver on the back.
+    Chest,
+}
+
+/// The pieces a fighter keeps wearing over a body another module draws, and what each hangs
+/// from: its helmet (only where the look leaves the head to a helmet), its team's tabards,
+/// pouches and quiver.
+pub(super) fn worn(part: Part) -> Option<Worn> {
+    let is = |p: Part| slot(p).is_some() && slot(p) == slot(part);
+    if [Part::Head, Part::Band, Part::Orb].into_iter().any(is) {
+        Some(Worn::Head)
+    } else if [TABARD_FRONT, TABARD_BACK, POUCH_R, POUCH_L]
+        .into_iter()
+        .any(is)
+    {
+        Some(Worn::Hips)
+    } else if is(QUIVER) {
+        Some(Worn::Chest)
+    } else {
+        None
+    }
+}
+
+impl Skeleton {
+    /// Where the joints worn pieces hang from are, model space: the hips, the chest and the
+    /// head (as `character.rs` writes them).
+    pub(super) fn worn_joints(&self) -> [Vec3; 3] {
+        [
+            self.pelvis.at(super::character::HIPS),
+            self.chest.at(super::character::CHEST),
+            self.head.at(super::character::HEAD),
+        ]
+    }
+}
+
 /// Pieces held in the hands rather than worn (the weapon and its pieces, the shield, a
 /// magazine or arrow in hand, the muzzle flash): they stay when a character module draws the
 /// body.
