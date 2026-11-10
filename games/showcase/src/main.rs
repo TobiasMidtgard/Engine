@@ -17,7 +17,8 @@
 //! draws it as the landscape's own mesh on an empty ground instead. A tour or film whose stops
 //! all belong to zones spawns only those zones' demos; `--zones a,b` (or `none`, `all`) picks
 //! them (see `zones::demo_zones`). `--exe` starts as the exe does (built a step a frame, then
-//! the start screen), also headless.
+//! the start screen), also headless. Everything runs at 2560x1440 unless `--size WxH` says
+//! otherwise; the exe opens borderless fullscreen (F11 or `--windowed` for a window).
 //!
 //! The map is a valley ringed by snowy mountains: a village around the market square, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -61,7 +62,14 @@ use engine::prelude::*;
 fn main() {
     let mut app = App::new();
     engine::core::log::init("info,wgpu=warn,naga=warn");
-    app.world.resource_mut::<EngineConfig>().app_name = "Engine showcase".into();
+    {
+        // Tobias plays at 2560x1440, so shots, films, routes and the exe default to it
+        // (`--size WxH` overrides); the engine's own default stays small for tests.
+        let mut config = app.world.resource_mut::<EngineConfig>();
+        config.app_name = "Engine showcase".into();
+        config.width = SIZE.0;
+        config.height = SIZE.1;
+    }
     engine::apply_cli_args(&mut app);
 
     app.add_plugins(DefaultPlugins)
@@ -178,6 +186,13 @@ fn main() {
     // `--exe` builds the way the exe does (a step a frame, then the start screen) in a headless
     // run too, to measure its start.
     let exe = (!headless && !scripted) || args.iter().any(|a| a == "--exe");
+    if exe && !args.iter().any(|a| a == "--windowed") {
+        // Borderless fullscreen at the monitor's size; F11 (or `--windowed`) for a window.
+        app.world.resource_mut::<Window>().fullscreen = true;
+    }
+    if exe {
+        app.add_systems(Update, toggle_fullscreen);
+    }
     walk::install(&mut app, exe);
     pack::install(&mut app);
     weather_panel::install(&mut app);
@@ -390,4 +405,14 @@ fn register_apis(app: &mut App) {
             Ok(serde_json::json!({ "hour": sky.hour, "hours_per_second": sky.hours_per_second }))
         },
     );
+}
+
+/// The showcase's default size: Tobias's monitor.
+const SIZE: (u32, u32) = (2560, 1440);
+
+/// F11 switches between borderless fullscreen and a window.
+fn toggle_fullscreen(keys: Option<Res<ButtonInput<KeyCode>>>, mut window: ResMut<Window>) {
+    if keys.is_some_and(|k| k.just_pressed(KeyCode::F11)) {
+        window.fullscreen = !window.fullscreen;
+    }
 }
