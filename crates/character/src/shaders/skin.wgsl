@@ -787,6 +787,30 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
         specular = mix(specular, fabric_spec, cloth);
         scatter = 1.0 - cloth;
     }
+    // Wear (`Appearance::wear`, live each frame without a rebuild): dirt gathers low and in
+    // patches, blood in glossy dark splashes, bruises tint the skin purple, wet darkens and
+    // glosses everything.
+    let wear = pose.wear;
+    if (any(wear > vec4<f32>(0.0))) {
+        let low = 1.0 - smoothstep(0.15, 1.2, r.y);
+        let dn = fbm3(r * 8.0 + seed, 3) / 0.875 * 0.75 + low * 0.35 + value_noise3(r * 90.0 + seed) * 0.12;
+        let dirt = smoothstep(1.05 - wear.x, 1.25 - wear.x, dn);
+        albedo = mix(albedo, albedo * vec3<f32>(0.5, 0.45, 0.4) + vec3<f32>(0.035, 0.028, 0.02), dirt * 0.85);
+        rough = mix(rough, 0.92, dirt);
+        specular = specular * (1.0 - 0.5 * dirt);
+        let bn = fbm3(r * 13.0 + seed * 3.1 + 7.0, 3) / 0.875 + value_noise3(r * 60.0 + seed) * 0.1;
+        let blood = smoothstep(1.0 - 0.55 * wear.y, 1.04 - 0.55 * wear.y, bn) * step(0.001, wear.y);
+        let blood_color = mix(vec3<f32>(0.2, 0.014, 0.01), vec3<f32>(0.07, 0.008, 0.006), cloth);
+        albedo = mix(albedo, blood_color, blood * 0.92);
+        rough = mix(rough, 0.28, blood);
+        specular = mix(specular, 0.9, blood);
+        let brn = fbm3(r * 6.0 + seed * 5.3 + 13.0, 2) / 0.75;
+        let bruise = smoothstep(1.0 - 0.6 * wear.z, 1.15 - 0.6 * wear.z, brn) * (1.0 - cloth);
+        albedo = albedo * mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.5, 0.7), bruise * 0.8);
+        albedo = albedo * (1.0 - wear.w * mix(0.25, 0.45, cloth));
+        rough = rough * (1.0 - 0.55 * wear.w);
+        specular = specular + 0.35 * wear.w;
+    }
     var s: SkinLight;
     s.albedo = albedo;
     s.n = n;

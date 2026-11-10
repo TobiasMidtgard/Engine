@@ -53,7 +53,7 @@ pub(crate) fn register(app: &mut App) {
                         "entity": e.to_bits(),
                         "sex": a.sex,
                         "age": a.age,
-                        "built": b.is_some_and(|b| b.appearance == *a),
+                        "built": b.is_some_and(|b| crate::same_build(&b.appearance, a)),
                     })
                 })
                 .collect();

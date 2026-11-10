@@ -227,7 +227,8 @@ struct GpuPose {
     gaze: [f32; 4],
     eye_l: [f32; 4],
     eye_r: [f32; 4],
-    grip: [f32; 4],
+    /// Dirt, blood, bruises, wet (`Appearance::wear`), read live so wear needs no rebuild.
+    wear: [f32; 4],
     weights: [[f32; 4]; MAX_CHANNELS / 4],
     prev_weights: [[f32; 4]; MAX_CHANNELS / 4],
 }
@@ -273,7 +274,6 @@ struct LastPose {
     palette: Vec<Mat4>,
     weights: [f32; MAX_CHANNELS],
     gaze: [f32; 2],
-    grip: [f32; 2],
     /// The pose skeleton the bone map was made for (its names), and the map.
     names: Option<Arc<[String]>>,
     map: Vec<Option<usize>>,
@@ -285,7 +285,6 @@ impl Default for LastPose {
             palette: Vec::new(),
             weights: [0.0; MAX_CHANNELS],
             gaze: [0.0; 2],
-            grip: [0.0; 2],
             names: None,
             map: Vec::new(),
         }
@@ -770,6 +769,7 @@ type CharacterItem = (
     Option<&'static SkeletonPose>,
     Option<&'static FaceControls>,
     Option<&'static HandControls>,
+    Option<&'static Appearance>,
     Option<&'static HairGuides>,
     Option<&'static HairGuidesPosed>,
 );
@@ -1434,7 +1434,9 @@ impl RenderFeature for CharacterFeature {
             c.seen = false;
         }
         let mut present = Vec::new();
-        for (entity, transform, built, skeleton, face, hands, guides, posed) in query.iter(world) {
+        for (entity, transform, built, skeleton, face, hands, look, guides, posed) in
+            query.iter(world)
+        {
             present.push(entity);
             let entry = self.characters.entry(entity);
             let full = uploaded && started.elapsed().as_secs_f64() * 1000.0 >= upload_budget;
@@ -1540,7 +1542,7 @@ impl RenderFeature for CharacterFeature {
                 c,
                 &built.meshes,
                 skeleton,
-                (face, hands),
+                (face, hands, look.map(|a| &a.wear)),
                 &mut self.palette,
                 &mut self.pose_bytes,
             );
@@ -1640,7 +1642,11 @@ fn write_pose(
     c: &mut GpuMeshes,
     m: &CharacterMeshes,
     skeleton: Option<&SkeletonPose>,
-    (face_controls, hands): (Option<&FaceControls>, Option<&HandControls>),
+    (face_controls, hands, wear): (
+        Option<&FaceControls>,
+        Option<&HandControls>,
+        Option<&engine_world::character::Wear>,
+    ),
     palette: &mut Vec<Mat4>,
     bytes: &mut Vec<u8>,
 ) {
@@ -1672,7 +1678,6 @@ fn write_pose(
         face::channel_weights(f, &mut weights);
         gaze = [f.gaze_yaw, f.gaze_pitch];
     }
-    let grip = hands.map_or([0.0; 2], |h| [h.grip(0), h.grip(1)]);
     let head = rig
         .and_then(|r| r.bones.iter().position(|b| b == "head"))
         .unwrap_or(0);
@@ -1690,7 +1695,9 @@ fn write_pose(
         gaze: [gaze[0], gaze[1], c.last.gaze[0], c.last.gaze[1]],
         eye_l: e(eyes[0]),
         eye_r: e(eyes[1]),
-        grip: [grip[0], grip[1], c.last.grip[0], c.last.grip[1]],
+        wear: wear.map_or([0.0; 4], |w| {
+            [w.dirt, w.blood, w.bruises, w.wet].map(|v| v.clamp(0.0, 1.0))
+        }),
         weights: fours(&weights),
         prev_weights: fours(&c.last.weights),
     };
@@ -1704,7 +1711,6 @@ fn write_pose(
     c.last.palette.extend_from_slice(palette);
     c.last.weights = weights;
     c.last.gaze = gaze;
-    c.last.grip = grip;
 }
 
 #[cfg(test)]

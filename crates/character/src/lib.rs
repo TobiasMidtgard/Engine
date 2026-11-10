@@ -331,6 +331,17 @@ fn answer_requests(
     }
 }
 
+/// Whether two looks build the same meshes: wear (dirt, blood, bruises, wet) is read live by
+/// the shaders, so a blow that bloodies someone doesn't rebuild them.
+pub fn same_build(a: &Appearance, b: &Appearance) -> bool {
+    a == b
+        || (a.wear != b.wear && {
+            let mut b = b.clone();
+            b.wear = a.wear;
+            *a == b
+        })
+}
+
 #[allow(clippy::type_complexity)]
 fn start_builds(
     mut commands: Commands,
@@ -355,7 +366,9 @@ fn start_builds(
             .copied()
             .unwrap_or_else(|| CharacterBuild::for_quality(quality.copied().unwrap_or_default()))
             .options();
-        if pending || built.is_some_and(|b| b.appearance == *appearance && b.options == opts) {
+        if pending
+            || built.is_some_and(|b| same_build(&b.appearance, appearance) && b.options == opts)
+        {
             continue;
         }
         let a = appearance.clone();

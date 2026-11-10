@@ -117,6 +117,6 @@ pub fn subject_eyes<'a>(mut q: impl Iterator<Item = SubjectParts<'a>>) -> Option
     let eyes = pose::eye_point(built, skeleton)?;
     Some((
         t.translation + (t.rotation * eyes).as_dvec3(),
-        built.appearance == *a,
+        engine_character::same_build(&built.appearance, a),
     ))
 }

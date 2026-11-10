@@ -39,7 +39,7 @@ struct Pose {
     gaze: vec4<f32>,                     // yaw, pitch this frame; yaw, pitch last frame (rad)
     eye_l: vec4<f32>,                    // eye centers (model space before posing)
     eye_r: vec4<f32>,
-    grip: vec4<f32>,                     // unused (fingers have bones)
+    wear: vec4<f32>,                     // dirt, blood, bruises, wet (Appearance::wear, 0..1)
     weights: array<vec4<f32>, 16>,       // expression channels this frame
     prev_weights: array<vec4<f32>, 16>,  // and last frame
     bones: array<mat4x4<f32>>,           // this frame's bones, then last frame's

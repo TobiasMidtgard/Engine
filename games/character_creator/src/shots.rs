@@ -239,6 +239,9 @@ impl ShotPlan {
         let views = value("--views").unwrap_or_else(|| "front,34,profile".into());
         let body_pose = value("--pose").unwrap_or_else(|| "stand".into());
         let headgear = value("--headgear");
+        // `--wear 0.6,0.5,0.4,0`: dirt, blood, bruises, wet.
+        let wear: Option<Vec<f32>> =
+            value("--wear").map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect());
         // `--hide torso,upper_arms`: body regions left out, as under armor.
         let hide: Option<Vec<String>> =
             value("--hide").map(|s| s.split(',').map(|r| r.trim().to_string()).collect());
@@ -305,6 +308,13 @@ impl ShotPlan {
             }
             if let Some(h) = &headgear {
                 a.headgear = h.clone();
+            }
+            if let Some(w) = &wear {
+                let at = |i: usize| w.get(i).copied().unwrap_or(0.0);
+                a.wear.dirt = at(0);
+                a.wear.blood = at(1);
+                a.wear.bruises = at(2);
+                a.wear.wet = at(3);
             }
             if let Some(h) = &hide {
                 a.hide = h.clone();
@@ -505,8 +515,10 @@ pub fn run_shots(
         return;
     }
     if ready.is_none()
-        || !built
-            .is_some_and(|b| b.appearance == shot.appearance && b.options == want_build.options())
+        || !built.is_some_and(|b| {
+            engine_character::same_build(&b.appearance, &shot.appearance)
+                && b.options == want_build.options()
+        })
     {
         plan.settled = 0;
         return;
