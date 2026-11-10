@@ -33,7 +33,7 @@ use crate::virtual_geometry::StableHasher;
 
 /// Changes whenever the same image would give different blocks (another encoder profile, mip
 /// filter or file layout), so old files are never used for new uploads.
-pub(crate) const CACHE_VERSION: u32 = 1;
+pub(crate) const CACHE_VERSION: u32 = 2;
 
 const MAGIC: [u8; 8] = *b"ENGTXC\0\x01";
 const HEADER_BYTES: usize = 40;
@@ -53,27 +53,36 @@ pub(crate) struct BlockShape {
     pub levels: u32,
 }
 
-/// Hash `bytes` in four lanes (so the multiplies of neighbouring words overlap in the CPU): an
-/// image of a few megabytes takes well under a millisecond.
+/// Hash `bytes` in eight lanes (so the multiplies of neighbouring words overlap in the CPU):
+/// the frame's 16 MB of new images take about a millisecond.
 pub(crate) fn hash_pixels(h: &mut StableHasher, bytes: &[u8]) {
-    let mut lanes = [
-        StableHasher::new(0x9ae1_6a3b_2f90_404f),
-        StableHasher::new(0xc3a5_c85c_97cb_3127),
-        StableHasher::new(0xb492_b66f_be98_f273),
-        StableHasher::new(0x165667b1_9e3779f9),
+    // Eight lanes of one multiply and one turn a word: the lanes don't wait for each other,
+    // so a 64 MB image takes a few milliseconds, where a single chain took thirty. The turn
+    // carries high bits back down (a multiply alone only moves differences up), and every
+    // lane goes through the hasher's full mix at the end.
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut lanes: [u64; 8] = [
+        0x9ae1_6a3b_2f90_404f,
+        0xc3a5_c85c_97cb_3127,
+        0xb492_b66f_be98_f273,
+        0x1656_67b1_9e37_79f9,
+        0x2545_f491_4f6c_dd1d,
+        0xd6e8_feb8_6659_fd93,
+        0xa076_1d64_78bd_642f,
+        0xe703_7ed1_a0b4_28db,
     ];
-    let (blocks, rest) = bytes.as_chunks::<32>();
+    let (blocks, rest) = bytes.as_chunks::<64>();
     for block in blocks {
         let (words, _) = block.as_chunks::<8>();
         for (lane, word) in lanes.iter_mut().zip(words) {
-            lane.write_u64(u64::from_le_bytes(*word));
+            *lane = (*lane ^ u64::from_le_bytes(*word))
+                .wrapping_mul(K)
+                .rotate_left(27);
         }
     }
     h.write_u64(bytes.len() as u64);
-    for lane in &lanes {
-        let (a, b) = lane.finish128();
-        h.write_u64(a);
-        h.write_u64(b);
+    for lane in lanes {
+        h.write_u64(lane);
     }
     h.write_bytes(rest);
 }

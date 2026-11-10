@@ -418,6 +418,8 @@ struct Inner {
     /// that is redrawn now and then would leave a file per version in the disk cache, so these
     /// are compressed without it.
     rewritten: std::collections::HashSet<u32>,
+    /// Views (image index, slot) being uploaded outside the lock right now.
+    uploading: std::collections::HashSet<(u32, usize)>,
     /// Finished views' blocks on their way back from the GPU to the disk cache.
     readbacks: Vec<Readback>,
 }
@@ -618,6 +620,11 @@ impl ImageCache {
         // When this frame's upload budget is spent the caller draws without the image and
         // asks again next frame (mips add a third).
         let bytes = image.data.len() as u64 * if image.mipmaps { 4 } else { 3 } / 3;
+        // Another thread is uploading this view right now (outside the lock, below): the
+        // caller draws without it this once, like when the budget is spent.
+        if inner.uploading.contains(&(index, slot)) {
+            return None;
+        }
         if !gpu.uploads.take(
             index as u64 * VIEW_SLOTS as u64 + slot as u64,
             bytes,
@@ -640,6 +647,13 @@ impl ImageCache {
         let disk = planned
             .filter(|_| !inner.rewritten.contains(&index))
             .and_then(|_| inner.disk_cache(gpu));
+        // The rest of the work (hashing the pixels, reading the disk cache, the upload itself,
+        // the image's mean color) runs without the lock: features prepare side by side, and a
+        // 100 ms upload under the lock held up every other texture lookup of the frame (probe
+        // lighting once waited a second for 226 mean colors).
+        let known = inner.images.contains_key(&index);
+        inner.uploading.insert((index, slot));
+        drop(guard);
         let key = match (&planned, &disk) {
             (Some((plan, encoding)), Some(_)) => Some(cache_key(image, srgb, *encoding, *plan)),
             _ => None,
@@ -657,35 +671,47 @@ impl ImageCache {
             }
             _ => None,
         };
-        let (texture, view, encoding, key, aliasable) = if let Some(texture) = from_disk {
+        // Bytes the disk cache spared the GPU, when the image came from it.
+        let mut spared = None;
+        let made = if let Some(texture) = from_disk {
             let (w, h, levels) = (texture.width(), texture.height(), texture.mip_level_count());
-            inner.stats.cache_hits += 1;
-            if let Some((_, encoding)) = planned {
-                inner.stats.cache_bytes_saved += (texels_with_mips(w, h, levels) * 4)
-                    .saturating_sub(compressed_bytes(encoding, w, h, levels));
-            }
+            spared = Some(planned.map_or(0, |(_, encoding)| {
+                (texels_with_mips(w, h, levels) * 4)
+                    .saturating_sub(compressed_bytes(encoding, w, h, levels))
+            }));
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let f = texture.format();
             let both = f.add_srgb_suffix() != f.remove_srgb_suffix();
-            (texture, view, None, None, aliasable && both)
+            Some((texture, view, None, None, aliasable && both))
         } else {
             let uploaded = {
                 let _span = crate::perf::HitchStep::new("images: upload");
                 upload_image(gpu, image, srgb, aliasable)
             };
-            let Some((texture, view)) = uploaded else {
-                inner.failed.insert((index, slot), version);
-                return None;
-            };
-            let shape = (texture.width(), texture.height(), texture.mip_level_count());
-            // As planned (always, unless the plan and the upload ever disagree: then the image
-            // is compressed as uploaded and stays out of the disk cache).
-            let (encoding, key) = match planned {
-                Some((plan, encoding)) if plan.shape() == shape => (Some(encoding), key),
-                _ => (Encoding::choose(compression, usage, image, shape), None),
-            };
-            (texture, view, encoding, key, aliasable)
+            uploaded.map(|(texture, view)| {
+                let shape = (texture.width(), texture.height(), texture.mip_level_count());
+                // As planned (always, unless the plan and the upload ever disagree: then the
+                // image is compressed as uploaded and stays out of the disk cache).
+                let (encoding, key) = match planned {
+                    Some((plan, encoding)) if plan.shape() == shape => (Some(encoding), key),
+                    _ => (Encoding::choose(compression, usage, image, shape), None),
+                };
+                (texture, view, encoding, key, aliasable)
+            })
         };
+        // A new image's mean color and coverage are read from its pixels, here too.
+        let looks = (!known).then(|| (mean_color(image), alpha_coverage(image)));
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        inner.uploading.remove(&(index, slot));
+        let Some((texture, view, encoding, key, aliasable)) = made else {
+            inner.failed.insert((index, slot), version);
+            return None;
+        };
+        if let Some(bytes) = spared {
+            inner.stats.cache_hits += 1;
+            inner.stats.cache_bytes_saved += bytes;
+        }
         inner.failed.remove(&(index, slot));
         inner.next_id += 1;
         inner.stats.uploads += 1;
@@ -710,8 +736,8 @@ impl ImageCache {
             views: Default::default(),
             pending: [None; VIEW_SLOTS],
             keys: [None; VIEW_SLOTS],
-            mean: mean_color(image),
-            coverage: alpha_coverage(image),
+            mean: looks.map_or_else(|| mean_color(image), |l| l.0),
+            coverage: looks.map_or_else(|| alpha_coverage(image), |l| l.1),
         });
         cached.views[slot] = Some(uploaded.clone());
         cached.pending[slot] = encoding;
