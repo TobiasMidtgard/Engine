@@ -255,6 +255,9 @@ impl Plugin for AnimationPlugin {
                 )
                     .chain()
                     .in_set(AnimSet::Output),
+                // Unordered, so its Commands add no sync point to the output chain: a new
+                // body's PoseCheck lands at the frame's end and is audited from the next frame.
+                validate::add_pose_checks.in_set(AnimSet::Output),
                 shift::follow_world_shifts.in_set(engine_world::WorldShiftSet::Apply),
             ),
         );
