@@ -357,7 +357,8 @@ const CUT_TILED_LAMPS: u32 = 1024u;
 const CUT_SCREEN_FOG: u32 = 2048u;
 // (4096 and 8192: the ground's grid lines, CPU side.)
 const CUT_GROUND_ONCE: u32 = 16384u;
-// (32768: meshes work out their material once, mesh_feature.rs "once"; CPU side.)
+// (32768: meshes work out their material once, mesh_feature.rs "once"; 65536: their scene
+// program after the depth test; 131072: their depth first in the pass of 32768. CPU side.)
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;

@@ -419,6 +419,36 @@ fn variants() -> Vec<Variant> {
             "a picture, not a cut: the pixels of objects lit once from their stored material in magenta",
         ),
         v(
+            "cut_meshes_early_z",
+            r,
+            json!({"trial_cuts": 65536}),
+            "objects' color program runs after the depth test, not before it: hidden layers are rejected without shading them (their programs can write a texture request, which makes the GPU run them first unless told otherwise)",
+        ),
+        v(
+            "cut_meshes_depth_first",
+            r,
+            json!({"trial_cuts": 163840}),
+            "cut_meshes_once with objects' depth drawn first, so their material is worked out for the layer in view only, not for every layer drawn",
+        ),
+        v(
+            "cut_once_depth_first_all",
+            r,
+            json!({"trial_cuts": 180224}),
+            "cut_ground_once, cut_meshes_once and the depth first together",
+        ),
+        v(
+            "count_mesh_runs_early_z",
+            r,
+            json!({"trial_cuts": 65536, "debug_skip": 262144}),
+            "the count with cut_meshes_early_z on",
+        ),
+        v(
+            "count_mesh_runs_depth_first",
+            r,
+            json!({"trial_cuts": 163840, "debug_skip": 262144}),
+            "the count with cut_meshes_depth_first on",
+        ),
+        v(
             "count_mesh_runs",
             r,
             json!({"debug_skip": 262144}),

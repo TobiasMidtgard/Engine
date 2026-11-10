@@ -596,6 +596,12 @@ pub struct ClusterRenderer {
     /// The pipelines of the meshes' own prepass (`trial_cut::MESHES_ONCE`, mesh_once.rs),
     /// single- and double-sided: made when first asked for ([`ensure_once`](Self::ensure_once)).
     once: Option<[wgpu::RenderPipeline; 2]>,
+    /// The same with `trial_cut::MESHES_DEPTH_FIRST`: depth only, then the material where the
+    /// depth is equal.
+    once_first: Option<[[wgpu::RenderPipeline; 2]; 2]>,
+    /// The scene pipelines whose program runs after the depth test
+    /// (`trial_cut::MESHES_EARLY_Z`), single- and double-sided.
+    scene_early: Option<[wgpu::RenderPipeline; 2]>,
     /// What they are created from.
     scene_shader: wgpu::ShaderModule,
     scene_layout: wgpu::PipelineLayout,
@@ -980,6 +986,8 @@ impl ClusterRenderer {
             hzb_reduce,
             scene: None,
             once: None,
+            once_first: None,
+            scene_early: None,
             scene_shader,
             scene_layout,
             features,
@@ -1053,6 +1061,8 @@ impl ClusterRenderer {
         self.features = features;
         self.scene = None;
         self.once = None;
+        self.once_first = None;
+        self.scene_early = None;
         self.shadow_masked = None;
     }
 
@@ -1894,57 +1904,144 @@ impl ClusterRenderer {
         &mut self,
         gpu: &GpuShared,
         targets: &[Option<wgpu::ColorTargetState>],
+        depth_first: bool,
     ) -> bool {
+        use crate::mesh_once::Draws;
         if !self.active {
             return false;
         }
-        if self.once.is_none() {
-            let constants = self.features.mesh_constants();
-            let compilation = wgpu::PipelineCompilationOptions {
-                constants: &constants,
-                ..Default::default()
-            };
-            let pipeline = |double: bool| {
-                gpu.device
-                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("cluster once"),
-                        layout: Some(&self.scene_layout),
-                        vertex: wgpu::VertexState {
-                            module: &self.scene_shader,
-                            entry_point: Some("vs_cluster_once"),
-                            compilation_options: compilation.clone(),
-                            buffers: &[],
-                        },
-                        primitive: wgpu::PrimitiveState {
-                            cull_mode: if double { None } else { Some(wgpu::Face::Back) },
-                            ..Default::default()
-                        },
-                        depth_stencil: Some(gpu.depth_state(true)),
-                        multisample: Default::default(),
-                        fragment: Some(wgpu::FragmentState {
-                            module: &self.scene_shader,
-                            entry_point: Some("fs_once"),
-                            compilation_options: compilation.clone(),
-                            targets,
-                        }),
-                        multiview_mask: None,
-                        cache: None,
-                    })
-            };
-            self.once = Some([pipeline(false), pipeline(true)]);
+        if (depth_first && self.once_first.is_some()) || (!depth_first && self.once.is_some()) {
+            return true;
+        }
+        let constants = self.features.mesh_constants();
+        let compilation = wgpu::PipelineCompilationOptions {
+            constants: &constants,
+            ..Default::default()
+        };
+        let write = gpu.depth_state(true);
+        let equal = wgpu::DepthStencilState {
+            depth_compare: Some(wgpu::CompareFunction::Equal),
+            ..gpu.depth_state(false)
+        };
+        let pipeline = |double: bool, draws: Draws| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("cluster once"),
+                    layout: Some(&self.scene_layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.scene_shader,
+                        entry_point: Some("vs_cluster_once"),
+                        compilation_options: compilation.clone(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: if double { None } else { Some(wgpu::Face::Back) },
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(draws.depth(&write, &equal)),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &self.scene_shader,
+                        entry_point: Some(draws.fragment()),
+                        compilation_options: compilation.clone(),
+                        targets: &draws.targets(targets),
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        if depth_first {
+            let pair = |draws| [pipeline(false, draws), pipeline(true, draws)];
+            self.once_first = Some([pair(Draws::Depth), pair(Draws::AtDepth)]);
+        } else {
+            self.once = Some([pipeline(false, Draws::Whole), pipeline(true, Draws::Whole)]);
         }
         true
     }
 
+    /// Make the scene pipelines whose program runs after the depth test
+    /// (`trial_cut::MESHES_EARLY_Z`): the clusters at the depth their prepass drew, nothing
+    /// written to it, no alpha test (the prepass did it).
+    pub fn ensure_scene_early(&mut self, gpu: &GpuShared) {
+        if !self.active || self.scene_early.is_some() {
+            return;
+        }
+        let mut constants = self.features.mesh_constants().to_vec();
+        constants.push(("SCENE_ALPHA_TEST", 0.0));
+        let compilation = wgpu::PipelineCompilationOptions {
+            constants: &constants,
+            ..Default::default()
+        };
+        let targets = [Some(wgpu::ColorTargetState {
+            format: gpu.formats.hdr,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let pipeline = |double: bool| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("cluster, depth test first"),
+                    layout: Some(&self.scene_layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.scene_shader,
+                        entry_point: Some("vs_cluster"),
+                        compilation_options: compilation.clone(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: if double { None } else { Some(wgpu::Face::Back) },
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        depth_compare: Some(wgpu::CompareFunction::Equal),
+                        ..gpu.depth_state(false)
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &self.scene_shader,
+                        entry_point: Some("fs_main_early"),
+                        compilation_options: compilation.clone(),
+                        targets: &targets,
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        self.scene_early = Some([pipeline(false), pipeline(true)]);
+    }
+
+    /// [`draw_scene`](Self::draw_scene) with the pipelines of
+    /// [`ensure_scene_early`](Self::ensure_scene_early) (the usual ones until they are made).
+    pub fn draw_scene_early<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'_>,
+        textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
+    ) {
+        let Some(scene) = &self.scene_early else {
+            return self.draw_scene(pass, textures);
+        };
+        self.draw_camera(pass, scene, &textures, 0);
+        if self.late {
+            self.draw_camera(pass, scene, &textures, self.late_first);
+        }
+    }
+
     /// Draw the camera's clusters into the meshes' own prepass (group 1 bound): those found
     /// visible early, or with `late` those occlusion culling found visible late.
-    pub fn draw_once<'a>(
+    pub(crate) fn draw_once<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'_>,
         textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
         late: bool,
+        draws: crate::mesh_once::Draws,
     ) {
-        let Some(once) = &self.once else {
+        use crate::mesh_once::Draws;
+        let once = match draws {
+            Draws::Whole => self.once.as_ref(),
+            Draws::Depth => self.once_first.as_ref().map(|p| &p[0]),
+            Draws::AtDepth => self.once_first.as_ref().map(|p| &p[1]),
+        };
+        let Some(once) = once else {
             return;
         };
         if !late {

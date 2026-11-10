@@ -1442,6 +1442,14 @@ pub struct MeshFeature {
     /// This view's opaque meshes are drawn that way this frame (`compute` decides): they skip
     /// the shared prepass and the scene pass.
     once_now: bool,
+    /// With `once_now`: the pass draws the meshes' depth first and their material where it
+    /// is equal (`trial_cut::MESHES_DEPTH_FIRST`).
+    depth_first_now: bool,
+    /// The opaque scene pipelines whose program runs after the depth test
+    /// (`trial_cut::MESHES_EARLY_Z`, mesh.wgsl `fs_main_early`), indexed like `pipelines` and
+    /// made as batches need them while the cut is on; and whether this frame draws with them.
+    early_pipelines: Vec<Option<wgpu::RenderPipeline>>,
+    early_now: bool,
     /// Exact counts of the meshes' shader work (`shade_skip::COUNT_MESH_RUNS`,
     /// mesh_counts.rs), while they are asked for, and whether this view is counted.
     counts: Option<crate::mesh_counts::MeshCounts>,
@@ -1744,6 +1752,7 @@ impl MeshFeature {
         self.pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
         self.prepass_pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
         self.once = None;
+        self.early_pipelines.clear();
         self.shadow_masked_pipeline = None;
         if let Some(impostors) = &mut self.impostors {
             impostors.clear_pipelines();
@@ -1861,10 +1870,17 @@ impl MeshFeature {
             once.light(pass);
             pass.set_bind_group(1, group, &[]);
         } else {
+            let early = self.early_now && phase == RenderPhase::Opaque;
             self.draw_batches(
                 pass,
                 batches,
-                |p| self.pipelines.get(p as usize).and_then(Option::as_ref),
+                |p| {
+                    self.early_pipelines
+                        .get(p as usize)
+                        .and_then(Option::as_ref)
+                        .filter(|_| early)
+                        .or_else(|| self.pipelines.get(p as usize).and_then(Option::as_ref))
+                },
                 |_| true,
                 culled.map(|c| (c.1, c.2)),
             );
@@ -1876,7 +1892,11 @@ impl MeshFeature {
             i.draw(pass, impostors, false);
         }
         if let Some(clusters) = clusters.filter(|_| !self.once_now) {
-            clusters.draw_scene(pass, |set| self.texture_group(set));
+            if self.early_now {
+                clusters.draw_scene_early(pass, |set| self.texture_group(set));
+            } else {
+                clusters.draw_scene(pass, |set| self.texture_group(set));
+            }
         }
     }
 
@@ -1961,6 +1981,8 @@ impl MeshFeature {
     /// frame (mesh_once.rs), with what that needs made: the main view with the cut on, no
     /// debug view, and a device that can hold the pass's targets.
     fn once_ready(&mut self, ctx: &FrameContext) -> bool {
+        use crate::mesh_once::Draws;
+        self.depth_first_now = false;
         if ctx.view.extra_view {
             return false;
         }
@@ -1971,20 +1993,28 @@ impl MeshFeature {
             self.once = None;
             return false;
         }
+        let first = ctx.settings.trial_cuts & crate::settings::trial_cut::MESHES_DEPTH_FIRST != 0;
         let targets = crate::mesh_once::color_targets(ctx.gpu);
         let clusters = self
             .clusters
             .as_mut()
-            .is_some_and(|c| c.ensure_once(ctx.gpu, &targets));
+            .is_some_and(|c| c.ensure_once(ctx.gpu, &targets, first));
         if self.opaque.is_empty() && !clusters {
             return false;
         }
+        self.depth_first_now = first;
         let mut used = [false; PIPELINE_VARIANTS as usize];
         for b in self.opaque.iter() {
             used[b.key.pipeline as usize] = true;
         }
         let missing = |once: &Option<crate::mesh_once::MeshOnce>, i: usize| {
-            once.as_ref().is_none_or(|o| o.pipelines[i].is_none())
+            once.as_ref().is_none_or(|o| {
+                if first {
+                    o.depth[i].is_none() || o.at_depth[i].is_none()
+                } else {
+                    o.pipelines[i].is_none()
+                }
+            })
         };
         if self.once.is_none() || (0..used.len()).any(|i| used[i] && missing(&self.once, i)) {
             let Some(inputs) = self.mesh_inputs(ctx.gpu) else {
@@ -1994,10 +2024,55 @@ impl MeshFeature {
                 crate::mesh_once::MeshOnce::new(ctx.gpu, PIPELINE_VARIANTS as usize)
             });
             for (i, _) in used.iter().enumerate().filter(|(_, used)| **used) {
-                if once.pipelines[i].is_none() {
-                    once.pipelines[i] = Some(build_once_pipeline(&inputs, i as u8, &targets));
+                let build = |draws| Some(build_once_pipeline(&inputs, i as u8, &targets, draws));
+                if !first {
+                    if once.pipelines[i].is_none() {
+                        once.pipelines[i] = build(Draws::Whole);
+                    }
+                    continue;
+                }
+                if once.depth[i].is_none() {
+                    once.depth[i] = build(Draws::Depth);
+                }
+                if once.at_depth[i].is_none() {
+                    once.at_depth[i] = build(Draws::AtDepth);
                 }
             }
+        }
+        true
+    }
+
+    /// Whether the opaque scene pass draws with the pipelines whose program runs after the
+    /// depth test this frame (`trial_cut::MESHES_EARLY_Z`), with those its batches need made.
+    fn early_ready(&mut self, ctx: &FrameContext) -> bool {
+        let on = ctx.settings.trial_cuts & crate::settings::trial_cut::MESHES_EARLY_Z != 0
+            && ctx
+                .gpu
+                .features
+                .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST);
+        if !on {
+            self.early_pipelines.clear();
+            return false;
+        }
+        if let Some(clusters) = &mut self.clusters {
+            clusters.ensure_scene_early(ctx.gpu);
+        }
+        self.early_pipelines
+            .resize(PIPELINE_VARIANTS as usize, None);
+        let mut inputs = None;
+        for i in 0..self.opaque.len() {
+            let variant = self.opaque[i].key.pipeline;
+            if variant & PIPE_BLEND != 0 || self.early_pipelines[variant as usize].is_some() {
+                continue;
+            }
+            if inputs.is_none() {
+                inputs = self.mesh_inputs(ctx.gpu);
+            }
+            let Some(inputs) = &inputs else {
+                return false;
+            };
+            self.early_pipelines[variant as usize] =
+                Some(build_mesh_pipeline_with(inputs, variant, false, true));
         }
         true
     }
@@ -3177,6 +3252,17 @@ fn build_mesh_pipeline(
     variant: u8,
     prepass: bool,
 ) -> wgpu::RenderPipeline {
+    build_mesh_pipeline_with(inputs, variant, prepass, false)
+}
+
+/// [`build_mesh_pipeline`]; with `early` an opaque scene pipeline's program runs after the
+/// depth test (`trial_cut::MESHES_EARLY_Z`).
+fn build_mesh_pipeline_with(
+    inputs: &MeshPipelineInputs,
+    variant: u8,
+    prepass: bool,
+    early: bool,
+) -> wgpu::RenderPipeline {
     let blend = !prepass && variant & PIPE_BLEND != 0;
     // The opaque scene pass draws what the prepass drew, at the same depth (`depth_equal`).
     let mut constants = inputs.constants.to_vec();
@@ -3207,7 +3293,12 @@ fn build_mesh_pipeline(
             &inputs.prepass_targets,
         )
     } else {
-        ("mesh", "vs_main", "fs_main", &main_targets)
+        let fs = if early && !blend {
+            "fs_main_early"
+        } else {
+            "fs_main"
+        };
+        ("mesh", "vs_main", fs, &main_targets)
     };
     inputs
         .device
@@ -3255,7 +3346,9 @@ fn build_once_pipeline(
     inputs: &MeshPipelineInputs,
     variant: u8,
     targets: &[Option<wgpu::ColorTargetState>],
+    draws: crate::mesh_once::Draws,
 ) -> wgpu::RenderPipeline {
+    let targets = &draws.targets(targets);
     let compilation = wgpu::PipelineCompilationOptions {
         constants: &inputs.constants,
         ..Default::default()
@@ -3288,11 +3381,11 @@ fn build_once_pipeline(
                 },
                 ..Default::default()
             },
-            depth_stencil: Some(inputs.depth[1].clone()),
+            depth_stencil: Some(draws.depth(&inputs.depth[1], &inputs.depth_equal)),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &inputs.shader,
-                entry_point: Some("fs_once"),
+                entry_point: Some(draws.fragment()),
                 compilation_options: compilation,
                 targets,
             }),
@@ -4976,6 +5069,7 @@ impl RenderFeature for MeshFeature {
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
         self.once_now = self.once_ready(ctx);
+        self.early_now = self.early_ready(ctx);
         if !ctx.view.extra_view {
             let count = ctx.settings.debug_skip & crate::settings::shade_skip::COUNT_MESH_RUNS != 0;
             if !count {
@@ -5129,20 +5223,38 @@ impl RenderFeature for MeshFeature {
         } else {
             crate::mesh_counts::PREPASS
         };
-        let counted = self.count_begin(&mut pass, query, true);
         pass.set_bind_group(1, group, &[]);
-        if !late || culled.is_some() {
-            pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
-            self.draw_batches(
-                &mut pass,
-                &self.opaque,
-                |p| once.pipelines.get(p as usize).and_then(Option::as_ref),
-                |_| true,
-                culled.map(|c| (c.1, c.2)),
-            );
-        }
-        if let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) {
-            clusters.draw_once(&mut pass, |set| self.texture_group(set), late);
+        // Depth and material together, or the depth first and then the material where it is
+        // equal (`trial_cut::MESHES_DEPTH_FIRST`). The count is of the material's draws.
+        use crate::mesh_once::Draws;
+        let steps: &[Draws] = if self.depth_first_now {
+            &[Draws::Depth, Draws::AtDepth]
+        } else {
+            &[Draws::Whole]
+        };
+        let mut counted = false;
+        for &draws in steps {
+            let pipelines = match draws {
+                Draws::Whole => &once.pipelines,
+                Draws::Depth => &once.depth,
+                Draws::AtDepth => &once.at_depth,
+            };
+            if draws != Draws::Depth {
+                counted = self.count_begin(&mut pass, query, true);
+            }
+            if !late || culled.is_some() {
+                pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
+                self.draw_batches(
+                    &mut pass,
+                    &self.opaque,
+                    |p| pipelines.get(p as usize).and_then(Option::as_ref),
+                    |_| true,
+                    culled.map(|c| (c.1, c.2)),
+                );
+            }
+            if let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) {
+                clusters.draw_once(&mut pass, |set| self.texture_group(set), late, draws);
+            }
         }
         if counted {
             crate::mesh_counts::MeshCounts::end(&mut pass);
@@ -5222,6 +5334,8 @@ impl RenderFeature for MeshFeature {
             "impostors_fading": self.impostors_fading,
             "lods_fading": self.lods_fading,
             "once": self.once_now,
+            "depth_first": self.depth_first_now,
+            "early_z": self.early_now,
             "mesh_runs": self.counts.as_ref().map(crate::mesh_counts::MeshCounts::describe),
             "once_bytes": self.once.as_ref().map_or(0, crate::mesh_once::MeshOnce::bytes),
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),

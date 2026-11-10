@@ -338,7 +338,15 @@ impl GpuShared {
     /// same label and source give the module compiled the first time (`crate::gpu_cache`).
     pub fn shader(&self, label: &str, source: &str, with_frame: bool) -> wgpu::ShaderModule {
         self.cache.shader(label, source, with_frame, || {
-            let code = compose_shader(source, with_frame);
+            let mut code = compose_shader(source, with_frame);
+            // (Entry points that ask for the depth test first are the usual ones where the
+            // device can't promise it.)
+            if !self
+                .features
+                .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST)
+            {
+                code = code.replace("@early_depth_test(force)", "");
+            }
             self.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),

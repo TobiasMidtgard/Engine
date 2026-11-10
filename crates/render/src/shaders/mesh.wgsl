@@ -1065,6 +1065,21 @@ fn surface_in(in: VertexOut, front: bool) -> SurfaceIn {
 
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return scene_fragment(in, front);
+}
+
+// `fs_main` with the depth test done before it runs (`trial_cut::MESHES_EARLY_Z`), for the
+// opaque scene pass (depth equal to the prepass's, nothing written to it). The programs here
+// can write a virtual texture request (`vt_feedback_store`), and a program that writes
+// anywhere but its targets must by the rules run before the depth test, hidden fragments
+// included, unless it asks for the test first: this asks. (`GpuShared::shader` drops the
+// attribute on a device without `SHADER_EARLY_DEPTH_TEST`.)
+@fragment @early_depth_test(force)
+fn fs_main_early(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return scene_fragment(in, front);
+}
+
+fn scene_fragment(in: VertexOut, front: bool) -> vec4<f32> {
     // The prepass's dither again: where a fading pair's two meshes lie at the same depth (flat
     // faces both levels share), each shades only its own pixels.
     // Under a planar reflection's mirror (its view only; elsewhere the plane is zero).
@@ -1348,6 +1363,38 @@ struct OnceOutput {
 
 @fragment
 fn fs_once(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceOutput {
+    return once_fragment(in, front);
+}
+
+// `trial_cut::MESHES_DEPTH_FIRST`: the pass draws the meshes' depth first (`fs_once_depth`) and
+// then their material where the depth is equal, with the test before the program
+// (`fs_main_early` says why), so the material is worked out for the layer in view only, not
+// for every layer drawn.
+@fragment @early_depth_test(force)
+fn fs_once_early(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceOutput {
+    return once_fragment(in, front);
+}
+
+// Depth only (the pass's color targets are not written): what `fs_once` discards is discarded
+// here, so the depth laid down is the depth `fs_once` would have left. Only alpha-tested
+// materials need their material for that.
+@fragment
+fn fs_once_depth(in: OnceVertexOut, @builtin(front_facing) front: bool) {
+    if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
+        discard;
+    }
+    let mat = materials[in.material];
+    if ((mat.flags.x & 15u) == 1u) {
+        let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local,
+            in.object_normal, mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, in.snow);
+        let m = evaluate_material(si, true);
+        if (m.base.a < mat.params.w) {
+            discard;
+        }
+    }
+}
+
+fn once_fragment(in: OnceVertexOut, front: bool) -> OnceOutput {
     if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
         discard;
     }

@@ -68,6 +68,60 @@ pub(crate) struct MeshOnce {
     stored: Option<Stored>,
     /// The meshes' pipelines for the pass, indexed like `MeshFeature::pipelines`.
     pub(crate) pipelines: Vec<Option<wgpu::RenderPipeline>>,
+    /// With `trial_cut::MESHES_DEPTH_FIRST`: the pipelines that draw their depth only, and
+    /// those that then draw the material where the depth is equal.
+    pub(crate) depth: Vec<Option<wgpu::RenderPipeline>>,
+    pub(crate) at_depth: Vec<Option<wgpu::RenderPipeline>>,
+}
+
+/// What a pipeline of the pass draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Draws {
+    /// Depth and material together (`fs_once`).
+    Whole,
+    /// Depth only, first (`fs_once_depth`; the color targets are not written).
+    Depth,
+    /// The material where the depth drawn first is equal, tested before the program
+    /// (`fs_once_early`).
+    AtDepth,
+}
+
+impl Draws {
+    pub(crate) fn fragment(self) -> &'static str {
+        match self {
+            Draws::Whole => "fs_once",
+            Draws::Depth => "fs_once_depth",
+            Draws::AtDepth => "fs_once_early",
+        }
+    }
+
+    /// The pass's color targets as a pipeline of this kind writes them.
+    pub(crate) fn targets(
+        self,
+        targets: &[Option<wgpu::ColorTargetState>],
+    ) -> Vec<Option<wgpu::ColorTargetState>> {
+        let mut targets = targets.to_vec();
+        if self == Draws::Depth {
+            for t in targets.iter_mut().flatten() {
+                t.write_mask = wgpu::ColorWrites::empty();
+            }
+        }
+        targets
+    }
+
+    /// Its depth state: `write` is the prepass's (test and write), `equal` the opaque scene
+    /// pass's (equal, nothing written).
+    pub(crate) fn depth(
+        self,
+        write: &wgpu::DepthStencilState,
+        equal: &wgpu::DepthStencilState,
+    ) -> wgpu::DepthStencilState {
+        if self == Draws::AtDepth {
+            equal.clone()
+        } else {
+            write.clone()
+        }
+    }
 }
 
 impl MeshOnce {
@@ -130,6 +184,8 @@ impl MeshOnce {
             light,
             stored: None,
             pipelines: (0..variants).map(|_| None).collect(),
+            depth: (0..variants).map(|_| None).collect(),
+            at_depth: (0..variants).map(|_| None).collect(),
         }
     }
 

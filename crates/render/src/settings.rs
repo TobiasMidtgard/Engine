@@ -276,6 +276,18 @@ pub mod trial_cut {
     /// once for every triangle that touches its 2x2 block. Impostors and virtual geometry
     /// keep the old way.
     pub const MESHES_ONCE: u32 = 32768;
+    /// The opaque meshes' scene program runs after the depth test, not before it. Their
+    /// programs can write a virtual texture request, and a program that writes anywhere but
+    /// its targets must run before the depth test unless it asks for the test first: without
+    /// this the scene pass shades every layer of meshes and throws away all but the one
+    /// whose depth equals the prepass's. With it (a device with `SHADER_EARLY_DEPTH_TEST`:
+    /// Vulkan), `fs_main_early` asks. Same picture.
+    pub const MESHES_EARLY_Z: u32 = 65536;
+    /// With [`MESHES_ONCE`]: the meshes' own pass draws their depth first (a program that
+    /// only discards what the material would) and then their material where the depth is
+    /// equal, after the test, so the material is worked out for the layer in view only and
+    /// not for every layer drawn. Their vertices are drawn twice, as today.
+    pub const MESHES_DEPTH_FIRST: u32 = 131072;
 }
 
 /// What the screen shows.
