@@ -204,6 +204,8 @@ struct GpuMesh {
     still_from: u64,
     /// Coarser levels of detail, finest first (empty until built, or for small meshes).
     lods: Vec<GpuLod>,
+    /// With profiling on, once its levels are built: `mesh_lod::movable_shares` (else 1).
+    movable: [f32; 3],
 }
 
 /// One level of detail of a [`GpuMesh`]: fewer triangles over the same vertices (indices in
@@ -248,7 +250,7 @@ impl GpuMesh {
 /// A mesh's levels of detail being built on a worker thread.
 struct LodJob {
     version: u64,
-    job: std::thread::JoinHandle<Vec<crate::mesh_lod::LodIndices>>,
+    job: std::thread::JoinHandle<(Vec<crate::mesh_lod::LodIndices>, [f32; 3])>,
 }
 
 /// What a texture set binds in one slot.
@@ -1429,6 +1431,9 @@ pub struct MeshFeature {
     scene: MeshScene,
     /// Levels of detail being built, by mesh index.
     lod_jobs: FastMap<u32, LodJob>,
+    /// Level-of-detail builds collected so far, for the profile log: all, those the simplifier
+    /// gave no level for, and those the index pool had no room to keep every level of.
+    lod_built: [u32; 3],
     /// Meshes waiting for a free worker to build their levels.
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
@@ -1883,6 +1888,7 @@ impl MeshFeature {
                         SPAWN_STILL_FRAMES
                     },
                 lods: Vec::new(),
+                movable: [1.0; 3],
             },
         );
         self.unusable.remove(&index);
@@ -1918,7 +1924,15 @@ impl MeshFeature {
         let mesh = mesh.clone();
         let job = std::thread::Builder::new()
             .name("mesh lods".into())
-            .spawn(move || crate::mesh_lod::build(&mesh));
+            .spawn(move || {
+                let levels = crate::mesh_lod::build(&mesh);
+                let movable = if engine_core::profile::enabled() {
+                    crate::mesh_lod::movable_shares(&mesh)
+                } else {
+                    [1.0; 3]
+                };
+                (levels, movable)
+            });
         match job {
             Ok(job) => {
                 self.lod_jobs.insert(index, LodJob { version, job });
@@ -1948,7 +1962,7 @@ impl MeshFeature {
             // The room its page held for these levels is theirs now.
             let pool = &mut self.pool;
             pool.release_lod_room(&mut gpu_mesh.pool);
-            let Ok(levels) = levels else {
+            let Ok((levels, movable)) = levels else {
                 tracing::warn!("building the levels of detail of mesh {index} failed");
                 continue;
             };
@@ -1957,6 +1971,8 @@ impl MeshFeature {
             for l in gpu_mesh.lods.drain(..) {
                 pool.free_indices(page, l.first_index, l.index_count);
             }
+            let built = levels.len();
+            gpu_mesh.movable = movable;
             gpu_mesh.lods = levels
                 .into_iter()
                 .map_while(|l| {
@@ -1967,6 +1983,9 @@ impl MeshFeature {
                     })
                 })
                 .collect();
+            self.lod_built[0] += 1;
+            self.lod_built[1] += (built == 0) as u32;
+            self.lod_built[2] += (gpu_mesh.lods.len() < built) as u32;
         }
         while self.lod_jobs.len() < MAX_LOD_JOBS
             && let Some((index, handle)) = self.lod_waiting.pop()
@@ -2335,6 +2354,136 @@ impl MeshFeature {
                 size.x,
                 size.y,
                 size.z
+            );
+        }
+        out
+    }
+
+    /// Where the view's mesh triangles sit, for the profile log: by the object's size on
+    /// screen (rows) and by how many pixels of its bounding disc each triangle gets (columns),
+    /// in millions of triangles; then how many of them are in objects that have no coarser
+    /// level left to switch to, and the meshes that put the most triangles under a pixel each.
+    fn density_report(&self, pixel_meters: Option<f32>, screen_px: f32) -> String {
+        use std::fmt::Write as _;
+        const SIZES: [f32; 4] = [64.0, 128.0, 256.0, 512.0];
+        const SHARES: [f32; 4] = [1.0, 4.0, 16.0, 64.0];
+        let Some(pixel_meters) = pixel_meters else {
+            return String::new();
+        };
+        let bucket = |edges: &[f32; 4], v: f32| edges.iter().take_while(|e| v >= **e).count();
+        let mut table = [[0u64; 5]; 5];
+        let mut stuck = [0u64; 5];
+        // Triangles of objects small enough for an impostor that are still drawn as meshes
+        // (not baked yet, or cross-fading).
+        let mut unbaked = [0u64; 5];
+        // Triangles a GPU would draw (no impostor due), by why they can't get fewer.
+        const CAUSES: [&str; 8] = [
+            "a coarser level is left (fine as it is)",
+            "at its coarsest level",
+            "always full detail (skinned, NoMeshLod)",
+            "under 512 triangles, no levels",
+            "no levels: hard edges only",
+            "no levels: texture or color seams",
+            "no levels: half open (15-50% movable when welded)",
+            "no levels: open cards and borders",
+        ];
+        let mut causes = [(0u64, 0u64); 8];
+        // Per mesh: triangles under a pixel each, instances, levels, triangles of the mesh.
+        let mut dense: HashMap<u32, (u64, u32, usize, u32)> = HashMap::new();
+        for item in self
+            .items
+            .iter()
+            .filter(|i| i.visible && i.lod != IMPOSTOR_LOD)
+        {
+            let Some(g) = self.meshes.get(&item.mesh) else {
+                continue;
+            };
+            let tris = (g.level(item.lod).1 / 3) as u64;
+            let across = 2.0 * item.radius / (pixel_meters * item.dist2.sqrt().max(0.05));
+            let disc = (std::f32::consts::FRAC_PI_4 * across * across).min(screen_px);
+            let share = disc / tris.max(1) as f32;
+            let (row, col) = (bucket(&SIZES, across), bucket(&SHARES, share));
+            table[row][col] += tris;
+            if item.lod as usize >= g.lods.len() {
+                stuck[row] += tris;
+            }
+            if item.impostor_ok && item.impostor_size {
+                unbaked[row] += tris;
+                continue;
+            }
+            let cause = if (item.lod as usize) < g.lods.len() {
+                0
+            } else if !g.lods.is_empty() {
+                1
+            } else if item.full_detail {
+                2
+            } else if (g.pool.index_count as usize / 3) < crate::mesh_lod::MIN_TRIANGLES {
+                3
+            } else if g.movable[0] >= 0.5 || g.movable[1] >= 0.5 {
+                4
+            } else if g.movable[2] >= 0.5 {
+                5
+            } else if g.movable[2] >= 0.15 {
+                6
+            } else {
+                7
+            };
+            causes[cause].0 += tris;
+            causes[cause].1 += if share < 1.0 { tris } else { 0 };
+            if share < 1.0 {
+                let d = dense.entry(item.mesh).or_default();
+                *d = (d.0 + tris, d.1 + 1, g.lods.len(), g.pool.index_count / 3);
+            }
+        }
+        let m = |t: u64| t as f64 / 1e6;
+        let mut out = String::from(
+            "mesh triangles in view, M, by size on screen and bounding-disc pixels per triangle\n  across px      <1 px   1-4    4-16   16-64   64+    no coarser level  awaiting impostor\n",
+        );
+        let names = ["< 64", "64-128", "128-256", "256-512", "512 +"];
+        for (r, name) in names.iter().enumerate() {
+            let _ = write!(out, "  {name:<10}");
+            for t in table[r] {
+                let _ = write!(out, " {:>7.2}", m(t));
+            }
+            let _ = writeln!(out, "   {:>7.2}   {:>7.2}", m(stuck[r]), m(unbaked[r]));
+        }
+        let _ = writeln!(
+            out,
+            "  triangles a GPU draws (no impostor due), M, and those under a pixel each, by cause"
+        );
+        for (name, (all, small)) in CAUSES.iter().zip(causes) {
+            let _ = writeln!(out, "  {:>7.2} {:>7.2}  {name}", m(all), m(small));
+        }
+        let dense_meshes = self
+            .meshes
+            .values()
+            .filter(|g| g.pool.index_count as usize / 3 >= crate::mesh_lod::MIN_TRIANGLES);
+        let _ = writeln!(
+            out,
+            "  levels of detail: {} of {} dense meshes have some; builds done {} ({} gave no level, {} found no room in the index pool), {} running, {} waiting",
+            dense_meshes.clone().filter(|g| !g.lods.is_empty()).count(),
+            dense_meshes.count(),
+            self.lod_built[0],
+            self.lod_built[1],
+            self.lod_built[2],
+            self.lod_jobs.len(),
+            self.lod_waiting.len(),
+        );
+        let mut rows: Vec<_> = dense.into_iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1.0));
+        let _ = writeln!(
+            out,
+            "  most triangles under a pixel each: mesh, tris drawn, instances, levels, tris full, size m"
+        );
+        for (mesh, (tris, n, levels, full)) in rows.into_iter().take(12) {
+            let size = self
+                .meshes
+                .get(&mesh)
+                .map_or(Vec3::ZERO, |g| g.half_extents * 2.0);
+            let _ = writeln!(
+                out,
+                "  {mesh:<6} {tris:>9} {n:>6} {levels:>3} {full:>8}  {:.1} x {:.1} x {:.1}",
+                size.x, size.y, size.z
             );
         }
         out
@@ -4436,6 +4585,13 @@ impl RenderFeature for MeshFeature {
         {
             self.last_report = Some(std::time::Instant::now());
             tracing::info!("mesh triangles\n{}", self.triangle_report(shadows));
+            tracing::info!(
+                "{}",
+                self.density_report(
+                    crate::mesh_lod::meters_per_pixel(view.fov_y, view.height, 1.0),
+                    (view.width * view.height) as f32,
+                )
+            );
             tracing::info!(
                 "canopy: {} crowns, leaf area {:.0} m² over {:.0} m² of crown discs (leaf area index {:.1})",
                 self.crowns.len(),

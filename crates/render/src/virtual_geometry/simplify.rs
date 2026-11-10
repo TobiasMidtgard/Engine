@@ -79,6 +79,8 @@ const MIN_NORMAL_COS: f64 = 0.2;
 pub struct Simplified {
     /// Remaining triangles (indices into the input positions), counter-clockwise as given.
     pub triangles: Vec<[u32; 3]>,
+    /// Which input triangle each remaining one was (corner for corner).
+    pub kept: Vec<u32>,
     /// Largest root mean squared distance from a moved vertex to the planes of the surface it
     /// replaced, in the positions' units.
     pub error: f32,
@@ -92,6 +94,55 @@ pub fn simplify(
     triangles: &[[u32; 3]],
     locked: &[bool],
     target: usize,
+) -> Simplified {
+    run(positions, triangles, locked, target, None)
+}
+
+/// [`Welded::moved`]: the corners (triangle, corner) about to move, and the vertex they move
+/// onto.
+pub type Moved<'a> = dyn FnMut(&[(u32, u8)], u32) -> bool + 'a;
+
+/// What [`simplify_welded`] asks of its caller.
+pub struct Welded<'a> {
+    /// The connected part each vertex belongs to, and each part's surface area in the mesh
+    /// the chain of levels started from: no part may end up with much less or more surface
+    /// than it had ([`MIN_PART_KEPT`]), however many levels down.
+    pub part: &'a [u32],
+    pub part_area: &'a [f64],
+    /// Asked before a collapse: the corners (triangle, corner 0..3, indices into the input
+    /// triangles) about to move onto vertex `v`. `false` forbids the collapse; `true` lets it
+    /// happen, and the callee notes what it needs to (which of a place's vertices each corner
+    /// is drawn with from now on).
+    pub moved: &'a mut Moved<'a>,
+}
+
+/// [`simplify`] for triangles over welded positions (one vertex per place, so an edge used by
+/// one triangle really is the surface's border): vertices on a border may move along it (a
+/// plank loses the vertices along its sides, a tube's rim some of its corners), no collapse
+/// may change the surface around it by much ([`MIN_AREA_KEPT`], [`MIN_PART_KEPT`]: a leaf card
+/// keeps its four corners, a rail its thickness, a bent blade of grass doesn't become the
+/// triangle between its ends), and the caller decides which collapses its other vertex data
+/// allows ([`Welded`]).
+pub fn simplify_welded(
+    positions: &[Vec3],
+    triangles: &[[u32; 3]],
+    locked: &[bool],
+    target: usize,
+    welded: Welded,
+) -> Simplified {
+    run(positions, triangles, locked, target, Some(welded))
+}
+
+/// Weight of the planes that hold an open border in place, against the triangles' own
+/// (per border edge: this times its length squared).
+const BORDER_WEIGHT: f64 = 8.0;
+
+fn run(
+    positions: &[Vec3],
+    triangles: &[[u32; 3]],
+    locked: &[bool],
+    target: usize,
+    mut welded: Option<Welded>,
 ) -> Simplified {
     let n = positions.len();
     let pos: Vec<DVec3> = positions.iter().map(|p| p.as_dvec3()).collect();
@@ -123,27 +174,59 @@ pub fn simplify(
     }
 
     // Movable vertices: not locked and every incident edge shared by exactly two triangles.
+    // Over welded positions a vertex with two border edges is movable too, along the border:
+    // each border edge adds a plane through itself, square to its triangle, so leaving the
+    // border's line costs as much as leaving the surface does.
     let mut movable: Vec<bool> = (0..n).map(|v| !locked[v]).collect();
+    let mut border = vec![0u8; n];
     {
-        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(tris.len() * 3);
-        for tri in &tris {
+        let mut edges: Vec<(u32, u32, u32)> = Vec::with_capacity(tris.len() * 3);
+        for (t, tri) in tris.iter().enumerate() {
             for k in 0..3 {
                 let (a, b) = (tri[k], tri[(k + 1) % 3]);
-                edges.push((a.min(b), a.max(b)));
+                edges.push((a.min(b), a.max(b), t as u32));
             }
         }
         edges.sort_unstable();
-        let mut i = 0;
-        while i < edges.len() {
-            let mut j = i;
-            while j < edges.len() && edges[j] == edges[i] {
-                j += 1;
+        for run in edges.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+            let (a, b, t) = run[0];
+            if run.len() == 2 {
+                continue;
             }
-            if j - i != 2 {
-                movable[edges[i].0 as usize] = false;
-                movable[edges[i].1 as usize] = false;
+            if run.len() == 1 && welded.is_some() {
+                let [p, q, r] = tris[t as usize].map(|i| pos[i as usize]);
+                let normal = (q - p).cross(r - p);
+                let along = pos[b as usize] - pos[a as usize];
+                let out = along.cross(normal);
+                if out.length_squared() > 0.0 {
+                    let plane = Quadric::plane(
+                        out.normalize(),
+                        pos[a as usize],
+                        BORDER_WEIGHT * along.length_squared(),
+                    );
+                    for v in [a, b] {
+                        quadrics[v as usize].add(&plane);
+                        border[v as usize] = border[v as usize].saturating_add(1);
+                    }
+                    continue;
+                }
             }
-            i = j;
+            movable[a as usize] = false;
+            movable[b as usize] = false;
+        }
+        // Where borders meet (or one ends), nothing moves.
+        for v in 0..n {
+            movable[v] &= border[v] == 0 || border[v] == 2;
+        }
+    }
+    let mut moves: Vec<(u32, u8)> = Vec::new();
+    // The surface each part has now.
+    let mut part_area: Vec<f64> = Vec::new();
+    if let Some(w) = &welded {
+        part_area.resize(w.part_area.len(), 0.0);
+        for tri in &tris {
+            let [a, b, c] = tri.map(|i| pos[i as usize]);
+            part_area[w.part[tri[0] as usize] as usize] += (b - a).cross(c - a).length() * 0.5;
         }
     }
 
@@ -163,6 +246,10 @@ pub fn simplify(
             neighbors(u as u32, &incident, &tris, &alive, &mut ring_u);
             for &v in &ring_u {
                 let cost = quadrics[u].error(pos[v as usize]);
+                // A border vertex only moves to the next one along its border.
+                if border[u] != 0 && border[v as usize] == 0 {
+                    continue;
+                }
                 candidates.push((cost, u as u32, v));
             }
         }
@@ -192,11 +279,44 @@ pub fn simplify(
                 .iter()
                 .filter(|&&t| alive[t as usize] && tris[t as usize].contains(&v))
                 .count();
-            if shared != 2 || common != 2 {
+            // (Along a border the edge has one triangle and one opposite corner.)
+            let sides = if border[ui] != 0 { 1 } else { 2 };
+            if shared != sides || common != sides {
                 continue;
             }
             if flips(u, v, &incident[ui], &tris, &alive, &pos) {
                 continue;
+            }
+            // Thin parts (a rail, a rope, a post) must not flatten away, nor a bent blade
+            // become the triangle between its ends: their surface strays little as they do,
+            // but the picture changes.
+            let mut area_after = 0.0;
+            if let Some(w) = &welded {
+                let (before, after) = area_around(u, v, &incident[ui], &tris, &alive, &pos);
+                let part = w.part[ui] as usize;
+                area_after = part_area[part] + after - before;
+                let had = w.part_area[part];
+                if after < before * MIN_AREA_KEPT
+                    || after * MIN_AREA_KEPT > before
+                    || area_after < had * MIN_PART_KEPT
+                    || area_after * MIN_PART_KEPT > had
+                {
+                    continue;
+                }
+            }
+            if let Some(w) = &mut welded {
+                moves.clear();
+                for &t in &incident[ui] {
+                    let tri = &tris[t as usize];
+                    if alive[t as usize] && !tri.contains(&v) {
+                        let corner = tri.iter().position(|c| *c == u).unwrap_or(0);
+                        moves.push((t, corner as u8));
+                    }
+                }
+                if !(w.moved)(&moves, v) {
+                    continue;
+                }
+                part_area[w.part[ui] as usize] = area_after;
             }
             // Collapse u into v.
             for k in 0..incident[ui].len() {
@@ -237,13 +357,12 @@ pub fn simplify(
         }
     }
 
+    let kept: Vec<u32> = (0..tris.len() as u32)
+        .filter(|&t| alive[t as usize])
+        .collect();
     Simplified {
-        triangles: tris
-            .iter()
-            .zip(&alive)
-            .filter(|(_, a)| **a)
-            .map(|(t, _)| *t)
-            .collect(),
+        triangles: kept.iter().map(|&t| tris[t as usize]).collect(),
+        kept,
         error: worst.sqrt() as f32,
     }
 }
@@ -292,6 +411,41 @@ fn flips(
         }
     }
     false
+}
+
+/// A collapse must leave this share of the area of the triangles around the moved vertex, and
+/// not more than one over it.
+const MIN_AREA_KEPT: f64 = 0.8;
+/// A connected part must keep this share of the area it had in the full mesh, and not more
+/// than one over it.
+const MIN_PART_KEPT: f64 = 0.9;
+
+/// The area of the triangles around `u`, and of those left once `u` has moved onto `v`. On a
+/// surface that goes on, the triangles left stretch over the two that go; where a thin part
+/// flattens they don't, and where a bent strip is cut short they span the bend.
+fn area_around(
+    u: u32,
+    v: u32,
+    incident_u: &[u32],
+    tris: &[[u32; 3]],
+    alive: &[bool],
+    pos: &[DVec3],
+) -> (f64, f64) {
+    let pv = pos[v as usize];
+    let (mut before, mut after) = (0.0, 0.0);
+    for &t in incident_u {
+        let t = t as usize;
+        if !alive[t] {
+            continue;
+        }
+        let [a, b, c] = tris[t].map(|i| pos[i as usize]);
+        before += (b - a).cross(c - a).length() * 0.5;
+        if !tris[t].contains(&v) {
+            let [a, b, c] = tris[t].map(|i| if i == u { pv } else { pos[i as usize] });
+            after += (b - a).cross(c - a).length() * 0.5;
+        }
+    }
+    (before, after)
 }
 
 #[cfg(test)]
