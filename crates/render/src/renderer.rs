@@ -846,8 +846,9 @@ struct ScreenMaps {
     fog: wgpu::TextureView,
     gi: wgpu::TextureView,
     aerial: wgpu::TextureView,
-    /// The screen light maps (lib_frame.wgsl `light_a`, `light_b`, `light_gi`).
-    light: [wgpu::TextureView; 3],
+    /// The screen light maps (lib_frame.wgsl `light_a`, `light_b`, `light_gi`, `light_fog`,
+    /// `light_fog_through`).
+    light: [wgpu::TextureView; 5],
     /// The lamps that can reach each tile (lib_frame.wgsl `lamp_tiles`).
     lamp_tiles: wgpu::TextureView,
 }
@@ -866,17 +867,21 @@ impl ScreenMaps {
                 targets.light_a.view.clone(),
                 targets.light_b.view.clone(),
                 targets.light_gi.view.clone(),
+                targets.light_fog.view.clone(),
+                targets.light_fog_through.view.clone(),
             ],
             lamp_tiles: targets.lamp_tiles.view.clone(),
         }
     }
 
-    /// For the screen light pass: the prepass's depth and normals (finished by then), and
-    /// stand-ins for every map drawn after the prepass, its own among them.
+    /// For the screen light pass: the prepass's depth and normals and the fog's tables (all
+    /// finished by then), and stand-ins for every map drawn after it, its own among them.
     fn for_light(&self, stand_ins: &Self) -> Self {
         Self {
             normal: self.normal.clone(),
             depth: self.depth.clone(),
+            fog: self.fog.clone(),
+            aerial: self.aerial.clone(),
             ..stand_ins.clone()
         }
     }
@@ -919,6 +924,12 @@ impl ScreenMaps {
             tex("no screen light a", crate::targets::LIGHT_FORMAT).view,
             tex("no screen light b", crate::targets::LIGHT_FORMAT).view,
             tex("no screen light gi", shared.formats.hdr).view,
+            tex("no screen light fog", shared.formats.hdr).view,
+            tex(
+                "no screen light through the fog",
+                crate::targets::FOG_THROUGH_FORMAT,
+            )
+            .view,
         ];
         // One texel says "no tiles" to the lamp loop.
         let lamp_tiles = Tex::new_layers(
@@ -1182,6 +1193,8 @@ impl Renderer {
                 layout_entry(28, all, float_texture),
                 layout_entry(29, all, float_texture),
                 layout_entry(30, all, float_texture),
+                layout_entry(32, all, float_texture),
+                layout_entry(33, all, float_texture),
                 // The lamps that can reach each tile (effects.rs `encode_lamp_tiles`). The 24th.
                 layout_entry(
                     31,
@@ -1987,6 +2000,15 @@ impl Renderer {
             || window != self.targets.window
         {
             self.resize(scene_size, output, window, is_extra);
+        }
+        // The screen light maps exist only while a cut that fills them is on.
+        let screen_light = settings.trial_cuts
+            & (crate::settings::trial_cut::SCREEN_LIGHT | crate::settings::trial_cut::SCREEN_FOG)
+            != 0;
+        if screen_light != self.targets.screen_light {
+            self.targets
+                .set_screen_light(&self.shared.device, &self.shared.formats, screen_light);
+            self.rebuild_frame_groups();
         }
         if !is_extra && let Some(s) = &mut self.surface {
             s.set_vsync(&self.shared.device, settings.vsync);
@@ -2877,7 +2899,7 @@ impl Renderer {
         }
         // The sun, the sky's cover and the probes' light for every pixel the prepass drew,
         // once a pixel (shading loads them: lib_frame.wgsl `screen_light`).
-        if settings.trial_cuts & crate::settings::trial_cut::SCREEN_LIGHT != 0 {
+        if self.targets.screen_light {
             self.perf.pass(&mut cpu, &mut encoder, "screen light");
             self.effects
                 .encode_light(&mut encoder, &self.targets, &self.light_group);
@@ -4117,6 +4139,14 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 31,
                 resource: view(&maps.lamp_tiles),
+            },
+            wgpu::BindGroupEntry {
+                binding: 32,
+                resource: view(&maps.light[3]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 33,
+                resource: view(&maps.light[4]),
             },
         ],
     })

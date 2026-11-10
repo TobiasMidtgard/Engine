@@ -90,6 +90,25 @@ impl Tex {
     }
 }
 
+/// The five screen light maps at a size: sun and sky, people and leaves, probes, fog, through
+/// the fog.
+fn screen_light_maps(
+    device: &wgpu::Device,
+    formats: &Formats,
+    width: u32,
+    height: u32,
+) -> [Tex; 5] {
+    let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    [
+        ("screen light: sun and sky", LIGHT_FORMAT),
+        ("screen light: people, leaves, reflections", LIGHT_FORMAT),
+        ("screen light: probes", formats.hdr),
+        ("screen light: fog", formats.hdr),
+        ("screen light: through the fog", FOG_THROUGH_FORMAT),
+    ]
+    .map(|(label, format)| Tex::new(device, label, width, height, format, usage))
+}
+
 /// Size-dependent targets.
 pub struct Targets {
     /// The scene's size (every target but `ldr`).
@@ -118,6 +137,13 @@ pub struct Targets {
     pub light_a: Tex,
     pub light_b: Tex,
     pub light_gi: Tex,
+    /// The screen light pass's fog: what it scatters toward the camera, and what it lets
+    /// through of the surface's light.
+    pub light_fog: Tex,
+    pub light_fog_through: Tex,
+    /// Whether the five screen light maps are the scene's size (`set_screen_light`); one
+    /// texel each otherwise, which tells shading there are none.
+    pub screen_light: bool,
     /// The lamps that can reach each 16-pixel tile: a bit per lamp, two layers of 128
     /// (lamp_tiles.wgsl).
     pub lamp_tiles: Tex,
@@ -149,12 +175,32 @@ pub struct Targets {
 
 /// The format of the two screen light maps that hold shares of the sun and the sky (0..1).
 pub const LIGHT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// What the fog lets through of each color, in the screen light maps.
+pub const FOG_THROUGH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgb10a2Unorm;
 /// Pixels across a lamp tile (lamp_tiles.wgsl `LAMP_TILE`).
 pub const LAMP_TILE: u32 = 16;
 /// A lamp tile's bits: 128 a layer.
 pub const LAMP_TILE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
 
 impl Targets {
+    /// The screen light maps at the scene's size while the screen light pass is on, one texel
+    /// each while it is off (28 bytes a pixel together). The frame bind groups hold their
+    /// views: rebuild them after a change.
+    pub fn set_screen_light(&mut self, device: &wgpu::Device, formats: &Formats, on: bool) {
+        let (w, h) = if on {
+            (self.width, self.height)
+        } else {
+            (1, 1)
+        };
+        let [a, b, gi, fog, through] = screen_light_maps(device, formats, w, h);
+        self.light_a = a;
+        self.light_b = b;
+        self.light_gi = gi;
+        self.light_fog = fog;
+        self.light_fog_through = through;
+        self.screen_light = on;
+    }
+
     pub fn new(
         device: &wgpu::Device,
         formats: &Formats,
@@ -207,9 +253,9 @@ impl Targets {
         );
         let ao_raw = screen("ambient occlusion raw", formats.ao);
         let ao = screen("ambient occlusion", formats.ao);
-        let light_a = screen("screen light: sun and sky", LIGHT_FORMAT);
-        let light_b = screen("screen light: people, leaves, reflections", LIGHT_FORMAT);
-        let light_gi = screen("screen light: probes", formats.hdr);
+        // One texel each until the screen light pass is on (`set_screen_light`).
+        let [light_a, light_b, light_gi, light_fog, light_fog_through] =
+            screen_light_maps(device, formats, 1, 1);
         let lamp_tiles = Tex::new_layers(
             device,
             "lamp tiles",
@@ -309,6 +355,9 @@ impl Targets {
             light_a,
             light_b,
             light_gi,
+            light_fog,
+            light_fog_through,
+            screen_light: false,
             lamp_tiles,
             history,
             upscaled,

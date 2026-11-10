@@ -383,6 +383,12 @@ fn variants() -> Vec<Variant> {
             "each pixel goes through the lamps that reach its 16-pixel tile, not every lamp in view",
         ),
         v(
+            "cut_screen_fog",
+            r,
+            json!({"trial_cuts": 2048}),
+            "fog and haze once per pixel in the screen pass, not in every shader run",
+        ),
+        v(
             "show_screen_light",
             r,
             json!({"trial_cuts": 512, "debug_skip": 16384}),
@@ -404,8 +410,8 @@ fn variants() -> Vec<Variant> {
         v(
             "cut_lighting_all",
             r,
-            json!({"trial_cuts": 1985}),
-            "the screen pass, lamp tiles and the four lighting cuts together",
+            json!({"trial_cuts": 4033}),
+            "the screen pass with fog, lamp tiles and the four lighting cuts together",
         ),
         v(
             "cut_shadow_refresh",

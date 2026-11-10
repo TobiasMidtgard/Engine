@@ -70,6 +70,11 @@
 @group(0) @binding(28) var light_a: texture_2d<f32>;
 @group(0) @binding(29) var light_b: texture_2d<f32>;
 @group(0) @binding(30) var light_gi: texture_2d<f32>;
+// The screen light pass's fog (`CUT_SCREEN_FOG`): the light the fog and haze in front of the
+// pixel's surface scatter toward the camera (pre-exposed), and what they let through of the
+// surface's own light, per color (`surface_fog`).
+@group(0) @binding(32) var light_fog: texture_2d<f32>;
+@group(0) @binding(33) var light_fog_through: texture_2d<f32>;
 // The lamps that can reach each 16-pixel tile of the screen, a bit per lamp: lamps 0-127 in
 // layer 0, 128-255 in layer 1 (lamp_tiles.wgsl). One texel when there are no tiles.
 @group(0) @binding(31) var lamp_tiles: texture_2d_array<u32>;
@@ -322,8 +327,9 @@ const SKIP_TERRAIN: u32 = 1024u;
 const SKIP_MESH_SCENE: u32 = 2048u;
 const SKIP_MESH_PREPASS_MATERIAL: u32 = 4096u;
 const SKIP_SKY_MAP_TAPS: u32 = 8192u;
-// The screen light pass writes no sun: with `CUT_SCREEN_LIGHT` on, the pixels whose shading
-// takes its light from the maps lose their sunlight and the rest keep it.
+// The screen light pass writes no sun and no fog: with `CUT_SCREEN_LIGHT` on, the pixels whose
+// shading takes its light from the maps lose their sunlight and the rest keep it; with
+// `CUT_SCREEN_FOG`, they lose their fog and haze.
 const SKIP_SCREEN_LIGHT_SUN: u32 = 16384u;
 
 fn shade_skip(bit: u32) -> bool {
@@ -343,6 +349,7 @@ const CUT_SUN_MARCH_STEPS: u32 = 128u;
 const CUT_SPECULAR_SKY_TAPS: u32 = 256u;
 const CUT_SCREEN_LIGHT: u32 = 512u;
 const CUT_TILED_LAMPS: u32 = 1024u;
+const CUT_SCREEN_FOG: u32 = 2048u;
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;
@@ -2197,6 +2204,16 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
         none.inscatter = vec3<f32>(0.0);
         none.transmittance = vec3<f32>(1.0);
         return none;
+    }
+    // Worked out for this pixel already (the screen light pass, where the prepass drew it).
+    if (trial_cut(CUT_SCREEN_FOG) && textureDimensions(light_fog).x > 1u) {
+        let pixel = vec2<i32>(floor(pixel_of(rel)));
+        if (in_prepass(rel, pixel)) {
+            var seen: SurfaceFog;
+            seen.inscatter = textureLoad(light_fog, pixel, 0).rgb;
+            seen.transmittance = textureLoad(light_fog_through, pixel, 0).rgb;
+            return seen;
+        }
     }
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);

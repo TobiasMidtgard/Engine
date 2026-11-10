@@ -196,7 +196,8 @@ pub mod shade_skip {
     pub const SKY_MAP_TAPS: u32 = 8192;
     /// The screen light pass writes no sun: with [`trial_cut::SCREEN_LIGHT`] on, the pixels
     /// whose shading takes its light from the pass's maps lose their sunlight and the rest
-    /// keep it (a picture of where the maps are used).
+    /// keep it (a picture of where the maps are used). With [`trial_cut::SCREEN_FOG`] on,
+    /// they lose their fog and haze the same way.
     pub const SCREEN_LIGHT_SUN: u32 = 16384;
 }
 
@@ -238,6 +239,10 @@ pub mod trial_cut {
     /// (61 at the plaza, 153 at the overview). Same picture: a lamp left out reaches no
     /// surface in the tile.
     pub const TILED_LAMPS: u32 = 1024;
+    /// The fog and haze in front of every pixel the prepass drew, worked out once a pixel in
+    /// the screen light pass (the froxels, the height fog beyond them, the aerial table) and
+    /// loaded by `surface_fog`, instead of in every run of every pixel's shader.
+    pub const SCREEN_FOG: u32 = 2048;
 }
 
 /// What the screen shows.

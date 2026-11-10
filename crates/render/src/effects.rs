@@ -582,6 +582,8 @@ impl ScreenEffects {
                 attachment(&targets.light_a.view),
                 attachment(&targets.light_b.view),
                 attachment(&targets.light_gi.view),
+                attachment(&targets.light_fog.view),
+                attachment(&targets.light_fog_through.view),
             ],
             ..Default::default()
         });
@@ -985,7 +987,7 @@ fn lamp_tiles_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
     })
 }
 
-/// The screen light pass's pipeline: one fullscreen triangle into the three light maps.
+/// The screen light pass's pipeline: one fullscreen triangle into the five light maps.
 fn light_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
     let module = shared.shader(
         "screen light",
@@ -1024,6 +1026,8 @@ fn light_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
                 target(crate::targets::LIGHT_FORMAT),
                 target(crate::targets::LIGHT_FORMAT),
                 target(shared.formats.hdr),
+                target(shared.formats.hdr),
+                target(crate::targets::FOG_THROUGH_FORMAT),
             ],
         }),
         multiview_mask: None,

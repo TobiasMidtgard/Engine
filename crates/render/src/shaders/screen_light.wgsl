@@ -1,9 +1,10 @@
 // The screen light pass: the lighting terms that depend on where a surface is and which way it
 // faces, worked out once for every pixel the prepass drew, for `shade_surface` to load
-// (`screen_light` in lib_frame.wgsl; `RenderSettings::trial_cuts` bit `SCREEN_LIGHT`).
+// (`screen_light` in lib_frame.wgsl; `RenderSettings::trial_cuts` bit `SCREEN_LIGHT`), and the
+// fog in front of it for `surface_fog` (bit `SCREEN_FOG`).
 // Requires lib_types + lib_frame + lib_atmosphere. Group 0 is the frame group with the
-// prepass's depth and normals bound and stand-ins for the maps drawn after the prepass, so the
-// library's own functions run here unchanged.
+// prepass's depth and normals and the fog's tables bound, and stand-ins for the maps drawn
+// after the prepass, so the library's own functions run here unchanged.
 //
 // Why: a pixel's shader runs once for every triangle that touches its 2x2 block. Counted at
 // the overview at 1600x900, the ground's shader runs 2.6 times a pixel and meshes' 2.7 times
@@ -18,6 +19,8 @@ struct LightOut {
     @location(0) a: vec4<f32>,
     @location(1) b: vec4<f32>,
     @location(2) gi: vec4<f32>,
+    @location(3) fog: vec4<f32>,
+    @location(4) fog_through: vec4<f32>,
 };
 
 @vertex
@@ -31,6 +34,8 @@ fn fs_light(in: FullscreenOut) -> LightOut {
     out.a = vec4<f32>(1.0);
     out.b = vec4<f32>(1.0);
     out.gi = vec4<f32>(0.0);
+    out.fog = vec4<f32>(0.0);
+    out.fog_through = vec4<f32>(1.0);
     let px = vec2<i32>(floor(in.position.xy));
     let z = textureLoad(prepass_depth, px, 0);
     let surface = textureLoad(prepass_normal, px, 0);
@@ -40,6 +45,16 @@ fn fs_light(in: FullscreenOut) -> LightOut {
     let n = oct_decode(surface.xy);
     let v = normalize(-rel);
     let roughness = surface.z * surface.z;
+
+    // The fog and haze in front of the surface (the light maps are stand-ins here, so this
+    // is `surface_fog` worked out in full).
+    // (None with `SKIP_SCREEN_LIGHT_SUN`: the picture of where the pass's maps are used.)
+    if (trial_cut(CUT_SCREEN_FOG) && !shade_skip(SKIP_SCREEN_LIGHT_SUN)) {
+        let fog = surface_fog(rel);
+        out.fog = vec4<f32>(fog.inscatter, 1.0);
+        out.fog_through = vec4<f32>(fog.transmittance, 1.0);
+    }
+    if (!trial_cut(CUT_SCREEN_LIGHT)) { return out; }
 
     // The sun: the shadow maps as seen from the side it is on, people's capsules, and the two
     // marches through the depth where anything of it is left.
