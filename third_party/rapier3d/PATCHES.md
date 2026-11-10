@@ -92,3 +92,22 @@ folder and the `exclude` line, and run `cargo update -p rapier3d`.
   physics tests.
 - **Drop it when**: upstream rebuilds only the awake part of the graph (or stops rebuilding on
   sleep and wake).
+
+## 4. Keep joints between disabled bodies out of the solver (`src/dynamics/joint/impulse_joint/impulse_joint_set.rs`)
+
+- **What**: `ImpulseJointSet::select_active_interactions` counts a disabled dynamic or
+  kinematic body as world-attached, like a fixed one, and skips a joint whose two sides are
+  both world-attached.
+- **Why**: a disabled body is out of the active set, so its solver id is `u32::MAX`, but the
+  selection only looked at its type and sleep state. A joint between two disabled bodies then
+  reached the joint coloring with no solver body on either side and hit its `unreachable!()`
+  (`ParallelInteractionGroups::group_interactions`, "internal error: entered unreachable code").
+  Rapier disables a joint itself when a body it holds is disabled, but not one made later:
+  in the Weaving hall's blades stop a ragdoll went non-finite, Rapier's quarantine switched
+  every part off, the engine moved the parts to another region and made their joints again
+  there, enabled, and the next step crashed (2026-11-10).
+- **Gain**: no crash. A joint between a disabled body and a moving one still holds the moving
+  one, with the disabled side fixed in place.
+- **Cost**: none.
+- **Test**: `crates/physics/tests/quarantine.rs` (both tests panic without the patch).
+- **Drop it when**: upstream checks `is_enabled` in the joint selection.

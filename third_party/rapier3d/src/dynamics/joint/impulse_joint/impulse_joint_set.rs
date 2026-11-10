@@ -603,22 +603,34 @@ impl ImpulseJointSet {
             let rb1 = &bodies[joint.body1];
             let rb2 = &bodies[joint.body2];
 
+            // Engine patch 4: a disabled body (by the user, or quarantined for a non-finite pose)
+            // is out of the active set, so it is world-attached like a fixed one. A joint
+            // between two of them constrains no solver body and must not reach the solver
+            // (its coloring has no slot for it: `unreachable!` in `group_interactions`).
+            let moving = |rb: &crate::dynamics::RigidBody| {
+                rb.is_dynamic_or_kinematic() && rb.is_enabled()
+            };
             if joint.data.is_enabled()
-                && (rb1.is_dynamic_or_kinematic() || rb2.is_dynamic_or_kinematic())
-                && (!rb1.is_dynamic_or_kinematic() || !rb1.is_sleeping())
-                && (!rb2.is_dynamic_or_kinematic() || !rb2.is_sleeping())
+                && (moving(rb1) || moving(rb2))
+                && (!moving(rb1) || !rb1.is_sleeping())
+                && (!moving(rb2) || !rb2.is_sleeping())
             {
                 // Stamp the solver-body ids while both body cache lines are hot so the solver's
                 // coloring/grouping and jacobian generation don't re-read the rigid-body set. `u32::MAX`
-                // marks a world-attached side (fixed, or defensively sleeping — its `active_set_id` indexes another island).
+                // marks a world-attached side (fixed, disabled, or defensively sleeping — its `active_set_id` indexes another island).
                 let solver_id = |rb: &crate::dynamics::RigidBody| {
-                    if rb.is_dynamic_or_kinematic() && !rb.is_sleeping() {
+                    if moving(rb) && !rb.is_sleeping() {
                         rb.ids.active_set_id
                     } else {
                         u32::MAX
                     }
                 };
-                joint.solver_body_ids = [solver_id(rb1), solver_id(rb2)];
+                let ids = [solver_id(rb1), solver_id(rb2)];
+                if ids == [u32::MAX; 2] {
+                    // Defensive: an awake body not (yet) in the active set.
+                    continue;
+                }
+                joint.solver_body_ids = ids;
                 out.push(i);
             }
         }
