@@ -5257,7 +5257,11 @@ fn roots_break_out_of_the_floor_coil_up_a_dummy_and_hold_it_until_they_slide_bac
     assert_eq!(found.len(), 1, "one tangle");
     let (_, tg) = &found[0];
     assert_eq!(tg.target, d);
-    assert_eq!(tg.roots.len(), 5, "two up each leg and one round both");
+    assert_eq!(
+        tg.roots.len(),
+        2 * wilds::LEG_ROOTS as usize + 1,
+        "three up each leg and one round both"
+    );
     assert!(tg.secs >= 2.0 && tg.secs <= 5.0, "{}", tg.secs);
     assert!(rooted(&app, d));
     for r in &tg.roots {

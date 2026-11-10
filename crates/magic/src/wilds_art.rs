@@ -132,10 +132,14 @@ pub fn bramble(a: Vec3, b: Vec3, height: f32, seed: u32) -> Vec<Vec3> {
     (0..=n)
         .map(|i| {
             let t = i as f32 / n as f32;
-            let arch = 4.0 * t * (1.0 - t);
-            let waver = (fbm(t * 3.0, (seed % 997) as f32 * 0.37, 64, seed) - 0.5) * 0.3;
+            // A cane rises steeply, arches over a third of the way along and droops to its
+            // tip, which roots where it comes down.
+            let arch = (PI * t.powf(0.7)).sin().max(0.0);
+            let y = (seed % 997) as f32 * 0.37;
+            let waver = (fbm(t * 3.0, y, 64, seed) - 0.5) * 0.45;
+            let sag = (fbm(t * 2.5, y + 11.0, 64, seed ^ 0x51) - 0.5) * 0.3 * height;
             a.lerp(b, t)
-                + Vec3::Y * (height * arch - UNDER_M * (1.0 - arch))
+                + Vec3::Y * (height * arch + sag * arch - UNDER_M * (1.0 - arch))
                 + side * (bow * arch + waver * arch)
         })
         .collect()
@@ -163,10 +167,11 @@ fn leaf(i: u32) -> (Vec2, f32, f32, f32, [f32; 3]) {
     let wide = len * (0.42 + 0.14 * h(5));
     // From a fresh yellow-green to a deep summer green.
     let t = h(6);
+    // (Linear albedo: leaves are darker than they look, 5 to 15% in the green.)
     let green = [
-        lerp(0.16, 0.035, t),
-        lerp(0.36, 0.17, t),
-        lerp(0.035, 0.03, t),
+        lerp(0.075, 0.022, t),
+        lerp(0.17, 0.075, t),
+        lerp(0.022, 0.016, t),
     ];
     (base, heading, len, wide, green)
 }
@@ -198,7 +203,7 @@ pub fn leaf_at(x: f32, y: f32) -> ([f32; 3], f32) {
             ((v.abs() * 3.2 - u * 1.6).rem_euclid(0.42) - 0.21).abs(),
         ) * smoothstep(0.02, 0.1, v.abs());
         let shade = 0.65 + 0.35 * smoothstep(0.0, 0.3, u) - 0.25 * smoothstep(0.08, 0.0, edge);
-        let light = 1.0 + 0.55 * rib + 0.2 * vein;
+        let light = 1.0 + 0.4 * rib + 0.15 * vein;
         out = (
             [
                 green[0] * shade * light,
@@ -303,8 +308,15 @@ mod tests {
         let (a, b) = (Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0));
         let p = bramble(a, b, 1.5, 3);
         assert!(p[0].y < 0.0 && p.last().unwrap().y < 0.0);
-        let mid = p[p.len() / 2];
-        assert!((mid.y - 1.5).abs() < 0.01 && (mid.x - 1.0).abs() < 0.05);
+        // Highest a third of the way along, about its height up, then down to the tip.
+        let (top, at) =
+            p.iter().enumerate().fold(
+                (0.0f32, 0),
+                |m, (i, q)| if q.y > m.0 { (q.y, i) } else { m },
+            );
+        assert!((top - 1.5).abs() < 0.3, "{top}");
+        let t = at as f32 / (p.len() - 1) as f32;
+        assert!(t > 0.25 && t < 0.5, "{t}");
     }
 
     #[test]

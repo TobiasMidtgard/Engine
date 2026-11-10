@@ -35,15 +35,15 @@ use engine_render::{
     Image, MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer, Shape, StandardMaterial,
 };
 use engine_world::animation::SkeletonPose;
-use engine_world::physics::{PhysicsQueries, QueryFilter};
+use engine_world::physics::PhysicsQueries;
 
 use crate::caster::Vitality;
 use crate::chains::{End, Ends, limb_ends};
 use crate::compile::Spell;
 use crate::design::CastType;
 use crate::looks::{LookCmd, Role};
-use crate::runtime::{CastInfo, MagicQueue, ground_below, roll};
-use crate::summon::{Minion, MinionPart};
+use crate::runtime::{CastInfo, MagicQueue, roll};
+use crate::summon::{Minion, MinionKind, MinionPart};
 use crate::wilds_art as art;
 
 // ------------------------------------------------------------------------------- numbers
@@ -53,7 +53,9 @@ pub const SOIL: [f32; 3] = [0.3, 0.2, 0.11];
 /// A root's segments are this long, m.
 pub const SEG_M: f32 = 0.13;
 /// A hedge's brambles have longer segments, m (there are many of them).
-pub const HEDGE_SEG_M: f32 = 0.2;
+pub const HEDGE_SEG_M: f32 = 0.22;
+/// Brambles start this far apart along a hedge, in each of its two rows, m.
+pub const HEDGE_STEP: f32 = 0.28;
 /// How fast a root slides out of the ground, and back in, m/s.
 pub const GROW_M_S: f32 = 4.5;
 pub const RETRACT_M_S: f32 = 3.0;
@@ -68,10 +70,15 @@ pub const BARK_SHARE: f32 = 0.4;
 pub const BARK_FIRE_SHARE: f32 = 0.15;
 /// How far round where a seed lands its roots hold, m.
 pub const SEED_M: f32 = 2.0;
+/// Roots up each leg of a body held.
+pub const LEG_ROOTS: u32 = 3;
 /// Seconds free roots stand before they sink back.
 pub const PATCH_HOLD: f32 = 1.8;
 /// A treant is this much taller than a golem of its size.
 pub const TREANT_SCALE: f32 = 1.55;
+/// A treant's crown: boughs, and leaf clusters round each.
+pub const CROWN_BOUGHS: u64 = 9;
+pub const CROWN_LEAVES: u64 = 8;
 /// A treant's eyes: a green glow, nits (a small glowing mesh in the daylit hall).
 pub const TREANT_EYES: [f32; 3] = [0.45, 1.0, 0.3];
 pub const TREANT_EYE_GLOW: f32 = 9_000.0;
@@ -93,12 +100,13 @@ pub fn roots_hold(cast: CastType) -> bool {
 
 // ------------------------------------------------------------------------------- materials
 
-/// Root bark: the bark preset, warm brown, mapped in the world so thin segments keep it.
+/// Root bark: the bark preset, a dark living brown that stands out on pale bone and stone,
+/// mapped in the world so thin segments keep it.
 pub fn bark() -> StandardMaterial {
     StandardMaterial::preset(MaterialPreset::Bark)
         .with_triplanar_world()
         .with_texture_scale(0.5)
-        .with_tint(0.72, 0.6, 0.48)
+        .with_tint(0.5, 0.4, 0.3)
 }
 
 /// Bark that burns: near black, glowing like embers.
@@ -131,7 +139,7 @@ fn leaf_material(picture: Handle<Image>) -> StandardMaterial {
     StandardMaterial::default()
         .with_base_color_texture(picture)
         .with_alpha_mask(0.5)
-        .with_subsurface(0.5)
+        .with_subsurface(0.35)
         .with_wind_sway(0.03)
         .with_roughness(0.6)
 }
@@ -601,11 +609,20 @@ pub fn spawn_wilds(
     ends: Ends,
     bodies: Query<(Option<&Minion>, Option<&SkeletonPose>, &GlobalTransform)>,
     pieces: Query<&MinionPart>,
+    creatures: Query<(), Or<(With<Vitality>, With<Minion>, With<MinionPart>)>>,
     mut tangles: Query<&mut Tangle>,
     mut roots: Query<&mut Root>,
     mut skins: Query<&mut BarkSkin>,
     mut commands: Commands,
 ) {
+    // The floor under a point, past whoever stands there (an area aimed at a body is placed on
+    // top of it).
+    let floor = |p: DVec3| {
+        crate::cataclysm::ground_under(&queries, p + DVec3::Y * 2.0, 30.0, Vec::new(), &|e| {
+            creatures.contains(e)
+        })
+        .map_or(p, |h| h.point)
+    };
     for t in std::mem::take(&mut queue.root_burns) {
         for mut tg in tangles.iter_mut().filter(|tg| tg.target == t) {
             if tg.done.is_none() {
@@ -634,11 +651,7 @@ pub fn spawn_wilds(
             continue;
         }
         let body = g.translation();
-        let ground = ground_below(
-            &queries,
-            body + DVec3::Y * 0.5,
-            &QueryFilter::excluding(nr.target),
-        );
+        let ground = floor(body + DVec3::Y * 0.5);
         let height = minion.map_or(1.8, |m| crate::summon::body_height(m.kind, m.size));
         let hs = (height / 1.8).clamp(0.5, 3.0);
         let limbs = limb_ends(nr.target, minion, &pieces, pose, height);
@@ -654,28 +667,34 @@ pub fn spawn_wilds(
             Vec3::new(d.x as f32, 0.0, d.z as f32)
         };
         let seed = nr.cast.seed as u64 ^ nr.target.to_bits().wrapping_mul(0x2545_f491);
-        let leg_r = if minion.is_some() { 0.14 } else { 0.075 } * hs;
+        // Snug round the leg: a skeleton's are bone, a golem's are stone pillars.
+        let leg_r = match minion.map(|m| m.kind) {
+            Some(MinionKind::Skeleton | MinionKind::SkeletalMage) => 0.06,
+            Some(MinionKind::Golem | MinionKind::Treant) => 0.2,
+            Some(_) => 0.1,
+            None => 0.075,
+        } * hs;
         let tangle = commands
             .spawn((Name::new("Tangle"), Transform::from_translation(origin)))
             .id();
         let mut ids = Vec::new();
         let mut k = 0u64;
-        // Two roots up each leg, round it in turn.
+        // Three roots up each leg, round it in turn, out of the earth on all sides of it.
         for (i, &f) in feet.iter().enumerate() {
             let foot = local(f);
-            for j in 0..2 {
+            for j in 0..LEG_ROOTS {
                 k += 1;
                 let h = |salt: u64| roll(seed ^ k.wrapping_mul(0x51ed), salt);
-                let girth = 0.05 * hs * (0.85 + 0.3 * h(1));
-                let angle = h(2) * TAU;
+                let girth = 0.072 * hs * (0.85 + 0.3 * h(1));
+                let angle = (j as f32 + 0.6 * h(2)) / LEG_ROOTS as f32 * TAU + i as f32;
                 let path = art::coil(
                     foot,
                     angle,
-                    (0.55 + 0.3 * h(3)) * hs,
+                    (0.5 + 0.35 * h(3)) * hs,
                     leg_r + girth * 0.9,
-                    (0.3 + 0.12 * h(4)) * height,
-                    1.2 + 0.6 * h(5),
-                    (i + j) % 2 == 0,
+                    (0.36 + 0.2 * h(4)) * height,
+                    1.6 + 0.8 * h(5),
+                    (i + j as usize).is_multiple_of(2),
                 );
                 let start = path[0].with_y(0.0);
                 ids.push(spawn_root(
@@ -684,12 +703,12 @@ pub fn spawn_wilds(
                     &path,
                     SEG_M,
                     girth,
-                    0.06 * k as f32,
+                    0.05 * k as f32,
                     None,
                     seed ^ k,
                     3,
-                    5,
-                    0.13 * hs,
+                    3,
+                    0.17 * hs,
                 ));
                 spawn_clod(&mut commands, tangle, start, 0.32 * hs, seed ^ k);
             }
@@ -700,13 +719,13 @@ pub fn spawn_wilds(
             let h = |salt: u64| roll(seed ^ k.wrapping_mul(0x51ed), salt);
             let mid = (local(feet[0]) + local(feet[1])) * 0.5;
             let spread = local(feet[0]).distance(local(feet[1])) * 0.5;
-            let girth = 0.075 * hs;
+            let girth = 0.11 * hs;
             let path = art::coil(
                 mid,
                 h(2) * TAU,
                 (0.8 + 0.3 * h(3)) * hs,
                 spread + leg_r + girth,
-                0.52 * height,
+                0.62 * height,
                 1.1,
                 h(5) < 0.5,
             );
@@ -721,8 +740,8 @@ pub fn spawn_wilds(
                 None,
                 seed ^ k,
                 2,
-                4,
-                0.16 * hs,
+                3,
+                0.2 * hs,
             ));
             spawn_clod(&mut commands, tangle, start, 0.45 * hs, seed ^ k);
         }
@@ -745,7 +764,7 @@ pub fn spawn_wilds(
     for np in std::mem::take(&mut queue.patches) {
         let seed = np.cast.seed as u64 ^ np.at.x.to_bits() ^ (np.at.z.to_bits() << 5);
         let n = (np.radius * np.radius * 0.9).round().clamp(2.0, 14.0) as u64;
-        let center = ground_below(&queries, np.at + DVec3::Y * 0.5, &QueryFilter::default());
+        let center = floor(np.at + DVec3::Y * 0.5);
         let patch = commands
             .spawn((Name::new("Root patch"), Transform::from_translation(center)))
             .id();
@@ -786,7 +805,7 @@ pub fn spawn_wilds(
     }
     for nh in std::mem::take(&mut queue.hedges) {
         let seed = nh.cast.seed as u64 ^ 0x4ed9e;
-        let center = ground_below(&queries, nh.at + DVec3::Y * 0.5, &QueryFilter::default());
+        let center = floor(nh.at + DVec3::Y * 0.5);
         let along = Vec3::new(nh.along.x, 0.0, nh.along.z).normalize_or(Vec3::X);
         let side = Vec3::new(-along.z, 0.0, along.x);
         let hedge = commands
@@ -798,39 +817,45 @@ pub fn spawn_wilds(
         let half = nh.half.max(0.5);
         let mut ids = Vec::new();
         let grow_in = |u: f32| 0.5 * (u.abs() / half).min(1.0);
-        // Brambles arching over each other along the line.
-        let n = (2.0 * half / 0.42).ceil() as u64;
+        // Brambles in two rows, each arching over from its own side of the line toward the
+        // other's, so they cross and lace into a thicket; low ones fill the bottom.
+        let n = (2.0 * half / HEDGE_STEP).ceil() as u64;
         for i in 0..n {
-            let h = |salt: u64| roll(seed ^ i.wrapping_mul(0x2f1b), salt);
-            let ua = -half + i as f32 * 0.42 + 0.2 * (h(1) - 0.5);
-            let ub = (ua + 0.9 + 1.1 * h(2)).min(half + 0.2);
-            let a = along * ua + side * 0.35 * (h(3) - 0.5) * 2.0;
-            let b = along * ub + side * 0.35 * (h(4) - 0.5) * 2.0;
-            let path = art::bramble(a, b, HEDGE_M * (0.6 + 0.45 * h(5)), (seed ^ i) as u32);
-            ids.push(spawn_root(
-                &mut commands,
-                center,
-                &path,
-                HEDGE_SEG_M,
-                0.055 + 0.02 * h(6),
-                grow_in((ua + ub) * 0.5),
-                None,
-                seed ^ i,
-                2,
-                3,
-                0.34,
-            ));
+            for row in 0..2u64 {
+                let id = i * 2 + row;
+                let h = |salt: u64| roll(seed ^ id.wrapping_mul(0x2f1b), salt);
+                let ua = -half + (i as f32 + 0.5 * row as f32) * HEDGE_STEP + 0.15 * (h(1) - 0.5);
+                let way = if h(9) < 0.5 { 1.0 } else { -1.0 };
+                let ub = (ua + way * (0.7 + 1.1 * h(2))).clamp(-half - 0.2, half + 0.2);
+                let off = if row == 0 { -0.3 } else { 0.3 };
+                let a = along * ua + side * (off + 0.2 * (h(3) - 0.5));
+                let b = along * ub + side * (-0.6 * off + 0.3 * (h(4) - 0.5));
+                let path = art::bramble(a, b, HEDGE_M * (0.4 + 0.65 * h(5)), id as u32);
+                ids.push(spawn_root(
+                    &mut commands,
+                    center,
+                    &path,
+                    HEDGE_SEG_M,
+                    0.045 + 0.025 * h(6),
+                    grow_in((ua + ub) * 0.5),
+                    None,
+                    seed ^ id,
+                    3,
+                    2,
+                    0.36,
+                ));
+            }
         }
         // Stems standing up out of it, leaning either way.
-        let m = (2.0 * half / 0.7).ceil() as u64;
+        let m = (2.0 * half / 0.38).ceil() as u64;
         for i in 0..m {
             let h = |salt: u64| roll(seed ^ (i + 1000).wrapping_mul(0x2f1b), salt);
-            let u = -half + (i as f32 + 0.5) * 0.7;
+            let u = -half + (i as f32 + 0.5) * 0.38;
             let base = along * u + side * 0.25 * (h(1) - 0.5) * 2.0;
             let lean = side * if h(2) < 0.5 { -1.0 } else { 1.0 } + along * (h(3) - 0.5);
             let path = art::writhe(
                 base,
-                HEDGE_M * (0.75 + 0.35 * h(4)),
+                HEDGE_M * (0.8 + 0.35 * h(4)),
                 lean,
                 0.7 + 0.8 * h(5),
                 (seed ^ (i + 1000)) as u32,
@@ -840,15 +865,17 @@ pub fn spawn_wilds(
                 center,
                 &path,
                 HEDGE_SEG_M,
-                0.07,
+                0.065,
                 grow_in(u) + 0.15,
                 None,
                 seed ^ (i + 1000),
-                2,
                 3,
-                0.36,
+                2,
+                0.4,
             ));
-            spawn_clod(&mut commands, hedge, base, 0.45, seed ^ (i + 1000));
+            if i % 2 == 0 {
+                spawn_clod(&mut commands, hedge, base, 0.45, seed ^ (i + 1000));
+            }
         }
         commands.entity(hedge).insert(Hedge {
             field: nh.field,
@@ -1325,8 +1352,9 @@ pub fn build_treant(
     parts: &mut Vec<Entity>,
 ) {
     use crate::summon::{ARM, CORE, EYE, GOLEM_SIZES, HEAD, LEG, PELVIS, PLATE, TORSO};
-    let wood = old_bark().with_tint(0.62, 0.52, 0.4);
-    let piece = |size: Vec3, salt: u64| {
+    let wood = old_bark().with_tint(0.58, 0.48, 0.37);
+    // Knots and burls: rough bark-covered lumps.
+    let knot = |size: Vec3, salt: u64| {
         MeshRenderer::new(
             MeshRef::Shape(Shape::Rock {
                 size: size.to_array(),
@@ -1336,33 +1364,43 @@ pub fn build_treant(
             MaterialRef::Inline(wood),
         )
     };
-    // A trunk: narrower and taller than a golem's chest, a stump for a head.
-    let sizes: Vec<[f32; 3]> = GOLEM_SIZES
-        .iter()
-        .enumerate()
-        .map(|(i, s)| match i {
-            PELVIS => [0.8, 0.55, 0.6],
-            TORSO => [1.0, 1.35, 0.8],
-            HEAD => [0.46, 0.62, 0.44],
-            _ if (PLATE[0]..=PLATE[1]).contains(&i) => [0.48, 0.34, 0.5],
-            _ => [s[0] * 0.66, s[1] * 1.05, s[2] * 0.66],
-        })
-        .collect();
-    let mut part = |commands: &mut Commands, index: usize, size: Vec3, r: MeshRenderer| {
+    // A limb or the trunk: a round bough along the piece's length (its y).
+    let bough = |radius: f32, length: f32| {
+        MeshRenderer::new(
+            MeshRef::Shape(Shape::Capsule {
+                radius,
+                height: length.max(2.0 * radius + 0.01),
+                segments: 12,
+            }),
+            MaterialRef::Inline(wood),
+        )
+    };
+    // The pieces summon.rs walks (a golem's), drawn as a tree: a tall trunk on a knotted
+    // pelvis, a stump of a head, boughs for limbs, root knots for feet and fists.
+    for (i, s) in GOLEM_SIZES.iter().enumerate() {
+        let size = Vec3::from_array(*s) * k;
+        let limb = |j: usize| LEG.iter().chain(ARM.iter()).any(|&l| l + j == i);
+        let r = match i {
+            PELVIS => knot(Vec3::new(0.78, 0.5, 0.6) * k, 1),
+            TORSO => bough(0.38 * k, 1.6 * k),
+            HEAD => bough(0.24 * k, 0.72 * k),
+            _ if (PLATE[0]..=PLATE[1]).contains(&i) => {
+                knot(Vec3::new(0.42, 0.3, 0.44) * k, i as u64)
+            }
+            _ if limb(0) => bough(0.15 * k, size.y * 1.12),
+            _ if limb(1) => bough(0.13 * k, size.y * 1.12),
+            _ => knot(size * 0.62, i as u64),
+        };
         let id = commands
             .spawn((
                 Name::new("Minion piece"),
                 Transform::default(),
                 r,
-                MinionPart { index, size },
+                MinionPart { index: i, size },
                 ChildOf(root),
             ))
             .id();
         parts.push(id);
-    };
-    for (i, s) in sizes.iter().enumerate() {
-        let size = Vec3::from_array(*s) * k;
-        part(commands, i, size, piece(size, i as u64));
     }
     let glow = |r: f32, nits: f32| {
         MeshRenderer::new(
@@ -1377,11 +1415,26 @@ pub fn build_treant(
             ),
         )
     };
-    part(commands, CORE, Vec3::ZERO, glow(0.1 * k, 400.0));
-    for e in EYE {
-        part(commands, e, Vec3::ZERO, glow(0.045 * k, TREANT_EYE_GLOW));
+    // The golem's core sits deep in the trunk, out of sight; the eyes glow from the stump.
+    for (index, r) in [
+        (CORE, glow(0.02 * k, 200.0)),
+        (EYE[0], glow(0.045 * k, TREANT_EYE_GLOW)),
+        (EYE[1], glow(0.045 * k, TREANT_EYE_GLOW)),
+    ] {
+        let id = commands
+            .spawn((
+                Name::new("Minion piece"),
+                Transform::default(),
+                r,
+                MinionPart {
+                    index,
+                    size: Vec3::ZERO,
+                },
+                ChildOf(root),
+            ))
+            .id();
+        parts.push(id);
     }
-    let find = |parts: &Vec<Entity>, i: usize| parts[i];
     let child =
         |commands: &mut Commands, parent: Entity, tf: Transform, r: MeshRenderer, leaf: bool| {
             let mut ec = commands.spawn((
@@ -1409,7 +1462,7 @@ pub fn build_treant(
     let leaf_card = || {
         MeshRenderer::new(
             MeshRef::Shape(Shape::Quad { size: [1.0, 1.0] }),
-            MaterialRef::Inline(StandardMaterial::color(0.1, 0.25, 0.04)),
+            MaterialRef::Inline(StandardMaterial::color(0.05, 0.12, 0.02)),
         )
     };
     let along = |dir: Vec3, len: f32, from: Vec3| {
@@ -1417,48 +1470,56 @@ pub fn build_treant(
         Transform::from_translation((from + d * len * 0.5).as_dvec3())
             .with_rotation(Quat::from_rotation_arc(Vec3::Y, d))
     };
-    // A crown: branches up and out of the head and the top of the trunk, leaves round them.
-    let head = find(parts, HEAD);
-    let torso = find(parts, TORSO);
-    for j in 0..7 {
-        let a = j as f32 / 7.0 * TAU + 0.4 * h(j);
-        let dir = Vec3::new(a.cos() * 0.7, 1.0, a.sin() * 0.5 - 0.15);
-        let len = (0.7 + 0.5 * h(10 + j)) * k;
+    let leaf_at = |at: Vec3, size: f32, salt: u64| {
+        Transform::from_translation(at.as_dvec3())
+            .with_rotation(Quat::from_euler(
+                EulerRot::YXZ,
+                h(salt) * TAU,
+                (h(salt + 1) - 0.5) * 1.6,
+                h(salt + 2) * TAU,
+            ))
+            .with_scale(Vec3::splat(size))
+    };
+    // A crown: boughs up and out of the stump, each in a cloud of leaf clusters.
+    let head = parts[HEAD];
+    let torso = parts[TORSO];
+    for j in 0..CROWN_BOUGHS {
+        let a = j as f32 / CROWN_BOUGHS as f32 * TAU + 0.5 * h(j);
+        let out = 0.55 + 0.45 * h(10 + j);
+        let dir = Vec3::new(a.cos() * out, 1.0, a.sin() * out * 0.8 - 0.1);
+        let len = (0.8 + 0.6 * h(20 + j)) * k;
         let from = Vec3::new(0.0, 0.2, 0.0) * k;
         child(
             commands,
             head,
             along(dir, len, from),
-            branch(len, 0.06 * k),
+            branch(len, 0.075 * k),
             false,
         );
-        // Leaves at its end and part way up.
-        for (t, s) in [(1.0, 1.0), (0.6, 0.8)] {
-            let at = from + dir.normalize() * len * t;
-            let rot = Quat::from_euler(
-                EulerRot::YXZ,
-                h(20 + j) * TAU,
-                0.3 * (h(30 + j) - 0.5),
-                h(40 + j) * TAU,
+        let d = dir.normalize();
+        let side = d.cross(Vec3::Y).normalize_or(Vec3::X);
+        let up = side.cross(d);
+        for c in 0..CROWN_LEAVES {
+            let salt = 100 + j * 31 + c * 7;
+            let t = 0.45 + 0.65 * h(salt + 3);
+            let spread = 0.35 * k * t;
+            let at = from
+                + d * len * t
+                + side * spread * (h(salt + 4) - 0.5) * 2.0
+                + up * spread * (h(salt + 5) - 0.3) * 1.6;
+            child(
+                commands,
+                head,
+                leaf_at(at, (0.45 + 0.25 * h(salt + 6)) * k, salt),
+                leaf_card(),
+                true,
             );
-            for c in 0..2 {
-                let turn = rot * Quat::from_rotation_y(c as f32 * PI * 0.5);
-                child(
-                    commands,
-                    head,
-                    Transform::from_translation(at.as_dvec3())
-                        .with_rotation(turn)
-                        .with_scale(Vec3::splat((0.9 + 0.4 * h(50 + j)) * s * k)),
-                    leaf_card(),
-                    true,
-                );
-            }
         }
     }
-    // Leaves and twigs bushing out over the shoulders and the back of the trunk.
+    // Twiggy boughs off the shoulders, leafed at their ends.
     for (i, &p) in PLATE.iter().enumerate() {
         let side = if i == 0 { -1.0 } else { 1.0 };
-        let shoulder = find(parts, p);
+        let shoulder = parts[p];
         for j in 0..3 {
             let dir = Vec3::new(side * (0.8 + 0.3 * h(60 + j)), 0.9, 0.3 * (h(70 + j) - 0.5));
             let len = (0.45 + 0.3 * h(80 + j)) * k;
@@ -1469,55 +1530,72 @@ pub fn build_treant(
                 branch(len, 0.045 * k),
                 false,
             );
-            let at = dir.normalize() * len;
-            child(
-                commands,
-                shoulder,
-                Transform::from_translation(at.as_dvec3())
-                    .with_rotation(Quat::from_rotation_y(h(90 + j) * TAU))
-                    .with_scale(Vec3::splat(0.75 * k)),
-                leaf_card(),
-                true,
-            );
+            for c in 0..3 {
+                let salt = 400 + j * 13 + c * 5 + i as u64 * 97;
+                let at = dir.normalize() * len * (0.7 + 0.35 * h(salt + 3))
+                    + Vec3::new(0.0, 0.15 * (h(salt + 4) - 0.5), 0.2 * (h(salt + 5) - 0.5)) * k;
+                child(
+                    commands,
+                    shoulder,
+                    leaf_at(at, 0.4 * k, salt),
+                    leaf_card(),
+                    true,
+                );
+            }
         }
     }
-    for j in 0..3 {
-        let at = Vec3::new(0.35 * (h(100 + j) - 0.5), 0.45 + 0.15 * j as f32, 0.35) * k;
+    // Burls on the trunk, and a broken-off branch.
+    for j in 0..4 {
+        let a = h(130 + j) * TAU;
+        let y = (-0.4 + 0.8 * h(140 + j)) * k;
+        let at = Vec3::new(a.cos() * 0.36, y, a.sin() * 0.3) * k;
         child(
             commands,
             torso,
-            Transform::from_translation(at.as_dvec3())
-                .with_rotation(Quat::from_rotation_y(h(110 + j) * TAU))
-                .with_scale(Vec3::splat(0.7 * k)),
-            leaf_card(),
-            true,
+            Transform::from_translation(at.as_dvec3()),
+            knot(
+                Vec3::new(0.28, 0.34, 0.24) * k * (0.7 + 0.5 * h(150 + j)),
+                50 + j,
+            ),
+            false,
         );
     }
+    child(
+        commands,
+        torso,
+        along(
+            Vec3::new(-0.6, 0.5, 0.4),
+            0.45 * k,
+            Vec3::new(-0.3, 0.3, 0.2) * k,
+        ),
+        branch(0.45 * k, 0.06 * k),
+        false,
+    );
     // Twig fingers off each hand, root toes off each foot.
     for i in 0..2 {
-        let fist = find(parts, ARM[i] + 2);
+        let fist = parts[ARM[i] + 2];
         for j in 0..4 {
             let a = (j as f32 - 1.5) * 0.35;
             let dir = Vec3::new(a, -1.0, -0.25);
-            let len = 0.42 * k;
+            let len = 0.5 * k;
             child(
                 commands,
                 fist,
                 along(dir, len, Vec3::new(0.0, -0.1, 0.0) * k),
-                branch(len, 0.04 * k),
+                branch(len, 0.045 * k),
                 false,
             );
         }
-        let foot = find(parts, LEG[i] + 2);
-        for j in 0..3 {
-            let a = (j as f32 - 1.0) * 0.6;
+        let foot = parts[LEG[i] + 2];
+        for j in 0..4 {
+            let a = (j as f32 - 1.5) * 0.55;
             let dir = Vec3::new(a.sin(), -0.25, -a.cos());
-            let len = 0.5 * k;
+            let len = 0.6 * k;
             child(
                 commands,
                 foot,
                 along(dir, len, Vec3::new(0.0, 0.0, -0.1) * k),
-                branch(len, 0.07 * k),
+                branch(len, 0.08 * k),
                 false,
             );
         }
