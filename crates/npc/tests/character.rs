@@ -786,3 +786,54 @@ fn fighters_are_built_finely_only_near_the_camera() {
         assert_eq!(*app.world.get::<CharacterQuality>(e).unwrap(), Crowd);
     }
 }
+
+#[test]
+fn fighters_about_as_near_dont_trade_detail_back_and_forth() {
+    use engine_world::SimulationFocus;
+    use engine_world::character::CharacterQuality;
+    let mut app = app();
+    let focus = app
+        .world
+        .spawn((
+            SimulationFocus::default(),
+            Transform::from_translation(DVec3::ZERO),
+        ))
+        .id();
+    // Three fighters 3 m off, two close-up places: the camera sways between them.
+    let es: Vec<Entity> = [-3.0, 3.0, 0.0]
+        .iter()
+        .map(|&x: &f64| {
+            let at = DVec3::new(x, 0.0, if x == 0.0 { 3.0 } else { 0.0 });
+            let e = fighter(
+                &mut app,
+                at,
+                Vec3::NEG_Z,
+                Faction::ENEMY,
+                NpcWeapon::sword(),
+            );
+            app.world.get_mut::<Npc>(e).unwrap().active = false;
+            e
+        })
+        .collect();
+    run(&mut app, 1.0);
+    let detail = |app: &App| -> Vec<CharacterQuality> {
+        es.iter()
+            .map(|&e| *app.world.get::<CharacterQuality>(e).unwrap())
+            .collect()
+    };
+    let first = detail(&app);
+    let mut changes = 0;
+    let mut last = first.clone();
+    for k in 0..20 {
+        let x = if k % 2 == 0 { 0.4 } else { -0.4 };
+        app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(x, 0.0, 0.3);
+        run(&mut app, 0.5);
+        let now = detail(&app);
+        changes += now.iter().zip(&last).filter(|(a, b)| a != b).count();
+        last = now;
+    }
+    assert_eq!(
+        changes, 0,
+        "detail traded back and forth: {first:?} -> {last:?}"
+    );
+}

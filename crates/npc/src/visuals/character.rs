@@ -527,20 +527,45 @@ pub(crate) fn request_appearances(
     if now >= *next {
         *next = now + DETAIL_EVERY;
         order.clear();
+        // Each finer detail is handed out nearest first, a fighter already built at it
+        // counting as nearer by the band between promoting and demoting, so two fighters
+        // about as near don't trade it (and rebuilds) on every re-rank.
         order.extend(ranked.iter().map(|(e, t, _)| (away(t.translation), e)));
-        order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (mut close, mut mid) = (0, 0);
-        for &(d, e) in order.iter() {
-            let Ok((_, _, mut q)) = ranked.get_mut(e) else {
-                continue;
+        let mut given: Vec<(Entity, CharacterQuality)> = Vec::with_capacity(order.len());
+        let mut left: Vec<(f64, Entity, CharacterQuality)> = order
+            .iter()
+            .filter_map(|&(d, e)| Some((d, e, *ranked.get(e).ok()?.2)))
+            .collect();
+        for (tier, (c_in, c_out, places)) in [
+            (CharacterQuality::CloseUp, CLOSE_UP_DETAIL),
+            (CharacterQuality::Mid, MID_DETAIL),
+        ] {
+            let holds = |q: CharacterQuality| match tier {
+                CharacterQuality::CloseUp => q == CharacterQuality::CloseUp,
+                _ => q != CharacterQuality::Crowd,
             };
-            let want = detail_for(d, Some(*q), close, mid);
-            match want {
-                CharacterQuality::CloseUp => close += 1,
-                CharacterQuality::Mid => mid += 1,
-                CharacterQuality::Crowd => {}
-            }
-            if *q != want {
+            let key = |&(d, _, q): &(f64, Entity, CharacterQuality)| {
+                if holds(q) { d - (c_out - c_in) } else { d }
+            };
+            left.sort_by(|a, b| key(a).total_cmp(&key(b)));
+            let room = places.saturating_sub(given.len());
+            let mut taken = 0;
+            left.retain(|&(d, e, q)| {
+                let reach = if holds(q) { c_out } else { c_in };
+                if taken < room && d < reach {
+                    taken += 1;
+                    given.push((e, tier));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        given.extend(left.iter().map(|&(_, e, _)| (e, CharacterQuality::Crowd)));
+        for (e, want) in given {
+            if let Ok((_, _, mut q)) = ranked.get_mut(e)
+                && *q != want
+            {
                 *q = want;
             }
         }
