@@ -73,6 +73,9 @@ pub enum EffectKind {
     /// A pact's demons (Pactbinding, demons.rs): the cast type makes it a hellgate they pour
     /// out of, or a demonic meteor they leap out of.
     Demon,
+    /// Living wood (Vitalism's Wilds, wilds.rs): the cast type makes it roots that burst up
+    /// and hold, a seed that bursts into them, a thorn hedge, bark skin or a treant.
+    Wilds,
 }
 
 /// One entry of the effect catalog.
@@ -120,6 +123,7 @@ impl EffectDef {
             EffectKind::Wrath => Dials::pole(Pole::Veil, 0.6) + Dials::pole(Pole::Heat, 0.4),
             EffectKind::Blade => Dials::pole(Pole::Push, 0.8) + Dials::pole(Pole::Form, 0.5),
             EffectKind::Demon => Dials::pole(Pole::Heat, 0.6) + Dials::pole(Pole::Form, 0.6),
+            EffectKind::Wilds => Dials::pole(Pole::Grow, 0.8) + Dials::pole(Pole::Form, 0.6),
         }
     }
 
@@ -147,6 +151,7 @@ impl EffectDef {
                 | EffectKind::Wrath
                 | EffectKind::Blade
                 | EffectKind::Demon
+                | EffectKind::Wilds
                 | EffectKind::Force { .. }
                 | EffectKind::TimeScale { factor: ..1.0 }
         )
@@ -335,6 +340,15 @@ pub const EFFECTS: &[EffectDef] = &[
         Subclass::Vitalism,
         EffectKind::TimeScale { factor: 1.35 },
         "Everything the target does is quicker.",
+    ),
+    def(
+        "wilds",
+        "Living wood",
+        Subclass::Vitalism,
+        EffectKind::Wilds,
+        "Roots, thorns and bark: out of the ground roots burst up and hold, a seed bursts into \
+         them where it lands, as a wall a thorn hedge grows, on yourself bark covers you, \
+         summoned a treant walks.",
     ),
     // Necromancy.
     def(

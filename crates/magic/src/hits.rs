@@ -327,6 +327,33 @@ pub fn apply_hits(
                     target: t,
                 });
             }
+            // Living wood (wilds.rs): fire burns the roots that hold a body away; else roots
+            // break out of the ground and hold it, a thorn hedge snags what pushes through it,
+            // and bark grows over its caster.
+            if aff.tangled > 0.0 && spell.element() == Some(Element::Fire) && base_damage > 0.0 {
+                aff.tangled = aff.tangled.min(0.05);
+                queue.root_burns.push(t);
+            } else if p.roots_secs > 0.0 && !h.cast.reaction && !friend {
+                let secs = p.roots_secs * scale.clamp(0.5, 1.5);
+                queue.roots.push(crate::wilds::NewRoots {
+                    cast: h.cast.clone(),
+                    target: t,
+                    secs,
+                });
+                aff.tangled = aff.tangled.max(secs);
+            }
+            if p.hedge && !friend {
+                aff.tangled = aff.tangled.max(crate::wilds::HEDGE_SNAG);
+            }
+            if p.bark_secs > 0.0 && !h.multi {
+                let secs = p.bark_secs * scale.clamp(0.5, 1.5);
+                aff.bark = aff.bark.max(secs);
+                queue.barks.push(crate::wilds::NewBark {
+                    cast: h.cast.clone(),
+                    target: t,
+                    secs,
+                });
+            }
             if p.fear_secs > 0.0 && base_damage <= 0.0 {
                 aff.dread = aff.dread.max(p.fear_secs);
             }
@@ -398,6 +425,15 @@ pub fn apply_hits(
             let ward_element = aff.ward_element;
             let (left, taken) = aff.absorb_hit(damage, spell.element());
             damage = left;
+            // Bark skin takes a share off (less off fire, which it feeds).
+            if aff.bark > 0.0 {
+                damage *= 1.0
+                    - if spell.element() == Some(Element::Fire) {
+                        crate::wilds::BARK_FIRE_SHARE
+                    } else {
+                        crate::wilds::BARK_SHARE
+                    };
+            }
             // A hard blow shakes off terror (WoW's fear breaks past a share of health): a
             // fifth of the body's health in one hit, from anything but the terror itself.
             if aff.dread > 0.0
@@ -895,13 +931,23 @@ fn fire_stage(
         reaction: h.cast.reaction,
     };
     let at = h.point + (h.normal * 0.15).as_dvec3();
+    // A placed stage (a blast, a lingering patch, a seed's roots) comes where its parent hit;
+    // one that flies goes on the way its parent went.
+    let aim = if matches!(
+        stage.cast,
+        CastType::Area | CastType::Rune | CastType::Wall | CastType::Summon | CastType::Rain
+    ) {
+        at
+    } else {
+        at + (h.dir * 4.0).as_dvec3()
+    };
     let mut hits = HitQueue::default();
     release(
         &info,
         at,
         at,
         h.dir,
-        at + (h.dir * 4.0).as_dvec3(),
+        aim,
         None,
         gravity.at(at).length(),
         queries,

@@ -6,7 +6,7 @@
 //! |---|---|
 //! | [`dials`] | the seven domains and fourteen poles every effect is made of |
 //! | [`schools`] | elements, statuses, classes and subclasses, mastery tiers, power |
-//! | [`effects`] | the 32 effects |
+//! | [`effects`] | the 33 effects |
 //! | [`design`] | `SpellDesign`: effects + cast type + modifiers + stages, as JSON |
 //! | [`combine`] | the combination table and the systemic fallback |
 //! | [`compile`] | from a design and a caster to the numbers a spell flies with |
@@ -26,6 +26,8 @@
 //! | [`blades`] | conjured blades (glintblade, phalanx, bladefall, spirit blade, bound blade) and imbued weapons |
 //! | [`chains`] | pact chains: bindings out of the floor, hooks that drag, bonds that share pain |
 //! | [`demons`] | a pact's demons: hellgates, demonic meteors, imps and hellhounds |
+//! | [`wilds`] | living wood: roots that burst up and hold, seeds, thorn hedges, bark skin, treants |
+//! | [`wilds_art`] | bark roots, thorns and leaves made in code |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
 //! | [`crafter`] | the Spellcrafter: an altar where you build a spell in four steps, see its cost, watch it fly at a dummy and put it on a key |
@@ -67,6 +69,8 @@ pub mod tether;
 pub mod undead;
 pub mod walls;
 pub mod wards;
+pub mod wilds;
+pub mod wilds_art;
 
 use engine_core::prelude::*;
 use engine_world::WorldShiftSet;
@@ -169,6 +173,7 @@ impl Plugin for MagicPlugin {
                     kinesis::draw_grips,
                     minds::draw_threads,
                     demons::dress_demons,
+                    wilds::dress_wilds,
                 )
                     .chain(),
             )
@@ -216,6 +221,7 @@ impl Plugin for MagicPlugin {
                         chains::pay_bonds,
                     )
                         .chain(),
+                    (wilds::spawn_wilds, wilds::burn_hedges, wilds::run_wilds).chain(),
                 )
                     .chain()
                     .in_set(MagicSet::Carriers),
@@ -245,7 +251,12 @@ impl Plugin for MagicPlugin {
             .add_systems(FixedUpdate, runtime::flush.in_set(MagicSet::Flush))
             .add_systems(
                 PostUpdate,
-                (runtime::sync_transforms, blades::hold_blades).before(UpdateSet::Propagate),
+                (
+                    runtime::sync_transforms,
+                    blades::hold_blades,
+                    wilds::hold_bark,
+                )
+                    .before(UpdateSet::Propagate),
             )
             .add_systems(
                 PostUpdate,
@@ -270,6 +281,7 @@ impl Plugin for MagicPlugin {
         blades::register(app);
         chains::register(app);
         demons::register(app);
+        wilds::register(app);
         demo::build(app);
     }
 }

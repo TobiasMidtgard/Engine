@@ -16,16 +16,16 @@ pub const VORTEX_PX: u32 = 256;
 pub const CRACKS_PX: u32 = 512;
 pub const CRACK_CELLS: i32 = 6;
 
-fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
+pub(crate) fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-fn hash2(x: i32, y: i32, seed: u32) -> f32 {
+pub(crate) fn hash2(x: i32, y: i32, seed: u32) -> f32 {
     let mut h = (x as u32).wrapping_mul(0x8da6_b343)
         ^ (y as u32).wrapping_mul(0xd816_3841)
         ^ seed.wrapping_mul(0xcb1a_b31f);
@@ -36,7 +36,7 @@ fn hash2(x: i32, y: i32, seed: u32) -> f32 {
 }
 
 /// Smooth value noise in 0..1, repeating every `period` cells.
-fn noise(x: f32, y: f32, period: i32, seed: u32) -> f32 {
+pub(crate) fn noise(x: f32, y: f32, period: i32, seed: u32) -> f32 {
     let (xi, yi) = (x.floor() as i32, y.floor() as i32);
     let (fx, fy) = (x - xi as f32, y - yi as f32);
     let (ux, uy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
@@ -51,7 +51,7 @@ fn noise(x: f32, y: f32, period: i32, seed: u32) -> f32 {
 }
 
 /// Four octaves of `noise`, 0..1, repeating every `period` cells of the first.
-fn fbm(x: f32, y: f32, period: i32, seed: u32) -> f32 {
+pub(crate) fn fbm(x: f32, y: f32, period: i32, seed: u32) -> f32 {
     let (mut sum, mut amp, mut f, mut norm) = (0.0, 0.5, 1.0, 0.0);
     for o in 0..4 {
         sum += amp * noise(x * f, y * f, period * f as i32, seed.wrapping_add(o * 977));
@@ -86,7 +86,7 @@ pub fn hellfire(t: f32) -> [f32; 3] {
     STOPS[4].1
 }
 
-fn srgb(v: f32) -> u8 {
+pub(crate) fn srgb(v: f32) -> u8 {
     let v = v.clamp(0.0, 1.0);
     let s = if v <= 0.003_130_8 {
         12.92 * v
@@ -96,7 +96,7 @@ fn srgb(v: f32) -> u8 {
     (s * 255.0 + 0.5) as u8
 }
 
-fn pixel(c: [f32; 3], alpha: f32) -> [u8; 4] {
+pub(crate) fn pixel(c: [f32; 3], alpha: f32) -> [u8; 4] {
     [
         srgb(c[0]),
         srgb(c[1]),

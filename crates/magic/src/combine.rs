@@ -545,6 +545,10 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
         // Chains are iron and embers (chains.rs): the chain look (vfx draws a chain's crackle
         // and lends its bursts the nearest element's, fire's, in the embers' red).
         ("chain".to_string(), name, crate::chains::EMBER)
+    } else if ingredients.iter().any(|k| k == "wilds") && elements.is_empty() {
+        // Living wood breaks out of the ground: stone's look (dust, grit, clods) in the soil's
+        // brown (wilds.rs), not the Life domain's green mist.
+        ("stone".to_string(), name, crate::wilds::SOIL)
     } else if ingredients.iter().any(|k| k == "raise") && elements.is_empty() {
         // Raising the dead is dark: it looks like shadow, in the grave's violet, not like the
         // green of the Life domain its dials sit in (a bone blade's cut would puff green).

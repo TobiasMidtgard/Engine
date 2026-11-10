@@ -26,6 +26,7 @@
 //! | `spells_minds` | minds: necromancers raise a golem and skeletons; students answer with three decoys the skeletons cut into glass, a mirror image on the dais, a terror wave that sends the dead running, a frenzy that turns them on each other, and a command that turns the golem on its own side ([`minds`], [`crate::minds`]) |
 //! | `spells_blades` | spellblades: necromancers imbue their golem and skeletons with fire (blades and fists burn, every cut sets fire); students answer with a phalanx of five swords over a head that loose themselves at the dead, two spirit blades that fence with skeletons, fans of glintblades at the golem, frost bladefalls down the line of the dead, and a bound blade in the hand ([`blades`], [`crate::blades`]) |
 //! | `spells_pacts` | pacts: warlocks open a hellgate on the floor that hellhounds leap out of and imps fly from, bind the students' golem in chains out of a burning sigil, drag their elemental in on a chain hook, bind their creatures' fates together and throw demonic meteors that burst into imps; the students answer with storm: a phalanx, bladefalls and lightning bolts and glintblades that break the gate ([`pacts`], [`crate::chains`], [`crate::demons`]) |
+//! | `spells_wilds` | the Wilds: druids against the dead: bark skin grows over one, a thorn hedge across the floor snags the charge, a treant wades in and its slam roots what it strikes, roots break out of the floor and coil up the skeletons' legs, Thornvine seeds burst into roots where they land, and a necromancer's fire runs along the hedge and burns it away ([`wilds`], [`crate::wilds`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -43,6 +44,7 @@ pub mod pacts;
 pub mod player;
 pub mod portal;
 pub mod shield;
+pub mod wilds;
 
 use engine_core::prelude::*;
 use engine_render::{Camera, MeshRenderer};
@@ -294,6 +296,18 @@ pub const VIEWS: &[DemoView] = &[
         // The golem bound in chains with the hounds at it, the first imps over the floor.
         warmup: 5.6,
     },
+    DemoView {
+        key: "spells_wilds",
+        name: "The Wilds: entangling roots, a thorn hedge, bark skin and a treant against the dead",
+        // From down the floor, looking up the hall at the dais: the dead coming in from the left
+        // (the necromancers' side), the hedge across their way in the middle, the treant before
+        // the dais to its right and lane 2 in bark on its plinth beyond.
+        eye: [4.2, 3.0, -5.5],
+        target: [1.8, 1.1, 5.5],
+        hour: 16.6,
+        // The front of the charge held in roots at the hedge, the treant at them.
+        warmup: 5.4,
+    },
 ];
 
 /// What the hall is running.
@@ -322,10 +336,11 @@ pub enum Program {
     Minds,
     Blades,
     Pacts,
+    Wilds,
 }
 
 impl Program {
-    pub const ALL: [Program; 21] = [
+    pub const ALL: [Program; 22] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -347,6 +362,7 @@ impl Program {
         Program::Minds,
         Program::Blades,
         Program::Pacts,
+        Program::Wilds,
     ];
 
     pub fn key(self) -> &'static str {
@@ -372,6 +388,7 @@ impl Program {
             Program::Minds => "spells_minds",
             Program::Blades => "spells_blades",
             Program::Pacts => "spells_pacts",
+            Program::Wilds => "spells_wilds",
         }
     }
 
@@ -416,6 +433,8 @@ impl Program {
             Program::Blades => blades::PERIOD,
             // The students' creatures last 21.6 s; what is left of the pact falls at the end.
             Program::Pacts => pacts::PERIOD,
+            // The first dead and the treant last 21.6 s; the hedge burns at 11 s.
+            Program::Wilds => wilds::PERIOD,
         }
     }
 
@@ -979,6 +998,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
         Program::Minds => minds::lanes(),
         Program::Blades => blades::lanes(),
         Program::Pacts => pacts::lanes(),
+        Program::Wilds => wilds::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -1045,7 +1065,12 @@ pub const WARD_BARRAGE_END: f32 = 13.0;
 fn two_sides(program: Program) -> bool {
     matches!(
         program,
-        Program::Dead | Program::Ward | Program::Minds | Program::Blades | Program::Pacts
+        Program::Dead
+            | Program::Ward
+            | Program::Minds
+            | Program::Blades
+            | Program::Pacts
+            | Program::Wilds
     )
 }
 
@@ -1187,6 +1212,7 @@ fn setup_program(
         commands.queue(crate::blades::clear);
         commands.queue(crate::chains::clear);
         commands.queue(crate::demons::clear);
+        commands.queue(crate::wilds::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -1243,7 +1269,7 @@ fn setup_program(
             };
             if program == Program::Duel {
                 commands.entity(e).insert(duel::student(&mut c, m.lane));
-            } else if matches!(program, Program::Blades | Program::Pacts) {
+            } else if matches!(program, Program::Blades | Program::Pacts | Program::Wilds) {
                 // Three waves of burning dead reach the plinths: the masters on them stand the
                 // whole period (a body that falls goes limp off its plinth, and its lane's
                 // blades never come).

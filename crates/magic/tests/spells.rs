@@ -5210,3 +5210,504 @@ fn the_pacts_hall_opens_a_gate_binds_hooks_and_the_students_break_it() {
         now.iter().map(|m| (m.0, m.1.kind)).collect::<Vec<_>>()
     );
 }
+
+// ------------------------------------------------------------------------------- the wilds
+
+fn tangles(app: &mut App) -> Vec<(Entity, wilds::Tangle)> {
+    let mut q = app.world.query::<(Entity, &wilds::Tangle)>();
+    let mut v: Vec<_> = q.iter(&app.world).map(|(e, t)| (e, t.clone())).collect();
+    v.sort_by_key(|t| t.0);
+    v
+}
+
+fn wild_roots(app: &mut App) -> Vec<(Entity, wilds::Root)> {
+    let mut q = app.world.query::<(Entity, &wilds::Root)>();
+    q.iter(&app.world).map(|(e, r)| (e, r.clone())).collect()
+}
+
+fn rooted(app: &App, e: Entity) -> bool {
+    app.world.get::<Statuses>(e).is_some_and(|s| s.rooted)
+}
+
+fn held(app: &mut App, e: Entity) -> bool {
+    tangles(app)
+        .iter()
+        .any(|t| t.1.target == e && t.1.done.is_none())
+}
+
+fn wild_app() -> App {
+    let mut a = app();
+    a.world
+        .init_resource::<engine_assets::Assets<engine_render::Mesh>>();
+    a.world
+        .init_resource::<engine_assets::Assets<engine_render::Image>>();
+    a
+}
+
+#[test]
+fn roots_break_out_of_the_floor_coil_up_a_dummy_and_hold_it_until_they_slide_back() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -8.0));
+    run(&mut app, 0.1);
+    let entangle = SpellDesign::new(&["wilds"], CastType::Area).named("Entangle");
+    cast(&mut app, me, entangle, Aim::Entity(d));
+    run(&mut app, 1.6);
+    let found = tangles(&mut app);
+    assert_eq!(found.len(), 1, "one tangle");
+    let (_, tg) = &found[0];
+    assert_eq!(tg.target, d);
+    assert_eq!(tg.roots.len(), 5, "two up each leg and one round both");
+    assert!(tg.secs >= 2.0 && tg.secs <= 5.0, "{}", tg.secs);
+    assert!(rooted(&app, d));
+    for r in &tg.roots {
+        let root = app.world.get::<wilds::Root>(*r).unwrap().clone();
+        // It starts under the floor beside the dummy, is all the way out now, and reaches up.
+        assert!(root.pts[0].y < 0.0, "{}", root.pts[0]);
+        let from = root.pts[0].with_y(0.0).length();
+        assert!(from > 0.3 && from < 1.6, "{from}");
+        assert!((root.length_now() - root.total()).abs() < 0.01);
+        let top = root.pts.iter().map(|p| p.y).fold(0.0, f32::max);
+        assert!(top > 0.45, "{top}");
+        // Its segments are drawn.
+        let shown = root
+            .segs
+            .iter()
+            .filter(|s| {
+                app.world
+                    .get::<Transform>(**s)
+                    .is_some_and(|t| t.scale.min_element() > 0.01)
+            })
+            .count();
+        assert!(
+            shown * 10 >= root.segs.len() * 9,
+            "{shown} of {}",
+            root.segs.len()
+        );
+    }
+    // Free roots writhe up across the area too.
+    let mut q = app.world.query::<&wilds::Patch>();
+    let patch = q.iter(&app.world).next().expect("a patch of roots").clone();
+    assert!(patch.roots.len() >= 6, "{}", patch.roots.len());
+    // A little damage as they bite.
+    let seen = app.world.resource::<Seen>();
+    assert!(seen.damage.iter().any(|x| x.target == d && x.amount > 0.0));
+    // Then they let go and slide back into the floor, and the dummy is free.
+    run(&mut app, 5.0);
+    assert!(tangles(&mut app).is_empty());
+    assert!(wild_roots(&mut app).is_empty());
+    assert!(!rooted(&app, d));
+}
+
+#[test]
+fn fire_burns_roots_off_a_held_body_at_once() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -8.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["wilds"], CastType::Area),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.4);
+    assert!(rooted(&app, d));
+    let roots = tangles(&mut app)[0].1.roots.clone();
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 0.9);
+    assert!(!rooted(&app, d), "fire frees it");
+    assert!(!held(&mut app, d));
+    let burnt = roots
+        .iter()
+        .filter(|r| {
+            app.world
+                .get::<wilds::Root>(**r)
+                .is_none_or(|r| r.burnt.is_some())
+        })
+        .count();
+    assert_eq!(burnt, roots.len(), "every root caught");
+    run(&mut app, 1.5);
+    assert!(
+        roots
+            .iter()
+            .all(|r| app.world.get::<wilds::Root>(*r).is_none())
+    );
+}
+
+#[test]
+fn a_seed_bursts_into_roots_that_hold_what_it_hit_and_those_beside_it() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    let near = dummy(&mut app, DVec3::new(1.3, 0.0, -10.0));
+    let far = dummy(&mut app, DVec3::new(5.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["wilds"], CastType::Bolt).named("Thornvine"),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.8);
+    assert!(rooted(&app, d) && held(&mut app, d));
+    assert!(
+        rooted(&app, near) && held(&mut app, near),
+        "the seed's roots reach 2 m"
+    );
+    assert!(!rooted(&app, far) && !held(&mut app, far));
+}
+
+#[test]
+fn a_thorn_hedge_grows_along_a_wall_and_snags_and_scratches_what_pushes_through() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -8.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["wilds"], CastType::Wall).named("Thorn wall"),
+        Aim::Point(DVec3::new(0.0, 0.0, -8.0)),
+    );
+    run(&mut app, 0.6);
+    let mut q = app.world.query::<&wilds::Hedge>();
+    let hedge = q.iter(&app.world).next().expect("a hedge").clone();
+    assert!(hedge.roots.len() >= 10, "{}", hedge.roots.len());
+    // Brambles along the wall's line, about head high, with no wall look of its own.
+    let mut tall = 0.0f32;
+    let mut wide = 0.0f32;
+    for r in &hedge.roots {
+        let root = app.world.get::<wilds::Root>(*r).unwrap();
+        for p in &root.pts {
+            tall = tall.max(p.y);
+            wide = wide.max(p.x.abs().max(p.z.abs()));
+        }
+    }
+    assert!(tall > 1.4 && tall < 2.6, "{tall}");
+    assert!(wide > 2.0, "{wide}");
+    // Whoever stands in it is snagged most of the time and scratched each tick.
+    let mut snagged = 0;
+    for _ in 0..60 {
+        run(&mut app, 1.0 / 30.0);
+        if rooted(&app, d) {
+            snagged += 1;
+        }
+    }
+    assert!(snagged > 25 && snagged < 60, "{snagged} of 60");
+    let seen = app.world.resource::<Seen>();
+    let scratches: Vec<f32> = seen
+        .damage
+        .iter()
+        .filter(|x| x.target == d)
+        .map(|x| x.amount)
+        .collect();
+    assert!(scratches.len() >= 3, "{scratches:?}");
+    assert!(
+        scratches.iter().all(|a| *a > 0.0 && *a < 25.0),
+        "{scratches:?}"
+    );
+    // When the wall's time is up the hedge goes with it.
+    run(&mut app, 30.0);
+    let mut q = app.world.query::<&wilds::Hedge>();
+    assert_eq!(q.iter(&app.world).count(), 0);
+    assert!(wild_roots(&mut app).is_empty());
+}
+
+#[test]
+fn bark_skin_grows_over_its_caster_and_takes_two_fifths_off_magic() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    app.world.entity_mut(me).insert(Body(0.5));
+    let plain = dummy(&mut app, DVec3::new(0.0, 0.0, -20.0));
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, -10.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 2;
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["wilds"], CastType::OnSelf).named("Bark skin"),
+        Aim::Entity(me),
+    );
+    run(&mut app, 1.5);
+    let mut q = app.world.query::<&wilds::BarkSkin>();
+    let skin = q.iter(&app.world).next().expect("bark").clone();
+    assert_eq!(skin.target, me);
+    assert!(skin.plates.len() >= 20, "{}", skin.plates.len());
+    assert!(skin.secs >= 15.0, "{}", skin.secs);
+    let grown = skin
+        .plates
+        .iter()
+        .filter(|p| {
+            app.world
+                .get::<Transform>(p.0)
+                .is_some_and(|t| t.scale.min_element() > 0.9)
+        })
+        .count();
+    assert_eq!(grown, skin.plates.len(), "all grown in");
+    // The same frost bolt does 40% less to it than to a plain body.
+    let bolt = SpellDesign::new(&["frost"], CastType::Bolt);
+    cast(&mut app, foe, bolt.clone(), Aim::Entity(me));
+    run(&mut app, 1.5);
+    cast(&mut app, foe, bolt, Aim::Entity(plain));
+    run(&mut app, 1.5);
+    let seen = app.world.resource::<Seen>();
+    let on = |e: Entity| -> f32 {
+        seen.damage
+            .iter()
+            .filter(|x| x.target == e && x.source == Some(foe))
+            .map(|x| x.amount)
+            .sum()
+    };
+    let (barked, bare) = (on(me), on(plain));
+    assert!(bare > 0.0);
+    assert!(
+        (barked / bare - (1.0 - wilds::BARK_SHARE)).abs() < 0.05,
+        "{barked} of {bare}"
+    );
+    // When its time is up it cracks off and falls.
+    let plates: Vec<Entity> = skin.plates.iter().map(|p| p.0).collect();
+    run(&mut app, 20.0);
+    let mut q = app.world.query::<&wilds::BarkSkin>();
+    assert_eq!(q.iter(&app.world).count(), 0);
+    assert!(plates.iter().all(|p| app.world.get_entity(*p).is_err()));
+}
+
+#[test]
+fn a_summoned_treant_walks_to_a_dummy_and_its_slam_roots_it() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -4.0));
+    run(&mut app, 0.1);
+    let treant = SpellDesign::new(&["wilds"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.4 })
+        .named("Treant");
+    cast(&mut app, me, treant, Aim::Point(DVec3::ZERO));
+    run(&mut app, 1.0);
+    let found = minions(&mut app);
+    assert_eq!(found.len(), 1);
+    let (t, m) = found[0].clone();
+    assert_eq!(m.kind, summon::MinionKind::Treant);
+    assert!(
+        summon::body_height(m.kind, m.size) > 3.3,
+        "{}",
+        summon::body_height(m.kind, m.size)
+    );
+    let mut rooted_by_it = false;
+    for _ in 0..24 {
+        run(&mut app, 0.5);
+        rooted_by_it |= held(&mut app, d);
+    }
+    let seen = app.world.resource::<Seen>();
+    let blows: Vec<_> = seen.damage.iter().filter(|x| x.source == Some(t)).collect();
+    assert!(blows.len() >= 3, "{}", blows.len());
+    assert!(blows.iter().all(|b| b.target == d));
+    assert!(rooted_by_it, "its slam roots what it strikes");
+}
+
+#[test]
+fn fire_through_a_thorn_hedge_runs_along_it_and_burns_it_away() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, -16.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 2;
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["wilds"], CastType::Wall),
+        Aim::Point(DVec3::new(0.0, 0.0, -8.0)),
+    );
+    run(&mut app, 1.0);
+    let mut q = app.world.query::<&wilds::Hedge>();
+    let hedge = q.iter(&app.world).next().expect("a hedge").clone();
+    cast(
+        &mut app,
+        foe,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Point(DVec3::new(1.0, 1.0, 0.0)),
+    );
+    run(&mut app, 0.8);
+    // Lit where it went in, the fire running out along it.
+    let burning = hedge
+        .roots
+        .iter()
+        .filter(|r| {
+            app.world
+                .get::<wilds::Root>(**r)
+                .is_none_or(|r| r.burnt.is_some_and(|b| b > 0.0))
+        })
+        .count();
+    let lit = hedge
+        .roots
+        .iter()
+        .filter(|r| {
+            app.world
+                .get::<wilds::Root>(**r)
+                .is_none_or(|r| r.burnt.is_some())
+        })
+        .count();
+    assert_eq!(lit, hedge.roots.len(), "the whole hedge caught");
+    assert!(burning > 0 && burning <= lit, "{burning} of {lit}");
+    run(&mut app, 3.0);
+    let mut q = app.world.query::<&wilds::Hedge>();
+    assert_eq!(q.iter(&app.world).count(), 0);
+    assert!(wild_roots(&mut app).is_empty());
+}
+
+#[test]
+fn the_wilds_hall_holds_the_dead_in_roots_and_thorns_and_a_treant_smashes_them() {
+    let mut app = blade_app();
+    app.world
+        .init_resource::<engine_assets::Assets<engine_render::Image>>();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Wilds;
+        hall.restart = true;
+    }
+    let view = demo::VIEWS
+        .iter()
+        .find(|v| v.key == "spells_wilds")
+        .unwrap();
+    let eye = DVec3::from(view.eye);
+    let fwd = (DVec3::from(view.target) - eye).normalize();
+    let right = fwd.cross(DVec3::Y).normalize();
+    let up = right.cross(fwd);
+    let tan_y = (55f64.to_radians() / 2.0).tan();
+    let in_view = |p: DVec3| {
+        let d = p - eye;
+        let z = d.dot(fwd);
+        z > 0.5
+            && (d.dot(right) / (z * tan_y * 16.0 / 9.0)).abs() < 0.9
+            && (d.dot(up) / (z * tan_y)).abs() < 0.9
+    };
+    let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
+    let mut held: Vec<(f32, Entity)> = Vec::new();
+    let mut hedge_at: Option<(f32, DVec3)> = None;
+    let mut hedge_burnt: Option<f32> = None;
+    let mut barked: Option<f32> = None;
+    let mut treant: Option<Entity> = None;
+    let mut treant_blows = 0usize;
+    let mut snags = 0usize;
+    let mut fell: Vec<Entity> = Vec::new();
+    let (mut looked, mut missed) = (0usize, 0usize);
+    let steps = (demo::wilds::PERIOD * 60.0) as usize;
+    for i in 0..steps {
+        app.update();
+        let t = i as f32 / 60.0;
+        for (_, tg) in tangles(&mut app) {
+            if tg.done.is_none() && !held.iter().any(|(at, e)| *e == tg.target && t - at < 3.0) {
+                println!(
+                    "{t:.2}: held {:?} {:?} {:?}",
+                    tg.target,
+                    kinds.get(&tg.target),
+                    app.world.get::<Name>(tg.target)
+                );
+                held.push((t, tg.target));
+            }
+        }
+        let mut q = app.world.query::<(Entity, &wilds::Hedge)>();
+        let hedges: Vec<(Entity, wilds::Hedge)> =
+            q.iter(&app.world).map(|(e, h)| (e, h.clone())).collect();
+        for (e, h) in &hedges {
+            if hedge_at.is_none() {
+                let at = app.world.get::<Transform>(*e).unwrap().translation;
+                println!("{t:.2}: hedge at {at:.1}, {} brambles", h.roots.len());
+                assert!(in_view(at + DVec3::Y), "the hedge is out of the picture");
+                hedge_at = Some((t, at));
+            }
+            if hedge_burnt.is_none()
+                && h.roots.iter().any(|r| {
+                    app.world
+                        .get::<wilds::Root>(*r)
+                        .is_some_and(|r| r.burnt.is_some())
+                })
+            {
+                println!("{t:.2}: the hedge burns");
+                hedge_burnt = Some(t);
+            }
+        }
+        let mut q = app.world.query::<&wilds::BarkSkin>();
+        if barked.is_none() && q.iter(&app.world).next().is_some() {
+            println!("{t:.2}: bark");
+            barked = Some(t);
+        }
+        let now = minions(&mut app);
+        for (e, k) in &kinds {
+            if !now.iter().any(|m| m.0 == *e) && !fell.contains(e) {
+                println!("{t:.2}: {e:?} {k:?} falls");
+                fell.push(*e);
+            }
+        }
+        for (e, m) in &now {
+            if kinds.insert(*e, m.kind).is_none() {
+                println!("{t:.2}: {e:?} {:?} comes at {:.1}", m.kind, m.pos);
+                if m.kind == summon::MinionKind::Treant {
+                    treant = Some(*e);
+                }
+            }
+            if i % 15 == 0 && t > 2.5 && t < 16.0 && m.age < m.life {
+                looked += 1;
+                if !in_view(m.pos + DVec3::Y * 0.6) {
+                    missed += 1;
+                    println!(
+                        "  {t:.2}: {e:?} {:?} out of the picture at {:.1}",
+                        m.kind, m.pos
+                    );
+                }
+            }
+            if i % 6 == 0
+                && m.kind == summon::MinionKind::Skeleton
+                && hedge_at.is_some_and(|(_, at)| {
+                    DVec3::new(m.pos.x - at.x, 0.0, m.pos.z - at.z).length() < 4.5
+                })
+                && app.world.get::<Statuses>(*e).is_some_and(|s| s.rooted)
+            {
+                snags += 1;
+            }
+        }
+    }
+    if let Some(tr) = treant {
+        let seen = app.world.resource::<Seen>();
+        treant_blows = seen.damage.iter().filter(|x| x.source == Some(tr)).count();
+    }
+    println!(
+        "held {} bodies, {snags} snag samples, treant blows {treant_blows}, missed {missed} of {looked}",
+        held.len()
+    );
+    assert!(barked.is_some_and(|t| t < 1.5), "no bark");
+    assert!(hedge_at.is_some_and(|h| h.0 < 2.5), "no hedge");
+    assert!(
+        hedge_burnt.is_some_and(|t| t > 10.0 && t < 13.0),
+        "{hedge_burnt:?}"
+    );
+    assert!(treant.is_some(), "no treant");
+    assert!(treant_blows >= 4, "{treant_blows}");
+    let held_dead = held
+        .iter()
+        .filter(|(_, e)| kinds.get(e) == Some(&summon::MinionKind::Skeleton))
+        .count();
+    assert!(held_dead >= 6, "{held_dead}");
+    assert!(
+        !held
+            .iter()
+            .any(|(_, e)| kinds.get(e) == Some(&summon::MinionKind::Treant)),
+        "the druids rooted their own treant"
+    );
+    assert!(snags >= 10, "{snags}");
+    assert!(
+        missed * 10 < looked,
+        "the fight left the picture {missed} of {looked} looks"
+    );
+}

@@ -159,6 +159,13 @@ pub struct Payload {
     pub demons: u32,
     /// Seconds a hellgate stands and its demons last.
     pub demon_secs: f32,
+    /// Seconds roots hold a body they grow round (wilds.rs; 0: none): an entangle's, a seed's,
+    /// a treant's slam's.
+    pub roots_secs: f32,
+    /// A thorn hedge grows along the wall (wilds.rs).
+    pub hedge: bool,
+    /// Seconds bark covers the caster (wilds.rs; 0: none).
+    pub bark_secs: f32,
     /// A light it leaves, lumens.
     pub light_lm: f32,
     /// Flame temperature for igniting fuel, °C (0: doesn't ignite).
@@ -187,6 +194,8 @@ impl Payload {
             || self.fear_secs > 0.0
             || self.command_secs > 0.0
             || self.wrath_secs > 0.0
+            || self.roots_secs > 0.0
+            || self.hedge
     }
 }
 
@@ -338,6 +347,11 @@ fn compile_inner(
         .ingredients
         .iter()
         .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Demon)));
+    // Living wood (Vitalism's Wilds, wilds.rs).
+    let wild = w
+        .ingredients
+        .iter()
+        .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Wilds)));
     let mods = &design.modifiers;
     let factor = |f: &dyn Fn(&Modifier) -> Option<f32>| -> f32 {
         mods.iter().filter_map(f).product::<f32>().max(0.05)
@@ -534,6 +548,13 @@ fn compile_inner(
         } else if demon && matches!(cast, CastType::Bolt | CastType::Lob) && !harm {
             // A demonic meteor burns where it lands, fire or not.
             ctx.power.damage() * 0.9 * cast.strength() * strength * spread
+        } else if wild && !harm && crate::wilds::roots_hold(cast) {
+            // Roots crush what they coil round (Diablo IV's Poison Creeper strangles); the hold
+            // is the point, so it is light.
+            ctx.power.damage() * 0.15 * cast.strength() * strength * spread
+        } else if wild && !harm && cast == CastType::Wall {
+            // A hedge's thorns scratch on each tick (its damage is per tick, two a second).
+            ctx.power.damage() * 0.035 * strength
         } else {
             0.0
         };
@@ -597,6 +618,8 @@ fn compile_inner(
             DamageKind::Slash
         } else if demon && w.elements.is_empty() {
             DamageKind::Fire
+        } else if wild && w.elements.is_empty() {
+            DamageKind::Pierce
         } else {
             damage_kind(&w)
         },
@@ -805,6 +828,19 @@ fn compile_inner(
         } else {
             0.0
         },
+        // Roots hold 3 s (a little more with power), more with Duration; a treant's slam
+        // holds as long.
+        roots_secs: if wild && (crate::wilds::roots_hold(cast) || cast == CastType::Summon) {
+            (3.0 * duration_k * (0.85 + 0.15 * size)).clamp(1.5, 12.0)
+        } else {
+            0.0
+        },
+        hedge: wild && cast == CastType::Wall,
+        bark_secs: if wild && cast == CastType::OnSelf {
+            (20.0 * duration_k).clamp(4.0, 90.0)
+        } else {
+            0.0
+        },
         light_lm: if has(&|k| matches!(k, EffectKind::Light)) {
             4000.0 * size
         } else {
@@ -880,6 +916,22 @@ fn compile_inner(
             }
             _ => {}
         }
+    }
+    // A living-wood bolt or lob is a seed: where it lands it bursts into roots that hold what
+    // stands within SEED_M (wilds.rs).
+    if wild && matches!(cast, CastType::Bolt | CastType::Lob) {
+        let seed = SpellDesign {
+            name: format!("{} roots", w.name),
+            effects: design.effects.clone(),
+            cast: CastType::Area,
+            modifiers: vec![Modifier::Size {
+                factor: crate::wilds::SEED_M / 3.0,
+            }],
+            stages: Vec::new(),
+        };
+        let mut s = compile_inner(&seed, ctx, complexity, budget, 0.6 * strength);
+        s.carrier.duration = 0.0;
+        stages.push((Trigger::Impact, Arc::new(s)));
     }
     for st in &design.stages {
         stages.push((

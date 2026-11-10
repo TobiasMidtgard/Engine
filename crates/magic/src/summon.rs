@@ -63,12 +63,23 @@ pub enum MinionKind {
     Imp,
     /// A pact's hound of burning stone that pounces and bites (demons.rs).
     Hellhound,
+    /// A walking tree that guards and smashes; its slam roots what it strikes (Vitalism's
+    /// Wilds, wilds.rs). It walks and fights as a golem does.
+    Treant,
 }
 
 impl MinionKind {
     /// Walks on two legs (posed by [`step_feet`] and two-bone IK).
     pub fn walks(self) -> bool {
-        matches!(self, Self::Golem | Self::Skeleton | Self::SkeletalMage)
+        matches!(
+            self,
+            Self::Golem | Self::Treant | Self::Skeleton | Self::SkeletalMage
+        )
+    }
+
+    /// Built, posed and fought as a golem: the stone golem and the treant.
+    pub fn golemlike(self) -> bool {
+        matches!(self, Self::Golem | Self::Treant)
     }
 
     pub fn skeletal(self) -> bool {
@@ -88,7 +99,9 @@ impl MinionKind {
 
 /// The creature a summon spell makes, or None (it casts as an area, as before).
 pub fn kind_of(spell: &Spell) -> Option<MinionKind> {
-    if spell.payload.stone_m > 0.0 {
+    if spell.payload.roots_secs > 0.0 && spell.cast == CastType::Summon {
+        Some(MinionKind::Treant)
+    } else if spell.payload.stone_m > 0.0 {
         // With raise, the bone golem.
         Some(MinionKind::Golem)
     } else if spell.payload.raise > 0.0 {
@@ -229,20 +242,20 @@ pub fn gait_of(kind: MinionKind) -> &'static Gait {
 
 /// The golem's pieces, in order.
 pub const GOLEM_PARTS: usize = 20;
-const PELVIS: usize = 0;
-const TORSO: usize = 1;
-const HEAD: usize = 2;
+pub const PELVIS: usize = 0;
+pub const TORSO: usize = 1;
+pub const HEAD: usize = 2;
 /// Thigh, shin, foot; left then right.
-const LEG: [usize; 2] = [3, 6];
+pub const LEG: [usize; 2] = [3, 6];
 /// Upper arm, forearm, fist; left then right.
-const ARM: [usize; 2] = [9, 12];
-const PLATE: [usize; 2] = [15, 16];
-const CORE: usize = 17;
-const EYE: [usize; 2] = [18, 19];
+pub const ARM: [usize; 2] = [9, 12];
+pub const PLATE: [usize; 2] = [15, 16];
+pub const CORE: usize = 17;
+pub const EYE: [usize; 2] = [18, 19];
 
 /// Rock sizes of the golem's pieces at size 1 (width, length, depth): the length runs along
 /// the bone.
-const GOLEM_SIZES: [[f32; 3]; 17] = [
+pub const GOLEM_SIZES: [[f32; 3]; 17] = [
     [0.95, 0.42, 0.62],
     [1.45, 1.05, 0.95],
     [0.5, 0.46, 0.52],
@@ -382,7 +395,7 @@ pub struct Minion {
 /// glow (blades.rs).
 pub fn weapon_parts(kind: MinionKind) -> &'static [usize] {
     match kind {
-        MinionKind::Golem => &[ARM[0] + 2, ARM[1] + 2],
+        MinionKind::Golem | MinionKind::Treant => &[ARM[0] + 2, ARM[1] + 2],
         MinionKind::Skeleton | MinionKind::SkeletalMage => &[crate::undead::HELD],
         MinionKind::Elemental | MinionKind::Wisp => &[0],
         MinionKind::Imp => &[crate::demons::IMP_FIRE],
@@ -680,6 +693,13 @@ pub fn attacks(kind: MinionKind, spell: &Spell, k: f32) -> (Arc<Spell>, Option<A
             blow(ForceDir::Away, 225.0, 0.8),
             Some(blow(ForceDir::Up, 170.0, 1.0)),
         ),
+        // A branch's swipe, and a slam that roots what it strikes (its roots_secs stays on the
+        // slam only).
+        MinionKind::Treant => {
+            let mut swipe = (*blow(ForceDir::Away, 240.0, 0.8)).clone();
+            swipe.payload.roots_secs = 0.0;
+            (Arc::new(swipe), Some(blow(ForceDir::Down, 120.0, 1.0)))
+        }
         // A bone blade's cut: quick, light, a little push. One skeleton is weak (Diablo IV's
         // minions take about 30% of their master's strength); a pack is not.
         MinionKind::Skeleton => (blow(ForceDir::Away, 90.0, 0.3), None),
@@ -782,7 +802,11 @@ pub fn size_of(spell: &Spell, scale: f32) -> f32 {
 /// Put a minion into the world (from the flush): its root, its pieces, and its looks.
 pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookCmd>) -> Entity {
     let spell = m.cast.spell.clone();
-    let k = size_of(&spell, m.cast.scale);
+    let k = if m.kind == MinionKind::Treant {
+        crate::wilds::treant_size(&spell, m.cast.scale)
+    } else {
+        size_of(&spell, m.cast.scale)
+    };
     let (attack, slam) = attacks(m.kind, &spell, k);
     let yaw = yaw_of(m.facing);
     let seed = m.cast.seed as u64;
@@ -799,6 +823,8 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     let (pos, health) = match m.kind {
         // A bone golem is lighter than a stone one (round-6-plan.md: 300).
         MinionKind::Golem => (m.at, if bone { 300.0 } else { 400.0 } * k),
+        // Wood: tougher than stone for its size, and taller (wilds.rs).
+        MinionKind::Treant => (m.at, 450.0 * k),
         MinionKind::Elemental => (m.at + DVec3::Y * HOVER_M as f64, 150.0 * k),
         MinionKind::Wisp => (m.at + DVec3::Y * 2.0, 0.0),
         // Weak alone (Diablo II's skeletons die to a few blows), strong in numbers.
@@ -818,6 +844,7 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     let name = match m.kind {
         MinionKind::Golem if bone => "Bone golem",
         MinionKind::Golem => "Summoned golem",
+        MinionKind::Treant => "Treant",
         MinionKind::Elemental => "Summoned elemental",
         MinionKind::Wisp => "Summoned wisp",
         MinionKind::Skeleton => "Skeleton warrior",
@@ -959,6 +986,26 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         MinionKind::Imp | MinionKind::Hellhound => {
             crate::demons::build(commands, root, m.kind, k, seed, &spell, &mut parts, looks);
         }
+        MinionKind::Treant => {
+            crate::wilds::build_treant(commands, root, k, seed, &mut parts);
+            // A green glow from its eyes and heart on the floor around it.
+            commands.entity(root).insert(PointLight {
+                color: crate::wilds::TREANT_EYES,
+                intensity_lm: 700.0,
+                range: 6.0,
+                radius: 0.2,
+            });
+            if element.is_some() {
+                looks.push(LookCmd::Attach {
+                    entity: parts[TORSO],
+                    look: spell.weave.key.clone(),
+                    role: Role::Aura,
+                    scale: 1.3 * k,
+                    color: spell.weave.color,
+                    power_j: spell.power.energy_j as f32 * 0.2,
+                });
+            }
+        }
         MinionKind::Wisp => {
             part(commands, 0, Vec3::ZERO, glow(0.22, color, 120.0));
             for i in 0..3 {
@@ -981,7 +1028,7 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
             "raise".into()
         } else if m.kind.demon() {
             "fire".into()
-        } else if m.kind == MinionKind::Golem {
+        } else if m.kind.golemlike() {
             "stone".into()
         } else {
             spell.weave.key.clone()
@@ -1235,7 +1282,10 @@ pub fn run_minions(
 
         let exclude = &ground;
         match m.kind {
-            MinionKind::Golem | MinionKind::Skeleton | MinionKind::SkeletalMage => {
+            MinionKind::Golem
+            | MinionKind::Treant
+            | MinionKind::Skeleton
+            | MinionKind::SkeletalMage => {
                 let gait = gait_of(m.kind);
                 let skeletal = m.kind.skeletal();
                 let mage = m.kind == MinionKind::SkeletalMage;
@@ -1430,7 +1480,7 @@ pub fn run_minions(
                 let mut speed = 0.0;
                 if act == Act::Ready && rising.is_none() {
                     let stop = match m.kind {
-                        MinionKind::Golem => reach_of(k),
+                        MinionKind::Golem | MinionKind::Treant => reach_of(k),
                         MinionKind::Skeleton => crate::undead::reach(k),
                         _ => crate::undead::MAGE_KEEP_M,
                     };
@@ -1479,8 +1529,12 @@ pub fn run_minions(
                             {
                                 m.attacks += 1;
                                 act = match m.kind {
-                                    MinionKind::Golem if m.attacks % 3 == 0 => Act::Slam { t: 0.0 },
-                                    MinionKind::Golem => Act::Punch {
+                                    MinionKind::Golem | MinionKind::Treant
+                                        if m.attacks % 3 == 0 =>
+                                    {
+                                        Act::Slam { t: 0.0 }
+                                    }
+                                    MinionKind::Golem | MinionKind::Treant => Act::Punch {
                                         t: 0.0,
                                         right: m.attacks % 2 == 1,
                                     },
@@ -1841,7 +1895,7 @@ pub fn body_radius(kind: MinionKind, k: f32) -> f32 {
 /// golem's fists and feet, a skeleton's hands and feet); a floating creature's heart.
 pub fn limb_parts(kind: MinionKind) -> [usize; 4] {
     match kind {
-        MinionKind::Golem => [ARM[0] + 2, ARM[1] + 2, LEG[0] + 2, LEG[1] + 2],
+        MinionKind::Golem | MinionKind::Treant => [ARM[0] + 2, ARM[1] + 2, LEG[0] + 2, LEG[1] + 2],
         MinionKind::Skeleton | MinionKind::SkeletalMage => {
             use crate::undead::{ARM as A, LEG as L};
             [A[0] + 2, A[1] + 2, L[0] + 2, L[1] + 2]
@@ -1854,7 +1908,7 @@ pub fn limb_parts(kind: MinionKind) -> [usize; 4] {
 /// How tall a minion stands, m (a floating one: its shell's height, about its middle).
 pub fn body_height(kind: MinionKind, k: f32) -> f32 {
     match kind {
-        MinionKind::Golem => 2.6 * k,
+        MinionKind::Golem | MinionKind::Treant => 2.6 * k,
         MinionKind::Skeleton | MinionKind::SkeletalMage => 1.75 * k,
         MinionKind::Elemental => SHELL_M * k,
         MinionKind::Wisp => 0.6,
@@ -1866,7 +1920,7 @@ pub fn body_height(kind: MinionKind, k: f32) -> f32 {
 /// Where a minion's chest is above its feet (a floating one: its middle), m.
 pub fn chest_height(kind: MinionKind, k: f32) -> f32 {
     match kind {
-        MinionKind::Golem => 1.75 * k,
+        MinionKind::Golem | MinionKind::Treant => 1.75 * k,
         MinionKind::Skeleton | MinionKind::SkeletalMage => 1.25 * k,
         MinionKind::Elemental | MinionKind::Wisp | MinionKind::Imp => 0.0,
         MinionKind::Hellhound => 0.7 * k,
@@ -1929,7 +1983,7 @@ fn fall(
     let center = tf.translation
         + DVec3::Y
             * match m.kind {
-                MinionKind::Golem => 1.5 * m.size,
+                MinionKind::Golem | MinionKind::Treant => 1.5 * m.size,
                 MinionKind::Skeleton | MinionKind::SkeletalMage => 1.0 * m.size,
                 MinionKind::Hellhound => 0.7 * m.size,
                 _ => 0.0,
@@ -2007,7 +2061,7 @@ fn fall(
         up: Vec3::Y,
         look: if bone {
             "bones".into()
-        } else if m.kind == MinionKind::Golem {
+        } else if m.kind.golemlike() {
             "stone".into()
         } else {
             spell.weave.key.clone()
@@ -2020,7 +2074,7 @@ fn fall(
             spell.weave.color
         },
     });
-    if m.kind == MinionKind::Golem && !spell.weave.elements.is_empty() && !bone {
+    if m.kind.golemlike() && !spell.weave.elements.is_empty() && !bone {
         // It bursts in its element as it falls.
         queue.spawns.push(Spawn::Field(
             field(

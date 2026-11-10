@@ -298,6 +298,13 @@ pub struct MagicQueue {
     pub bond_hops: Vec<crate::chains::BondHop>,
     /// Hellgates to open and demons' meteors that landed (demons.rs).
     pub hellgates: Vec<crate::demons::NewHellgate>,
+    /// Living wood (wilds.rs): roots to grow round bodies, free roots across areas, hedges
+    /// along walls, bark over bodies, and bodies whose roots fire struck.
+    pub roots: Vec<crate::wilds::NewRoots>,
+    pub patches: Vec<crate::wilds::NewPatch>,
+    pub hedges: Vec<crate::wilds::NewHedge>,
+    pub barks: Vec<crate::wilds::NewBark>,
+    pub root_burns: Vec<Entity>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -2723,6 +2730,35 @@ pub fn flush(
                 ec.insert(m);
             }
             Spawn::Field(f, _) => {
+                // Living wood sends free roots up across an area's ground (wilds.rs), or grows
+                // a thorn hedge along a wall instead of the wall's look.
+                let wild = f.cast.spell.payload.roots_secs > 0.0;
+                if wild
+                    && matches!(f.kind, FieldKind::Burst | FieldKind::Lasting)
+                    && f.cone.is_none()
+                    && f.wall.is_none()
+                    && f.follow.is_none()
+                    && f.wave.is_none()
+                {
+                    queue.patches.push(crate::wilds::NewPatch {
+                        cast: f.cast.clone(),
+                        at: pos,
+                        radius: f.radius,
+                    });
+                }
+                if f.cast.spell.payload.hedge
+                    && let Some((along, half)) = f.wall
+                {
+                    queue.hedges.push(crate::wilds::NewHedge {
+                        cast: f.cast.clone(),
+                        field: id,
+                        at: pos,
+                        along,
+                        half,
+                    });
+                    ec.insert(f);
+                    continue;
+                }
                 // Lasting fields, auras and runes show a look on the entity; bursts show
                 // theirs where they go off (tick_fields). A wall gets pieces along its length.
                 if f.kind != FieldKind::Burst {
