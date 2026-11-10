@@ -94,6 +94,8 @@ mod mesh_once;
 mod mesh_pool;
 #[doc(hidden)]
 pub use mesh_pool::set_index_share as set_mesh_index_share;
+#[doc(hidden)]
+pub use mesh_pool::set_vertex_share as set_mesh_vertex_share;
 mod mesh_scene;
 mod mipmaps;
 pub mod motion_blur;

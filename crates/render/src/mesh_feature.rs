@@ -2672,9 +2672,10 @@ impl MeshFeature {
         );
         let _ = writeln!(
             out,
-            "  the levels built hold {:.0}% of their meshes' own indices; the pool's index buffers grew {} times",
+            "  the levels built hold {:.0}% of their meshes' own indices; the pool's index buffers grew {} times, its vertex buffers {}",
             self.lod_indices[1] as f64 * 100.0 / self.lod_indices[0].max(1) as f64,
             self.pool.index_growths,
+            self.pool.vertex_growths,
         );
         let mut rows: Vec<_> = dense.into_iter().collect();
         rows.sort_by_key(|r| std::cmp::Reverse(r.1.0));
@@ -4961,6 +4962,11 @@ impl RenderFeature for MeshFeature {
             d.set(
                 "render.meshes.pool_index_growths",
                 self.pool.index_growths as f64,
+            );
+            // The same for the vertex buffers.
+            d.set(
+                "render.meshes.pool_vertex_growths",
+                self.pool.vertex_growths as f64,
             );
             // Meshes with a copy in the pool.
             d.set("render.meshes.resident", self.meshes.len() as f64);

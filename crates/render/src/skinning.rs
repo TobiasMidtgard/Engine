@@ -148,7 +148,9 @@ pub(crate) struct Skin {
     rest: wgpu::Buffer,
     /// Where the pool held the rest vertices it copied (a new upload copies again).
     copied: Option<(PoolMesh, u64)>,
-    group: Option<(u16, wgpu::BindGroup)>,
+    /// Its bind group, with the pool page and that page's vertex buffer generation
+    /// (`MeshPool::generation`) it was made over.
+    group: Option<((u16, u32), wgpu::BindGroup)>,
     /// Each bone's bind-space box of the vertices it moves most (none: no vertex).
     boxes: Vec<Option<(Vec3, Vec3)>>,
     /// The pose last skinned, to skip one that didn't change.
@@ -346,6 +348,14 @@ impl Skins {
                 state.due = true;
                 state.fresh = true;
             }
+            let at = (pool_mesh.page, pool.generation(pool_mesh.page));
+            if state.group.as_ref().is_some_and(|(made, _)| *made != at) {
+                // The page's vertex buffer was replaced by a larger one: let go of the old
+                // one (the group keeps it alive), and pose once more into the new one, which
+                // holds what the old one did when it was copied.
+                state.group = None;
+                state.due = true;
+            }
             if !state.due {
                 continue;
             }
@@ -364,11 +374,7 @@ impl Skins {
                     pad: [0; 2],
                 }),
             );
-            if state
-                .group
-                .as_ref()
-                .is_none_or(|(p, _)| *p != pool_mesh.page)
-            {
+            if state.group.is_none() {
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("gpu skinning"),
                     layout,
@@ -382,7 +388,7 @@ impl Skins {
                         entry(6, motion),
                     ],
                 });
-                state.group = Some((pool_mesh.page, group));
+                state.group = Some((at, group));
             }
             jobs.push((*index, pool_mesh.vertex_count));
         }

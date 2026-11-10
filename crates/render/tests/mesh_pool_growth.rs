@@ -1,14 +1,22 @@
-//! The mesh pool's index buffers start small and grow as meshes and their levels of detail
-//! arrive (`mesh_pool`): a field of stones uploaded a few kinds at a time is drawn the same as
-//! with index buffers as large as the vertex buffers, which never need to grow, and takes less
-//! video memory. Needs a GPU or lavapipe; passes with a note when neither is available.
+//! The mesh pool's vertex and index buffers start small and grow as meshes and their levels of
+//! detail arrive (`mesh_pool`): a field of stones uploaded a few kinds at a time is drawn the
+//! same as with whole pages made at once and index buffers as large as the vertex buffers,
+//! which never need to grow, and takes less video memory. Two skinned posts stand among the
+//! stones: their posed vertices live in the vertex buffer that is replaced, one bent before
+//! the stones arrive and left alone, one bent again after. Needs a GPU or lavapipe; passes
+//! with a note when neither is available.
+
+use std::sync::Arc;
 
 use engine_assets::Assets;
 use engine_core::diagnostics::Diagnostics;
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::rock::rock;
-use engine_render::{Mesh, RenderDisabled, RenderStats, capture_now, set_mesh_index_share};
+use engine_render::{
+    GpuSkin, Mesh, RenderDisabled, RenderStats, SkinBlend, SkinBone, SkinWeights, capture_now,
+    mesh, set_mesh_index_share, set_mesh_vertex_share,
+};
 
 const W: u32 = 480;
 const H: u32 = 270;
@@ -21,13 +29,43 @@ struct Run {
     index_mb: f64,
     index_used_mb: f64,
     growths: f64,
+    vertex_mb: f64,
+    vertex_used_mb: f64,
+    vertex_growths: f64,
     refused: f64,
 }
 
-/// The stone field drawn with new pool pages getting `share` index bytes a vertex byte.
-fn render(share: f64, shot: &str) -> Option<Run> {
+/// A 0.3 m square post 2 m tall: the lower meter on bone 0, the upper on bone 1.
+fn post() -> (Mesh, Arc<SkinWeights>) {
+    let mut post = Mesh::new(Vec::new(), Vec::new());
+    let mut weights = SkinWeights::default();
+    for (bone, y) in [(0u16, 0.5f32), (1, 1.5)] {
+        let mut part = mesh::cuboid(Vec3::new(0.3, 1.0, 0.3));
+        part.transform(&Mat4::from_translation(Vec3::new(0.0, y, 0.0)));
+        for _ in &part.vertices {
+            weights.joints.push([bone, 0, 0, 0]);
+            weights.weights.push([1.0, 0.0, 0.0, 0.0]);
+        }
+        post.merge(&part);
+    }
+    (post, Arc::new(weights))
+}
+
+/// The post's bones with the upper one turned `angle` about +Z at the joint.
+fn bent(angle: f32) -> Vec<SkinBone> {
+    let joint = (Quat::IDENTITY, Vec3::new(0.0, 1.0, 0.0));
+    vec![
+        SkinBone::IDENTITY,
+        SkinBone::from_poses(joint, (Quat::from_rotation_z(angle), joint.1)),
+    ]
+}
+
+/// The stone field drawn with new pool pages getting `share` index bytes a vertex byte and
+/// vertex buffers that start at `vertex_share` of their page.
+fn render(share: f64, vertex_share: f64, shot: &str) -> Option<Run> {
     engine_core::log::init("error");
     set_mesh_index_share(share);
+    set_mesh_vertex_share(vertex_share);
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -73,11 +111,32 @@ fn render(share: f64, shot: &str) -> Option<Run> {
             StandardMaterial::color(0.25, 0.3, 0.2),
         ),
     ));
+    // The posts, among the first meshes in the pool: the left one bent now and never again,
+    // the right one bent once the stones are in.
+    let red = StandardMaterial::color(0.8, 0.1, 0.1);
+    let mut posts = Vec::new();
+    for x in [-1.6, 1.6] {
+        let (post, weights) = post();
+        let handle = w.resource_mut::<Assets<Mesh>>().add(post);
+        posts.push(
+            w.spawn((
+                Transform::from_xyz(x, 0.0, -5.0),
+                MeshRenderer::new(handle, red),
+                GpuSkin {
+                    weights,
+                    bones: bent(if x < 0.0 { 1.2 } else { 0.0 }),
+                    blend: SkinBlend::DualQuaternion,
+                },
+            ))
+            .id(),
+        );
+    }
     app.update();
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
         return None;
     }
+    app.update_n(3);
     // A few kinds at a time, with frames between: later kinds arrive when the index buffer
     // already holds earlier ones and their levels of detail.
     let material = StandardMaterial::color(0.45, 0.42, 0.38);
@@ -98,6 +157,9 @@ fn render(share: f64, shot: &str) -> Option<Run> {
             }
         }
         app.update_n(3);
+    }
+    if let Some(mut skin) = app.world.get_mut::<GpuSkin>(posts[1]) {
+        skin.bones = bent(-1.2);
     }
     // Until the levels are built (the triangle count stops falling) and none is fading in.
     let (mut last, mut steady) = (u64::MAX, 0);
@@ -128,24 +190,37 @@ fn render(share: f64, shot: &str) -> Option<Run> {
         index_mb: get("render.meshes.pool_index_mb"),
         index_used_mb: get("render.meshes.pool_index_used_mb"),
         growths: get("render.meshes.pool_index_growths"),
+        vertex_mb: get("render.meshes.pool_vertex_mb"),
+        vertex_used_mb: get("render.meshes.pool_vertex_used_mb"),
+        vertex_growths: get("render.meshes.pool_vertex_growths"),
         refused: get("render.meshes.pool_lods_refused"),
     })
 }
 
 #[test]
-fn index_buffers_that_grow_draw_the_same_stones_in_less_memory() {
-    // Index buffers as large as the vertex buffers, as they used to be: nothing grows.
-    let Some(full) = render(1.0, "pool_full.png") else {
+fn buffers_that_grow_draw_the_same_stones_and_posts_in_less_memory() {
+    // Whole pages at once with index buffers as large as the vertex buffers, as they used to
+    // be: nothing grows.
+    let Some(full) = render(1.0, 1.0, "pool_full.png") else {
         return;
     };
     // An eighth, the default: they grow as the stones and their levels arrive.
-    let Some(grown) = render(0.125, "pool_grown.png") else {
+    let Some(grown) = render(0.125, 0.125, "pool_grown.png") else {
         return;
     };
     eprintln!(
         "index buffers: {:.1} MB ({:.1} used) without growing, {:.1} MB ({:.1} used) after {} \
          growths",
         full.index_mb, full.index_used_mb, grown.index_mb, grown.index_used_mb, grown.growths
+    );
+    eprintln!(
+        "vertex buffers: {:.1} MB ({:.1} used) without growing, {:.1} MB ({:.1} used) after {} \
+         growths",
+        full.vertex_mb,
+        full.vertex_used_mb,
+        grown.vertex_mb,
+        grown.vertex_used_mb,
+        grown.vertex_growths
     );
     let (mut sum, mut worst, mut off) = (0u64, 0u8, 0u32);
     for (a, b) in full.pixels.iter().zip(&grown.pixels) {
@@ -169,10 +244,25 @@ fn index_buffers_that_grow_draw_the_same_stones_in_less_memory() {
         grown.index_used_mb
     );
     assert!(grown.index_mb < full.index_mb * 0.6);
+    // The vertex buffers likewise.
+    assert_eq!(full.vertex_growths, 0.0);
+    assert!(
+        grown.vertex_growths >= 2.0,
+        "{} growths",
+        grown.vertex_growths
+    );
+    assert!((full.vertex_used_mb - grown.vertex_used_mb).abs() < 0.01);
+    assert!(
+        grown.vertex_mb < grown.vertex_used_mb * 1.3 + 1.0,
+        "{} MB for {} MB of vertices",
+        grown.vertex_mb,
+        grown.vertex_used_mb
+    );
+    assert!(grown.vertex_mb < full.vertex_mb * 0.8);
 
     // Two runs of one build differ by a mean of 0.002 with a few edge pixels of up to 37 (which
-    // frame each stone's levels arrive in); a stone drawn from the wrong indices would change
-    // hundreds of pixels.
+    // frame each stone's levels arrive in); a stone drawn from the wrong indices or a post
+    // left in an old pose would change hundreds of pixels.
     assert!(mean < 0.05, "the pictures differ: mean {mean}");
     assert!(off < 150, "{off} values differ by more than 12 of 255");
 }
