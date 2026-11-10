@@ -312,6 +312,10 @@ pub struct MagicQueue {
     pub spikes: Vec<crate::wilds::NewPatch>,
     pub ribcages: Vec<crate::wilds::NewHedge>,
     pub armours: Vec<crate::bones::NewArmour>,
+    /// Life (life.rs): heals that landed (glows, gold fire off the dead, revives) and healing
+    /// circles to lay on the floor.
+    pub heals: Vec<crate::life::HealAt>,
+    pub circles: Vec<crate::life::NewCircle>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -2770,6 +2774,32 @@ pub fn flush(
                     } else {
                         queue.patches.push(p);
                     }
+                }
+                // An area of healing lays a circle of light and blossoms on the floor (life.rs).
+                let pl = &f.cast.spell.payload;
+                if pl.heal > 0.0
+                    && !pl.harmful()
+                    && matches!(
+                        f.kind,
+                        FieldKind::Burst | FieldKind::Lasting | FieldKind::Rune
+                    )
+                    && f.cone.is_none()
+                    && f.wall.is_none()
+                    && f.follow.is_none()
+                    && f.wave.is_none()
+                    // A burst that leaves a lingering field shows the field's circle only.
+                    && !(f.kind == FieldKind::Burst
+                        && f.cast.spell.stages_on(crate::design::Trigger::Impact).any(|st| {
+                            st.payload.heal > 0.0 && st.carrier.duration > 0.0
+                        }))
+                {
+                    queue.circles.push(crate::life::NewCircle {
+                        field: (f.kind != FieldKind::Burst).then_some(id),
+                        at: pos,
+                        radius: f.radius,
+                        side: f.cast.side,
+                        seed: f.cast.seed,
+                    });
                 }
                 // A ribcage stands along a bone wall instead of the wall's look.
                 if f.cast.spell.payload.ribcage

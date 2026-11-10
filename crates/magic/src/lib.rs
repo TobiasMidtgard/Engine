@@ -30,6 +30,8 @@
 //! | [`wilds_art`] | bark roots, thorns and leaves made in code |
 //! | [`bones`] | bone out of the ground: prisons of ribs, bone spears, ribcage walls, bone armour |
 //! | [`dragon`] | the bone dragon: its bones fly together, it flies, breathes grave frost, lands and bites |
+//! | [`life`] | healing you can see: wounds shed and mended, revives, the dead burned, healing circles |
+//! | [`life_art`] | the healing circle's blossom, painted in code |
 //! | [`bone_art`] | bone, ribs and torn wing membrane made in code |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
@@ -60,6 +62,8 @@ pub mod effects;
 pub mod growth;
 pub mod hits;
 pub mod kinesis;
+pub mod life;
+pub mod life_art;
 pub mod looks;
 pub mod meet;
 pub mod minds;
@@ -236,6 +240,13 @@ impl Plugin for MagicPlugin {
                         bones::run_spears,
                     )
                         .chain(),
+                    (
+                        life::land_heals,
+                        life::wound_minions,
+                        life::run_glows,
+                        life::run_circles,
+                    )
+                        .chain(),
                 )
                     .chain()
                     .in_set(MagicSet::Carriers),
@@ -282,6 +293,7 @@ impl Plugin for MagicPlugin {
                     blades::follow_world_shift,
                     chains::follow_world_shift,
                     demons::follow_world_shift,
+                    life::follow_world_shift,
                 )
                     .in_set(WorldShiftSet::Apply)
                     .before(runtime::sync_transforms),
@@ -298,6 +310,7 @@ impl Plugin for MagicPlugin {
         demons::register(app);
         wilds::register(app);
         bones::register(app);
+        life::register(app);
         dragon::register(app);
         demo::build(app);
     }
@@ -310,6 +323,7 @@ fn paint_pictures(
     mut wilds: ResMut<wilds::WildsMeshes>,
     mut demons: ResMut<demons::DemonMeshes>,
     mut dragons: ResMut<dragon::DragonMeshes>,
+    mut life: ResMut<life::LifeMeshes>,
     images: Option<ResMut<engine_assets::Assets<engine_render::Image>>>,
     meshes: Option<ResMut<engine_assets::Assets<engine_render::Mesh>>>,
 ) {
@@ -317,6 +331,7 @@ fn paint_pictures(
         wilds.leaf(&mut images);
         demons.vortex(pact_art::VortexLayer::ALL[0], &mut images);
         demons.cracks(&mut images);
+        life.blossom(&mut images);
     }
     if let Some(mut meshes) = meshes {
         wilds.card(&mut meshes);

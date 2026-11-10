@@ -6284,3 +6284,392 @@ fn the_bones_hall_raises_a_dragon_cages_the_golem_and_the_students_break_it_out(
         "the dragon left the picture {missed} of {looked} looks"
     );
 }
+
+// ------------------------------------------------------------------------------- life
+
+fn life_app() -> App {
+    let mut a = blade_app();
+    a.world
+        .init_resource::<engine_assets::Assets<engine_render::Image>>();
+    a
+}
+
+fn wounds(app: &App, e: Entity) -> life::Wounds {
+    app.world
+        .get::<life::Wounds>(e)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn shed_pieces(app: &mut App) -> usize {
+    let mut q = app.world.query::<&life::ShedPiece>();
+    q.iter(&app.world).count()
+}
+
+fn rings(app: &mut App) -> usize {
+    let mut q = app.world.query::<&life::HealRing>();
+    q.iter(&app.world).count()
+}
+
+fn fallen(app: &mut App) -> Vec<life::Fallen> {
+    let mut q = app.world.query::<&life::Fallen>();
+    q.iter(&app.world).cloned().collect()
+}
+
+fn circles(app: &mut App) -> Vec<life::Circle> {
+    let mut q = app.world.query::<&life::Circle>();
+    q.iter(&app.world).cloned().collect()
+}
+
+fn golem_of(app: &mut App) -> Option<(Entity, summon::Minion)> {
+    minions(app)
+        .into_iter()
+        .find(|m| m.1.kind == summon::MinionKind::Golem)
+}
+
+fn summon_golem(app: &mut App, me: Entity, at: DVec3) -> (Entity, summon::Minion) {
+    cast(
+        app,
+        me,
+        SpellDesign::new(&["stone"], CastType::Summon)
+            .with(Modifier::Duration { factor: 0.5 })
+            .named("Stone golem"),
+        Aim::Point(at),
+    );
+    run(app, 2.6);
+    golem_of(app).expect("a golem")
+}
+
+fn mend() -> SpellDesign {
+    SpellDesign::new(&["heal"], CastType::Bolt).named("Mending bolt")
+}
+
+fn hurt(app: &mut App, e: Entity, share: f32) {
+    let mut v = app.world.get_mut::<Vitality>(e).unwrap();
+    v.health = v.max * share;
+}
+
+#[test]
+fn a_hurt_golem_sheds_its_plates_then_its_arm_and_healing_flies_them_back() {
+    let mut app = life_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
+    run(&mut app, 0.1);
+    let (g, m) = summon_golem(&mut app, me, DVec3::ZERO);
+    let plate = m.parts[summon::PLATE[0]];
+    let fist = m.parts[summon::ARM[0] + 2];
+    assert!(wounds(&app, g).shed.is_empty());
+    // Hurt to two thirds: a shoulder plate drops off and lies on the floor.
+    hurt(&mut app, g, 0.66);
+    run(&mut app, 0.2);
+    assert_eq!(wounds(&app, g).shed.len(), 1);
+    assert_eq!(app.world.get::<Transform>(plate).unwrap().scale, Vec3::ZERO);
+    assert_eq!(shed_pieces(&mut app), 1);
+    // Down to a fifth: the other plate, then its left forearm and fist.
+    hurt(&mut app, g, 0.2);
+    run(&mut app, 0.3);
+    assert_eq!(wounds(&app, g).shed.len(), 3);
+    assert_eq!(shed_pieces(&mut app), 4);
+    assert_eq!(app.world.get::<Transform>(fist).unwrap().scale, Vec3::ZERO);
+    // A little healing that stays under the next mark brings nothing back.
+    hurt(&mut app, g, 0.27);
+    run(&mut app, 0.2);
+    assert_eq!(wounds(&app, g).shed.len(), 3, "it mends only past a mark");
+    // Healed whole: every piece flies back up from where it lay.
+    hurt(&mut app, g, 1.0);
+    run(&mut app, 0.1);
+    let w = wounds(&app, g);
+    assert!(w.shed.is_empty());
+    assert_eq!(w.mends.len(), 4);
+    assert_eq!(shed_pieces(&mut app), 0);
+    assert_eq!(app.world.get::<Transform>(plate).unwrap().scale, Vec3::ONE);
+    run(&mut app, 1.1);
+    assert!(wounds(&app, g).mends.is_empty());
+    assert!(
+        rings(&mut app) > 0,
+        "a ring of light closes round each as it seats"
+    );
+}
+
+#[test]
+fn a_mending_bolt_heals_a_golem_and_a_ring_of_light_runs_up_it() {
+    let mut app = life_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
+    run(&mut app, 0.1);
+    let (g, _) = summon_golem(&mut app, me, DVec3::ZERO);
+    hurt(&mut app, g, 0.4);
+    run(&mut app, 0.2);
+    let before = app.world.get::<Vitality>(g).unwrap().health;
+    cast(&mut app, me, mend(), Aim::Entity(g));
+    let took = run_until(&mut app, 2.0, |a| rings(a) > 0);
+    assert!(took.is_some(), "no ring of light");
+    let after = app.world.get::<Vitality>(g).unwrap().health;
+    assert!(after > before, "{before} -> {after}");
+    let mut q = app.world.query::<&life::Mote>();
+    assert!(q.iter(&app.world).count() >= life::MOTES as usize);
+    // The ring runs up the golem from its feet and is gone (and the rings round any piece the
+    // heal brought back after it).
+    run(&mut app, 2.5);
+    assert_eq!(rings(&mut app), 0);
+}
+
+#[test]
+fn a_heal_on_a_fallen_golems_pieces_puts_it_back_together_at_half_health() {
+    let mut app = life_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
+    run(&mut app, 0.1);
+    let (g, m) = summon_golem(&mut app, me, DVec3::ZERO);
+    hurt(&mut app, g, 0.6);
+    run(&mut app, 0.2);
+    hurt(&mut app, g, 0.0);
+    run(&mut app, 0.3);
+    assert!(golem_of(&mut app).is_none(), "it fell");
+    let f = fallen(&mut app);
+    assert_eq!(f.len(), 1);
+    // Its shed plate lies with the rest of its pieces.
+    assert_eq!(
+        f[0].pieces.len(),
+        summon::GOLEM_SIZES.len(),
+        "{:?}",
+        f[0].pieces
+    );
+    cast(&mut app, me, mend(), Aim::Point(DVec3::new(0.4, 0.0, 0.3)));
+    let took = run_until(&mut app, 2.0, |a| golem_of(a).is_some());
+    assert!(took.is_some(), "the heal didn't revive it");
+    run(&mut app, 0.1);
+    let (g2, m2) = golem_of(&mut app).unwrap();
+    assert!(fallen(&mut app).is_empty());
+    let v = app.world.get::<Vitality>(g2).unwrap();
+    assert!(
+        (v.health / v.max - life::REVIVE_HEALTH).abs() < 0.01,
+        "{}",
+        v.health / v.max
+    );
+    assert!(
+        m2.life - m2.age <= m.life - m.age + 0.1,
+        "it has the time it had left"
+    );
+    let w = wounds(&app, g2);
+    assert!(w.assembling > 0.0 && !w.mends.is_empty());
+    // Its pieces fly together; its eyes light once it is whole.
+    let eye = m2.parts[summon::EYE[0]];
+    assert_eq!(app.world.get::<Transform>(eye).unwrap().scale, Vec3::ZERO);
+    run(&mut app, life::ASSEMBLE_SECS + 0.3);
+    let w = wounds(&app, g2);
+    assert!(w.mends.is_empty() && w.assembling <= 0.0);
+    assert!(app.world.get::<Transform>(eye).unwrap().scale.x > 0.0);
+    assert!(!matches!(
+        golem_of(&mut app).unwrap().1.act,
+        summon::Act::Rise { .. }
+    ));
+}
+
+#[test]
+fn a_golem_fallen_too_long_ago_stays_down() {
+    let mut app = life_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
+    run(&mut app, 0.1);
+    let (g, _) = summon_golem(&mut app, me, DVec3::ZERO);
+    hurt(&mut app, g, 0.0);
+    run(&mut app, life::REVIVE_SECS + 2.0);
+    assert!(fallen(&mut app).is_empty());
+    cast(&mut app, me, mend(), Aim::Point(DVec3::new(0.4, 0.0, 0.3)));
+    run(&mut app, 2.0);
+    assert!(golem_of(&mut app).is_none());
+}
+
+#[test]
+fn healing_burns_a_skeleton_and_passes_over_a_living_foe() {
+    let mut app = life_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
+    let necro = mage(&mut app, DVec3::new(0.0, 0.0, -12.0), Mastery::Adept);
+    app.world.get_mut::<MagicCaster>(necro).unwrap().side = 2;
+    let foe = mage(&mut app, DVec3::new(4.0, 0.0, 0.0), Mastery::Adept);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 2;
+    app.world.entity_mut(foe).insert(Body(0.9));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        necro,
+        raise(),
+        Aim::Point(DVec3::new(0.0, 0.0, -2.0)),
+    );
+    run(&mut app, 2.4);
+    let s = minions(&mut app)
+        .into_iter()
+        .find(|m| m.1.kind == summon::MinionKind::Skeleton)
+        .expect("a skeleton")
+        .0;
+    let max = app.world.get::<Vitality>(s).unwrap().max;
+    cast(&mut app, me, mend(), Aim::Entity(s));
+    let took = run_until(&mut app, 2.0, |a| {
+        a.world.get::<Vitality>(s).is_none_or(|v| v.health < max)
+    });
+    assert!(took.is_some(), "the heal didn't burn it");
+    // A living foe is no one a heal mends.
+    hurt(&mut app, foe, 0.5);
+    let before = app.world.get::<Vitality>(foe).unwrap().health;
+    cast(&mut app, me, mend(), Aim::Entity(foe));
+    run(&mut app, 1.5);
+    assert_eq!(app.world.get::<Vitality>(foe).unwrap().health, before);
+}
+
+#[test]
+fn a_healing_circle_opens_blossoms_heals_its_side_and_its_wave_revives_what_fell_in_it() {
+    let mut app = life_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 8.0), Mastery::Expert);
+    let friend = mage(&mut app, DVec3::new(-1.0, 0.0, 0.0), Mastery::Adept);
+    app.world.entity_mut(friend).insert(Body(0.9));
+    run(&mut app, 0.1);
+    let (g, _) = summon_golem(&mut app, me, DVec3::new(1.5, 0.0, 0.0));
+    hurt(&mut app, g, 0.0);
+    run(&mut app, 0.3);
+    assert_eq!(fallen(&mut app).len(), 1);
+    hurt(&mut app, friend, 0.3);
+    let circle = SpellDesign::new(&["heal"], CastType::Area)
+        .with(Modifier::Linger {
+            secs: 4.0,
+            radius_m: 3.0,
+        })
+        .named("Healing circle");
+    cast(&mut app, me, circle, Aim::Point(DVec3::ZERO));
+    let took = run_until(&mut app, 2.0, |a| !circles(a).is_empty());
+    assert!(took.is_some(), "no circle");
+    run(&mut app, 0.8);
+    let c = circles(&mut app)[0].clone();
+    assert!(c.blooms.len() >= 14, "{}", c.blooms.len());
+    let open = c
+        .blooms
+        .iter()
+        .filter(|b| app.world.get::<Transform>(b.0).unwrap().scale.x > 0.1)
+        .count();
+    assert!(
+        open * 2 > c.blooms.len(),
+        "{open} of {} open",
+        c.blooms.len()
+    );
+    // Its first wave revived the golem that fell in it.
+    assert!(
+        golem_of(&mut app).is_some(),
+        "the wave didn't revive the golem"
+    );
+    run(&mut app, 2.5);
+    let v = app.world.get::<Vitality>(friend).unwrap();
+    assert!(v.health > v.max * 0.3 + 1.0, "{}", v.health);
+    // When the field is gone the blossoms close and go.
+    let took = run_until(&mut app, 6.0, |a| circles(a).is_empty());
+    assert!(took.is_some(), "the circle outlived its field");
+    assert!(c.blooms.iter().all(|b| app.world.get_entity(b.0).is_err()));
+}
+
+#[test]
+fn the_life_hall_heals_the_golem_burns_the_dead_and_revives_the_golem_when_it_falls() {
+    let mut app = life_app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Life;
+        hall.restart = true;
+    }
+    let view = demo::VIEWS.iter().find(|v| v.key == "spells_life").unwrap();
+    let eye = DVec3::from(view.eye);
+    let fwd = (DVec3::from(view.target) - eye).normalize();
+    let right = fwd.cross(DVec3::Y).normalize();
+    let up = right.cross(fwd);
+    let tan_y = (55f64.to_radians() / 2.0).tan();
+    let in_view = |p: DVec3| {
+        let d = p - eye;
+        let z = d.dot(fwd);
+        z > 0.5
+            && (d.dot(right) / (z * tan_y * 16.0 / 9.0)).abs() < 0.92
+            && (d.dot(up) / (z * tan_y)).abs() < 0.92
+    };
+    let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
+    let mut fell: Vec<(f32, Entity, summon::MinionKind)> = Vec::new();
+    let mut most_shed = 0usize;
+    let mut mended: Option<f32> = None;
+    let mut circle_at: Option<f32> = None;
+    let mut seared = 0usize;
+    let mut burned: std::collections::HashSet<Entity> = Default::default();
+    let mut golem_fell: Option<f32> = None;
+    let mut revived: Option<f32> = None;
+    let mut wisp = false;
+    let (mut looked, mut missed) = (0usize, 0usize);
+    let steps = (demo::life::PERIOD * 60.0) as usize;
+    for i in 0..steps {
+        app.update();
+        let t = i as f32 / 60.0;
+        let now = minions(&mut app);
+        for (e, k) in &kinds {
+            if !now.iter().any(|m| m.0 == *e) && !fell.iter().any(|f| f.1 == *e) {
+                println!("{t:.2}: {e:?} {k:?} falls");
+                fell.push((t, *e, *k));
+                if *k == summon::MinionKind::Golem && golem_fell.is_none() {
+                    golem_fell = Some(t);
+                }
+            }
+        }
+        for (e, m) in &now {
+            if kinds.insert(*e, m.kind).is_none() {
+                println!("{t:.2}: {e:?} {:?} comes at {:.1}", m.kind, m.pos);
+                if m.kind == summon::MinionKind::Golem && golem_fell.is_some() {
+                    revived.get_or_insert(t);
+                }
+            }
+            wisp |= m.kind == summon::MinionKind::Wisp;
+            if m.kind.golemlike() {
+                let w = wounds(&app, *e);
+                if w.shed.len() > most_shed {
+                    println!("{t:.2}: {:?} sheds to {}", m.kind, w.shed.len());
+                }
+                most_shed = most_shed.max(w.shed.len());
+                if !w.mends.is_empty() && w.assembling <= 0.0 && mended.is_none() {
+                    println!("{t:.2}: {:?} mends", m.kind);
+                    mended = Some(t);
+                }
+                if i % 15 == 0 && m.age > 2.0 && m.age < m.life {
+                    looked += 1;
+                    if !in_view(m.pos + DVec3::Y) {
+                        missed += 1;
+                    }
+                }
+            }
+        }
+        if circle_at.is_none() && !circles(&mut app).is_empty() {
+            println!("{t:.2}: a healing circle");
+            circle_at = Some(t);
+        }
+        let mut q = app.world.query::<(Entity, &life::HealRing)>();
+        for (e, r) in q.iter(&app.world) {
+            if r.down && burned.insert(e) {
+                seared += 1;
+            }
+        }
+    }
+    println!("shed {most_shed}, seared {seared}, looked {looked} missed {missed}");
+    assert!(wisp, "lane 1's wisp");
+    assert!(most_shed >= 2, "the golem shed {most_shed}");
+    assert!(mended.is_some(), "nothing flew back");
+    assert!(
+        circle_at.is_some_and(|t| t > 4.0 && t < 6.0),
+        "{circle_at:?}"
+    );
+    assert!(seared >= 3, "the dead burned {seared} times");
+    let skeletons = fell
+        .iter()
+        .filter(|f| f.2 == summon::MinionKind::Skeleton)
+        .count();
+    assert!(skeletons >= 4, "{skeletons} skeletons fell");
+    let fell_at = golem_fell.expect("the golem never fell");
+    assert!(fell_at > 10.5 && fell_at < 14.2, "it fell at {fell_at}");
+    let back = revived.expect("the golem was never revived");
+    assert!(back > 14.0 && back < 15.5, "revived at {back}");
+    assert!(
+        missed * 10 <= looked,
+        "the golem and treant out of view {missed} of {looked}"
+    );
+}

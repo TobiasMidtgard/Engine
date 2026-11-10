@@ -126,9 +126,10 @@ pub fn apply_hits(
     colliders: Query<&Collider>,
     mut fresh: Local<HashMap<Entity, Afflictions>>,
     mut dealt: Local<HashMap<Entity, f32>>,
-    (factions, rewinding): (
+    (factions, rewinding, minions): (
         Option<Res<Factions>>,
         Query<(), With<crate::space::Rewinding>>,
+        Query<&crate::summon::Minion>,
     ),
 ) {
     let list = std::mem::take(&mut queue_in.0);
@@ -175,11 +176,18 @@ pub fn apply_hits(
         let friend = target.is_some_and(|t| {
             creature && h.cast.friend(t, t_caster, t_faction, factions.as_deref())
         });
+        // A pure heal mends its own side and bodies of no side, and passes over a living foe;
+        // the dead it burns, whoever's they are (life.rs).
+        let dead = target.is_some_and(|t| minions.get(t).is_ok_and(crate::life::burns));
+        let living_foe = !friend && !dead && (t_caster.is_some() || t_faction.is_some());
         if target.is_some() && creature {
             let skip = match spell.filter {
                 TargetFilter::Enemies => friend,
                 TargetFilter::Allies => !friend,
-                TargetFilter::Everyone => spell.safeguard && friend && p.harmful(),
+                TargetFilter::Everyone => {
+                    (spell.safeguard && friend && p.harmful())
+                        || (p.heal > 0.0 && !p.harmful() && living_foe)
+                }
             };
             if skip {
                 continue;
@@ -885,16 +893,36 @@ pub fn apply_hits(
         }
 
         // ---- heal, lifesteal
-        if let Some(t) = target
-            && p.heal > 0.0
-        {
-            let blocked = affs.get(t).is_ok_and(|a| a.heal_blocked());
-            if !blocked
-                && let Ok(mut v) = vitals.get_mut(t)
-                && !v.down()
-            {
-                v.health = (v.health + p.heal * scale).min(v.max);
+        if p.heal > 0.0 {
+            // Life burns the dead (life.rs): a heal that reaches a skeleton or a bone dragon
+            // hurts it by as much as it would have healed.
+            let mut amount = 0.0;
+            if let Some(t) = target {
+                let blocked = affs.get(t).is_ok_and(|a| a.heal_blocked());
+                if let Ok(mut v) = vitals.get_mut(t)
+                    && !v.down()
+                {
+                    if dead {
+                        amount =
+                            (p.heal * scale * crate::life::SEAR).min(v.max * crate::life::SEAR_CAP);
+                        v.health = (v.health - amount).max(0.0);
+                    } else if !blocked {
+                        amount = p.heal * scale;
+                        v.health = (v.health + p.heal * scale).min(v.max);
+                    }
+                }
             }
+            let (height, radius) = crate::life::body_of(target.and_then(|t| minions.get(t).ok()));
+            queue.heals.push(crate::life::HealAt {
+                at: t_pos.unwrap_or(h.point),
+                target,
+                amount,
+                sear: dead,
+                side: h.cast.side,
+                revives: h.cast.caster.is_none_or(|c| !minions.contains(c)),
+                height,
+                radius,
+            });
         }
         let steal = p.lifesteal + reaction.map(|r| r.reaction.drain).unwrap_or(0.0);
         if steal > 0.0

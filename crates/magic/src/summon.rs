@@ -2063,13 +2063,19 @@ fn fall(
                 MinionKind::Hellhound => 0.7 * m.size,
                 _ => 0.0,
             } as f64;
+    // A living golem or treant cut down before its time can be revived while its pieces lie
+    // (life.rs).
+    let revivable = m.kind.golemlike() && spell.payload.raise <= 0.0 && m.life - m.age > 1.0;
+    let mut pieces = Vec::new();
     for &p in &m.parts {
         let Ok((part, ptf)) = parts.get(p) else {
             continue;
         };
-        if part.size == Vec3::ZERO {
+        // Glowing pieces go with it; a piece it shed already lies on the floor (life.rs).
+        if part.size == Vec3::ZERO || ptf.scale == Vec3::ZERO {
             continue;
         }
+        pieces.push((part.index, p));
         let at = tf.translation + (tf.rotation * ptf.translation.as_vec3()).as_dvec3();
         let rot = tf.rotation * ptf.rotation;
         let out = (at - center).as_vec3();
@@ -2104,7 +2110,31 @@ fn fall(
             },
             Rubble {
                 age: 0.0,
-                life: if skeletal { 3.0 } else { RUBBLE_SECS } + r(6),
+                life: if skeletal {
+                    3.0
+                } else if revivable {
+                    crate::life::REVIVE_SECS
+                } else {
+                    RUBBLE_SECS
+                } + r(6),
+            },
+        ));
+    }
+    if revivable {
+        commands.spawn((
+            Name::new("Fallen"),
+            crate::life::Fallen {
+                was: e,
+                new: NewMinion {
+                    kind: m.kind,
+                    cast: m.cast.clone(),
+                    at: m.pos,
+                    facing: Vec3::new(-m.yaw.sin(), 0.0, -m.yaw.cos()),
+                    on: None,
+                },
+                left: m.life - m.age,
+                age: 0.0,
+                pieces,
             },
         ));
     }
