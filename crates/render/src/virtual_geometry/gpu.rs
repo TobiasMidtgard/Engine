@@ -424,7 +424,13 @@ impl Pool {
             return Some(start);
         }
         let needed = self.capacity + len - self.free.tail(self.capacity);
-        let capacity = needed.max(self.capacity * 2).min(max_bytes / self.stride);
+        // Doubling while small, a quarter at a time past 64 MB.
+        let next = if self.capacity * self.stride >= GROW_STEP_BYTES {
+            self.capacity + self.capacity / 4
+        } else {
+            self.capacity * 2
+        };
+        let capacity = needed.max(next).min(max_bytes / self.stride);
         if capacity < needed {
             return None;
         }
@@ -451,6 +457,20 @@ impl Pool {
         }
     }
 }
+
+/// Room for `n` items of `bytes` each: the next power of two, or past [`GROW_STEP_BYTES`] the
+/// next quarter of the power of two below it, so a large list isn't mostly empty.
+fn grow_count(n: u64, bytes: u64) -> u64 {
+    let p = n.max(1).next_power_of_two();
+    if p * bytes <= GROW_STEP_BYTES || p < 8 {
+        return p;
+    }
+    let step = p / 8;
+    n.div_ceil(step) * step
+}
+
+/// See [`grow_count`].
+const GROW_STEP_BYTES: u64 = 64 << 20;
 
 fn pool_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
@@ -1435,7 +1455,8 @@ impl ClusterRenderer {
         }
         // Every slot's list holds as many clusters as the instances have, within the limits
         // of a draw's vertex index (slot * entries * vertices < 2^32) and of the device.
-        let per_slot = (entries.next_power_of_two().min(MAX_SLOT_ENTRIES as u64) as u32)
+        // Whole powers of two while the lists are small, quarter steps past 64 MB.
+        let per_slot = (grow_count(entries, slots as u64 * 8).min(MAX_SLOT_ENTRIES as u64) as u32)
             .min(u32::MAX / CLUSTER_VERTICES / slots)
             .min((self.max_bytes / 8 / slots as u64) as u32)
             .max(1);
@@ -1443,7 +1464,7 @@ impl ClusterRenderer {
         use wgpu::BufferUsages as U;
         let visible = slots as u64 * per_slot as u64;
         if visible > self.visible_capacity {
-            self.visible_capacity = visible.next_power_of_two().min(self.max_bytes / 8);
+            self.visible_capacity = grow_count(visible, 8).min(self.max_bytes / 8);
             self.visible = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("visible clusters"),
                 size: self.visible_capacity * 8,
@@ -2156,5 +2177,19 @@ mod tests {
         assert_eq!(free, Ranges(vec![(0, 100)]));
         assert_eq!(free.alloc(100), Some(0));
         assert_eq!(free.tail(100), 0);
+    }
+}
+
+#[cfg(test)]
+mod grow_tests {
+    use super::grow_count;
+
+    #[test]
+    fn small_lists_double_large_ones_grow_by_quarters() {
+        assert_eq!(grow_count(1000, 8), 1024);
+        let big = (100 << 20) / 8; // 100 MB of 8-byte entries
+        let n = grow_count(big, 8);
+        assert!(n >= big && n < big + big / 4 + 1, "{n} for {big}");
+        assert!(n * 8 < 128 << 20);
     }
 }
