@@ -205,6 +205,12 @@ const SUBSURFACE_MIN_PIXELS: f32 = 1.5;
 
 /// Frame time spent uploading people's meshes in play (ms).
 const UPLOAD_BUDGET_MS: f64 = 3.0;
+/// A body's bounding sphere around the hips (m, before the entity's scale): raised arms and
+/// loose hair inside.
+const BODY_RADIUS_M: f32 = 1.3;
+/// People nearer than this are posed and drawn in every view, on screen or not, so their
+/// shadows fall into it.
+const SHADOW_POSE_M: f32 = 25.0;
 /// The same under a loading screen (`LoadingBudget`, at most): the render frame's own share,
 /// the budget being the whole frame's.
 const LOADING_UPLOAD_BUDGET_MS: f64 = 10.0;
@@ -317,6 +323,12 @@ struct GpuMeshes {
     /// Where it was drawn, for motion vectors.
     placement: Placement,
     seen: bool,
+    /// Drawn in this view: in its frustum, or near enough that its shadow may fall in it.
+    drawn: bool,
+    /// The frame (`ViewData::frame_index`) its pose buffer was last written for: other views
+    /// of the same frame reuse it, and a person posed again after a gap starts its motion
+    /// vectors from rest.
+    posed_frame: Option<u64>,
 }
 
 /// A character's model matrix (camera-relative) and position, this frame's and the last
@@ -1212,6 +1224,8 @@ impl CharacterFeature {
             seen: true,
             scatter: false,
             fringe: false,
+            drawn: true,
+            posed_frame: None,
         }
     }
 
@@ -1229,7 +1243,11 @@ impl CharacterFeature {
         let Some(p) = &self.pipelines else {
             return;
         };
-        for c in self.characters.values().filter(|c| c.seen && keep(c)) {
+        for c in self
+            .characters
+            .values()
+            .filter(|c| c.seen && c.drawn && keep(c))
+        {
             pass.set_bind_group(1, &c.group, &[]);
             match which {
                 Pass::Scene | Pass::Prepass => {
@@ -1388,7 +1406,7 @@ impl RenderFeature for CharacterFeature {
         gpu: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
-        _out: &mut PrepareOut,
+        out: &mut PrepareOut,
     ) {
         // Uploads go ahead while the pipelines compile, so people show the frame they are done.
         let Some(p) = &self.layouts else {
@@ -1434,12 +1452,14 @@ impl RenderFeature for CharacterFeature {
             c.seen = false;
         }
         let mut present = Vec::new();
+        let (mut upload_ms, mut pose_ms, mut culled) = (0.0f32, 0.0f32, 0u32);
         for (entity, transform, built, skeleton, face, hands, look, guides, posed) in
             query.iter(world)
         {
             present.push(entity);
             let entry = self.characters.entry(entity);
             let full = uploaded && started.elapsed().as_secs_f64() * 1000.0 >= upload_budget;
+            let upload_start = std::time::Instant::now();
             let c = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
                     let c = o.into_mut();
@@ -1504,11 +1524,23 @@ impl RenderFeature for CharacterFeature {
                     v.insert(new)
                 }
             };
+            upload_ms += upload_start.elapsed().as_secs_f32() * 1000.0;
             c.seen = true;
             let world_pos = transform.translation();
             let rel = (world_pos - view.origin).as_vec3();
             let model =
                 Mat4::from_scale_rotation_translation(transform.scale(), transform.rotation(), rel);
+            // Off screen and far: not posed or drawn in this view (its shadow can't reach it).
+            let scale = transform.scale().max_element();
+            let center = model.transform_point3(Vec3::new(0.0, 0.95, 0.0));
+            c.drawn = view
+                .frustum
+                .intersects_sphere(center, BODY_RADIUS_M * scale)
+                || rel.length() < SHADOW_POSE_M;
+            if !c.drawn {
+                culled += 1;
+                continue;
+            }
             // Last frame's placement relative to last frame's camera.
             let prev_model = match c.placement.place(view.frame_index, model, world_pos) {
                 Some((m, at)) => Mat4::from_cols(
@@ -1537,16 +1569,26 @@ impl RenderFeature for CharacterFeature {
             u.prev_model = prev_model.to_cols_array_2d();
             gpu.queue
                 .write_buffer(&c.uniform, 0, bytemuck::bytes_of(&u));
-            write_pose(
-                gpu,
-                c,
-                &built.meshes,
-                skeleton,
-                (face, hands, look.map(|a| &a.wear)),
-                &mut self.palette,
-                &mut self.pose_bytes,
-            );
-            write_motion(gpu, c, guides, posed, skeleton, &mut self.motion);
+            // The pose is the same in every view of a frame: written once.
+            if c.posed_frame != Some(view.frame_index) {
+                let pose_start = std::time::Instant::now();
+                if c.posed_frame.is_none_or(|f| f + 1 != view.frame_index) {
+                    // Not posed last frame: no motion from a stale pose.
+                    c.last.palette.clear();
+                }
+                c.posed_frame = Some(view.frame_index);
+                write_pose(
+                    gpu,
+                    c,
+                    &built.meshes,
+                    skeleton,
+                    (face, hands, look.map(|a| &a.wear)),
+                    &mut self.palette,
+                    &mut self.pose_bytes,
+                );
+                write_motion(gpu, c, guides, posed, skeleton, &mut self.motion);
+                pose_ms += pose_start.elapsed().as_secs_f32() * 1000.0;
+            }
             let distance = rel.length() * lod_scale;
             c.choose_detail(gpu, if lod_scale > 0.0 { distance } else { 0.0 });
             self.stats.instances += 1;
@@ -1554,6 +1596,9 @@ impl RenderFeature for CharacterFeature {
             self.stats.draw_calls += 2 + c.strands.iter().filter(|s| s.drawn > 0).count() as u32;
         }
         self.characters.retain(|_, c| c.seen);
+        self.stats.culled = culled;
+        out.step("character: uploads", upload_ms);
+        out.step("character: poses", pose_ms);
         // Uploads of people gone (their threads finish into slots nobody reads).
         if !self.uploads.is_empty() {
             present.sort_unstable();
