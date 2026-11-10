@@ -236,11 +236,14 @@ impl Plugin for AnimationPlugin {
                     .chain_ignore_deferred()
                     .in_set(AnimSet::Ragdoll),
                 muscle::muscle_system.in_set(AnimSet::Muscles),
+                // Unordered, so its inserts wait for the frame's end instead of adding a sync
+                // point to the output chain: a person is checked from their second frame.
+                validate::add_pose_checks.in_set(AnimSet::Output),
                 (
                     grip::apply_grip_presets,
                     animator::publish_pose,
                     retarget::retarget_poses,
-                    (validate::add_pose_checks, validate::audit_poses),
+                    validate::audit_poses,
                     face::face_system,
                     (face::appearance_face_system, body::hand_controls_system),
                     (
