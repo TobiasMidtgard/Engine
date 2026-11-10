@@ -209,6 +209,9 @@ pub mod shade_skip {
     /// and the scene pass of the main view (mesh_counts.rs; `render.stats`, the meshes'
     /// `mesh_runs`). Needs pipeline statistics queries.
     pub const COUNT_MESH_RUNS: u32 = 262144;
+    /// Skinned meshes are not posed (they freeze where they are; a new one stays in its bind
+    /// pose): what posing them on the GPU costs in `compute meshes`.
+    pub const FREEZE_SKINS: u32 = 524288;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the same picture, switchable

@@ -189,6 +189,12 @@ fn variants() -> Vec<Variant> {
             "HZB occlusion for instanced meshes",
         ),
         v(
+            "freeze_skins",
+            r,
+            json!({"debug_skip": 524_288}),
+            "skinned meshes are not posed (characters freeze): what GPU skinning costs in `compute meshes`",
+        ),
+        v(
             "no_grass",
             r,
             json!({"grass_density": 0.0}),
@@ -1059,9 +1065,24 @@ fn run(args: &Args) -> Result<(), String> {
         if args.shots {
             shot(&mut bridge, &format!("{}-{stop}.png", args.out))?;
         }
+        // Impostor bakes so far, before and after the first baseline: bakes during it are in
+        // its "compute meshes: impostor bake" row and not in a settled frame.
+        let bakes = |bridge: &mut Bridge| {
+            let at = bridge.call("render.stats", json!({})).ok()?;
+            at["renderer"]["features"]
+                .as_array()?
+                .iter()
+                .find(|f| f["name"] == "meshes")?["state"]["impostor_bakes"]
+                .as_u64()
+        };
+        let bakes_before = bakes(&mut bridge);
         let base = sample(&mut bridge, args.secs)?;
         let mut stop_json = Map::new();
         stop_json.insert("baseline".into(), base.to_json());
+        stop_json.insert(
+            "impostor_bakes_around_baseline".into(),
+            json!([bakes_before, bakes(&mut bridge)]),
+        );
         eprintln!(
             "{stop}: baseline gpu {:.2} ms, frame {:.2} ms",
             base.gpu_ms(),
@@ -1191,13 +1212,17 @@ fn run(args: &Args) -> Result<(), String> {
             {
                 let m = &meshes["state"];
                 md.push_str(&format!(
-                    "Meshes: {} opaque batches, {} impostors baked, {} in view, {} fading.
+                    "Meshes: {} opaque batches, {} impostors baked, {} in view, {} fading ({} bakes so far); {} of {} skinned meshes posed this frame, {} vertices.
 
 ",
                     m["opaque_batches"],
                     m["impostors"],
                     m["impostors_in_view"],
-                    m["impostors_fading"]
+                    m["impostors_fading"],
+                    m["impostor_bakes"],
+                    m["skinned"],
+                    m["skins"],
+                    m["skinned_vertices"]
                 ));
                 stop_json.insert("meshes".into(), m.clone());
             }

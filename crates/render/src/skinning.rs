@@ -192,6 +192,8 @@ pub(crate) struct Skins {
     pub skins: bevy_platform::collections::HashMap<u32, Skin>,
     /// Dispatches this frame.
     pub skinned: u32,
+    /// Vertices they posed.
+    pub skinned_vertices: u64,
     /// Every skinned vertex's posed position last frame (model space, `w` 1), each mesh's at
     /// its `motion_offset`: the prepass reads it (mesh materials group, binding 2).
     pub motion: Option<wgpu::Buffer>,
@@ -263,6 +265,7 @@ impl Skins {
         resident: impl Fn(u32) -> Option<(PoolMesh, u64)>,
     ) {
         self.skinned = 0;
+        self.skinned_vertices = 0;
         if self.skins.is_empty() {
             return;
         }
@@ -407,6 +410,7 @@ impl Skins {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(count.div_ceil(WORKGROUP), 1, 1);
             self.skinned += 1;
+            self.skinned_vertices += count as u64;
         }
     }
 

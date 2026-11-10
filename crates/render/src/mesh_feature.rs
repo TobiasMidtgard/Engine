@@ -5107,6 +5107,18 @@ impl RenderFeature for MeshFeature {
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        self.compute_parts(encoder, ctx, &mut |_, _| {});
+    }
+
+    /// The parts after the first ("compute meshes": the canopy map and skinning) are timed
+    /// apart: at the PC's overview the whole took 2.6 ms on 4 Nov and under 0.1 ms at every
+    /// other stop, and nothing said which part.
+    fn compute_parts(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        ctx: &FrameContext,
+        part: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
+    ) {
         self.once_now = self.once_ready(ctx);
         self.early_now = self.early_ready(ctx);
         if !ctx.view.extra_view {
@@ -5127,14 +5139,21 @@ impl RenderFeature for MeshFeature {
         }
         // First: every pass after it (shadows, prepass, the view, bakes) draws the posed
         // vertices.
-        let meshes = &self.meshes;
-        self.skins.encode(ctx.gpu, encoder, &self.pool, |index| {
-            meshes.get(&index).map(|m| (m.pool, m.version))
-        });
+        if ctx.settings.debug_skip & crate::settings::shade_skip::FREEZE_SKINS != 0 {
+            self.skins.skinned = 0;
+            self.skins.skinned_vertices = 0;
+        } else {
+            let meshes = &self.meshes;
+            self.skins.encode(ctx.gpu, encoder, &self.pool, |index| {
+                meshes.get(&index).map(|m| (m.pool, m.version))
+            });
+        }
         // Occlusion culling's early phase, before the depth prepass.
+        part(encoder, "compute meshes: culling");
         if let Some(culling) = &self.culling {
             culling.encode_early(encoder);
         }
+        part(encoder, "compute meshes: impostor bake");
         if let Some(impostors) = &mut self.impostors
             && let Some(bake) = impostors.pending()
             && let Some(mesh) = self.meshes.get(&bake.mesh)
@@ -5158,6 +5177,7 @@ impl RenderFeature for MeshFeature {
                 &mesh.pool,
             );
         }
+        part(encoder, "compute meshes: clusters");
         if let Some(clusters) = &mut self.clusters {
             clusters.encode_culling(encoder);
         }
@@ -5377,6 +5397,10 @@ impl RenderFeature for MeshFeature {
             "impostor_atlas_bc7": self.impostors.as_ref().is_some_and(Impostors::compressed),
             "impostors_in_view": self.impostor_view.1,
             "impostors_fading": self.impostors_fading,
+            "impostor_bakes": self.impostors.as_ref().map_or(0, Impostors::bakes),
+            "skins": self.skins.skins.len(),
+            "skinned": self.skins.skinned,
+            "skinned_vertices": self.skins.skinned_vertices,
             "lods_fading": self.lods_fading,
             "once": self.once_now,
             "depth_first": self.depth_first_now,

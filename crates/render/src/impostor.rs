@@ -239,6 +239,8 @@ pub(crate) struct Impostors {
     warned_full: bool,
     /// The frame of the last bake.
     last_bake: u64,
+    /// Bakes scheduled so far.
+    bakes: u64,
 }
 
 impl Impostors {
@@ -384,6 +386,7 @@ impl Impostors {
             warmup: None,
             warned_full: false,
             last_bake: 0,
+            bakes: 0,
         }
     }
 
@@ -405,6 +408,12 @@ impl Impostors {
             .entry(key)
             .and_modify(|r| r.score += request.score)
             .or_insert(request);
+    }
+
+    /// Bakes scheduled since the start (one every [`BAKE_EVERY_IN_PLAY`] frames at most
+    /// in play): two readings apart tell whether bakes ran between them.
+    pub(crate) fn bakes(&self) -> u64 {
+        self.bakes
     }
 
     /// Whether anything is baked (the draw pipelines are needed).
@@ -535,6 +544,7 @@ impl Impostors {
         // can't, the mesh stays a mesh and asks again.
         self.warned_full = false;
         self.last_bake = self.frame;
+        self.bakes += 1;
         self.pending = Some(Bake {
             key,
             layer,

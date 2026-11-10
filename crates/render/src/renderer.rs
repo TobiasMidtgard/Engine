@@ -2564,7 +2564,10 @@ impl Renderer {
             };
             self.perf
                 .pass(&mut cpu, &mut encoder, format!("compute {}", f.name()));
-            f.compute(&mut encoder, &ctx);
+            let perf = &mut self.perf;
+            f.compute_parts(&mut encoder, &ctx, &mut |encoder, name| {
+                perf.pass(&mut cpu, encoder, name)
+            });
         }
 
         // Environment map: draw the sky, then filter it for reflections and diffuse light. The

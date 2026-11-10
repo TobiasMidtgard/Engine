@@ -750,6 +750,19 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// Record compute or offscreen work before the scene is drawn.
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}
 
+    /// [`compute`](Self::compute) for a feature whose work the GPU profile should show in
+    /// parts: `part` starts a pass of that name there (the renderer has started
+    /// "compute <name>" before the call). The renderer calls this one.
+    fn compute_parts(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        ctx: &FrameContext,
+        part: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
+    ) {
+        let _ = part;
+        self.compute(encoder, ctx);
+    }
+
     /// The cloud shadow map this feature draws this frame, if any (the weather module's clouds;
     /// see [`crate::cloud_shadows`]). Called every frame after `prepare`. When it returns a
     /// request, `compute` gets the map, placed around the camera, in `ctx.cloud_shadows`, and
