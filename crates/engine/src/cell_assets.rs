@@ -106,9 +106,18 @@ impl CellAssets {
     /// the material, and no remaining material or inline material uses the image. Returns how
     /// many went and their bytes.
     pub(crate) fn release(self, world: &mut World) -> (u32, u64) {
-        let mut meshes = HashSet::new();
-        let mut materials = HashSet::new();
-        let mut images = HashSet::new();
+        // A cell that made and drew nothing has nothing to look for.
+        if self.meshes.is_empty()
+            && self.materials.is_empty()
+            && self.images.is_empty()
+            && self.drawn.is_empty()
+        {
+            return (0, 0);
+        }
+        // What is still drawn, as bits by slot: every mesh in the world is looked at here, in
+        // the frame the cell leaves, so each costs two bits and no hashing.
+        let (mut meshes, mut materials, mut images) =
+            (Slots::default(), Slots::default(), Slots::default());
         for r in world.query::<&ResolvedMesh>().iter(world) {
             meshes.insert(r.mesh.index());
             materials.insert(r.material.index());
@@ -131,7 +140,9 @@ impl CellAssets {
         let (n4, b4) = remove_remade(world, remade_meshes, &meshes, REMADE_MESHES);
         let (n5, b5) = remove_remade(world, remade_materials, &materials, REMADE_MATERIALS);
         // Images: what the materials left standing still use stays.
-        if let Some(all) = world.get_resource::<Assets<StandardMaterial>>() {
+        if !self.images.is_empty()
+            && let Some(all) = world.get_resource::<Assets<StandardMaterial>>()
+        {
             for (_, m) in all.iter() {
                 textures(m, &mut images);
             }
@@ -140,6 +151,26 @@ impl CellAssets {
         n += n2 + n3 + n4 + n5;
         bytes += b2 + b3 + b4 + b5;
         (n, bytes)
+    }
+}
+
+/// Asset slot indices as bits.
+#[derive(Default)]
+struct Slots(Vec<u64>);
+
+impl Slots {
+    fn insert(&mut self, index: u32) {
+        let word = (index / 64) as usize;
+        if self.0.len() <= word {
+            self.0.resize(word + 1, 0);
+        }
+        self.0[word] |= 1 << (index % 64);
+    }
+
+    fn contains(&self, index: u32) -> bool {
+        self.0
+            .get((index / 64) as usize)
+            .is_some_and(|w| w >> (index % 64) & 1 == 1)
     }
 }
 
@@ -156,8 +187,10 @@ fn texture_handles(m: &StandardMaterial) -> impl Iterator<Item = Handle<Image>> 
     .flatten()
 }
 
-fn textures(m: &StandardMaterial, out: &mut HashSet<u32>) {
-    out.extend(texture_handles(m).map(|t| t.index()));
+fn textures(m: &StandardMaterial, out: &mut Slots) {
+    for t in texture_handles(m) {
+        out.insert(t.index());
+    }
 }
 
 fn owned_footprint<T: engine_assets::Asset>(world: &World, handles: &[Handle<T>]) -> (u32, u64) {
@@ -174,25 +207,22 @@ fn owned_footprint<T: engine_assets::Asset>(world: &World, handles: &[Handle<T>]
 fn remove_unused<T: engine_assets::Asset>(
     world: &mut World,
     handles: Vec<Handle<T>>,
-    used: &HashSet<u32>,
+    used: &Slots,
 ) -> (u32, u64) {
+    if handles.is_empty() {
+        return (0, 0);
+    }
     let Some(mut assets) = world.get_resource_mut::<Assets<T>>() else {
         return (0, 0);
     };
-    let keyed = assets.keyed_indices();
-    let (mut n, mut bytes) = (0, 0);
-    for h in handles {
-        if keyed.contains(&h.index()) || used.contains(&h.index()) {
-            continue;
-        }
-        let size = assets.bytes_of(h) as u64;
-        // An old generation (the module removed it itself) removes nothing.
-        if assets.remove(h).is_some() {
-            n += 1;
-            bytes += size;
-        }
+    let mut keyed = Slots::default();
+    for (_, h) in assets.keys() {
+        keyed.insert(h.index());
     }
-    (n, bytes)
+    let go = handles
+        .into_iter()
+        .filter(|h| !keyed.contains(h.index()) && !used.contains(h.index()));
+    remove_all(&mut assets, go)
 }
 
 /// Removes the keyed assets among `handles` whose key starts with `prefix` (the renderer makes
@@ -200,25 +230,43 @@ fn remove_unused<T: engine_assets::Asset>(
 fn remove_remade<T: engine_assets::Asset>(
     world: &mut World,
     handles: Vec<Handle<T>>,
-    used: &HashSet<u32>,
+    used: &Slots,
     prefix: &str,
 ) -> (u32, u64) {
+    if handles.is_empty() {
+        return (0, 0);
+    }
     let Some(mut assets) = world.get_resource_mut::<Assets<T>>() else {
         return (0, 0);
     };
-    let remade: HashSet<u32> = assets
-        .keys()
-        .filter(|(k, _)| k.starts_with(prefix))
-        .map(|(_, h)| h.index())
-        .collect();
-    let (mut n, mut bytes) = (0, 0);
-    let mut seen = HashSet::new();
-    for h in handles {
-        if !remade.contains(&h.index()) || used.contains(&h.index()) || !seen.insert(h.index()) {
-            continue;
+    let mut remade = Slots::default();
+    for (key, h) in assets.keys() {
+        if key.starts_with(prefix) {
+            remade.insert(h.index());
         }
-        let size = assets.bytes_of(h) as u64;
-        if assets.remove(h).is_some() {
+    }
+    let go = handles
+        .into_iter()
+        .filter(|h| remade.contains(h.index()) && !used.contains(h.index()));
+    remove_all(&mut assets, go)
+}
+
+/// Removes `handles` in one go; how many held a value, and their bytes. An old generation
+/// (the module removed it itself) and one named twice remove nothing.
+fn remove_all<T: engine_assets::Asset>(
+    assets: &mut Assets<T>,
+    handles: impl Iterator<Item = Handle<T>>,
+) -> (u32, u64) {
+    let sized: Vec<(Handle<T>, u64)> = handles.map(|h| (h, assets.bytes_of(h) as u64)).collect();
+    let mut gone = Slots::default();
+    for (h, _) in assets.remove_many(sized.iter().map(|(h, _)| *h)) {
+        gone.insert(h.index());
+    }
+    let (mut n, mut bytes) = (0, 0);
+    let mut counted = Slots::default();
+    for (h, size) in sized {
+        if gone.contains(h.index()) && !counted.contains(h.index()) {
+            counted.insert(h.index());
             n += 1;
             bytes += size;
         }
@@ -235,5 +283,95 @@ pub(crate) fn install_sizers(world: &mut World) {
     }
     if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
         images.set_sizer(|i| i.data.capacity() + i.mips.iter().map(Vec::capacity).sum::<usize>());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A world as full as the showcase's when a zone leaves: `drawn` entities drawing meshes
+    /// and materials of which most are keyed shapes, and a cell that made a few of them.
+    fn full_world(drawn: u32) -> (World, CellAssets) {
+        let mut world = World::new();
+        let (mut meshes, mut materials, mut images) = (
+            Assets::<Mesh>::default(),
+            Assets::<StandardMaterial>::default(),
+            Assets::<Image>::default(),
+        );
+        let textures: Vec<Handle<Image>> =
+            (0..1_000).map(|_| images.add(Image::default())).collect();
+        let shapes: Vec<Handle<Mesh>> = (0..8_000)
+            .map(|i| meshes.get_or_insert_keyed(&format!("shape:{i}"), Mesh::default))
+            .collect();
+        let inline: Vec<Handle<StandardMaterial>> = (0..3_000)
+            .map(|i| {
+                materials.get_or_insert_keyed(&format!("mat:{i}"), || {
+                    StandardMaterial::default().with_base_color_texture(textures[i % 1_000])
+                })
+            })
+            .collect();
+        // The cell's own: 150 meshes, 20 materials and 30 images nothing else uses, and 500
+        // shapes with inline materials only it drew.
+        let mut cell = CellAssets::default();
+        cell.images = (0..30).map(|_| images.add(Image::default())).collect();
+        cell.meshes = (0..150).map(|_| meshes.add(Mesh::default())).collect();
+        cell.materials = (0..20)
+            .map(|i| {
+                materials.add(StandardMaterial::default().with_base_color_texture(cell.images[i]))
+            })
+            .collect();
+        cell.drawn = (0..500).map(|i| (shapes[i], inline[i])).collect();
+        world.insert_resource(meshes);
+        world.insert_resource(materials);
+        world.insert_resource(images);
+        for i in 0..drawn as usize {
+            let (mesh, material) = (shapes[500 + i % 7_500], inline[500 + i % 2_500]);
+            world.spawn((
+                MeshRenderer {
+                    mesh: MeshRef::Handle(mesh),
+                    material: MaterialRef::Handle(material),
+                    ..Default::default()
+                },
+                ResolvedMesh { mesh, material },
+            ));
+        }
+        (world, cell)
+    }
+
+    #[test]
+    fn a_release_in_a_full_world_frees_only_the_cells_own() {
+        let (mut world, cell) = full_world(2_000);
+        let (n, _) = cell.release(&mut world);
+        // 150 meshes, 20 materials, 30 images, and the 500 shapes and 500 inline materials
+        // only its entities drew.
+        assert_eq!(n, 150 + 20 + 30 + 500 + 500);
+        assert_eq!(world.resource::<Assets<Mesh>>().iter().count(), 7_500);
+        assert_eq!(
+            world.resource::<Assets<StandardMaterial>>().iter().count(),
+            2_500
+        );
+        assert_eq!(world.resource::<Assets<Image>>().iter().count(), 1_000);
+    }
+
+    /// How long a release takes in a full world (run with `--release --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn time_a_release_in_a_full_world() {
+        for drawn in [20_000, 60_000, 200_000] {
+            let (mut world, cell) = full_world(drawn);
+            let started = std::time::Instant::now();
+            let (n, _) = cell.release(&mut world);
+            println!(
+                "{drawn} drawn: released {n} in {:.2} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+            let started = std::time::Instant::now();
+            let (n, _) = CellAssets::default().release(&mut world);
+            println!(
+                "{drawn} drawn: a cell with nothing of its own, {n} in {:.2} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
     }
 }

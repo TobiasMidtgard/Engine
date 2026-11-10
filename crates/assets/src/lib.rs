@@ -416,6 +416,54 @@ impl<T: Asset> Assets<T> {
         v
     }
 
+    /// Removes every asset in `handles`, as [`Assets::remove`] would one by one, and returns
+    /// the values that were there with their handles. One pass over the keys and the slots for
+    /// all of them: `remove` walks both for each asset, which a streamed cell freeing a few
+    /// hundred assets among tens of thousands paid in the frame it left.
+    pub fn remove_many(
+        &mut self,
+        handles: impl IntoIterator<Item = Handle<T>>,
+    ) -> Vec<(Handle<T>, T)> {
+        // By slot index, as handles compare.
+        let mut gone: Vec<bool> = Vec::new();
+        let mut out = Vec::new();
+        for h in handles {
+            if !self.is_live(h) {
+                continue;
+            }
+            let slot = &mut self.slots[h.index as usize];
+            let v = slot.value.take();
+            slot.live = false;
+            slot.version = 0;
+            slot.forward = None;
+            slot.generation = match slot.generation.wrapping_add(1) {
+                ANY_GENERATION => 0,
+                g => g,
+            };
+            self.removals += 1;
+            self.free.push(h.index);
+            if gone.is_empty() {
+                gone.resize(self.slots.len(), false);
+            }
+            gone[h.index as usize] = true;
+            if let Some(v) = v {
+                out.push((h, v));
+            }
+        }
+        if gone.is_empty() {
+            return out;
+        }
+        self.keys
+            .retain(|_, k| !gone.get(k.index as usize).is_some_and(|g| *g));
+        // Reservations forwarded to one of them go back to waiting, as in `remove`.
+        for slot in &mut self.slots {
+            if slot.forward.is_some_and(|t| gone[t as usize]) {
+                slot.forward = None;
+            }
+        }
+        out
+    }
+
     /// Version of the asset's current value (changes on every edit). 0 if missing or still
     /// loading.
     pub fn version(&self, h: Handle<T>) -> u64 {
@@ -628,6 +676,61 @@ mod tests {
             Some(new.generation())
         );
         assert_eq!(a.removals(), 1);
+    }
+
+    /// Removing many at once leaves the store as removing them one by one does.
+    #[test]
+    fn removing_many_is_removing_each() {
+        let build = || {
+            let mut a = Assets::<Thing>::default();
+            let plain: Vec<_> = (0..6).map(|i| a.add(Thing(i))).collect();
+            let keyed: Vec<_> = (0..6)
+                .map(|i| a.get_or_insert_keyed(&format!("k{i}"), || Thing(10 + i)))
+                .collect();
+            let alias = a.reserve_keyed("alias");
+            assert!(a.forward(alias, keyed[1]));
+            let waiting = a.reserve_keyed("waiting");
+            let old = a.add(Thing(99));
+            a.remove(old);
+            (a, plain, keyed, alias, waiting, old)
+        };
+        let (mut one, plain, keyed, alias, waiting, old) = build();
+        let (mut many, ..) = build();
+        // Plain and keyed ones, one a reservation forwards to, a reservation still waiting,
+        // one named twice and a handle already removed.
+        let go = [
+            plain[0], keyed[1], plain[4], keyed[5], waiting, plain[0], old,
+        ];
+        let each: Vec<u32> = go
+            .iter()
+            .filter_map(|h| one.remove(*h).map(|t| t.0))
+            .collect();
+        let removed = many.remove_many(go);
+        assert_eq!(removed.iter().map(|(_, t)| t.0).collect::<Vec<_>>(), each);
+        assert_eq!(
+            removed.iter().map(|(h, _)| *h).collect::<Vec<_>>(),
+            vec![plain[0], keyed[1], plain[4], keyed[5]]
+        );
+        assert_eq!(many.removals(), one.removals());
+        let state = |a: &Assets<Thing>| {
+            let mut keys: Vec<(String, u32)> =
+                a.keys().map(|(k, h)| (k.to_string(), h.index())).collect();
+            keys.sort();
+            let values: Vec<(u32, Option<u32>, u32)> = a
+                .iter()
+                .map(|(h, t)| (h.index(), h.generation(), t.0))
+                .collect();
+            (keys, values)
+        };
+        assert_eq!(state(&many), state(&one));
+        // The reservation that forwarded to a removed asset waits again in both.
+        assert!(many.get(alias).is_none() && one.get(alias).is_none());
+        assert!(many.get(waiting).is_none());
+        // Freed slots are handed out again in the same order.
+        for i in 0..5 {
+            assert_eq!(many.add(Thing(i)).index(), one.add(Thing(i)).index());
+        }
+        assert!(many.remove_many([]).is_empty());
     }
 
     #[test]

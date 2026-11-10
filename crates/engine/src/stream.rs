@@ -1765,11 +1765,14 @@ fn leave(world: &mut World, budget: &StreamingBudget) {
                 .filter(|(_, m)| m.0 == l.cell)
                 .map(|(e, _)| e)
                 .collect();
-            note_drawn(world, i, &roots);
-            remember_leaving(world, i, &roots);
+            tracing::info_span!("stream: leave: note").in_scope(|| {
+                note_drawn(world, i, &roots);
+                remember_leaving(world, i, &roots);
+            });
             l.roots = Some(roots);
         }
         let roots = l.roots.as_mut().expect("set above");
+        let span = tracing::info_span!("stream: leave: despawn").entered();
         while let Some(e) = roots.pop() {
             if let Ok(entity) = world.get_entity_mut(e) {
                 entity.despawn();
@@ -1778,10 +1781,11 @@ fn leave(world: &mut World, budget: &StreamingBudget) {
                 break;
             }
         }
+        drop(span);
         if !roots.is_empty() {
             return true;
         }
-        unload(world, i);
+        tracing::info_span!("stream: leave: unload").in_scope(|| unload(world, i));
         false
     });
     let mut res = world.resource_mut::<Leaves>();
@@ -1847,13 +1851,14 @@ fn unload(world: &mut World, i: usize) {
         .map(|t| t.elapsed().as_secs_f32());
     hooks[i].reset();
     if let Some(unload) = hooks[i].loader.unload.as_mut() {
-        unload(world);
+        tracing::info_span!("stream: unload: hook").in_scope(|| unload(world));
     }
     let assets = std::mem::take(&mut hooks[i].assets);
     let release = hooks[i].loader.release;
     restore(world, hooks);
     let freed = if release {
-        let (n, bytes) = assets.release(world);
+        let (n, bytes) =
+            tracing::info_span!("stream: unload: release").in_scope(|| assets.release(world));
         format!(
             ", freed {n} assets ({:.0} MB)",
             bytes as f64 / (1 << 20) as f64
