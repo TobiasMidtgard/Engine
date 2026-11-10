@@ -17,34 +17,91 @@ use crate::mouth::{MouthMesh, MouthPart, push, smooth_normals};
 use crate::pack::HumanPack;
 use crate::shoes::{hull, reach};
 
-/// Rest height of the waistband (`WAIST` in common.wgsl), and of the hem, a hand above the
-/// knees.
+/// Rest height of the waistband (`WAIST` in common.wgsl).
 const WAIST: f32 = 0.105;
-const HEM: f32 = -0.3;
 /// Cross-sections from waist to hem, and points around each.
 const SLICES: usize = 24;
 const AROUND: usize = 48;
-/// How far the cloth stands off the body, m, and how far out the hem flares beyond the seat.
-const EASE: f32 = 0.006;
-const FLARE: f32 = 0.05;
-/// Folds round the hem: how many, and how deep, m.
-const FOLDS: f32 = 11.0;
-const FOLD_DEPTH: f32 = 0.012;
 
-/// The skirt of a morphed body (`morphed`: the pack's vertices after the morphs). Empty when
-/// the body has no hips and legs.
-pub fn build(pack: &HumanPack, morphed: &[Vec3]) -> MouthMesh {
+/// How a shell of cloth round both legs is cut: rest heights of its top and hem, how far it
+/// stands off the body (m) and flares out beyond the seat at the hem, its folds round the hem
+/// (how many, how deep), what it is (for the shader), and for a tabard the half width of its
+/// front and back panels (`None`: all the way round).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shell {
+    pub top: f32,
+    pub hem: f32,
+    pub ease: f32,
+    pub flare: f32,
+    pub folds: f32,
+    pub fold_depth: f32,
+    pub part: MouthPart,
+    pub panels: Option<f32>,
+}
+
+/// A skirt, from the waistband to a hand above the knees.
+pub const SKIRT: Shell = Shell {
+    top: WAIST,
+    hem: -0.3,
+    ease: 0.006,
+    flare: 0.05,
+    folds: 11.0,
+    fold_depth: 0.012,
+    part: MouthPart::Skirt,
+    panels: None,
+};
+/// The skirt of a gambeson or a mail hauberk: padded, from over the belt to mid-thigh, standing
+/// clear of the padded torso above it.
+pub const COAT: Shell = Shell {
+    top: WAIST + 0.03,
+    hem: -0.25,
+    ease: 0.016,
+    flare: 0.03,
+    folds: 7.0,
+    fold_depth: 0.005,
+    part: MouthPart::Coat,
+    panels: None,
+};
+/// A tabard's panels, front and back, from the belt to above the knees, over a coat.
+pub const TABARD: Shell = Shell {
+    top: WAIST + 0.02,
+    hem: -0.34,
+    ease: 0.03,
+    flare: 0.06,
+    folds: 5.0,
+    fold_depth: 0.004,
+    part: MouthPart::Tabard,
+    panels: Some(0.125),
+};
+
+impl Shell {
+    /// A tabard over trousers rather than a coat lies closer.
+    pub fn without_coat(mut self) -> Self {
+        self.ease = 0.012;
+        self.flare = 0.04;
+        self.top = WAIST + 0.005;
+        self
+    }
+}
+
+/// A shell of a morphed body (`morphed`: the pack's vertices after the morphs). Empty when the
+/// body has no hips and legs.
+pub fn build(pack: &HumanPack, morphed: &[Vec3], shell: &Shell) -> MouthMesh {
     let mut m = MouthMesh::default();
+    // (Not the hands, which hang at the hips.)
     let ids: Vec<u32> = pack
         .group_vertices("body")
         .into_iter()
-        .filter(|&v| (HEM - 0.02..WAIST + 0.01).contains(&pack.positions[v as usize].y))
+        .filter(|&v| {
+            (shell.hem - 0.02..shell.top + 0.01).contains(&pack.positions[v as usize].y)
+                && crate::clothes::arm_weight(pack, v) < 0.3
+        })
         .collect();
     if ids.len() < 32 {
         return m;
     }
     let pts: Vec<Vec3> = ids.iter().map(|&v| morphed[v as usize]).collect();
-    // The waist and hem heights on this body: where its rest waist and hem went.
+    // The top and hem heights on this body: where its rest top and hem went.
     let height_of = |rest_y: f32| {
         let near: Vec<f32> = ids
             .iter()
@@ -53,11 +110,18 @@ pub fn build(pack: &HumanPack, morphed: &[Vec3]) -> MouthMesh {
             .collect();
         near.iter().sum::<f32>() / near.len().max(1) as f32
     };
-    skirt(&mut m, &pts, &ids, height_of(WAIST), height_of(HEM));
+    skirt(
+        &mut m,
+        &pts,
+        &ids,
+        height_of(shell.top),
+        height_of(shell.hem),
+        shell,
+    );
     m
 }
 
-fn skirt(m: &mut MouthMesh, pts: &[Vec3], ids: &[u32], top: f32, hem: f32) {
+fn skirt(m: &mut MouthMesh, pts: &[Vec3], ids: &[u32], top: f32, hem: f32, shell: &Shell) {
     if top - hem < 0.05 {
         return;
     }
@@ -112,7 +176,7 @@ fn skirt(m: &mut MouthMesh, pts: &[Vec3], ids: &[u32], top: f32, hem: f32) {
         let t = (k - seat) as f32 / (SLICES - 1 - seat).max(1) as f32;
         for (j, (r, s)) in radii[k].iter_mut().zip(seat_r).enumerate() {
             // Flaring front and back more than at the sides, where the hands hang.
-            *r = r.max(s) + FLARE * t * t * front_back(j);
+            *r = r.max(s) + shell.flare * t * t * front_back(j);
         }
         centers[k] = seat_c;
     }
@@ -131,25 +195,40 @@ fn skirt(m: &mut MouthMesh, pts: &[Vec3], ids: &[u32], top: f32, hem: f32) {
     for (k, (row, c)) in radii.iter().zip(&centers).enumerate() {
         // Soft folds, none at the waistband and deepest at the hem, wavering around.
         let t = (k as f32 / (SLICES - 1) as f32).max(0.0);
-        let depth = FOLD_DEPTH * t.powf(1.5);
+        let depth = shell.fold_depth * t.powf(1.5);
         for (j, r) in row.iter().enumerate() {
             let a = j as f32 / AROUND as f32 * TAU;
-            let fold = (a * FOLDS + 0.6 * (a * 3.0).sin()).cos() * 0.5 + 0.5;
-            let q = *c + dir(j) * (r + EASE + depth * fold * front_back(j));
-            push(m, Vec3::new(q.x, y_at(k), q.y), MouthPart::Skirt, pts, ids);
+            let fold = (a * shell.folds + 0.6 * (a * 3.0).sin()).cos() * 0.5 + 0.5;
+            let q = *c + dir(j) * (r + shell.ease + depth * fold * front_back(j));
+            push(m, Vec3::new(q.x, y_at(k), q.y), shell.part, pts, ids);
         }
     }
     let at = |k: usize, j: usize| first + (k * AROUND + j % AROUND) as u32;
+    // A tabard's panels: the columns within its half width of the middle, front and back (at
+    // the seat, so the panels hang straight however the hem flares).
+    let column = |j: usize| {
+        shell.panels.is_none_or(|w| {
+            let x = dir(j).x * radii[seat][j];
+            x.abs() < w && dir(j).y.abs() > 0.3
+        })
+    };
     let start = m.indices.len();
     for k in 0..SLICES - 1 {
         for j in 0..AROUND {
+            if !(column(j) && column((j + 1) % AROUND)) {
+                continue;
+            }
             let (a, b, c, d) = (at(k, j), at(k, j + 1), at(k + 1, j), at(k + 1, j + 1));
             m.indices.extend([a, c, b, b, c, d]);
         }
     }
     // Face outward: flip if a band's normal points into the skirt.
     let mid = SLICES / 2;
-    let probe = mid * AROUND * 6 + start;
+    let per_band = (m.indices.len() - start) / (SLICES - 1);
+    if per_band == 0 {
+        return;
+    }
+    let probe = mid * per_band + start;
     let (a, b, c) = (
         m.positions[m.indices[probe] as usize],
         m.positions[m.indices[probe + 1] as usize],
@@ -162,6 +241,29 @@ fn skirt(m: &mut MouthMesh, pts: &[Vec3], ids: &[u32], top: f32, hem: f32) {
         }
     }
     smooth_normals(m, first);
+    if shell.panels.is_some() {
+        back_faces(m, first, start);
+    }
+}
+
+/// The far side of open panels (the skin is drawn with back faces culled): a copy of the
+/// panels' vertices just behind them, facing the other way.
+fn back_faces(m: &mut MouthMesh, first: u32, start: usize) {
+    let n = m.positions.len() as u32 - first;
+    for i in first..first + n {
+        let (p, nrm) = (m.positions[i as usize], m.normals[i as usize]);
+        m.positions.push(p - nrm * 0.0015);
+        m.normals.push(-nrm);
+        m.parts.push(m.parts[i as usize]);
+        m.anchors.push(m.anchors[i as usize]);
+    }
+    let flipped: Vec<u32> = m.indices[start..]
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0] + n, t[2] + n, t[1] + n])
+        .collect();
+    m.indices.extend(flipped);
 }
 
 /// How much of the flare and folds direction `j` gets: all of it front and back, a third at
@@ -226,8 +328,9 @@ pub fn reweight(pack: &HumanPack, skin: &mut SkinMesh, first: usize) {
     if skin.bones.len() != skin.positions.len() || first >= skin.positions.len() {
         return;
     }
-    let ring = |i: usize| (i - first) / AROUND;
-    let rows = (skin.positions.len() - first).div_ceil(AROUND);
+    // (A tabard's far side repeats the rows.)
+    let ring = |i: usize| (i - first) / AROUND % SLICES;
+    let rows = SLICES.min((skin.positions.len() - first).div_ceil(AROUND));
     let center_x = |k: usize| {
         let row = &skin.positions
             [first + k * AROUND..(first + (k + 1) * AROUND).min(skin.positions.len())];
@@ -277,7 +380,7 @@ mod tests {
         }
         let ids: Vec<u32> = (0..pts.len() as u32).collect();
         let mut m = MouthMesh::default();
-        skirt(&mut m, &pts, &ids, 0.105, -0.3);
+        skirt(&mut m, &pts, &ids, 0.105, -0.3, &SKIRT);
         assert_eq!(m.positions.len(), SLICES * AROUND);
         assert!(m.parts.iter().all(|p| *p == MouthPart::Skirt));
         // Front and center at the hem: the skirt spans the gap between the legs, outside both.
@@ -289,7 +392,7 @@ mod tests {
             .fold(f32::MIN, f32::max);
         assert!(front > 0.11, "{front}");
         let side = hem.iter().map(|p| p.x).fold(f32::MIN, f32::max);
-        assert!(side > 0.17 + FLARE * 0.3, "{side}");
+        assert!(side > 0.17 + SKIRT.flare * 0.3, "{side}");
         // Normals face out of the skirt.
         let mid = SLICES / 2;
         for (p, n) in m.positions[mid * AROUND..(mid + 1) * AROUND]
@@ -301,5 +404,36 @@ mod tests {
                 "{p} {n}"
             );
         }
+    }
+
+    #[test]
+    fn a_tabard_hangs_in_two_panels_seen_from_both_sides() {
+        let mut pts = Vec::new();
+        for i in 0..36 {
+            let y = 0.13 - i as f32 * 0.014;
+            for j in 0..24 {
+                let a = j as f32 / 24.0 * TAU;
+                pts.push(Vec3::new(0.17 * a.cos(), y, 0.11 * a.sin()));
+            }
+        }
+        let ids: Vec<u32> = (0..pts.len() as u32).collect();
+        let mut m = MouthMesh::default();
+        skirt(&mut m, &pts, &ids, 0.125, -0.34, &TABARD);
+        assert!(m.parts.iter().all(|p| *p == MouthPart::Tabard));
+        // Every drawn point is in front or behind, within the panels' width (at the sides
+        // there is nothing).
+        let drawn: Vec<Vec3> = m.indices.iter().map(|i| m.positions[*i as usize]).collect();
+        assert!(!drawn.is_empty());
+        for p in &drawn {
+            assert!(p.x.abs() < 0.18 && p.z.abs() > 0.05, "{p}");
+        }
+        // Each panel is drawn twice, its far side facing the other way.
+        let front = m.indices.len() / 2;
+        let n = |t: &[u32]| {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.positions[i as usize]);
+            (b - a).cross(c - a)
+        };
+        let (near, far) = (n(&m.indices[..3]), n(&m.indices[front..front + 3]));
+        assert!(near.dot(far) < 0.0);
     }
 }

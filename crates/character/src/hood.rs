@@ -32,6 +32,29 @@ const OPENING: [f32; 4] = [0.96, 0.105, 0.035, 0.01];
 const THIN: f32 = 0.004;
 const FULL: f32 = 0.02;
 const BACK: f32 = 0.03;
+
+/// How a hood is cut: how far it stands off the head (over the head, and the extra room at
+/// the back), and what it is made of.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fit {
+    pub full: f32,
+    pub back: f32,
+    pub part: MouthPart,
+}
+
+/// A cloth hood, loose over the head.
+pub const HOOD: Fit = Fit {
+    full: FULL,
+    back: BACK,
+    part: MouthPart::Hood,
+};
+/// A mail coif: rings hanging close over the head (an open helm fits over it) and onto the
+/// shoulders.
+pub const COIF: Fit = Fit {
+    full: 0.008,
+    back: 0.006,
+    part: MouthPart::Coif,
+};
 /// How fast the hood narrows going down, m per m: barely behind (it hangs), more at the sides.
 const DROP_BACK: f32 = 0.1;
 const DROP_SIDE: f32 = 0.25;
@@ -95,8 +118,8 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
 }
 
 /// The hood of a morphed body (`morphed`: the pack's vertices after the morphs; `head`: the
-/// rest head center).
-pub fn build(pack: &HumanPack, morphed: &[Vec3], head: Vec3) -> MouthMesh {
+/// rest head center), cut to `fit`.
+pub fn build(pack: &HumanPack, morphed: &[Vec3], head: Vec3, fit: Fit) -> MouthMesh {
     let mut m = MouthMesh::default();
     let Some(body) = pack.group("body") else {
         return m;
@@ -240,8 +263,8 @@ pub fn build(pack: &HumanPack, morphed: &[Vec3], head: Vec3) -> MouthMesh {
             let d = *r - head;
             let back = smooth(0.0, -0.08, d.z) * smooth(-0.1, 0.05, d.y);
             // Down to the hem, the cowl settles onto the shirt.
-            let hem = HEM + (FULL - HEM) * smooth(0.0, 0.03, r.y - LOWER_EDGE);
-            THIN + (hem - THIN) * face + BACK * back * face
+            let hem = HEM + (fit.full - HEM) * smooth(0.0, 0.03, r.y - LOWER_EDGE);
+            THIN + (hem - THIN) * face + fit.back * back * face
         })
         .collect();
     // The cloth off the skin (the ears' folds point every which way, so they count as skin),
@@ -321,7 +344,7 @@ pub fn build(pack: &HumanPack, morphed: &[Vec3], head: Vec3) -> MouthMesh {
     for (i, v) in verts.iter().enumerate() {
         m.positions.push(p[i]);
         m.normals.push(normals[i]);
-        m.parts.push(MouthPart::Hood);
+        m.parts.push(fit.part);
         m.anchors.push([(*v, 1.0), (*v, 0.0), (*v, 0.0)]);
     }
     m.indices.extend(tris.iter().map(|t| t + first));
@@ -349,7 +372,7 @@ fn line_edges(
         *map.entry(i).or_insert_with(|| {
             m.positions.push(p);
             m.normals.push(Vec3::ZERO);
-            m.parts.push(MouthPart::Hood);
+            m.parts.push(m.parts[first as usize]);
             let v = verts[i as usize];
             m.anchors.push([(v, 1.0), (v, 0.0), (v, 0.0)]);
             m.positions.len() as u32 - 1

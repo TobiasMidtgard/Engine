@@ -52,6 +52,12 @@ pub enum Top {
     Tshirt,
     /// Bare-chested; women wear a band across the chest.
     None,
+    /// A padded, quilted coat with a standing collar and a skirt to mid-thigh
+    /// (`crate::skirt::COAT`).
+    Gambeson,
+    /// A mail hauberk over a gambeson: rings over the torso, the skirt and the arms to the
+    /// elbows, the padding showing on the forearms, the collar and below the hem.
+    Mail,
 }
 
 /// The lower garment (`Outfit::bottom`).
@@ -62,6 +68,8 @@ pub enum Bottom {
     Shorts,
     /// To above the knees (`crate::skirt`), over briefs.
     Skirt,
+    /// Close-fitting wool hose, the lower legs in tall leather boots.
+    Hose,
 }
 
 /// Where the outfit's accent colour shows (`Outfit::accent_on`).
@@ -72,6 +80,9 @@ pub enum Accent {
     ArmbandL,
     ArmbandR,
     Collar,
+    /// A tabard in the accent colour over the chest and back, its panels hanging to above the
+    /// knees (`crate::skirt::TABARD`): a team colour that reads from far off.
+    Tabard,
 }
 
 /// How a person's clothes are cut, from their outfit's ids (unknown ids fall back to the
@@ -92,21 +103,35 @@ impl Cut {
             top: match o.top.as_str() {
                 "tshirt" => Top::Tshirt,
                 "none" => Top::None,
+                "gambeson" => Top::Gambeson,
+                "mail" => Top::Mail,
                 _ => Top::Shirt,
             },
             bottom: match o.bottom.as_str() {
                 "shorts" => Bottom::Shorts,
                 "skirt" => Bottom::Skirt,
+                "hose" => Bottom::Hose,
                 _ => Bottom::Trousers,
             },
             accent: match o.accent_on.as_str() {
                 "armband_l" => Accent::ArmbandL,
                 "armband_r" => Accent::ArmbandR,
                 "collar" => Accent::Collar,
+                "tabard" => Accent::Tabard,
                 _ => Accent::None,
             },
             male: a.sex > 0.5,
         }
+    }
+
+    /// Whether the top has a padded skirt (`crate::skirt::COAT`).
+    pub fn coat(&self) -> bool {
+        matches!(self.top, Top::Gambeson | Top::Mail)
+    }
+
+    /// Whether the collar stands up the neck.
+    pub fn high_collar(&self) -> bool {
+        self.coat()
     }
 
     /// The styles as the shaders read them: top, bottom, accent place.
@@ -134,18 +159,18 @@ fn sleeve_past(r: Vec3, hem: f32) -> Option<f32> {
 /// How far inside the clothes' edges a rest position is, m (negative outside): the neckline,
 /// and the sleeves, shorts and band where the outfit has them.
 fn cover_depth(r: Vec3, head_z: f32, cut: Cut) -> f32 {
-    let mut d = collar_depth(r, head_z);
+    let mut d = collar_depth(r, head_z, cut.high_collar());
     if r.y >= WAIST {
         let bare_arms = |hem| sleeve_past(r, hem).map_or(1.0, |past| -past);
         match cut.top {
-            Top::Shirt => {}
+            Top::Shirt | Top::Gambeson | Top::Mail => {}
             Top::Tshirt => d = d.min(bare_arms(SLEEVE_HEM)),
             Top::None if cut.male => d = d.min(WAIST - r.y),
             Top::None => d = d.min(bare_arms(0.0)).min(r.y - BAND[0]).min(BAND[1] - r.y),
         }
     } else {
         match cut.bottom {
-            Bottom::Trousers => {}
+            Bottom::Trousers | Bottom::Hose => {}
             Bottom::Shorts => d = d.min(r.y - SHORTS_HEM),
             Bottom::Skirt => d = d.min(r.y - BRIEFS_HEM),
         }
@@ -154,11 +179,17 @@ fn cover_depth(r: Vec3, head_z: f32, cut: Cut) -> f32 {
 }
 
 /// How far inside the shirt's neckline a rest position is (`collar_depth` in common.wgsl;
-/// `head_z`: the rest head center's depth).
-fn collar_depth(r: Vec3, head_z: f32) -> f32 {
+/// `head_z`: the rest head center's depth; `high`: a standing collar up the neck, lower in
+/// front, under the chin).
+fn collar_depth(r: Vec3, head_z: f32, high: bool) -> f32 {
     let d = Vec2::new(r.x, r.z - head_z + 0.012);
     let theta = d.x.atan2(d.y);
-    let neckline = 0.565 - 0.03 * (theta.cos() * 0.5 + 0.5);
+    let front = theta.cos() * 0.5 + 0.5;
+    let neckline = if high {
+        0.597 - 0.042 * front
+    } else {
+        0.565 - 0.03 * front
+    };
     let shoulders = (d.length() - 0.082).min(0.6 - r.y);
     let a = neckline - r.y;
     let k = 0.008;
@@ -190,6 +221,7 @@ pub fn dress(
         return Vec::new();
     }
     let head_z = regions.landmarks.head.z;
+    let hose = cut.bottom == Bottom::Hose;
     let cloth = |v: u32| regions.masks[v as usize * MASKS + Mask::Cloth as usize];
     let n = skin.base.len();
     let pos: Vec<Vec3> = skin.base.iter().map(|v| morphed[*v as usize]).collect();
@@ -251,7 +283,7 @@ pub fn dress(
         .collect();
 
     let mut q = pos.clone();
-    hang(pack, morphed, &skin.base, &rest, &cov, &mut q);
+    hang(pack, morphed, &skin.base, &rest, &cov, &mut q, !hose);
     // Bridge the hollows: move toward the neighbors' average, only ever outward.
     for _ in 0..20 {
         let q0 = q.clone();
@@ -269,7 +301,7 @@ pub fn dress(
                 return Vec3::ZERO;
             }
             let ease = if rest[b].y < WAIST {
-                EASE_TROUSERS
+                if hose { EASE_SHIRT } else { EASE_TROUSERS }
             } else if arm_weight(pack, skin.base[b]) >= 0.3 {
                 EASE_SLEEVES
             } else {
@@ -438,7 +470,7 @@ fn dir(j: usize) -> Vec2 {
 }
 
 /// How much of a pack vertex the arms move.
-fn arm_weight(pack: &HumanPack, v: u32) -> f32 {
+pub(crate) fn arm_weight(pack: &HumanPack, v: u32) -> f32 {
     let Some(s) = pack.skin.get(v as usize) else {
         return 0.0;
     };
@@ -464,6 +496,7 @@ fn hang(
     rest: &[Vec3],
     cov: &[bool],
     q: &mut [Vec3],
+    loose_legs: bool,
 ) {
     // The torso: everything covered above the waist that the arms don't move.
     if pack.has_rig() {
@@ -540,7 +573,7 @@ fn hang(
         }
     }
     for (knee, side) in [("lower_leg_l", 1.0f32), ("lower_leg_r", -1.0)] {
-        let Some(knee) = joint(knee) else {
+        let Some(knee) = joint(knee).filter(|_| loose_legs) else {
             continue;
         };
         let leg: Vec<usize> = (0..q.len())
@@ -575,8 +608,8 @@ mod tests {
     #[test]
     fn the_neckline_matches_the_shader() {
         // Down the chest is inside the shirt, up the neck outside it, as in common.wgsl.
-        assert!(collar_depth(Vec3::new(0.0, 0.45, 0.08), 0.0) > 0.0);
-        assert!(collar_depth(Vec3::new(0.0, 0.62, 0.02), 0.0) < 0.0);
+        assert!(collar_depth(Vec3::new(0.0, 0.45, 0.08), 0.0, false) > 0.0);
+        assert!(collar_depth(Vec3::new(0.0, 0.62, 0.02), 0.0, false) < 0.0);
         // Hands (no cloth) and feet (below the hem) are bare.
         let shirt = Cut::default();
         assert!(covers(Vec3::new(0.2, 0.0, 0.0), 1.0, 0.0, shirt));

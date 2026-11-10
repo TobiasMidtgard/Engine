@@ -26,6 +26,13 @@ pub enum MouthPart {
     Skirt = 5,
     /// A hood (see `crate::hood`).
     Hood = 6,
+    /// The skirt of a gambeson or a mail hauberk, from the waist to mid-thigh
+    /// (`crate::skirt::COAT`).
+    Coat = 7,
+    /// A tabard's front and back panels below the belt (`crate::skirt::TABARD`).
+    Tabard = 8,
+    /// A mail coif over the head and shoulders, built as a snug hood (`crate::hood`).
+    Coif = 9,
 }
 
 /// Mouth geometry in the character's model space.

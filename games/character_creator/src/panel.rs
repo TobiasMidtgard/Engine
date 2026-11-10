@@ -427,6 +427,41 @@ fn tab_content(ui: &CreatorUi, a: &Appearance, p: &PoseEdit) -> Vec<El> {
                     0.02,
                 ));
             }
+            // Clothes and armor: a kit at once, or each layer.
+            out.push(heading("Outfit"));
+            let kit = kit_of(a);
+            out.push(
+                El::new()
+                    .class("row")
+                    .children(KITS.iter().map(|(name, ..)| {
+                        El::button(slider_label("", name), format!("creator.kit:{name}"))
+                            .class("chip")
+                            .selected(kit == Some(*name))
+                    })),
+            );
+            let o = &a.outfit;
+            for (label, field, ids, now) in [
+                ("Top", "top", TOPS, o.top.as_str()),
+                ("Legs", "bottom", BOTTOMS, o.bottom.as_str()),
+                ("Over", "over", OVERS, o.accent_on.as_str()),
+                ("Head", "head", HEADS, a.headgear.as_str()),
+            ] {
+                out.push(
+                    El::text(label)
+                        .class("caption")
+                        .with_style(|s| s.margin([4.0, 4.0, 0.0, 4.0])),
+                );
+                for row in ids.chunks(4) {
+                    out.push(El::new().class("row").children(row.iter().map(|id| {
+                        El::button(
+                            slider_label("", &id.replace('_', " ")),
+                            format!("creator.{field}:{id}"),
+                        )
+                        .class("chip")
+                        .selected(*id == now)
+                    })));
+                }
+            }
             // Hide groups: what armor or a long coat covers is left out of the body.
             out.push(heading("Hidden under armor"));
             for row in engine_character::cover::REGIONS.chunks(4) {
@@ -523,6 +558,68 @@ fn capital(s: &str) -> String {
     }
 }
 
+/// Garment ids the creator offers (`engine_character::clothes`, `headgear`).
+const TOPS: &[&str] = &["shirt", "tshirt", "none", "gambeson", "mail"];
+const BOTTOMS: &[&str] = &["trousers", "shorts", "skirt", "hose"];
+const OVERS: &[&str] = &["none", "armband_l", "collar", "tabard"];
+const HEADS: &[&str] = &["none", "hood", "mail_coif"];
+
+/// Whole outfits: name, top, bottom, accent place, headgear, and colours (linear: top, bottom,
+/// accent).
+type Kit = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    [[f32; 3]; 3],
+);
+const KITS: &[Kit] = &[
+    (
+        "Townsfolk",
+        "shirt",
+        "trousers",
+        "none",
+        "none",
+        [[0.075, 0.085, 0.1], [0.038, 0.04, 0.046], [0.6, 0.05, 0.04]],
+    ),
+    (
+        "Levy",
+        "gambeson",
+        "hose",
+        "none",
+        "none",
+        [[0.25, 0.19, 0.11], [0.05, 0.055, 0.045], [0.6, 0.05, 0.04]],
+    ),
+    (
+        "Man-at-arms",
+        "mail",
+        "hose",
+        "tabard",
+        "mail_coif",
+        [
+            [0.25, 0.19, 0.11],
+            [0.05, 0.055, 0.045],
+            [0.33, 0.012, 0.008],
+        ],
+    ),
+    (
+        "Sergeant",
+        "gambeson",
+        "hose",
+        "tabard",
+        "none",
+        [[0.18, 0.16, 0.12], [0.05, 0.05, 0.045], [0.02, 0.06, 0.25]],
+    ),
+];
+
+fn kit_of(a: &Appearance) -> Option<&'static str> {
+    let o = &a.outfit;
+    KITS.iter()
+        .find(|k| (k.1, k.2, k.3, k.4) == (&*o.top, &*o.bottom, &*o.accent_on, &*a.headgear))
+        .map(|k| k.0)
+}
+
 fn styles<'a>(items: impl Iterator<Item = (&'a str, bool)>, action: &str) -> El {
     El::new().class("row").children(items.map(|(name, on)| {
         El::button(slider_label("", name), format!("{action}:{name}"))
@@ -614,6 +711,25 @@ pub fn apply_actions(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>)
                 ui.hand = side;
                 ui.rebuild = true;
                 world.resource_mut::<CameraFocus>().0 = Some(["hand_l", "hand_r"][side].into());
+            }
+            "top" | "bottom" | "over" | "head" => {
+                let o = &mut a.outfit;
+                match verb {
+                    "top" => o.top = arg.to_string(),
+                    "bottom" => o.bottom = arg.to_string(),
+                    "over" => o.accent_on = arg.to_string(),
+                    _ => a.headgear = arg.to_string(),
+                }
+            }
+            "kit" => {
+                if let Some((_, top, bottom, over, head, colors)) = KITS.iter().find(|k| k.0 == arg)
+                {
+                    let o = &mut a.outfit;
+                    (o.top, o.bottom, o.accent_on) =
+                        (top.to_string(), bottom.to_string(), over.to_string());
+                    a.headgear = head.to_string();
+                    [o.top_color, o.bottom_color, o.accent] = *colors;
+                }
             }
             "hide" => {
                 if engine_character::cover::REGIONS.contains(&arg) {

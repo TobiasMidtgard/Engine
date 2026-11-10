@@ -2,7 +2,9 @@
 //! left out, so whoever draws the helmet (an equipment or NPC module) draws it over a head that
 //! doesn't poke through. `open_helm` hides the hair, ears and neck and keeps the face from brow
 //! to chin; `closed_helm` hides the whole head and neck. A `hood` is drawn here (`crate::hood`)
-//! and hides the scalp hair under it; unknown ids hide nothing.
+//! and hides the scalp hair under it; so is a `mail_coif` (a snug hood of mail rings that an
+//! open helm fits over: add the helm as `open_helm` drawn by its owner, the coif stays); unknown
+//! ids hide nothing.
 
 use engine_core::math::Vec3;
 
@@ -16,6 +18,7 @@ const NECK_BASE: f32 = 0.55;
 pub enum Headgear {
     None,
     Hood,
+    MailCoif,
     OpenHelm,
     ClosedHelm,
 }
@@ -24,6 +27,7 @@ impl Headgear {
     pub fn from_id(id: &str) -> Self {
         match id {
             "hood" => Headgear::Hood,
+            "mail_coif" => Headgear::MailCoif,
             "open_helm" => Headgear::OpenHelm,
             "closed_helm" => Headgear::ClosedHelm,
             _ => Headgear::None,
@@ -33,7 +37,9 @@ impl Headgear {
     /// Whether a rest-space point is under the headgear. `head`: the rest head center (between
     /// the ears, level with the eyes).
     pub fn hides(self, rest: Vec3, head: Vec3) -> bool {
-        if matches!(self, Headgear::None | Headgear::Hood) || rest.y < NECK_BASE {
+        if matches!(self, Headgear::None | Headgear::Hood | Headgear::MailCoif)
+            || rest.y < NECK_BASE
+        {
             return false;
         }
         if self == Headgear::ClosedHelm {
@@ -45,6 +51,15 @@ impl Headgear {
         !face
     }
 
+    /// The hood drawn here for this headgear, if any.
+    pub fn hood(self) -> Option<crate::hood::Fit> {
+        match self {
+            Headgear::Hood => Some(crate::hood::HOOD),
+            Headgear::MailCoif => Some(crate::hood::COIF),
+            _ => None,
+        }
+    }
+
     /// Whether any of the eyes, mouth, brows and lashes show.
     pub fn face_shows(self) -> bool {
         self != Headgear::ClosedHelm
@@ -52,7 +67,7 @@ impl Headgear {
 
     /// Leave out the skin (and anything anchored to it, such as teeth) under the headgear.
     pub fn cover_skin(self, skin: &mut SkinMesh, head: Vec3) {
-        if matches!(self, Headgear::None | Headgear::Hood) {
+        if matches!(self, Headgear::None | Headgear::Hood | Headgear::MailCoif) {
             return;
         }
         let hidden: Vec<bool> = skin.rest.iter().map(|r| self.hides(*r, head)).collect();
@@ -74,7 +89,9 @@ impl Headgear {
     pub fn cover_hair(self, strands: &mut Vec<StrandSet>) {
         match self {
             Headgear::None => {}
-            Headgear::Hood | Headgear::OpenHelm => strands.retain(|s| s.kind != StrandKind::Scalp),
+            Headgear::Hood | Headgear::MailCoif | Headgear::OpenHelm => {
+                strands.retain(|s| s.kind != StrandKind::Scalp)
+            }
             Headgear::ClosedHelm => strands.clear(),
         }
     }

@@ -17,9 +17,9 @@ struct Character {
     rest_eye_r: vec4<f32>,
     rest_head: vec4<f32>,
     rest_mouth: vec4<f32>,
-    top: vec4<f32>,           // shirt color (linear), style (0 shirt, 1 t-shirt, 2 none)
-    bottom: vec4<f32>,        // trousers color, style (0 trousers, 1 shorts, 2 skirt)
-    accent: vec4<f32>,        // accent color, where (0 nowhere, 1 left armband, 2 right, 3 collar)
+    top: vec4<f32>,           // shirt color (linear), style (0 shirt, 1 t-shirt, 2 none, 3 gambeson, 4 mail)
+    bottom: vec4<f32>,        // trousers color, style (0 trousers, 1 shorts, 2 skirt, 3 hose and boots)
+    accent: vec4<f32>,        // accent color, where (0 nowhere, 1 left armband, 2 right, 3 collar, 4 tabard)
     thigh: vec4<f32>,         // a skirt's left thigh capsule: hip joint (base mesh space), radius
     knee: vec4<f32>,          // knee joint, radius (the right thigh mirrors; radius 0: no skirt)
     // Where the lids cross each eye: left upper, left lower, right upper, right lower, each
@@ -116,7 +116,19 @@ struct Bent {
 
 // A skirt point pushed out of both thighs (`bones`: hips, left and right upper leg, as the
 // skirt is skinned), so a striding leg carries the skirt instead of poking through it.
-fn clear_thighs(p: vec3<f32>, bones: vec4<u32>, prev: bool) -> vec3<f32> {
+// How far outside the thighs a shell round the legs keeps (0: not a shell): a skirt, a coat's
+// skirt, a tabard over it.
+fn shell_margin(part: u32) -> f32 {
+    switch part {
+        case 5u: { return 0.012; }
+        case 7u: { return 0.016; }
+        case 8u: { return 0.032; }
+        default: { return 0.0; }
+    }
+}
+
+// (`margin`: how far outside the thigh, m: shells over shells stand further out.)
+fn clear_thighs(p: vec3<f32>, bones: vec4<u32>, prev: bool, margin: f32) -> vec3<f32> {
     if (pose.info.y == 0u || character.thigh.w <= 0.0) {
         return p;
     }
@@ -130,7 +142,7 @@ fn clear_thighs(p: vec3<f32>, bones: vec4<u32>, prev: bool) -> vec3<f32> {
         let ab = k - a;
         let t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
         let c = a + ab * t;
-        let r = mix(character.thigh.w, character.knee.w, t) + 0.012;
+        let r = mix(character.thigh.w, character.knee.w, t) + margin;
         let d = q - c;
         let len = length(d);
         // Not up at the hip joint, where the skirt hangs from the hips instead.
@@ -153,19 +165,34 @@ const SLEEVE_HEM: f32 = 0.12;
 const SHORTS_HEM: f32 = -0.17;
 const BRIEFS_HEM: f32 = -0.07;
 const BAND: vec2<f32> = vec2<f32>(0.32, 0.45);
+// Rest height of the tops of tall boots (with hose), below the knees.
+const BOOT_TOP: f32 = -0.5;
 
 // How far inside a crew-neck shirt a rest position is, m (negative outside): below the
 // neckline, which dips in front, or out on the shoulders, wider than the neck.
 fn collar_depth(r: vec3<f32>) -> f32 {
     let d = vec2<f32>(r.x, r.z - character.rest_head.z + 0.012);
     let theta = atan2(d.x, d.y);
-    let neckline = 0.565 - 0.03 * (cos(theta) * 0.5 + 0.5);
+    let front = cos(theta) * 0.5 + 0.5;
+    // A gambeson's collar stands up the neck, lower in front under the chin (clothes.rs).
+    let neckline = select(0.565 - 0.03 * front, 0.597 - 0.042 * front, padded());
     let shoulders = min(length(d) - 0.082, 0.6 - r.y);
     // A smooth union, so the neckline runs in one curve from the front dip to the back.
     let a = neckline - r.y;
     let k = 0.008;
     let h = saturate(0.5 + 0.5 * (a - shoulders) / k);
     return mix(shoulders, a, h) + k * h * (1.0 - h);
+}
+
+// Whether the top is padded: a gambeson, or mail over one.
+fn padded() -> bool {
+    let top = u32(character.top.w + 0.5);
+    return top == 3u || top == 4u;
+}
+
+// Whether the legs are in hose and boots.
+fn hose() -> bool {
+    return u32(character.bottom.w + 0.5) == 3u;
 }
 
 // How far past a sleeve's hem (`hem`: m down the upper arm from the shoulder joint) a rest
@@ -206,11 +233,14 @@ fn cover_depth(r: vec3<f32>) -> f32 {
     return d;
 }
 
-// 1 on the outfit's accent: a band round one sleeve, or the collar.
+// 1 on the outfit's accent: a band round one sleeve, the collar, or a tabard.
 fn accent_band(r: vec3<f32>, collar: f32) -> f32 {
     let at = u32(character.accent.w + 0.5);
     if (at == 3u) {
         return collar;
+    }
+    if (at == 4u) {
+        return tabard_band(r);
     }
     if (at == 0u || (at == 1u) != (r.x > 0.0)) {
         return 0.0;
@@ -219,6 +249,105 @@ fn accent_band(r: vec3<f32>, collar: f32) -> f32 {
     let hem = select(0.115, SLEEVE_HEM - 0.004, u32(character.top.w + 0.5) == 1u);
     let past = sleeve_past(r, hem);
     return smoothstep(-0.041, -0.039, past) * smoothstep(0.001, -0.001, past);
+}
+
+// A tabard over the chest and back (its panels below the belt are a shell of their own,
+// `skirt::TABARD`): a band down the middle, over the shoulders, short of the collar.
+const TABARD_HALF: f32 = 0.125;
+fn tabard_band(r: vec3<f32>) -> f32 {
+    if (r.y < WAIST - 0.01) {
+        return 0.0;
+    }
+    let half = TABARD_HALF + 0.03 * smoothstep(0.42, 0.52, r.y);
+    let side = smoothstep(half + 0.002, half - 0.002, abs(r.x));
+    let collar = smoothstep(0.008, 0.014, collar_depth(r));
+    return side * collar;
+}
+
+// 1 where a mail hauberk's rings are (over the gambeson): the torso, the upper arms to just
+// past the elbows, short of the padded collar; not under a tabard.
+const MAIL_SLEEVE: f32 = 0.25;
+fn mail_cover(r: vec3<f32>) -> f32 {
+    if (u32(character.top.w + 0.5) != 4u || r.y < WAIST - 0.01) {
+        return 0.0;
+    }
+    let sleeve = smoothstep(0.002, -0.002, sleeve_past(r, MAIL_SLEEVE));
+    let collar = smoothstep(0.02, 0.026, collar_depth(r));
+    var tabard = 0.0;
+    if (u32(character.accent.w + 0.5) == 4u) {
+        tabard = tabard_band(r);
+    }
+    return sleeve * collar * (1.0 - tabard);
+}
+
+// How much of a padded top shows its quilting: not under mail or a tabard.
+fn quilted(r: vec3<f32>) -> f32 {
+    var tabard = 0.0;
+    if (u32(character.accent.w + 0.5) == 4u) {
+        tabard = tabard_band(r);
+    }
+    return (1.0 - mail_cover(r)) * (1.0 - tabard);
+}
+
+// Mail rings in a surface's own coordinates (`uv`, m: around and down): rows of riveted rings,
+// each linking four, as a staggered lattice of rings. Returns how much ring covers the point
+// (0 in the gaps), the ring's height across its wire (0..1), and a per-ring random. `footprint`
+// (m per pixel) fades the rings to their average where they get smaller than a pixel.
+const MAIL_PITCH: f32 = 0.0085;
+fn mail_rings(uv: vec2<f32>, footprint: f32) -> vec3<f32> {
+    let radius = MAIL_PITCH * 0.62;
+    let wire = MAIL_PITCH * 0.17;
+    var cover = 0.0;
+    var height = 0.0;
+    var id = 0.0;
+    for (var row = 0; row < 2; row++) {
+        // Every other row shifted half a ring: rings overlap their neighbors below and beside.
+        let shift = vec2<f32>(f32(row) * 0.5, f32(row) * 0.5);
+        let g = uv / MAIL_PITCH - shift;
+        let cell = floor(g + 0.5);
+        let d = (g - cell) * MAIL_PITCH;
+        // Rings lean down and outward like scales, so their lower half stands out.
+        let dist = length(d * vec2<f32>(1.0, 1.15));
+        let across = abs(dist - radius) / wire;
+        let on = 1.0 - smoothstep(0.75, 1.0, across);
+        let h = sqrt(saturate(1.0 - across * across)) * (0.75 + 0.25 * smoothstep(0.0, -radius, d.y));
+        if (on > cover) {
+            cover = on;
+            height = h;
+            id = hash13(vec3<f32>(cell, f32(row)));
+        }
+    }
+    // Smaller than a pixel: what the eye sees is the average of rings and gaps.
+    let vis = saturate(MAIL_PITCH * 0.6 / max(footprint, 1e-7) - 1.0);
+    return vec3<f32>(mix(0.62, cover, vis), mix(0.45, height, vis), id);
+}
+
+// Mail coordinates on the body at rest position `r`: around the torso and down it, or around
+// and along an arm.
+fn mail_uv(r: vec3<f32>) -> vec2<f32> {
+    let m = vec3<f32>(select(-1.0, 1.0, r.x > 0.0), 1.0, 1.0);
+    if (sleeve_past(r, 0.0) > 0.0) {
+        let up = along_limb(r, SHOULDER * m, ELBOW * m);
+        return vec2<f32>(up.z * 0.05, -up.x);
+    }
+    return vec2<f32>(atan2(r.x, r.z) * 0.15, r.y);
+}
+
+// A gambeson's quilting at rest position `r`: channels stitched down the torso and round the
+// sleeves. Returns the padding's puff (0 on a seam .. 1 between) and how much seam is here.
+const QUILT: f32 = 0.048;
+fn quilt(r: vec3<f32>) -> vec2<f32> {
+    let m = vec3<f32>(select(-1.0, 1.0, r.x > 0.0), 1.0, 1.0);
+    var s = atan2(r.x, r.z) * 0.15 / QUILT;
+    if (sleeve_past(r, 0.0) > 0.0) {
+        let up = along_limb(r, SHOULDER * m, ELBOW * m);
+        let lo = along_limb(r, ELBOW * m, WRIST * m);
+        s = select(up.x, length(ELBOW - SHOULDER) + lo.x, lo.x >= 0.0) / (QUILT * 0.75);
+    }
+    let f = fract(s);
+    let puff = sqrt(max(sin(f * 3.14159265), 0.0));
+    let seam = 1.0 - smoothstep(0.0, 0.07, min(f, 1.0 - f));
+    return vec2<f32>(puff, seam);
 }
 
 // What covers a rest position below the neckline: 0 shirt, 1 trousers, 2 shoes.
@@ -239,9 +368,19 @@ fn belt_band(r: vec3<f32>) -> f32 {
 fn cloth_lift(r: vec3<f32>, sleeves: f32) -> f32 {
     let covered = smoothstep(-0.004, 0.004, cover_depth(r)) * sleeves;
     // (The shoes are their own shell; the feet stay inside it.)
-    let thickness = array<f32, 3>(0.004, 0.006, 0.0);
+    var thickness = array<f32, 3>(0.004, 0.006, 0.0);
     let g = garment(r);
-    return covered * (thickness[g] + cloth_folds(r, g).x);
+    var quilting = 0.0;
+    if (padded() && covered > 0.0) {
+        // Padding a centimetre thick, mail a little more; the quilted channels puff out.
+        thickness[0] = select(0.011, 0.013, u32(character.top.w + 0.5) == 4u);
+        quilting = quilt(r).x * 0.002 * quilted(r);
+    }
+    if (hose()) {
+        // Hose hug the legs; boot shafts stand off them.
+        thickness[1] = select(0.0025, 0.006, r.y < BOOT_TOP);
+    }
+    return covered * (thickness[g] + cloth_folds(r, g).x + select(0.0, quilting, g == 0u));
 }
 
 // ---------------------------------------------------------------- folds
@@ -314,6 +453,12 @@ fn cloth_folds(r: vec3<f32>, g: u32) -> vec2<f32> {
             let hem = smoothstep(upper + lower - 0.16, upper + lower, s);
             amp = 0.0008 + 0.004 * knee + 0.006 * hem;
             f = fold_rings(s, angle, r, 0.045);
+            if (hose()) {
+                // Knit hose crease little; boots wrinkle at the ankle.
+                let ankle = exp(-sq((r.y - (SHOE_TOP + 0.04)) / 0.03));
+                amp = select(0.0005 + 0.0015 * knee, 0.0006 + 0.003 * ankle, r.y < BOOT_TOP);
+                f = fold_rings(s, angle, r, 0.03);
+            }
         }
     }
     return vec2<f32>(amp * (f.x - 0.5) * f.y, (1.0 - f.x) * (1.0 - f.x) * f.y * saturate(amp / 0.005));

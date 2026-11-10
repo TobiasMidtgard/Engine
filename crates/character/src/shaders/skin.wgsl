@@ -43,7 +43,7 @@ struct SkinOut {
     @location(6) curvature: f32,
     @location(7) clip_now: vec4<f32>,
     @location(8) clip_prev: vec4<f32>,
-    // 0 skin, 1 teeth, 2 gums, 3 tongue, 4 shoes, 5 skirt, 6 hood.
+    // 0 skin, 1 teeth, 2 gums, 3 tongue, 4 shoes, 5 skirt, 6 hood, 7 coat, 8 tabard, 9 coif.
     @location(9) @interpolate(flat) part: u32,
     // Where the point sits before the pose (the hair shadow grid's space), and that space's x
     // and y axes in world space.
@@ -67,9 +67,11 @@ fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     var p = (now * vec4<f32>(hand.p + lift, 1.0)).xyz;
     var p_prev = (skin_matrix(in.bones, in.weights, true)
         * vec4<f32>(hand_prev.p + lift, 1.0)).xyz;
-    if (u32(in.normal.w + 0.5) == 5u) {
-        p = clear_thighs(p, in.bones, false);
-        p_prev = clear_thighs(p_prev, in.bones, true);
+    // Shells round the legs, each outside the one under it.
+    let margin = shell_margin(u32(in.normal.w + 0.5));
+    if (margin > 0.0) {
+        p = clear_thighs(p, in.bones, false, margin);
+        p_prev = clear_thighs(p_prev, in.bones, true, margin);
     }
     let rel = model_point(p);
     out.rel = rel;
@@ -296,13 +298,41 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
         let vis = saturate((0.0015 / max(footprint, 1e-7) - 1.0));
         let g = garment(r);
         var relief = 0.0;
-        if (g == 0u) {
+        if (g == 0u && padded()) {
+            // Linen over padding, quilted in channels; mail rings over it.
+            let weave = sin(r.x * 6283.0 / 0.6) * sin(r.y * 6283.0 / 0.6);
+            relief = weave * 0.000008 + value_noise3(r * 1800.0) * 0.00001;
+            let mail = mail_cover(r);
+            let big = saturate(0.03 / max(footprint, 1e-7) - 1.0);
+            let q = quilt(r);
+            h += cloth * (q.x * 0.0012 - q.y * 0.0006) * big * quilted(r);
+            if (mail > 0.0) {
+                let rings = mail_rings(mail_uv(r), footprint);
+                h += cloth * mail * (rings.x * rings.y * 0.0009 - 0.0003) * big;
+            }
+            // The tabard's edge stands off what it covers.
+            if (u32(character.accent.w + 0.5) == 4u) {
+                h += cloth * tabard_band(r) * 0.0008 * big;
+            }
+        } else if (g == 0u) {
             let wale = sin(r.x * 6283.0 / 0.9) * 0.5 + 0.5;
             let course = sin(r.y * 6283.0 / 0.7 + wale * 2.0);
             relief = wale * 0.00002 + course * 0.000008;
             let collar = smoothstep(0.004, 0.0, collar_depth(r) - 0.012);
             let rib = sin(atan2(r.x, r.z - character.rest_head.z) * 420.0) * 0.5 + 0.5;
             relief = mix(relief, rib * 0.00006, collar);
+        } else if (g == 1u && hose()) {
+            // Knit hose; grained leather boots, their shafts turned down at the top.
+            let wale = sin(atan2(r.x - HIP.x * sign(r.x), r.z) * 160.0) * 0.5 + 0.5;
+            relief = wale * 0.000016;
+            if (r.y < BOOT_TOP) {
+                relief = value_noise3(r * 1400.0) * 0.000022;
+                let cuff = smoothstep(BOOT_TOP - 0.004, BOOT_TOP - 0.0015, r.y)
+                    - smoothstep(BOOT_TOP - 0.045, BOOT_TOP - 0.042, r.y);
+                h += cloth * saturate(cuff) * 0.0006 * saturate(0.03 / max(footprint, 1e-7) - 1.0);
+            }
+            let belt = belt_band(r);
+            relief += belt * 0.00025;
         } else if (g == 1u) {
             let twill = sin((r.y * 0.94 + (r.x + r.z) * 0.34) * 6283.0 / 0.8) * 0.5 + 0.5;
             relief = twill * 0.000016 + value_noise3(r * 2500.0) * 0.000006;
@@ -338,6 +368,7 @@ struct SkinLight {
     n_soft: vec3<f32>,   // smoothed normal (light under the skin doesn't see the pores)
     roughness: f32,      // perceptual, sharp lobe
     specular: f32,       // 0..1 scale of the highlights
+    metal: f32,          // 0 skin, cloth .. 1 bare metal (mail): no diffuse, highlights in its color
     scatter: f32,        // 0 none (cloth) .. 1 skin
     curvature: f32,      // 1/m
     thin: f32,           // ears, nostrils: light shines through from behind
@@ -369,7 +400,7 @@ fn mouth_light(c: vec3<f32>, inside: f32) -> vec3<f32> {
     return mix(c, lum * vec3<f32>(1.18, 0.92, 0.78), inside);
 }
 
-fn skin_spec(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, rough: f32) -> f32 {
+fn skin_spec(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, rough: f32, f0: f32) -> f32 {
     let h = normalize(l + v);
     let n_dot_l = saturate(dot(n, l));
     let n_dot_v = max(dot(n, v), 1e-4);
@@ -379,7 +410,7 @@ fn skin_spec(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, rough: f32) -> f32 {
     let a2 = min(sq(rough * 1.3), 1.0);
     let d = mix(d_ggx(saturate(dot(n, h)), a2), d_ggx(saturate(dot(n, h)), a1), 0.85);
     let vis = v_smith_ggx_correlated(n_dot_v, n_dot_l, a1);
-    let f = f_schlick(vec3<f32>(0.028), saturate(dot(l, h))).x;
+    let f = f_schlick(vec3<f32>(f0), saturate(dot(l, h))).x;
     return d * vis * f * n_dot_l;
 }
 
@@ -430,6 +461,11 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
     // Other people's limbs (and this body's other limbs) as capsules: the sun they block just
     // above the skin (x) and the sky they hide (y), where the shadow map is too coarse.
     let caps = capsule_occlusion(rel, s.n_soft);
+    // Metal reflects in its own color and scatters nothing.
+    let lum = max(luminance(s.albedo), 1e-3);
+    let f0 = mix(0.028, lum, s.metal);
+    let tint = mix(vec3<f32>(1.0), s.albedo / lum, s.metal);
+    let albedo = s.albedo * (1.0 - s.metal);
 
     let l = frame.sun_dir.xyz;
     let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
@@ -443,14 +479,14 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
         }
         // Light diffusing under the skin reddens shadow edges.
         let sh = vec3<f32>(pow(shadow, mix(1.0, 0.9, imitate)), shadow, pow(shadow, mix(1.0, 1.05, imitate)));
-        let diffuse = s.albedo * INV_PI * wrap3(nl, wrap);
-        let spec = skin_spec(s.n, v, l, s.roughness) * s.specular;
+        let diffuse = albedo * INV_PI * wrap3(nl, wrap);
+        let spec = skin_spec(s.n, v, l, s.roughness, f0) * s.specular * tint;
         color += diffuse * sh * sun;
         specular += spec * shadow * sun;
         // Thin parts glow red when the light is behind them.
         if (s.thin > 0.0) {
             let back = pow(saturate(dot(v, -l)), 3.0) * saturate(-dot(s.n_soft, l) + 0.3);
-            color += s.albedo * vec3<f32>(1.0, 0.32, 0.18) * (back * s.thin * 0.6 * shadow) * sun * INV_PI;
+            color += albedo * vec3<f32>(1.0, 0.32, 0.18) * (back * s.thin * 0.6 * shadow) * sun * INV_PI;
         }
     }
 
@@ -464,8 +500,8 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
         let pl = to_light * inverseSqrt(max(dist2, 1e-8));
         let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
         let nl = vec3<f32>(dot(nr, pl), dot(ng, pl), dot(nb, pl));
-        let diffuse = s.albedo * INV_PI * wrap3(nl, wrap);
-        let spec = skin_spec(s.n, v, pl, s.roughness) * s.specular;
+        let diffuse = albedo * INV_PI * wrap3(nl, wrap);
+        let spec = skin_spec(s.n, v, pl, s.roughness, f0) * s.specular * tint;
         // Light diffusing under the skin reddens the hair's shadow edges too.
         let hair = hair_over_skin(s, pl);
         let sh = vec3<f32>(pow(hair, mix(1.0, 0.9, imitate)), hair, pow(hair, mix(1.0, 1.05, imitate)));
@@ -473,7 +509,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
         specular += spec * hair * light.color_radius.rgb * falloff;
         if (s.thin > 0.0) {
             let back = pow(saturate(dot(v, -pl)), 3.0) * saturate(-dot(s.n_soft, pl) + 0.3);
-            lit += s.albedo * vec3<f32>(1.0, 0.32, 0.18) * back * s.thin * 0.6 * INV_PI;
+            lit += albedo * vec3<f32>(1.0, 0.32, 0.18) * back * s.thin * 0.6 * INV_PI;
         }
         color += lit * light.color_radius.rgb * falloff;
     }
@@ -486,15 +522,15 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
     let irradiance = mouth_light(mix(sky_b, sky_r, vec3<f32>(1.0, 0.5, 0.0)) * PI, s.inside);
     let visibility = min(s.occlusion, screen_ao(rel)) * caps.y;
     // Light bounces inside the skin, so occlusion darkens red less.
-    let ao = ao_multibounce(visibility, s.albedo);
+    let ao = ao_multibounce(visibility, albedo);
     let ao_rgb = mix(ao, sqrt(ao), vec3<f32>(0.5, 0.15, 0.0) * s.scatter);
-    color += s.albedo * irradiance * INV_PI * ao_rgb;
-    color += s.albedo * screen_gi(rel);
+    color += albedo * irradiance * INV_PI * ao_rgb;
+    color += albedo * screen_gi(rel);
     let rough = s.roughness;
     let r = reflect(-v, s.n);
     let ssr = screen_reflection(rel);
     let env = mix(mouth_light(sample_env_rough(r, rough) * sky_vis + fill, s.inside), ssr.rgb, ssr.a);
-    let brdf = env_brdf_approx(vec3<f32>(0.028), rough, n_dot_v);
+    let brdf = env_brdf_approx(vec3<f32>(f0), rough, n_dot_v) * tint;
     specular += env * brdf * s.specular * specular_occlusion(n_dot_v, visibility, rough * rough);
     // Peach fuzz catches light at grazing angles (on the surface: not blurred).
     let fuzz = pow(1.0 - n_dot_v, 4.0) * 0.09 * s.scatter;
@@ -507,6 +543,104 @@ struct SkinSurface {
     light: SkinLight,
 };
 
+// Iron mail: rings of dark, oiled iron, brighter on their worn tops, the gaps dark (the
+// padding under them in shade).
+struct Mail {
+    albedo: vec3<f32>,
+    roughness: f32,
+    metal: f32,
+};
+fn mail_surface(uv: vec2<f32>, footprint: f32, seed: f32) -> Mail {
+    let rings = mail_rings(uv, footprint);
+    var m: Mail;
+    let rust = smoothstep(0.75, 0.95, value_noise3(vec3<f32>(uv * 60.0, seed)));
+    let iron = vec3<f32>(0.2, 0.195, 0.19) * (0.8 + 0.35 * rings.z) * (0.7 + 0.4 * rings.y);
+    let iron_rust = mix(iron, vec3<f32>(0.16, 0.08, 0.04), rust * 0.6);
+    m.albedo = mix(vec3<f32>(0.012, 0.011, 0.01), iron_rust, rings.x);
+    m.roughness = mix(0.9, mix(0.42, 0.65, rust) + 0.1 * rings.z, rings.x);
+    m.metal = rings.x * (1.0 - 0.7 * rust);
+    return m;
+}
+
+// Bump a shading normal `n` by a height `h` (m) over the surface at camera-relative `rel`
+// (Mikkelsen's surface gradient, from screen derivatives).
+fn bump(n: vec3<f32>, rel: vec3<f32>, h: f32) -> vec3<f32> {
+    let dpx = dpdx(rel);
+    let dpy = dpdy(rel);
+    let r1 = cross(dpy, n);
+    let r2 = cross(n, dpx);
+    let det = dot(dpx, r1);
+    let grad = sign(det) * (dpdx(h) * r1 + dpdy(h) * r2);
+    return normalize(abs(det) * n - grad);
+}
+
+// A gambeson's or hauberk's skirt (7), a tabard's panels (8), a mail coif (9). The skirt and
+// panels carry the belt round their tops.
+fn armor_surface(in: SkinOut, n_in: vec3<f32>) -> SkinLight {
+    let r = in.rest;
+    let footprint = max(length(dpdx(r)), length(dpdy(r)));
+    let seed = character.look.w * 917.0;
+    let big = saturate(0.03 / max(footprint, 1e-7) - 1.0);
+    var s: SkinLight;
+    s.n_soft = n_in;
+    s.curvature = 0.0;
+    s.thin = 0.0;
+    s.scatter = 0.0;
+    s.occlusion = 1.0;
+    var h = 0.0;
+    var mail = 0.0;
+    var uv = vec2<f32>(atan2(r.x, r.z) * 0.17, r.y);
+    if (in.part == 9u) {
+        let d = r - character.rest_head.xyz;
+        uv = vec2<f32>(atan2(d.x, d.z) * 0.1, r.y);
+        mail = 1.0;
+    } else if (in.part == 7u && u32(character.top.w + 0.5) == 4u) {
+        // The padding shows below the mail's hem.
+        mail = smoothstep(-0.235, -0.225, r.y);
+    }
+    if (in.part == 8u) {
+        let wool = 0.85 + 0.3 * value_noise3(r * vec3<f32>(500.0, 200.0, 500.0) + seed);
+        let hem = smoothstep(-0.31, -0.315, r.y);
+        s.albedo = character.accent.xyz * wool * (1.0 - 0.3 * hem);
+        s.roughness = 0.9;
+        s.specular = 0.25;
+        h = value_noise3(r * vec3<f32>(80.0, 20.0, 80.0)) * 0.0008 * big;
+    } else {
+        let weave = 0.88 + 0.24 * value_noise3(r * vec3<f32>(700.0, 250.0, 700.0) + seed);
+        let f = fract(uv.x / QUILT);
+        let puff = sqrt(max(sin(f * 3.14159265), 0.0));
+        let seam = 1.0 - smoothstep(0.0, 0.07, min(f, 1.0 - f));
+        s.albedo = character.top.xyz * weave * (0.8 + 0.2 * puff) * (1.0 - 0.35 * seam);
+        s.roughness = 0.92;
+        s.specular = 0.2;
+        h = (puff * 0.0016 - seam * 0.0006) * big;
+    }
+    if (mail > 0.0) {
+        let m = mail_surface(uv, footprint, seed);
+        s.albedo = mix(s.albedo, m.albedo, mail);
+        s.roughness = mix(s.roughness, m.roughness, mail);
+        s.specular = mix(s.specular, 1.0, mail);
+        s.metal = m.metal * mail;
+        let rings = mail_rings(uv, footprint);
+        h = mix(h, (rings.x * rings.y * 0.0009) * big, mail);
+    }
+    if (in.part != 9u) {
+        // The belt: dark leather, a brass buckle in front.
+        let belt = smoothstep(WAIST + 0.006, WAIST + 0.01, r.y);
+        let buckle = belt * smoothstep(0.022, 0.018, abs(r.x)) * step(0.0, r.z);
+        s.albedo = mix(s.albedo, vec3<f32>(0.03, 0.019, 0.012), belt);
+        s.roughness = mix(s.roughness, 0.45, belt);
+        s.specular = mix(s.specular, 0.6, belt);
+        s.metal = s.metal * (1.0 - belt);
+        s.albedo = mix(s.albedo, vec3<f32>(0.6, 0.45, 0.2), buckle);
+        s.metal = mix(s.metal, 1.0, buckle);
+        s.roughness = mix(s.roughness, 0.3, buckle);
+        s.specular = mix(s.specular, 1.0, buckle);
+    }
+    s.n = bump(n_in, in.rel, h);
+    return s;
+}
+
 // Teeth (ivory enamel, a little translucent and greyer toward the biting edge), gums and
 // tongue (wet, red, the tongue rough with papillae).
 fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
@@ -518,6 +652,9 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
     s.n_soft = n;
     s.curvature = 0.0;
     s.thin = 0.0;
+    if (in.part >= 7u) {
+        return armor_surface(in, n);
+    }
     if (in.part == 6u) {
         // A hood: the top's heather knit.
         let seed = character.look.w * 917.0;
@@ -755,6 +892,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     specular *= saturate(1.0 + 0.15 * nose + 0.1 * forehead - 0.2 * cheeks) * (1.0 - patchy * 0.3);
 
     var scatter = 1.0;
+    var metal = 0.0;
     // The shirt: a heather knit in the outfit's color, its collar band a shade darker, and
     // the accent's band. Twill trousers with a dark leather belt; black leather shoes on pale
     // rubber soles.
@@ -763,11 +901,48 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
         var fabric = vec3<f32>(0.0);
         var fabric_rough = 0.9;
         var fabric_spec = 0.25;
-        if (g == 0u) {
+        if (g == 0u && padded()) {
+            // Quilted linen, darker along its stitched seams and in the channels' shade; mail
+            // over it; the tabard over both.
+            let weave = 0.88 + 0.24 * value_noise3(r * vec3<f32>(700.0, 250.0, 700.0) + seed);
+            let q = quilt(r);
+            fabric = character.top.xyz * weave * (0.8 + 0.2 * q.x) * (1.0 - 0.35 * q.y);
+            fabric_rough = 0.92;
+            fabric_spec = 0.2;
+            let mail = mail_cover(r);
+            if (mail > 0.0) {
+                let m = mail_surface(mail_uv(r), footprint, seed);
+                fabric = mix(fabric, m.albedo, mail);
+                fabric_rough = mix(fabric_rough, m.roughness, mail);
+                fabric_spec = mix(fabric_spec, 1.0, mail);
+                metal = mail * m.metal;
+            }
+            let tabard = select(0.0, tabard_band(r), u32(character.accent.w + 0.5) == 4u);
+            let wool = 0.85 + 0.3 * value_noise3(r * vec3<f32>(500.0, 200.0, 500.0) + seed);
+            fabric = mix(fabric, character.accent.xyz * wool, tabard);
+            fabric_rough = mix(fabric_rough, 0.9, tabard);
+            fabric_spec = mix(fabric_spec, 0.25, tabard);
+        } else if (g == 0u) {
             let heather = 0.82 + 0.36 * value_noise3(r * vec3<f32>(900.0, 300.0, 900.0) + seed);
             let collar = smoothstep(0.004, 0.0, collar_depth(r) - 0.012);
             fabric = character.top.xyz * heather * (1.0 - 0.25 * collar);
             fabric = mix(fabric, character.accent.xyz * heather, accent_band(r, collar));
+        } else if (g == 1u && hose()) {
+            // Wool hose; boots of dark brown leather from below the knees, their tops turned
+            // down.
+            let heather = 0.82 + 0.36 * value_noise3(r * vec3<f32>(900.0, 300.0, 900.0) + seed);
+            fabric = character.bottom.xyz * heather;
+            if (r.y < BOOT_TOP) {
+                let grain = 0.88 + 0.24 * value_noise3(r * 900.0 + seed);
+                let cuff = smoothstep(BOOT_TOP - 0.045, BOOT_TOP - 0.042, r.y);
+                fabric = mix(vec3<f32>(0.03, 0.018, 0.011), vec3<f32>(0.06, 0.04, 0.026), cuff) * grain;
+                fabric_rough = mix(0.42, 0.6, cuff);
+                fabric_spec = 0.6;
+            }
+            let belt = belt_band(r);
+            fabric = mix(fabric, vec3<f32>(0.03, 0.019, 0.012), belt);
+            fabric_rough = mix(fabric_rough, 0.45, belt);
+            fabric_spec = mix(fabric_spec, 0.6, belt);
         } else if (g == 1u) {
             let mottle = 0.85 + 0.3 * value_noise3(r * vec3<f32>(400.0, 120.0, 400.0) + seed);
             fabric = character.bottom.xyz * mottle;
@@ -820,6 +995,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     s.n_soft = n_soft;
     s.roughness = clamp(rough, 0.12, 1.0);
     s.specular = specular;
+    s.metal = metal * cloth;
     s.scatter = scatter;
     s.curvature = in.curvature;
     s.thin = saturate(ears + nose * 0.3) * scatter;

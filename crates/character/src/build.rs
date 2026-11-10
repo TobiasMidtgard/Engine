@@ -32,8 +32,8 @@ pub struct CharacterMeshes {
     pub landmarks: Option<Landmarks>,
     /// The skeleton the skin is weighted to (`None` when the pack has no rig).
     pub rig: Option<Rig>,
-    /// The left thigh as a capsule for a skirt to stay outside: hip and knee joints and radii
-    /// (`skirt::thigh`). `None` without a skirt.
+    /// The left thigh as a capsule for a skirt, a coat or a tabard to stay outside: hip and
+    /// knee joints and radii (`skirt::thigh`). `None` without any of them.
     pub thigh: Option<[[f32; 4]; 2]>,
     /// Where the lids cross each eye (`eyes::lid_curves`).
     pub lids: [[f32; 4]; 4],
@@ -167,16 +167,32 @@ pub fn build(
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
     }
     skin.add_part(pack, &shoes::build(pack, &morphed));
-    let thigh = (cut.bottom == clothes::Bottom::Skirt)
+    // Shells round both legs, inside out: a skirt, a coat's skirt, a tabard's panels. Each is
+    // skinned to the hips and thighs and kept outside the thighs (`clear_thighs`).
+    let tabard = skirt::TABARD;
+    let shells = [
+        (cut.bottom == clothes::Bottom::Skirt).then_some(skirt::SKIRT),
+        cut.coat().then_some(skirt::COAT),
+        (cut.accent == clothes::Accent::Tabard).then(|| {
+            if cut.coat() {
+                tabard
+            } else {
+                tabard.without_coat()
+            }
+        }),
+    ];
+    let thigh = shells
+        .iter()
+        .any(Option::is_some)
         .then(|| skirt::thigh(pack, &morphed))
         .flatten();
-    if cut.bottom == clothes::Bottom::Skirt {
+    for shell in shells.iter().flatten() {
         let first = skin.positions.len();
-        skin.add_part(pack, &skirt::build(pack, &morphed));
+        skin.add_part(pack, &skirt::build(pack, &morphed, shell));
         skirt::reweight(pack, &mut skin, first);
     }
-    if headgear == Headgear::Hood {
-        skin.add_part(pack, &hood::build(pack, &morphed, lm0.head));
+    if let Some(fit) = headgear.hood() {
+        skin.add_part(pack, &hood::build(pack, &morphed, lm0.head, fit));
     }
     headgear.cover_skin(&mut skin, lm0.head);
     crate::cover::hide(&mut skin, &pack.bones, &a.hide);
