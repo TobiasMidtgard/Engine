@@ -1216,6 +1216,14 @@ fn setup_program(
             };
             if program == Program::Duel {
                 commands.entity(e).insert(duel::student(&mut c, m.lane));
+            } else if program == Program::Blades {
+                // Three waves of burning dead reach the plinths: the masters on them stand the
+                // whole period (a body that falls goes limp off its plinth, and its lane's
+                // blades never come).
+                commands.entity(e).insert(Vitality {
+                    regen: 120.0,
+                    ..Vitality::new(4000.0)
+                });
             } else {
                 commands.entity(e).insert(Vitality::new(300.0));
             }

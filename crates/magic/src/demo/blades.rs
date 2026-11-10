@@ -2,9 +2,9 @@
 //! carry fire on their weapons; the students answer with blades of hard light, as
 //! `spells_dead` sets two sides on the floor:
 //!
-//! * The necromancers (lanes 3 to 5) raise a stone golem and five skeleton warriors on the
-//!   right of the floor, then each Imbues its creatures with fire (1.8 to 2.2 s): the
-//!   skeletons' blades and the golem's fists burn orange, and every cut they land sets fire.
+//! * The necromancers (lanes 3 to 5) raise a stone golem and five skeleton warriors mid-floor,
+//!   then each Imbues its creatures with fire (1.8 to 2.2 s): the skeletons' blades and the
+//!   golem's fists burn orange, and every cut they land sets fire.
 //! * Lane 2 raises a Greatblade phalanx (2.4 s): five glintstone-blue swords in an arch over its
 //!   head that loose themselves, one after another, at whatever of the dead comes within 9 m.
 //! * Lane 1 calls two Spirit blades (3.0 s) that fly out and fence with the skeletons from either
@@ -13,12 +13,15 @@
 //!   first one after another across the floor and stand in it.
 //! * Lane 0, far out on the left of the line, throws fans of three Glintblades at the golem (6.6
 //!   and 8.2 s), each breaking into shards where it strikes.
-//! * Four more skeletons climb out (9.4 to 10.6 s) and are imbued with fire again; lane 2 takes a
-//!   Bound blade in its hand (10.4 s) and raises a second phalanx (12.2 s), lane 1 drops another
-//!   bladefall on them (12.6 s) and lane 0 throws more glintblades (15 s).
-//! * A third wave (a golem and three skeletons, 14.6 to 15.8 s) burns too; the second phalanx
-//!   looses at it, glintblades go at its golem (16.6 and 18.4 s) and a last bladefall comes down
-//!   on it (19.6 s). It is gone before the period ends.
+//! * Lane 2 raises a phalanx for each wave (2.4, 7, 12.2 and 16.4 s). Four more skeletons climb
+//!   out (9.4 to 10.6 s) and are imbued with fire again; lane 2 takes a Bound blade in its hand
+//!   (10.4 s), lane 1 drops another bladefall on them (12.6 s) and lane 0 throws glintblades at
+//!   them (11.4, 13 and 15 s).
+//! * A third wave (a golem and three skeletons, 14.6 to 15.8 s) burns too; glintblades go at its
+//!   golem (16.6 and 18.4 s) and a last bladefall comes down on it (19.6 s). It is gone before
+//!   the period ends.
+//! * The bladefalls spare the students (Safeguard), and so does the steam their frost makes on
+//!   the burning dead. The masters on the plinths have 4000 health this stop, so none falls.
 //!
 //! The dead rise mid-floor between the two sides (x -0.6 to 2.8, z 5.8 to 7.4), so the whole
 //! fight stays in the stop's one picture.
@@ -61,10 +64,14 @@ pub fn glintblades() -> SpellDesign {
         .named("Glintblades")
 }
 
-/// A frost bladefall: twenty pale blades down the line from the caster to its aim.
+/// A frost bladefall: twenty pale blades down the line from the caster to its aim, sparing
+/// friends.
 pub fn bladefall() -> SpellDesign {
     d(&["blade", "frost"], CastType::Rain)
         .with(Modifier::Split { count: 2 })
+        // It comes down where the dead reach the students' plinths: it spares them, and so
+        // does the steam its frost makes on the burning dead.
+        .with(Modifier::Safeguard)
         .named("Frost bladefall")
 }
 
@@ -126,6 +133,8 @@ pub(super) fn lanes() -> Vec<Lane> {
         of(vec![
             cast(6.6, glintblades(), AimAt::Golem),
             cast(8.2, glintblades(), AimAt::Golem),
+            cast(11.4, glintblades(), AimAt::Foe),
+            cast(13.0, glintblades(), AimAt::Foe),
             cast(15.0, glintblades(), AimAt::Foe),
             cast(16.6, glintblades(), AimAt::Golem),
             cast(18.4, glintblades(), AimAt::Golem),
@@ -136,10 +145,13 @@ pub(super) fn lanes() -> Vec<Lane> {
             cast(12.6, bladefall(), AimAt::Foe),
             cast(19.6, bladefall(), AimAt::Foe),
         ]),
+        // A phalanx for each wave, and one more as the second wave comes on.
         of(vec![
             cast(2.4, phalanx(), AimAt::Foe),
+            cast(7.0, phalanx(), AimAt::Foe),
             cast(10.4, bound_blade(), AimAt::Foe),
             cast(12.2, phalanx(), AimAt::Foe),
+            cast(16.4, phalanx(), AimAt::Foe),
         ]),
         // The dead rise mid-floor before the plinths, between the two sides, near enough to
         // the camera that the whole fight stays in one picture.

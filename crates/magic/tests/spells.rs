@@ -447,6 +447,45 @@ fn fire_on_a_chilled_dummy_makes_steam() {
 }
 
 #[test]
+fn a_safeguarded_spells_steam_spares_its_side() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    // A friend (the same side) right beside the dummy, in the cloud.
+    let friend = mage(&mut app, DVec3::new(1.2, 0.0, -10.0), Mastery::Novice);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Bolt).with(Modifier::Safeguard),
+        Aim::Entity(d),
+    );
+    run(&mut app, 0.8);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt).with(Modifier::Safeguard),
+        Aim::Entity(d),
+    );
+    run(&mut app, 3.0);
+    assert!(
+        hits_on(&app, d).iter().any(|h| h.reaction == Some("steam")),
+        "it still makes steam"
+    );
+    let mut q = app.world.query::<&runtime::Field>();
+    assert!(
+        q.iter(&app.world)
+            .any(|f| f.cast.spell.weave.key == "steam" && f.cast.spell.safeguard),
+        "the cloud keeps the safeguard"
+    );
+    assert!(
+        hits_on(&app, friend).iter().all(|h| h.damage <= 0.0),
+        "the friend in the cloud is spared"
+    );
+    assert!(app.world.get::<Vitality>(friend).unwrap().health >= 100.0);
+}
+
+#[test]
 fn a_split_volley_shares_its_energy() {
     let single = SpellDesign::new(&["fire"], CastType::Bolt);
     let volley = single.clone().with(Modifier::Split { count: 5 });
@@ -4398,6 +4437,7 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
     let mut most_stuck = 0;
     let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
     let mut bound_at = None;
+    let mut lowest = f32::MAX;
     let steps = (demo::blades::PERIOD * 60.0) as usize;
     for i in 0..steps {
         app.update();
@@ -4429,6 +4469,11 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
                     println!("  {t:.2} blade out of the picture: {k} at {:.1}", b.pos);
                 }
             }
+        }
+        if i % 30 == 0 {
+            // The masters on the plinths stand the whole period.
+            let mut q = app.world.query::<(&demo::art::HallMage, &Vitality)>();
+            lowest = q.iter(&app.world).fold(lowest, |m, (_, v)| m.min(v.health));
         }
         let stuck = blades_now(&mut app)
             .iter()
@@ -4483,13 +4528,13 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
     println!(
         "phalanx {}, spirit {}, bound {}, bladefall {} (most stuck {most_stuck}); imbued at most \
          {most_imbued}; spirit cuts {spirit_cuts}, burning cuts {burning_cuts}, blade hits \
-         {blade_hits}; bound at {bound_at:?}",
+         {blade_hits}; bound at {bound_at:?}; lowest master {lowest}",
         count("phalanx"),
         count("spirit"),
         count("bound"),
         count("bladefall"),
     );
-    assert_eq!(count("phalanx"), 10, "two phalanxes of five");
+    assert_eq!(count("phalanx"), 20, "four phalanxes of five");
     assert_eq!(count("spirit"), 2);
     assert_eq!(count("bound"), 1);
     assert_eq!(count("bladefall"), 60, "three bladefalls of twenty");
@@ -4501,5 +4546,9 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
     assert!(
         missed * 20 < looked,
         "the fight left the picture {missed} of {looked} looks"
+    );
+    assert!(
+        lowest > 1000.0,
+        "a master on a plinth nearly fell: {lowest}"
     );
 }

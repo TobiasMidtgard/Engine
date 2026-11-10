@@ -696,8 +696,17 @@ pub fn apply_hits(
                 scale: 1.5,
                 color: r.color,
             });
+            // What a safeguarded spell sets off spares its side as the spell does: frost
+            // blades cutting a burning foe don't scald the friend beside it with the steam.
+            let guard = spell.safeguard;
             let child = |s: Arc<Spell>| CastInfo {
-                spell: s,
+                spell: if guard && !s.safeguard {
+                    let mut g = (*s).clone();
+                    g.safeguard = true;
+                    Arc::new(g)
+                } else {
+                    s
+                },
                 caster: h.cast.caster,
                 side: h.cast.side,
                 faction: h.cast.faction,
