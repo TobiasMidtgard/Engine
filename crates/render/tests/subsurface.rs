@@ -249,10 +249,11 @@ fn light_spreads_under_skin_red_farthest_and_highlights_stay_sharp() {
         s[0] > s[1] && s[1] >= s[2],
         "red reaches farthest, blue least: {s:?}"
     );
-    // The lit side loses a little light to the shadow at its edge.
+    // The lit side loses a little light to the shadow at its edge: red, which reaches 2 mm
+    // (blue stays within a few tenths of a millimetre, as in measured skin).
     let (pl, sl) = (at(&plain, -0.002), at(&skin, -0.002));
     assert!(
-        sl[2] < pl[2],
+        sl[0] < pl[0],
         "the lit edge gives light away: {pl:?} -> {sl:?}"
     );
     // The highlight keeps its peak (specular doesn't scatter).

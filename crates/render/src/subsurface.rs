@@ -8,8 +8,8 @@
 //! same units as the color) so highlights stay sharp. The feature also answers
 //! `RenderFeature::needs_subsurface` with true while it draws such pixels. Right after the
 //! opaque scene, two passes blur the marked pixels' diffuse light along x and then y with the
-//! skin's diffusion profile (a sum of Gaussians fitted to measured skin, d'Eon and Luebke 2007,
-//! per channel), only within marked pixels and not across steps in depth, and add the
+//! skin's diffusion profile (Burley's normalized diffusion, red reaching six times as far as
+//! green, twelve as blue), only within marked pixels and not across steps in depth, and add the
 //! specular back. The reach follows `RenderSettings::subsurface_width` (meters at strength 1),
 //! so a face scatters the same at any distance; far away it covers less than a pixel and the
 //! pass leaves it be.
@@ -33,14 +33,15 @@ pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8U
 
 /// Kernel samples per pass, the center included (`SSS_SAMPLES` in subsurface.wgsl).
 const SAMPLES: usize = 17;
-/// The kernel spans this many profile units on either side of the center.
-const RANGE: f32 = 2.0;
 /// Samples bunch toward the center by this power (the profile is peaked).
 const EXPONENT: f32 = 2.0;
-/// How far each channel's light reaches, relative to the profile (red farthest).
-const FALLOFF: [f32; 3] = [1.0, 0.37, 0.3];
-/// Share of each channel's light that scatters (the rest stays where it entered).
-const STRENGTH: [f32; 3] = [0.48, 0.41, 0.28];
+/// Each channel's Burley shape distance `d`, as a share of the kernel's reach: red eight times
+/// within it, so all but a twentieth of red's light lands inside. Green and blue in the ratio of
+/// measured skin's diffuse mean free paths (Jensen et al. 2001, "skin1": about 3.7, 1.4 and
+/// 0.7 mm) over Burley's albedo scaling for skin's surface albedo (0.91, 0.34, 0.27): red
+/// spreads six times as far as green and twelve times as far as blue, so shadow edges warm
+/// and the texture's detail survives in green and blue.
+const SHAPE: [f32; 3] = [1.0 / 8.0, 0.17 / 8.0, 0.08 / 8.0];
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -50,71 +51,77 @@ struct SssUniform {
     dir: [f32; 4],
 }
 
-/// The diffusion profile at distance `r` (profile units) per channel: the sum of Gaussians
-/// fitted to measured skin, less the narrowest (light that comes straight back out).
-fn profile(r: f32) -> [f32; 3] {
-    const GAUSSIANS: [(f32, f32); 5] = [
-        (0.100, 0.0484),
-        (0.118, 0.187),
-        (0.113, 0.567),
-        (0.358, 1.99),
-        (0.078, 7.41),
-    ];
-    let mut out = [0.0; 3];
-    for (c, o) in out.iter_mut().enumerate() {
-        let rr = r / (0.001 + FALLOFF[c]);
-        *o = GAUSSIANS
-            .iter()
-            .map(|&(w, v)| w * (-(rr * rr) / (2.0 * v)).exp() / (std::f32::consts::TAU * v))
-            .sum();
+/// Burley's normalized diffusion profile (Christensen and Burley 2015, as Unreal and HDRP
+/// scatter skin) at radius `r` for shape distance `d`: the light leaving the surface at `r`
+/// from where it entered, per unit area; it integrates to 1 over the plane.
+fn burley(r: f32, d: f32) -> f32 {
+    ((-r / d).exp() + (-r / (3.0 * d)).exp()) / (8.0 * std::f32::consts::PI * d * r)
+}
+
+/// The share of channel `c`'s light the profile lands in the strip `lo..hi` along one axis
+/// (reach units): its marginal, so that the x and then y passes spread it over the plane as
+/// the profile does (Jimenez et al. 2015 section 3).
+fn strip_share(c: usize, lo: f32, hi: f32) -> f32 {
+    let d = SHAPE[c];
+    // Midpoints in x, and in y = ymax t² (dense near the axis, finer there than blue's shape
+    // distance; the singular center is never sampled at r = 0), both halves of y.
+    let (nx, nt) = (48, 160);
+    let ymax = 1.5f32;
+    let dx = (hi - lo) / nx as f32;
+    let dt = 1.0 / nt as f32;
+    let mut sum = 0.0f64;
+    for i in 0..nx {
+        let x = lo + (i as f32 + 0.5) * dx;
+        for j in 0..nt {
+            let t = (j as f32 + 0.5) * dt;
+            let y = ymax * t * t;
+            let dy = 2.0 * ymax * t * dt;
+            sum += 2.0 * (burley((x * x + y * y).sqrt(), d) * dy) as f64;
+        }
     }
-    out
+    (sum * dx as f64) as f32
 }
 
 /// The separable kernel: per sample the weight per channel and the offset (-1..1 of the
-/// reach), center first; each channel's weights add up to 1.
+/// reach), center first; each channel's weights add up to 1 (what the profile carries past
+/// the reach is given back to the samples in proportion).
 fn kernel() -> [[f32; 4]; SAMPLES] {
-    let step = 2.0 * RANGE / (SAMPLES - 1) as f32;
+    static KERNEL: std::sync::OnceLock<[[f32; 4]; SAMPLES]> = std::sync::OnceLock::new();
+    *KERNEL.get_or_init(build_kernel)
+}
+
+fn build_kernel() -> [[f32; 4]; SAMPLES] {
+    let half = (SAMPLES / 2) as f32;
     let mut k = [[0.0f32; 4]; SAMPLES];
     for (i, s) in k.iter_mut().enumerate() {
-        let o = -RANGE + i as f32 * step;
-        s[3] = RANGE * o.signum() * (o.abs() / RANGE).powf(EXPONENT);
+        let o = (i as f32 - half) / half;
+        s[3] = o.signum() * o.abs().powf(EXPONENT);
     }
     let offsets: Vec<f32> = k.iter().map(|s| s[3]).collect();
     for (i, s) in k.iter_mut().enumerate() {
-        let before = if i > 0 {
-            (offsets[i] - offsets[i - 1]).abs()
+        // Each sample stands for the strip half-way to its neighbours.
+        let lo = if i > 0 {
+            (offsets[i] + offsets[i - 1]) / 2.0
         } else {
-            0.0
+            -1.0
         };
-        let after = if i + 1 < SAMPLES {
-            (offsets[i] - offsets[i + 1]).abs()
+        let hi = if i + 1 < SAMPLES {
+            (offsets[i] + offsets[i + 1]) / 2.0
         } else {
-            0.0
+            1.0
         };
-        let area = (before + after) / 2.0;
-        let p = profile(offsets[i]);
-        for c in 0..3 {
-            s[c] = area * p[c];
+        for (c, w) in s.iter_mut().take(3).enumerate() {
+            *w = strip_share(c, lo, hi);
+        }
+    }
+    for c in 0..3 {
+        let sum: f32 = k.iter().map(|s| s[c]).sum();
+        for s in &mut k {
+            s[c] /= sum;
         }
     }
     // Center first.
     k.swap(0, SAMPLES / 2);
-    let (center, rest) = k.split_at_mut(1);
-    for c in 0..3 {
-        let sum: f32 = center.iter().chain(rest.iter()).map(|s| s[c]).sum();
-        for s in center.iter_mut().chain(rest.iter_mut()) {
-            s[c] /= sum;
-        }
-        center[0][c] = (1.0 - STRENGTH[c]) + STRENGTH[c] * center[0][c];
-        for s in rest.iter_mut() {
-            s[c] *= STRENGTH[c];
-        }
-    }
-    // Offsets in units of the reach.
-    for s in &mut k {
-        s[3] /= RANGE;
-    }
     k
 }
 
