@@ -158,7 +158,7 @@ impl Plugin for MagicPlugin {
                     .chain()
                     .in_set(MagicSet::Cast),
             )
-            .add_systems(Startup, player::bind_actions)
+            .add_systems(Startup, (player::bind_actions, paint_pictures))
             .add_systems(
                 Update,
                 (
@@ -283,5 +283,26 @@ impl Plugin for MagicPlugin {
         demons::register(app);
         wilds::register(app);
         demo::build(app);
+    }
+}
+
+/// The pictures and meshes magic makes in code (a hellgate's vortex and hellstone cracks, an
+/// imp's wing, the Wilds' leaf cluster), made once at startup rather than in the frame the first
+/// gate or leaf appears: the leaf picture alone took 60 ms on the build server, a stutter.
+fn paint_pictures(
+    mut wilds: ResMut<wilds::WildsMeshes>,
+    mut demons: ResMut<demons::DemonMeshes>,
+    images: Option<ResMut<engine_assets::Assets<engine_render::Image>>>,
+    meshes: Option<ResMut<engine_assets::Assets<engine_render::Mesh>>>,
+) {
+    if let Some(mut images) = images {
+        wilds.leaf(&mut images);
+        demons.vortex(pact_art::VortexLayer::ALL[0], &mut images);
+        demons.cracks(&mut images);
+    }
+    if let Some(mut meshes) = meshes {
+        wilds.card(&mut meshes);
+        demons.wing(&mut meshes);
+        demons.disc(&mut meshes);
     }
 }

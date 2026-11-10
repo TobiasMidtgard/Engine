@@ -5245,6 +5245,13 @@ fn wild_app() -> App {
 }
 
 #[test]
+fn the_leaf_picture_is_painted_at_startup_not_when_the_first_leaf_grows() {
+    let mut app = wild_app();
+    app.update();
+    assert!(app.world.resource::<wilds::WildsMeshes>().ready());
+}
+
+#[test]
 fn roots_break_out_of_the_floor_coil_up_a_dummy_and_hold_it_until_they_slide_back() {
     let mut app = wild_app();
     let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);

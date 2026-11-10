@@ -169,6 +169,11 @@ pub struct WildsMeshes {
 }
 
 impl WildsMeshes {
+    /// The leaf picture and its card are made (lib.rs makes them at startup).
+    pub fn ready(&self) -> bool {
+        self.card.is_some() && self.leaf.is_some()
+    }
+
     pub fn card(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
         *self
             .card
