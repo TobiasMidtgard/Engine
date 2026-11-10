@@ -77,7 +77,9 @@ mod humanoid;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
+use engine_world::animation::{BodyRequest, SkeletonPose};
 use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest, BodyFit};
+use engine_world::combat::AttackWindow;
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
@@ -453,6 +455,12 @@ type PoseItem<'a> = (
         Has<AppearanceRequest>,
         // That person's own skeleton (the pose is sized to it).
         Option<&'a BodyFit>,
+        // Posed by the animation module from intent (`intent_body.rs`): its pose, and
+        // whether it holds the props of its own.
+        Option<&'a SkeletonPose>,
+        Option<&'a crate::intent_body::IntentBody>,
+        Has<BodyRequest>,
+        Has<AttackWindow>,
     ),
 );
 
@@ -529,8 +537,15 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let (animal, mind, bird, motor, memory, looks, asks, fit) = animal;
+        let (animal, mind, bird, motor, memory, looks, asks, fit, pose, body, requested, armed) =
+            animal;
         let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks.is_some() || asks);
+        // The animation module poses it and holds its weapons (`intent_body.rs`).
+        let posed_elsewhere = drawn_elsewhere
+            && body.is_some_and(|b| b.asked)
+            && requested
+            && armed
+            && pose.is_some();
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
@@ -616,7 +631,7 @@ pub(crate) fn pose_stand_ins(
         let worn = drawn_elsewhere
             .then(|| fit.zip(st.motion.body()))
             .flatten()
-            .and_then(|(f, (s, _))| character::worn_offsets(f, s));
+            .and_then(|(f, (s, _))| character::worn_frames(f, s, pose.filter(|_| posed_elsewhere)));
         let helmed = looks.is_some_and(|l| HELMED.contains(&l.headgear.as_str()));
         let tabarded = looks.is_some_and(|l| l.outfit.accent_on == "tabard");
         let helmet = placed(Part::Head);
@@ -630,15 +645,16 @@ pub(crate) fn pose_stand_ins(
                 (Some(_), Some(humanoid::Worn::Head)) if !helmed => None,
                 (Some(_), Some(humanoid::Worn::Tabard)) if tabarded => None,
                 (Some([hips, chest, head]), Some(w)) => {
-                    p.pos += match w {
+                    let frame = match w {
                         humanoid::Worn::Hips | humanoid::Worn::Tabard => hips,
                         humanoid::Worn::Chest => chest,
                         humanoid::Worn::Head => head,
                     };
+                    (p.pos, p.rot) = frame.carry(p.pos, p.rot);
                     if w == humanoid::Worn::Head {
                         // Grown about the middle of the head.
-                        let middle =
-                            helmet.pos + head + helmet.rot * crate::art::fighter::rig::HEAD_MIDDLE;
+                        let (at, rot) = head.carry(helmet.pos, helmet.rot);
+                        let middle = at + rot * crate::art::fighter::rig::HEAD_MIDDLE;
                         p.pos = middle + HELMET_GROWTH * (p.pos - middle);
                         scale *= HELMET_GROWTH;
                     }
@@ -652,8 +668,9 @@ pub(crate) fn pose_stand_ins(
             if *t != new {
                 *t = new;
             }
-            let visible =
-                p.visible && !(drawn_elsewhere && !humanoid::held(part.part) && kept.is_none());
+            // What it holds stays, unless the animation module holds props of its own.
+            let held = humanoid::held(part.part) && !posed_elsewhere;
+            let visible = p.visible && !(drawn_elsewhere && !held && kept.is_none());
             if r.visible != visible {
                 r.visible = visible;
             }

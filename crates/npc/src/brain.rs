@@ -1935,11 +1935,14 @@ fn drive(
         _ => {}
     }
     // Mid-attack: commit.
-    if let AttackPhase::Windup { aim, .. } = combat.phase {
+    if let AttackPhase::Windup { aim, heavy, .. } = combat.phase {
         let d = Vec3::new((aim.x - pos.x) as f32, 0.0, (aim.z - pos.z) as f32).normalize_or(fwd);
         out.look = Some(d);
         out.attack = Some(if weapon.style == WeaponStyle::Ranged {
             engine_world::AttackKind::Ranged
+        } else if heavy && combat.anim_strikes {
+            // The animation module presses a heavy strike for it.
+            engine_world::AttackKind::Dash
         } else {
             engine_world::AttackKind::Melee
         });

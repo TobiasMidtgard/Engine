@@ -78,6 +78,10 @@ pub(crate) fn begin_attack(
             AttackKind::Melee
         },
     });
+    // An intent body's strike is pressed through its `MoveIntent` (`intent_body.rs`).
+    if combat.anim_strikes {
+        return;
+    }
     triggers.write(AnimationTrigger {
         entity: me,
         name: if ranged {
@@ -283,6 +287,10 @@ pub(crate) fn defend(
                 Defense::None => {}
             }
             combat.defense = d;
+            if combat.anim_strikes {
+                // Its guard is raised through its `MoveIntent`.
+                continue;
+            }
             triggers.write(AnimationTrigger {
                 entity: me,
                 name: match d {
@@ -311,6 +319,8 @@ pub(crate) struct Strike {
     at: f64,
     /// The attacker's [`Seed`].
     seed: u64,
+    /// The animation module lands it (see [`NpcCombat::anim_strikes`]).
+    anim: bool,
 }
 
 type FighterItem<'a> = (
@@ -340,7 +350,7 @@ pub(crate) fn resolve_attacks(
     mut tokens: ResMut<AttackTokens>,
     mut damage: MessageWriter<DamageEvent>,
     mut traces: MessageWriter<ProjectileTrace>,
-    mut noise: MessageWriter<NoiseEvent>,
+    (mut noise, mut triggers): (MessageWriter<NoiseEvent>, MessageWriter<AnimationTrigger>),
     mut strikes: Local<Vec<Strike>>,
     seeds: Query<&Seed>,
 ) {
@@ -372,6 +382,7 @@ pub(crate) fn resolve_attacks(
             continue;
         };
         if feint && now >= hit_at - 0.22 {
+            crate::intent_body::feint(me, &combat, &mut triggers);
             combat.phase = AttackPhase::Ready;
             combat.ready_at = now + 0.15;
             combat.stats.feints += 1;
@@ -400,6 +411,7 @@ pub(crate) fn resolve_attacks(
             aim,
             at: now,
             seed: seed_of(&seeds, me),
+            anim: combat.anim_strikes,
         });
     }
     if !settings.resolve_hits {
@@ -408,6 +420,8 @@ pub(crate) fn resolve_attacks(
     let phys = physics_backend(&backend, &physics);
     for s in strikes.drain(..) {
         match s.weapon.style {
+            // The animation module's blow lands it.
+            WeaponStyle::Melee if s.anim => {}
             WeaponStyle::Melee => {
                 resolve_melee(&s, &mut q, &seen, &mut models, &mut damage, &mut noise)
             }
@@ -1185,6 +1199,7 @@ mod tests {
             aim: target.position,
             at,
             seed: 0,
+            anim: false,
         };
         let dir = -Vec3::Z;
         let (mut head, mut body, mut legs) = (0, 0, 0);

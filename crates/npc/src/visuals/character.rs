@@ -25,7 +25,8 @@
 //!   height ([`size_of`]), so a short fighter's hands meet the weapon where its arms reach and
 //!   the feet stay where the gait plants them.
 //! * **Pose and face.** One writer per entity: on fighters without a `BodyRequest` (whose
-//!   pose the animation module writes), this module writes `SkeletonPose` every step from the
+//!   pose the animation module writes; for an intent body of this crate's, once it has armed
+//!   it), this module writes `SkeletonPose` every step from the
 //!   stand-in's pose, on the animation module's humanoid skeleton (its bone names and parents,
 //!   shared by every fighter through an `Arc`), and `FaceControls`: ARKit weights for blinks,
 //!   pain, effort, fear and panting, and the eyes' gaze in the head. Fighters without a
@@ -33,9 +34,11 @@
 //! * **Bodies drawn elsewhere.** While a character module draws appearances
 //!   (`AppearanceBodies` exists, checked every step), a fighter with an `Appearance` (or
 //!   asking for one) has its stand-in body hidden; what it holds stays (the weapon, the
-//!   shield, a magazine or arrow in hand). Once the person is built (its `BodyFit`), what
-//!   it wears over the clothes stays too, moved onto that person's joints as the character
-//!   module poses them ([`drawn_joints`]): the pouches on its hips (and the team's tabards,
+//!   shield, a magazine or arrow in hand) unless the animation module poses it from intent and
+//!   holds props of its own (`intent_body.rs`). Once the person is built (its `BodyFit`), what
+//!   it wears over the clothes stays too, moved and turned with that person's joints as the
+//!   character module poses them, from the stand-in's pose or the animation module's
+//!   ([`worn_frames`]): the pouches on its hips (and the team's tabards,
 //!   where the look has no tabard of its own), the quiver on its chest, and the helmet shell
 //!   with its crest and brow light on its head where the look's headgear is `mail_coif` (or
 //!   `open_helm`), drawn 9% larger about the middle of the head so it sits over the coif; the
@@ -64,9 +67,10 @@ use engine_core::prelude::*;
 use engine_world::FocusPoints;
 use engine_world::animation::{BodyRequest, BonePose, SkeletonPose};
 use engine_world::character::{
-    ARKIT, Appearance, AppearanceRequest, BodyFit, CharacterQuality, FaceControls, HandControls,
-    Outfit, arkit,
+    ARKIT, Appearance, AppearanceBodies, AppearanceRequest, BodyFit, CharacterQuality,
+    FaceControls, HandControls, Outfit, arkit,
 };
+use engine_world::combat::AttackWindow;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::{DamageEvent, DamageKind};
 
@@ -195,12 +199,25 @@ fn body_bone(name: &str) -> bool {
 /// module poses them: each bone keeps its own length and takes the pose's turn from its rest,
 /// the hips go where the pose puts them, and the body is moved so its feet land on the pose's
 /// feet. `None` for a skeleton without those joints.
-pub(crate) fn drawn_joints(fit: &BodyFit, pose: &[BonePose]) -> Option<[Vec3; 3]> {
-    let n = fit.names.len().min(fit.rest.len()).min(fit.parents.len());
+#[cfg(test)]
+fn drawn_joints(fit: &BodyFit, pose: &[BonePose]) -> Option<[Vec3; 3]> {
     let ours = |name: &str| {
         let i = HUMANOID_BONES.iter().position(|(b, _)| *b == name)?;
-        pose.get(i)
+        pose.get(i).copied()
     };
+    drawn_frames(fit, &ours).map(|f| f.map(|(at, _)| at))
+}
+
+/// Where the person drawn from `fit` has its hips, chest and head joints (model space) when
+/// posed by a pose whose bones `ours` finds by name, as the character module poses them (each
+/// bone keeps its own length and takes the pose's turn from its rest, the hips go where the
+/// pose puts them, and the body is moved so its feet land on the pose's feet), with each
+/// joint's bone as the pose turns it. `None` for a skeleton without those joints.
+fn drawn_frames(
+    fit: &BodyFit,
+    ours: &dyn Fn(&str) -> Option<BonePose>,
+) -> Option<[(Vec3, Quat); 3]> {
+    let n = fit.names.len().min(fit.rest.len()).min(fit.parents.len());
     let mut turn = vec![Quat::IDENTITY; n];
     let mut at = vec![Vec3::ZERO; n];
     let mut posed = vec![false; n];
@@ -245,20 +262,66 @@ pub(crate) fn drawn_joints(fit: &BodyFit, pose: &[BonePose]) -> Option<[Vec3; 3]
         shift /= feet;
     }
     let find = |name: &str| {
-        fit.names[..n]
-            .iter()
-            .position(|b| b == name)
-            .map(|i| at[i] + shift)
+        let i = fit.names[..n].iter().position(|b| b == name)?;
+        Some((at[i] + shift, ours(name)?.rotation))
     };
     Some([find("hips")?, find("chest")?, find("head")?])
 }
 
-/// How far each joint worn pieces hang from (hips, chest, head) is moved on the person a
-/// character module draws from the stand-in's.
-pub(super) fn worn_offsets(fit: &BodyFit, s: &Skeleton) -> Option<[Vec3; 3]> {
-    let drawn = drawn_joints(fit, &bones(s))?;
+/// How the pieces worn from one of the stand-in's joints move onto the person a character
+/// module draws: the stand-in's joint (`own`), where the drawn person has it (`at`), and how
+/// much more that person's bone is turned than the stand-in's (`turn`), model space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct WornFrame {
+    pub own: Vec3,
+    pub at: Vec3,
+    pub turn: Quat,
+}
+
+impl WornFrame {
+    /// A worn piece placed on the stand-in at `pos`, turned `rot`, moved onto the person.
+    pub fn carry(&self, pos: Vec3, rot: Quat) -> (Vec3, Quat) {
+        (self.at + self.turn * (pos - self.own), self.turn * rot)
+    }
+}
+
+/// Where the pieces worn from the stand-in's hips, chest and head go on the person a character
+/// module draws from `fit`: posed by the stand-in, or by `drawn` (another module's pose, found
+/// by bone name).
+pub(super) fn worn_frames(
+    fit: &BodyFit,
+    s: &Skeleton,
+    drawn: Option<&SkeletonPose>,
+) -> Option<[WornFrame; 3]> {
+    let mine = bones(s);
+    let ours = |name: &str| {
+        let i = HUMANOID_BONES.iter().position(|(b, _)| *b == name)?;
+        mine.get(i).copied()
+    };
+    let theirs = |name: &str| {
+        let p = drawn?;
+        p.bones.get(p.index_of(name)?).copied()
+    };
+    let posed = match drawn {
+        Some(_) => drawn_frames(fit, &theirs)?,
+        None => drawn_frames(fit, &ours)?,
+    };
     let own = s.worn_joints();
-    Some([0, 1, 2].map(|i| drawn[i] - own[i]))
+    let names = ["hips", "chest", "head"];
+    let mut out = [WornFrame {
+        own: Vec3::ZERO,
+        at: Vec3::ZERO,
+        turn: Quat::IDENTITY,
+    }; 3];
+    for i in 0..3 {
+        let stand_in = ours(names[i])?.rotation;
+        out[i] = WornFrame {
+            own: own[i],
+            at: posed[i].0,
+            turn: (posed[i].1 * stand_in.inverse()).normalize(),
+        };
+    }
+    Some(out)
 }
 
 /// The face as ARKit weights, and the eyes' gaze in the head (yaw toward its left, pitch up).
@@ -350,18 +413,26 @@ type BodyItem<'a> = (
     Option<&'a mut FaceControls>,
     Option<&'a mut HandControls>,
     Option<&'a crate::agent::NpcWeapon>,
+    (
+        Has<BodyRequest>,
+        Option<&'a crate::intent_body::IntentBody>,
+        Has<AttackWindow>,
+    ),
 );
 
-type BodyFilter = (
-    Without<Animal>,
-    Without<BodyRequest>,
-    Without<crate::rest::Resting>,
-);
+type BodyFilter = (Without<Animal>, Without<crate::rest::Resting>);
 
 /// Write each fighter's `SkeletonPose`, `FaceControls` and `HandControls` from its stand-in's
-/// pose (not where a `BodyRequest` has the animation module write the pose).
+/// pose (not where a `BodyRequest` has the animation module write the pose: see the module
+/// docs).
 pub(crate) fn write_bodies(mut commands: Commands, mut q: Query<BodyItem, BodyFilter>) {
-    for (e, st, pose, face, hands, weapon) in &mut q {
+    for (e, st, pose, face, hands, weapon, (requested, intent, armed)) in &mut q {
+        // The animation module writes the pose where it was asked for a body: one this crate
+        // asked for (`intent_body.rs`) once it has answered (armed it), any other at once.
+        let ours = intent.is_some_and(|b| b.asked);
+        if requested && (!ours || armed) {
+            continue;
+        }
         let Some((s, x)) = st.motion.body() else {
             continue;
         };
@@ -514,7 +585,12 @@ pub(crate) fn request_appearances(
     mut ranked: Query<Ranked, (With<Npc>, Without<Animal>)>,
     mut next: Local<f64>,
     mut order: Local<Vec<(f64, Entity)>>,
+    (drawn, mut bodies): (
+        Option<Res<AppearanceBodies>>,
+        Query<crate::intent_body::Asking, crate::intent_body::AskingFilter>,
+    ),
 ) {
+    crate::intent_body::give_bodies(&mut commands, &settings, drawn.is_some(), &mut bodies);
     if !settings.character_looks {
         return;
     }

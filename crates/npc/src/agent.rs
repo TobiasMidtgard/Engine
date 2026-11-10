@@ -618,6 +618,9 @@ pub struct NpcCombat {
     /// NPC clock time it last took damage.
     pub last_hurt: f64,
     pub stats: CombatStats,
+    /// The animation module plays this fighter's strikes (an intent body, see
+    /// `intent_body.rs`): they land through its `DamageEvent`s, not this crate's.
+    pub anim_strikes: bool,
 }
 
 impl NpcCombat {
@@ -673,6 +676,10 @@ pub struct NpcSettings {
     /// stays), their pose sized to each person and their hands closed on what they hold
     /// (`visuals/character.rs`). On by default; off, every fighter keeps its stand-in body.
     pub character_looks: bool,
+    /// Fighters who are people and fight hand to hand ask the animation module for their bodies
+    /// (a `BodyRequest` with a `Loadout`) and are posed by it from their intent, their strikes
+    /// landing through its windows (`intent_body.rs`); off, the stand-in's pose drives them.
+    pub anim_bodies: bool,
     /// Fighters' path searches run beside the frame and are answered the next step (`Some(true)`)
     /// or at once (`Some(false)`). `None` decides by the run: beside in play, at once in tests
     /// and plain headless runs (`nav::off_the_step`).
@@ -693,6 +700,7 @@ impl Default for NpcSettings {
             ally_revive_health: 0.4,
             ally_revive_range: 20.0,
             character_looks: true,
+            anim_bodies: true,
             paths_beside: None,
         }
     }

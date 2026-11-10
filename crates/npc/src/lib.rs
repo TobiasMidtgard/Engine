@@ -9,6 +9,7 @@ pub mod demo;
 pub mod faction;
 pub mod features;
 pub mod grenade;
+pub mod intent_body;
 pub mod learning;
 pub mod locomotion;
 pub mod minds;
@@ -34,6 +35,7 @@ pub use combat::Downed;
 pub use faction::{Faction, Factions, Squad};
 pub use features::ExplosiveProp;
 pub use grenade::Grenades;
+pub use intent_body::IntentBody;
 pub use learning::{OpponentModel, OpponentModels};
 pub use locomotion::{FootKind, Footfall, MoverState, SelfPropelled};
 pub use minds::Spellbound;
@@ -185,6 +187,7 @@ impl Plugin for NpcPlugin {
                         brain::think_and_act,
                         wildlife::animal_think,
                         wildlife::animal_bites,
+                        intent_body::drive_bodies,
                     )
                         .chain()
                         .in_set(NpcSet::Decide),

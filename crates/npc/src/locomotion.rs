@@ -9,7 +9,8 @@
 //! `LocomotionState` and `AnimationParams`, and sends a `GroundContact` per footstep so
 //! terrain, grass and audio react to NPCs and animals the same way they react to the player,
 //! with a `footstep_left` or `footstep_right` `AnimationEvent` (on the humanoid skeleton's
-//! `foot_l` or `foot_r` for people).
+//! `foot_l` or `foot_r` for people), except for a body the animation module poses from intent
+//! (`intent_body.rs`), whose feet it plants itself.
 
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationEvent, AnimationParams};
@@ -314,7 +315,9 @@ pub(crate) fn fallback_move(
             // ---------------------------------------------------------------- footsteps
             let foot = foot.copied().unwrap_or_default();
             mover.phase = (mover.phase + horiz * dt / foot.stride.max(0.1) * PI) % TAU;
-            if foot.kind == FootKind::None || !grounded {
+            // The animation module plants an intent body's feet (and writes their contacts).
+            let posed_elsewhere = combat.is_some_and(|c| c.anim_strikes);
+            if foot.kind == FootKind::None || !grounded || posed_elsewhere {
                 return;
             }
             mover.stride += horiz * dt;
