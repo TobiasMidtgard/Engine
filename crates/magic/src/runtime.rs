@@ -1659,6 +1659,20 @@ pub fn fly_missiles(
                 reacts: true,
                 expire: false,
             });
+            // A rain drop bursts where it lands and strikes what stands round it as well
+            // ("thirty exploding fireballs over an army", spell-catalog.md).
+            if spell.cast == CastType::Rain {
+                splash(
+                    &m.cast,
+                    h.point,
+                    Some(h.entity),
+                    dir,
+                    c.radius * RAIN_SPLASH,
+                    &creatures,
+                    factions,
+                    &mut hits,
+                );
+            }
             // Fork: children fan out from the hit, sparing what it hit.
             if c.fork > 1 && !m.forked && m.cast.depth < MAX_STAGE_DEPTH {
                 for i in 0..c.fork {
@@ -1723,6 +1737,18 @@ pub fn fly_missiles(
                 reacts: false,
                 expire: !lands,
             });
+            if spell.cast == CastType::Rain {
+                splash(
+                    &m.cast,
+                    sp.pos,
+                    None,
+                    dir,
+                    c.radius * RAIN_SPLASH,
+                    &creatures,
+                    factions,
+                    &mut hits,
+                );
+            }
             spend(&mut m, e, &mut queue);
         }
     }
@@ -2316,6 +2342,7 @@ pub fn tick_rain(
         let spell = r.cast.spell.clone();
         let c = spell.carrier;
         let due = ((r.age / r.duration).min(1.0) * c.count as f32).ceil() as u32;
+        let mut drop = None;
         while r.dropped < due {
             let i = r.dropped;
             r.dropped += 1;
@@ -2340,10 +2367,12 @@ pub fn tick_rain(
             }
             let high = ground + DVec3::new(-3.0, 16.0 + 4.0 * roll(seed, 13) as f64, 2.0);
             let vel = (ground - high).as_vec3().normalize_or(Vec3::NEG_Y) * c.speed;
+            let drop = drop.get_or_insert_with(|| drop_of(&spell)).clone();
             queue.spawns.push(Spawn::Missile(
                 Missile {
                     cast: CastInfo {
                         seed: r.cast.seed.wrapping_add(i * 104_729),
+                        spell: drop,
                         ..r.cast.clone()
                     },
                     vel,
@@ -2364,6 +2393,67 @@ pub fn tick_rain(
         if r.age >= r.duration {
             queue.despawn.push(e);
         }
+    }
+}
+
+/// A rain's drop as it falls: the rain's spell with a drop's girth, a fifth of a metre at size
+/// 1 (a lob's), since the rain's own carrier radius is the patch of ground the drops come down
+/// over. A drop swept with that radius (14 m for an Ascended's rain) struck anything within it
+/// from 14 m up, burst at the largest scale and cost a millisecond or more of physics a step.
+pub fn drop_of(spell: &Spell) -> Arc<Spell> {
+    let mut s = spell.clone();
+    s.carrier.radius *= RAIN_DROP_SHARE;
+    Arc::new(s)
+}
+
+/// A rain drop's radius as a share of the rain's (5 m at size 1).
+pub const RAIN_DROP_SHARE: f32 = 0.04;
+/// How far round where a rain drop lands it strikes, in drop radii: 1.6 m at size 1, 4.5 m for
+/// an Ascended's rain.
+pub const RAIN_SPLASH: f32 = 8.0;
+
+/// A drop's splash: a hit on each creature standing within `reach` of where it landed (across
+/// the ground, and up to a body's height above or below), other than the one it struck and
+/// those the spell spares. Hits checks the filters again; this only keeps the queue short.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn splash(
+    cast: &CastInfo,
+    at: DVec3,
+    struck: Option<Entity>,
+    dir: Vec3,
+    reach: f32,
+    creatures: &Query<(Entity, &GlobalTransform, Allegiance, Option<&Vitality>), CreatureFilter>,
+    factions: Option<&Factions>,
+    hits: &mut HitQueue,
+) {
+    let spell = &cast.spell;
+    let harmful = spell.payload.harmful();
+    for (o, gt, oc, v) in creatures {
+        if Some(o) == struck || v.is_some_and(|v| v.down()) {
+            continue;
+        }
+        if harmful
+            && (Some(o) == cast.caster
+                || (spell.safeguard && cast.friend(o, oc.caster, oc.faction, factions)))
+        {
+            continue;
+        }
+        let body = gt.translation() + DVec3::Y;
+        let d = body - at;
+        if DVec3::new(d.x, 0.0, d.z).length() > reach as f64 || d.y.abs() > 2.5 {
+            continue;
+        }
+        hits.0.push(PendingHit {
+            cast: cast.clone(),
+            target: Some(o),
+            point: body,
+            normal: Vec3::Y,
+            dir: d.as_vec3().normalize_or(dir),
+            multi: true,
+            impact: false,
+            reacts: true,
+            expire: false,
+        });
     }
 }
 

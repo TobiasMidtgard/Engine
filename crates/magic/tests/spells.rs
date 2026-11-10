@@ -521,6 +521,73 @@ fn a_chain_hops_to_three_dummies() {
 }
 
 #[test]
+fn a_rains_drops_burst_on_the_ground_and_splash_round_it() {
+    // An Ascended's rain covers 9 to 14 m: its drops once swept as spheres that wide, so they burst high
+    // over the dummies and cost a millisecond of physics a step each.
+    let mut app = app();
+    let me = app
+        .world
+        .spawn((
+            Name::new("Ascended"),
+            Transform::default(),
+            MagicCaster {
+                mana_regen: 0.0,
+                ..MagicCaster::new(88.0, Mastery::Ascended1)
+            },
+            Vitality::new(100.0),
+        ))
+        .id();
+    let aim = DVec3::new(0.0, 0.0, -16.0);
+    let ds: Vec<Entity> = (0..7)
+        .map(|i| {
+            let a = i as f64 * std::f64::consts::TAU / 6.0;
+            let r = if i == 0 { 0.0 } else { 3.0 };
+            dummy(&mut app, aim + DVec3::new(a.cos() * r, 0.0, a.sin() * r))
+        })
+        .collect();
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Rain),
+        Aim::Point(aim),
+    );
+    let (mut rain_r, mut drop_r, mut count) = (0.0f32, 0.0f32, 0);
+    let mut landed: Vec<(Entity, f64)> = Vec::new();
+    for _ in 0..300 {
+        app.update();
+        let mut rains = app.world.query::<&runtime::Rainfall>();
+        for r in rains.iter(&app.world) {
+            rain_r = r.cast.spell.carrier.radius;
+            count = r.cast.spell.carrier.count as usize;
+        }
+        let mut drops = app
+            .world
+            .query::<(Entity, &runtime::Missile, &runtime::SpellPos)>();
+        for (e, m, sp) in drops.iter(&app.world) {
+            drop_r = m.cast.spell.carrier.radius;
+            if m.spent.is_some() && !landed.iter().any(|(l, _)| *l == e) {
+                landed.push((e, sp.pos.y));
+            }
+        }
+    }
+    assert!(rain_r > 8.0, "an Ascended's rain covers {rain_r} m");
+    assert!(
+        (drop_r - rain_r * runtime::RAIN_DROP_SHARE).abs() < 1e-4 && drop_r < 1.0,
+        "a drop is {drop_r} m across a {rain_r} m rain"
+    );
+    assert!(
+        count >= 10 && landed.len() == count,
+        "{} of {count} drops landed",
+        landed.len()
+    );
+    let high = landed.iter().map(|(_, y)| *y).fold(0.0, f64::max);
+    assert!(high < 2.5, "a drop burst {high:.1} m up");
+    let hit = ds.iter().filter(|d| !hits_on(&app, **d).is_empty()).count();
+    assert!(hit >= 4, "{hit} of 7 dummies under the rain hit");
+}
+
+#[test]
 fn an_aura_ticks_on_what_stands_in_it() {
     let mut app = app();
     let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
