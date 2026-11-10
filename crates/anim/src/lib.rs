@@ -12,6 +12,7 @@ pub mod course;
 pub mod demo;
 pub mod events;
 pub mod face;
+pub mod fighter;
 pub mod footwork;
 pub mod freeflow;
 pub mod fur_coat;
@@ -161,14 +162,17 @@ impl Plugin for AnimationPlugin {
                         body::give_hand_controls,
                         parkour::give_parkour,
                         actions::give_animal_actions,
+                        fighter::arm_fighters,
                     )
                         .chain_ignore_deferred(),
                     (
                         body::fit_bodies,
                         animator::build_animators,
+                        fighter::drive_fighters,
                         animator::queue_triggers,
                         freeflow::pick_targets,
                         combat::run_attacks,
+                        fighter::publish_windows,
                         paired::hold_pairs,
                         combat::evade_strikes,
                         footwork::step_footwork,

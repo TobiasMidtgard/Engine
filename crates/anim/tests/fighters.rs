@@ -1,0 +1,220 @@
+//! Fighters driven by intent alone, as NPC AI drives them: two requested bodies with a
+//! `Loadout`, facing each other, that nothing but `MoveIntent` and `StrikeTargets` steers.
+//! The loadout arms them (props, move set, stance), a strike pressed through the intent plays
+//! its wind-up, active and recovery phases in `AttackWindow`, a blow lands on the foe, the
+//! guard follows `MoveIntent::block`, and a new loadout swaps the props.
+
+use engine_anim::AnimationPlugin;
+use engine_anim::combat::Attacker;
+use engine_anim::fighter::Armed;
+use engine_core::prelude::*;
+use engine_core::time::TimeSource;
+use engine_world::WorldPlugin;
+use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose, StrikeTargets};
+use engine_world::combat::{AttackPhase, AttackWindow, ItemClass, Loadout};
+use engine_world::events::AttackKind;
+use engine_world::locomotion::MoveIntent;
+
+const STEP: f64 = 1.0 / 60.0;
+
+fn sword_and_shield() -> Loadout {
+    Loadout {
+        main: ItemClass::OneHandedBlade,
+        off: ItemClass::Shield,
+        two_handed: false,
+    }
+}
+
+/// Two fighters a step apart along X, facing each other (bodies face their −Z).
+fn duel() -> (App, Entity, Entity) {
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs: STEP });
+    app.add_plugins((WorldPlugin, AnimationPlugin));
+    let fighter = |app: &mut App, x: f64, yaw: f32, seed: u64| {
+        let t = Transform::from_translation(DVec3::new(x, 0.0, 0.0))
+            .with_rotation(Quat::from_rotation_y(yaw.to_radians()));
+        app.world
+            .spawn((
+                t,
+                GlobalTransform::from(t),
+                BodyRequest::human(seed),
+                sword_and_shield(),
+                MoveIntent::default(),
+                StrikeTargets::default(),
+            ))
+            .id()
+    };
+    let a = fighter(&mut app, -0.7, -90.0, 11);
+    let b = fighter(&mut app, 0.7, 90.0, 12);
+    for (me, foe) in [(a, b), (b, a)] {
+        app.world.get_mut::<StrikeTargets>(me).unwrap().target = Some(foe);
+    }
+    app.update();
+    engine_anim::character::finish_loading(&mut app.world);
+    for _ in 0..30 {
+        app.update();
+    }
+    (app, a, b)
+}
+
+#[test]
+fn a_loadout_arms_a_requested_body() {
+    let (app, a, _) = duel();
+    assert!(app.world.get::<SkeletonPose>(a).is_some(), "no body");
+    let armed = app.world.get::<Armed>(a).expect("armed");
+    assert!(
+        armed.props.len() >= 4,
+        "sword and shield props: {}",
+        armed.props.len()
+    );
+    let attacker = app.world.get::<Attacker>(a).expect("attacker");
+    assert_eq!(attacker.set, "sword_shield");
+    assert!(!attacker.warp, "the requester moves the body");
+    let params = app.world.get::<AnimationParams>(a).unwrap();
+    assert_eq!(params.get("sword_stance"), 1.0);
+}
+
+/// What NPC AI's mover does with a strike's step: carries the body by it.
+fn take_steps(app: &mut App, people: [Entity; 2], moved: &mut [DVec3; 2]) {
+    for (k, e) in people.into_iter().enumerate() {
+        let step = app.world.get::<Attacker>(e).unwrap().warp_delta.as_dvec3();
+        moved[k] += step;
+        let mut t = app.world.get_mut::<Transform>(e).unwrap();
+        t.translation += step;
+    }
+}
+
+#[test]
+fn an_intended_strike_plays_its_phases_and_lands() {
+    let (mut app, a, b) = duel();
+    let at = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation;
+    let start = [at(&app, a), at(&app, b)];
+    let mut moved = [DVec3::ZERO; 2];
+    app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Melee);
+    let mut phases: Vec<AttackPhase> = Vec::new();
+    let mut hits = 0;
+    for f in 0..(1.6 / STEP) as usize {
+        if f == 2 {
+            // The AI lets go; held or not, it is one press.
+            app.world.get_mut::<MoveIntent>(a).unwrap().attack = None;
+        }
+        app.update();
+        take_steps(&mut app, [a, b], &mut moved);
+        let w = app.world.get::<AttackWindow>(a).expect("window");
+        if let Some(p) = w.phase
+            && phases.last() != Some(&p)
+        {
+            phases.push(p);
+            assert!(w.phase_length_secs >= 0.0 && w.phase_secs <= w.phase_length_secs + 0.05);
+            assert!(!w.name.is_empty());
+        }
+        hits = hits.max(app.world.get::<Attacker>(a).unwrap().hits);
+    }
+    assert_eq!(
+        &phases[..3],
+        [
+            AttackPhase::Windup,
+            AttackPhase::Active,
+            AttackPhase::Recovery
+        ],
+        "{phases:?}"
+    );
+    assert!(hits >= 1, "the cut didn't land");
+    assert_eq!(
+        app.world.get::<AttackWindow>(a).unwrap().phase,
+        None,
+        "still striking"
+    );
+    // The strike stepped in, and only through the published step: the module itself moved
+    // nobody.
+    assert!(moved[0].length() > 0.05, "no step in: {:?}", moved[0]);
+    for (k, e) in [a, b].into_iter().enumerate() {
+        assert!((at(&app, e) - start[k] - moved[k]).length() < 1e-6);
+    }
+}
+
+#[test]
+fn the_guard_follows_the_intent_and_a_new_loadout_swaps_the_props() {
+    let (mut app, a, _) = duel();
+    app.world.get_mut::<MoveIntent>(a).unwrap().block = true;
+    app.update();
+    assert_eq!(
+        app.world
+            .get::<AnimationParams>(a)
+            .unwrap()
+            .get("shield_guard"),
+        1.0
+    );
+    app.world.get_mut::<MoveIntent>(a).unwrap().block = false;
+    app.update();
+    assert_eq!(
+        app.world
+            .get::<AnimationParams>(a)
+            .unwrap()
+            .get("shield_guard"),
+        0.0
+    );
+    let old = app.world.get::<Armed>(a).unwrap().props.clone();
+    *app.world.get_mut::<Loadout>(a).unwrap() = Loadout {
+        main: ItemClass::TwoHandedBlade,
+        off: ItemClass::None,
+        two_handed: true,
+    };
+    app.update();
+    app.update();
+    assert!(
+        old.iter().all(|p| app.world.get_entity(*p).is_err()),
+        "old props left"
+    );
+    assert_eq!(app.world.get::<Attacker>(a).unwrap().set, "greatsword");
+    let params = app.world.get::<AnimationParams>(a).unwrap();
+    assert_eq!(
+        (params.get("sword_stance"), params.get("greatsword_stance")),
+        (0.0, 1.0)
+    );
+    assert!(!app.world.get::<Armed>(a).unwrap().props.is_empty());
+}
+
+#[test]
+fn a_feint_pulls_the_strike_back_and_skill_sets_the_telegraph() {
+    let (mut app, a, _) = duel();
+    // A rookie: twice as long a wind-up.
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("windup_speed", 0.5);
+    app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Melee);
+    app.update();
+    app.world.get_mut::<MoveIntent>(a).unwrap().attack = None;
+    app.update();
+    let w = app.world.get::<AttackWindow>(a).unwrap().clone();
+    assert_eq!(w.phase, Some(AttackPhase::Windup));
+    let slow = w.phase_length_secs;
+    app.world
+        .get_mut::<engine_anim::animator::Animator>(a)
+        .unwrap()
+        .trigger("feint");
+    let mut cancelled = false;
+    for _ in 0..(1.0 / STEP) as usize {
+        app.update();
+        cancelled |= app.world.get::<AttackWindow>(a).unwrap().phase == Some(AttackPhase::Cancel);
+    }
+    let attacker = app.world.get::<Attacker>(a).unwrap();
+    assert!(cancelled, "no cancel phase");
+    assert_eq!((attacker.feinted, attacker.hits), (1, 0));
+    assert_eq!(app.world.get::<AttackWindow>(a).unwrap().phase, None);
+    // A master's telegraph is shorter.
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("windup_speed", 1.5);
+    app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Melee);
+    app.update();
+    app.world.get_mut::<MoveIntent>(a).unwrap().attack = None;
+    app.update();
+    let fast = app.world.get::<AttackWindow>(a).unwrap().phase_length_secs;
+    assert!(fast < slow * 0.5, "rookie {slow} s, master {fast} s");
+}

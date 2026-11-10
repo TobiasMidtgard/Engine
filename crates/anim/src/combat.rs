@@ -996,6 +996,42 @@ pub enum AttackPhase {
     Recovery,
 }
 
+/// How fast each phase of a strike plays, times as authored: a slow wind-up reads as a
+/// telegraph (a rookie's), a fast one as a master's; a sharper active phase snaps the blow,
+/// a slower recovery holds the follow-through. `speed` scales all three.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tempo {
+    pub speed: f32,
+    pub windup: f32,
+    pub active: f32,
+    pub recovery: f32,
+}
+
+impl Default for Tempo {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            windup: 1.0,
+            active: 1.0,
+            recovery: 1.0,
+        }
+    }
+}
+
+impl Tempo {
+    /// The rate the move plays at in `phase`.
+    pub fn rate(&self, phase: AttackPhase) -> f32 {
+        let p = match phase {
+            AttackPhase::Idle => 1.0,
+            AttackPhase::Startup => self.windup,
+            AttackPhase::Active => self.active,
+            AttackPhase::Recovery => self.recovery,
+        };
+        (p * self.speed).clamp(0.1, 4.0)
+    }
+}
+
 /// A character that attacks with an [`AttackSet`].
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1021,6 +1057,10 @@ pub struct Attacker {
     pub phase: AttackPhase,
     pub cancel_open: bool,
     pub armored: bool,
+    /// How fast each phase plays.
+    pub tempo: Tempo,
+    /// Strikes pulled back in their wind-up so far (feints).
+    pub feinted: u32,
     /// World-space move the last warp step asked for, meters.
     pub warp_delta: Vec3,
     /// Hits landed by the current move (blocked ones not counted).
@@ -1079,6 +1119,8 @@ impl Default for Attacker {
             phase: AttackPhase::Idle,
             cancel_open: false,
             armored: false,
+            tempo: Tempo::default(),
+            feinted: 0,
             warp_delta: Vec3::ZERO,
             hits: 0,
             blocked: 0,
@@ -1110,6 +1152,9 @@ impl Attacker {
 
 /// How far the middle of the face is above the head bone (the top of the neck), meters.
 const FACE_ABOVE_HEAD: f64 = 0.07;
+
+/// How long a feinted strike takes to settle back into the stance, s.
+const FEINT_SECS: f32 = 0.2;
 
 /// How long before its hit window a strike's aim stops following the target, s.
 const COMMIT_SECS: f32 = 0.2;
@@ -1534,14 +1579,25 @@ pub(crate) fn run_attacks(
         attacker.aim = None;
         // Presses: the newest one waits in the buffer.
         let mut pressed = None;
+        let mut feint = false;
         animator.triggers.retain(|(name, _)| {
             if name.starts_with("attack_") {
                 pressed = Some(name.clone());
+                false
+            } else if name == "feint" {
+                feint = true;
                 false
             } else {
                 true
             }
         });
+        // A feint pulls the strike back while it still winds up: the move ends with a short
+        // recovery (the window reads it as cancelled), and nothing lands.
+        if feint && attacker.current.is_some() && attacker.phase == AttackPhase::Startup {
+            animator.stop_overlay(FEINT_SECS);
+            attacker.recoil = FEINT_SECS;
+            attacker.feinted += 1;
+        }
         // An older press ages first, so a new one always gets this frame to start in, however
         // long the frame (at 4 fps a frame outlasts the buffer). It doesn't age while the
         // fighter can't act (rebounding, in shield-stun or with its guard broken): a counter
@@ -1565,7 +1621,9 @@ pub(crate) fn run_attacks(
         };
         attacker.open = (attacker.open - dt).max(0.0);
         // Advance the move playing; at its end it is over (the overlay fades itself). A
-        // rebounding move is over when the rebound is.
+        // rebounding move is over when the rebound is. `step` is how far the clip went
+        // this frame, at its tempo.
+        let mut step = dt;
         if attacker.recoil > 0.0 {
             attacker.recoil -= dt;
             if attacker.recoil <= 0.0 {
@@ -1573,7 +1631,10 @@ pub(crate) fn run_attacks(
                 attacker.current = None;
             }
         } else if let Some(name) = attacker.current.clone() {
-            attacker.time += dt;
+            let rate = attacker.tempo.rate(attacker.phase);
+            animator.set_overlay_rate(rate);
+            step = dt * rate;
+            attacker.time += step;
             let over = moves
                 .get(&name)
                 .and_then(|m| library.clip(&m.clip))
@@ -1588,7 +1649,7 @@ pub(crate) fn run_attacks(
         let cancel_open = |m: &AttackMove| {
             m.windows
                 .iter()
-                .any(|w| w.kind == WindowKind::Cancel && w.overlaps(now, dt))
+                .any(|w| w.kind == WindowKind::Cancel && w.overlaps(now, step))
         };
         let follow = playing
             .filter(|m| moves.is_approach(&m.name) && cancel_open(m))
@@ -1792,7 +1853,7 @@ pub(crate) fn run_attacks(
             // close, its aim fading out); the others act only while they are open.
             let open = (w.start..=w.end).contains(&t);
             let hit = matches!(w.kind, WindowKind::Hit { .. });
-            if !open && !(hit && w.overlaps(t, dt)) {
+            if !open && !(hit && w.overlaps(t, step)) {
                 continue;
             }
             match &w.kind {

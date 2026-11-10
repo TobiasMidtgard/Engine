@@ -199,6 +199,8 @@ pub struct Overlay {
     /// Playing backwards (a blade bouncing back off a shield): rate (clip seconds per
     /// second) and seconds left, then it fades out.
     rewind: Option<(f32, f32)>,
+    /// How fast it plays forward (clip seconds per second): a strike's tempo per phase.
+    pub rate: f32,
 }
 
 impl Animator {
@@ -322,6 +324,7 @@ impl Animator {
             from,
             stopping: None,
             rewind: None,
+            rate: 1.0,
         });
     }
 
@@ -335,6 +338,13 @@ impl Animator {
     }
 
     /// Fade the overlay out over `fade` seconds from now.
+    /// Play the overlay faster or slower from now (1 = as authored).
+    pub fn set_overlay_rate(&mut self, rate: f32) {
+        if let Some(o) = &mut self.overlay {
+            o.rate = rate;
+        }
+    }
+
     pub fn stop_overlay(&mut self, fade: f32) {
         if let Some(o) = &mut self.overlay
             && o.stopping.is_none()
@@ -382,7 +392,7 @@ impl Animator {
                     o.stopping = Some((0.0, o.fade_out));
                 }
             }
-            _ => o.time = (o.time + dt).min(d),
+            _ => o.time = (o.time + dt * o.rate.max(0.0)).min(d),
         }
         if o.time > prev {
             for e in o.clip.events_between(prev, o.time) {
