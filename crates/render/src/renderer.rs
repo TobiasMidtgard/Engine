@@ -428,6 +428,8 @@ pub struct Renderer {
     compute_group: wgpu::BindGroup,
     /// The prepass and the effects that write the screen-space maps.
     prepass_group: wgpu::BindGroup,
+    /// The screen light pass: the prepass's depth and normals, stand-ins for the later maps.
+    light_group: wgpu::BindGroup,
     /// Overlays: unjittered matrices.
     overlay_group: wgpu::BindGroup,
     post: PostResources,
@@ -520,6 +522,7 @@ per_view! {
     frame_group: wgpu::BindGroup,
     compute_group: wgpu::BindGroup,
     prepass_group: wgpu::BindGroup,
+    light_group: wgpu::BindGroup,
     overlay_group: wgpu::BindGroup,
     post: PostResources,
     effects: ScreenEffects,
@@ -653,6 +656,7 @@ impl ViewState {
             frame_group: groups.scene,
             compute_group: groups.compute,
             prepass_group: groups.prepass,
+            light_group: groups.light,
             overlay_group: groups.overlay,
             post,
             effects,
@@ -833,6 +837,7 @@ struct RenderReturn {
 
 /// Views of the maps computed each frame that the frame group binds (bindings 10–12 and
 /// 18–20): the screen-space maps and the volumetric fog.
+#[derive(Clone)]
 struct ScreenMaps {
     ao: wgpu::TextureView,
     normal: wgpu::TextureView,
@@ -841,6 +846,8 @@ struct ScreenMaps {
     fog: wgpu::TextureView,
     gi: wgpu::TextureView,
     aerial: wgpu::TextureView,
+    /// The screen light maps (lib_frame.wgsl `light_a`, `light_b`, `light_gi`).
+    light: [wgpu::TextureView; 3],
 }
 
 impl ScreenMaps {
@@ -853,6 +860,21 @@ impl ScreenMaps {
             fog: volumetrics.view().clone(),
             gi: targets.gi.view.clone(),
             aerial: volumetrics.aerial.view().clone(),
+            light: [
+                targets.light_a.view.clone(),
+                targets.light_b.view.clone(),
+                targets.light_gi.view.clone(),
+            ],
+        }
+    }
+
+    /// For the screen light pass: the prepass's depth and normals (finished by then), and
+    /// stand-ins for every map drawn after the prepass, its own among them.
+    fn for_light(&self, stand_ins: &Self) -> Self {
+        Self {
+            normal: self.normal.clone(),
+            depth: self.depth.clone(),
+            ..stand_ins.clone()
         }
     }
 
@@ -889,6 +911,12 @@ impl ScreenMaps {
         let depth = tex("no prepass depth", shared.formats.depth);
         let ssr = tex("no screen-space reflections", shared.formats.hdr);
         let gi = tex("no screen-space gi", shared.formats.hdr);
+        // One texel says "no map" to `screen_light`, whatever it holds.
+        let light = [
+            tex("no screen light a", crate::targets::LIGHT_FORMAT).view,
+            tex("no screen light b", crate::targets::LIGHT_FORMAT).view,
+            tex("no screen light gi", shared.formats.hdr).view,
+        ];
         Self {
             ao: ao.view,
             normal: normal.view,
@@ -897,6 +925,7 @@ impl ScreenMaps {
             fog: volumetrics.stand_in().clone(),
             gi: gi.view,
             aerial: volumetrics.aerial.stand_in().clone(),
+            light,
         }
     }
 }
@@ -1134,6 +1163,10 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
+                // The screen light maps (effects.rs `encode_light`). The 21st to 23rd.
+                layout_entry(28, all, float_texture),
+                layout_entry(29, all, float_texture),
+                layout_entry(30, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -1220,6 +1253,7 @@ impl Renderer {
             frame_group: view.frame_group,
             compute_group: view.compute_group,
             prepass_group: view.prepass_group,
+            light_group: view.light_group,
             overlay_group: view.overlay_group,
             post: view.post,
             effects: view.effects,
@@ -1470,6 +1504,7 @@ impl Renderer {
         self.frame_group = groups.scene;
         self.compute_group = groups.compute;
         self.prepass_group = groups.prepass;
+        self.light_group = groups.light;
         self.overlay_group = groups.overlay;
     }
 
@@ -2815,6 +2850,13 @@ impl Renderer {
             self.effects
                 .encode_ao(&mut encoder, &self.targets, &self.prepass_group);
         }
+        // The sun, the sky's cover and the probes' light for every pixel the prepass drew,
+        // once a pixel (shading loads them: lib_frame.wgsl `screen_light`).
+        if settings.trial_cuts & crate::settings::trial_cut::SCREEN_LIGHT != 0 {
+            self.perf.pass(&mut cpu, &mut encoder, "screen light");
+            self.effects
+                .encode_light(&mut encoder, &self.targets, &self.light_group);
+        }
         if ssr {
             // What screen-space reflections can't see, traced against probe GI's scene.
             if !extra {
@@ -3829,6 +3871,8 @@ struct FrameGroups {
     compute: wgpu::BindGroup,
     /// Prepass and screen-space effects: stand-ins for the maps they write.
     prepass: wgpu::BindGroup,
+    /// The screen light pass: the prepass's depth and normals, stand-ins for the rest.
+    light: wgpu::BindGroup,
     /// Overlays: the unjittered frame uniform.
     overlay: wgpu::BindGroup,
 }
@@ -3878,6 +3922,7 @@ impl FrameGroups {
             scene: group(frame[0], maps, shown_clouds),
             compute: group(frame[0], maps, &clouds.stand_in),
             prepass: group(frame[0], stand_ins, shown_clouds),
+            light: group(frame[0], &maps.for_light(stand_ins), shown_clouds),
             overlay: group(frame[1], maps, shown_clouds),
         }
     }
@@ -4024,6 +4069,18 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 27,
                 resource: view(&shadow.insets.array_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 28,
+                resource: view(&maps.light[0]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 29,
+                resource: view(&maps.light[1]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 30,
+                resource: view(&maps.light[2]),
             },
         ],
     })

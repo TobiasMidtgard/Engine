@@ -358,6 +358,7 @@ fn surface_layers(rel: vec3<f32>) -> vec4<f32> {
 // `tiling_pos` (world position minus a 4096 m camera tile), so with frequencies that are powers
 // of two the pattern stays put when the camera crosses a tile boundary.
 fn pnoise3(p: vec3<f32>, period: f32) -> f32 {
+    if ((TERRAIN_OFF & 512u) != 0u) { cost.y += 1.0; }
     let i = floor(p);
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
@@ -372,6 +373,7 @@ fn pnoise3(p: vec3<f32>, period: f32) -> f32 {
 
 // `pnoise3` with its own lattice period per axis, for patterns stretched along one axis.
 fn pnoise3v(p: vec3<f32>, period: vec3<f32>) -> f32 {
+    if ((TERRAIN_OFF & 512u) != 0u) { cost.y += 1.0; }
     let i = floor(p);
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
@@ -1352,6 +1354,8 @@ fn fs_prepass(in: PrepassOut) -> PrepassOutput {
     // Rain from the surface layers (or the weather where they don't reach), standing water and
     // prints, pooled the way the scene pass pools them (without the material detail).
     let layers = surface_layers(in.rel);
+    // (Five print taps, the weather grid, the wear map and the paint map's eight loads.)
+    cost_taps(5.0 + 1.0 + 2.0 + 8.0);
     let rain_wet = saturate(layers.x);
     let duv = deform_uv(in.rel);
     let depth = textureSampleLevel(deform_tex, map_sampler, deform_st(duv), 0.0).r * inside01(duv) * maps.flags.x;
@@ -1520,8 +1524,33 @@ struct MatSample {
 // Parts of `fs_main` switched off to measure what they cost (`TERRAIN_SHADER_OFF`, render.rs):
 // 1 material textures (their means instead), 2 rock's larger scales, 4 parallax relief,
 // 16 lighting (albedo only); 128 everything (a flat color: the floor), 256 everything after
-// the materials are blended.
+// the materials are blended; 512 draws what the materials cost instead of the ground (`cost`).
 override TERRAIN_OFF: u32 = 0u;
+
+// The cost view (`TERRAIN_SHADER_OFF=512`): what a pixel did up to the blended materials,
+// counted as it ran. x: texture probes (one trilinear lookup each: an anisotropic sample is as
+// many as its footprint is long, up to 16; a plain bilinear tap counts half), y: lattice noise
+// evaluations (`pnoise3`). Drawn as red = probes / 2048, green = probes / 256, blue =
+// noise / 128 (linear, straight to the target), for a tool to read back from a picture taken
+// with tonemapping, fog and anti-aliasing off. Costs nothing unless the override asks for it.
+var<private> cost: vec2<f32> = vec2<f32>(0.0);
+
+// Counts one material sample of footprint `gx`, `gy` (texture coordinates per pixel) taken
+// `n` times.
+fn cost_samples(gx: vec2<f32>, gy: vec2<f32>, n: f32) {
+    if ((TERRAIN_OFF & 512u) != 0u) {
+        let lx = dot(gx, gx);
+        let ly = dot(gy, gy);
+        cost.x += n * clamp(ceil(sqrt(max(lx, ly) / max(min(lx, ly), 1e-24))), 1.0, 16.0);
+    }
+}
+
+// Counts `n` plain taps (one mip level, no anisotropy).
+fn cost_taps(n: f32) {
+    if ((TERRAIN_OFF & 512u) != 0u) {
+        cost.x += 0.5 * n;
+    }
+}
 // The scene pass cuts the mirror's clip itself only when it tests depth `GreaterEqual`
 // (`TERRAIN_DEPTH=greater`): by default it shades exactly the prepass's pixels (an equal test,
 // no depth writes), which already left the clipped ones out, and a shader without `discard`
@@ -1543,17 +1572,30 @@ struct Texels {
     normal: vec4<f32>,
 };
 
+// The most anisotropic probes a material sample may take: 16 (the sampler's own limit), less
+// under the trial cuts (lib_frame.wgsl `trial_cut`). `scale` is the copy's size against the
+// material's tile (1 = the texture itself), `fade` how much of it still shows (`mat_fade`).
+fn mat_most(scale: f32, fade: f32) -> f32 {
+    var most = 16.0;
+    if (trial_cut(CUT_TERRAIN_ANISO_8)) { most = 8.0; }
+    if (trial_cut(CUT_TERRAIN_ANISO_4)) { most = 4.0; }
+    // The larger copies only modulate the ground from afar (grain, blocks, buttresses).
+    if (trial_cut(CUT_TERRAIN_COPY_ANISO) && scale > 1.0) { most = min(most, 4.0); }
+    // A texture fading into its mean color needs less sharpness along the view.
+    if (trial_cut(CUT_TERRAIN_FADE_ANISO)) { most = min(most, max(2.0, ceil(16.0 * fade))); }
+    return most;
+}
+
 // Two lookups at offsets picked by a slow noise, switched where the noise steps, so the tile
 // never visibly repeats (Quilez, "texture repetition", technique 3). The taller texel wins
 // near a switch. `uv` is in tiles; `period` is how many tiles the 4096 m camera tile holds.
-fn mat_fetch(i: u32, uv: vec2<f32>, gx_in: vec2<f32>, gy_in: vec2<f32>, period: f32) -> Texels {
-    // Trial cuts (lib_frame.wgsl `trial_cut`): the sampler's anisotropy held to 8 or 4 probes
-    // instead of 16, by lengthening the footprint's short axis to that share of its long one
-    // (the sampler then picks the mip that fits and takes that many probes at most).
+// `most` holds the sampler's anisotropy to that many probes, by lengthening the footprint's
+// short axis to that share of its long one (the sampler then picks the mip that fits and takes
+// that many probes at most). `single` takes one lookup instead of the pair (the tile repeats).
+fn mat_fetch(i: u32, uv: vec2<f32>, gx_in: vec2<f32>, gy_in: vec2<f32>, period: f32, most: f32, single: bool) -> Texels {
     var gx = gx_in;
     var gy = gy_in;
-    if (trial_cut(CUT_TERRAIN_ANISO_8 | CUT_TERRAIN_ANISO_4)) {
-        let most = select(8.0, 4.0, trial_cut(CUT_TERRAIN_ANISO_4));
+    if (most < 16.0) {
         let lx = dot(gx, gx);
         let ly = dot(gy, gy);
         let least = max(lx, ly) / (most * most);
@@ -1562,11 +1604,17 @@ fn mat_fetch(i: u32, uv: vec2<f32>, gx_in: vec2<f32>, gy_in: vec2<f32>, period: 
             if (lx < ly) { gx *= stretch; } else { gy *= stretch; }
         }
     }
+    if (single) {
+        cost_samples(gx, gy, 2.0);
+        return Texels(textureSampleGrad(mat_albedo, mat_sampler, uv, i, gx, gy),
+            textureSampleGrad(mat_normal, mat_sampler, uv, i, gx, gy));
+    }
     let k = pnoise3(vec3<f32>(uv * 0.25, f32(i) * 7.31), period * 0.25) * 8.0;
     let ia = floor(k);
     let f = fract(k);
     let oa = sin(vec2<f32>(3.0, 7.0) * ia);
     let ob = sin(vec2<f32>(3.0, 7.0) * (ia + 1.0));
+    cost_samples(gx, gy, 4.0);
     let a0 = textureSampleGrad(mat_albedo, mat_sampler, uv + oa, i, gx, gy);
     let b0 = textureSampleGrad(mat_albedo, mat_sampler, uv + ob, i, gx, gy);
     let a1 = textureSampleGrad(mat_normal, mat_sampler, uv + oa, i, gx, gy);
@@ -1605,7 +1653,8 @@ fn sample_planar_at(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
     if (fade <= 0.0) {
         return mat_mean(i, n);
     }
-    let tx = mat_fetch(i, tp.xz / tile, dp1.xz / tile, dp2.xz / tile, 4096.0 / tile);
+    let single = scale > 1.0 && trial_cut(CUT_TERRAIN_COPY_SINGLE);
+    let tx = mat_fetch(i, tp.xz / tile, dp1.xz / tile, dp2.xz / tile, 4096.0 / tile, mat_most(scale, fade), single);
     let tn = unpack_tn(tx.normal);
     let nd = normalize(vec3<f32>(tn.x + n.x, n.y * tn.z, tn.y + n.z));
     return finish_sample(i, tx, nd, n, fade);
@@ -1649,13 +1698,15 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
     w /= (w.x + w.y + w.z);
     let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), n >= vec3<f32>(0.0));
     let period = 4096.0 / tile;
+    let most = mat_most(scale, fade);
+    let single = scale > 1.0 && trial_cut(CUT_TERRAIN_COPY_SINGLE);
     var albedo = vec4<f32>(0.0);
     var packed = vec4<f32>(0.0);
     var nd = vec3<f32>(0.0);
     var wsum = 0.0;
     if (w.x > 0.02) {
         let flip = vec2<f32>(sg.x, 1.0);
-        let tx = mat_fetch(i, tp.zy / tile * flip, dp1.zy / tile * flip, dp2.zy / tile * flip, period);
+        let tx = mat_fetch(i, tp.zy / tile * flip, dp1.zy / tile * flip, dp2.zy / tile * flip, period, most, single);
         var tn = unpack_tn(tx.normal);
         tn.x *= sg.x;
         nd += vec3<f32>(n.x * tn.z, tn.y + n.y, tn.x + n.z) * w.x;
@@ -1665,7 +1716,7 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
     }
     if (w.y > 0.02) {
         let flip = vec2<f32>(sg.y, 1.0);
-        let tx = mat_fetch(i, tp.xz / tile * flip, dp1.xz / tile * flip, dp2.xz / tile * flip, period);
+        let tx = mat_fetch(i, tp.xz / tile * flip, dp1.xz / tile * flip, dp2.xz / tile * flip, period, most, single);
         var tn = unpack_tn(tx.normal);
         tn.x *= sg.y;
         nd += vec3<f32>(tn.x + n.x, n.y * tn.z, tn.y + n.z) * w.y;
@@ -1675,7 +1726,7 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
     }
     if (w.z > 0.02) {
         let flip = vec2<f32>(-sg.z, 1.0);
-        let tx = mat_fetch(i, tp.xy / tile * flip, dp1.xy / tile * flip, dp2.xy / tile * flip, period);
+        let tx = mat_fetch(i, tp.xy / tile * flip, dp1.xy / tile * flip, dp2.xy / tile * flip, period, most, single);
         var tn = unpack_tn(tx.normal);
         tn.x *= -sg.z;
         nd += vec3<f32>(tn.x + n.x, tn.y + n.y, n.z * tn.z) * w.z;
@@ -1798,6 +1849,7 @@ fn relief_height(l: ReliefLayer, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) ->
         return 0.0;
     }
     let uv = xz / l.tile;
+    cost_samples(gx / l.tile, gy / l.tile, 2.0);
     let a = textureSampleGrad(mat_albedo, mat_sampler, uv + l.oa, l.i, gx / l.tile, gy / l.tile).a;
     let b = textureSampleGrad(mat_albedo, mat_sampler, uv + l.ob, l.i, gx / l.tile, gy / l.tile).a;
     return mix(a, b, smoothstep(0.2, 0.8, l.f + (b - a) * 0.8)) * l.weight;
@@ -2004,12 +2056,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let duv = deform_uv(in.rel);
     let in_deform = inside01(duv) * maps.flags.x * (1.0 - ocean);
     let texel = 1.0 / maps.deform.w;
-    let d0 = textureSampleLevel(deform_tex, map_sampler, deform_st(duv), 0.0);
-    let dxp = textureSampleLevel(deform_tex, map_sampler, deform_st(duv + vec2(texel, 0.0)), 0.0).r;
-    let dxn = textureSampleLevel(deform_tex, map_sampler, deform_st(duv - vec2(texel, 0.0)), 0.0).r;
-    let dzp = textureSampleLevel(deform_tex, map_sampler, deform_st(duv + vec2(0.0, texel)), 0.0).r;
-    let dzn = textureSampleLevel(deform_tex, map_sampler, deform_st(duv - vec2(0.0, texel)), 0.0).r;
+    // (Read inside the window only: everything they feed is scaled by `in_deform`.)
+    var d0 = vec4<f32>(0.0);
+    var dxp = 0.0;
+    var dxn = 0.0;
+    var dzp = 0.0;
+    var dzn = 0.0;
+    if (in_deform > 0.0) {
+        d0 = textureSampleLevel(deform_tex, map_sampler, deform_st(duv), 0.0);
+        dxp = textureSampleLevel(deform_tex, map_sampler, deform_st(duv + vec2(texel, 0.0)), 0.0).r;
+        dxn = textureSampleLevel(deform_tex, map_sampler, deform_st(duv - vec2(texel, 0.0)), 0.0).r;
+        dzp = textureSampleLevel(deform_tex, map_sampler, deform_st(duv + vec2(0.0, texel)), 0.0).r;
+        dzn = textureSampleLevel(deform_tex, map_sampler, deform_st(duv - vec2(0.0, texel)), 0.0).r;
+        cost_taps(5.0);
+    }
     let layers = surface_layers(in.rel);
+    // (The weather grid, the wear map and the paint map's eight loads.)
+    cost_taps(1.0 + 2.0 + 8.0);
 
     // Worn paths: the wear, and its slope across the path (for the sunken bed's normal).
     let wear_raw = path_wear(in.rel) * (1.0 - ocean);
@@ -2549,6 +2612,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     occlusion *= inv_b;
     ground_h *= inv_b;
     var n = normalize(select(n_geo, nsum, bsum > 1e-4));
+    if ((TERRAIN_OFF & 512u) != 0u) {
+        return vec4<f32>(cost.x / 2048.0, min(cost.x / 256.0, 1.0), cost.y / 128.0, 1.0);
+    }
     if ((TERRAIN_OFF & 256u) != 0u) {
         return vec4<f32>(pre_expose(albedo * 0.3), 1.0);
     }

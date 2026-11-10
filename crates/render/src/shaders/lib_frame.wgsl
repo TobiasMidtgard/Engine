@@ -60,6 +60,16 @@
 @group(0) @binding(26) var canopy_map: texture_2d<f32>;
 // People's own sun shadow maps (shadows.rs `ShadowInset`, `frame.shadow_insets`), one layer each.
 @group(0) @binding(27) var inset_shadow_map: texture_depth_2d_array;
+// The screen light maps (screen_light.wgsl, `screen_light`): what the shadow maps, the sky maps
+// and the probes give the surface the prepass drew at each pixel, worked out once per pixel.
+// 1x1 stand-ins in the prepass, in the pass that writes them and in views without them.
+// a: the sun through the shadow maps and people's capsules, its contact shadow, its far march,
+//    the sky the cover overhead leaves.
+// b: the sky people's capsules leave, the sky through the leaves, the sky a reflection sees.
+// gi: the probes' irradiance and how much they cover the point (`probe_gi`).
+@group(0) @binding(28) var light_a: texture_2d<f32>;
+@group(0) @binding(29) var light_b: texture_2d<f32>;
+@group(0) @binding(30) var light_gi: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -106,7 +116,25 @@ fn scene_linear_depth(uv: vec2<f32>, z: f32) -> f32 {
 // Whether the prepass drew the surface at camera-relative `rel` (so its normal, ambient
 // occlusion and motion are in the screen-space maps). Fragments of features without a prepass,
 // transparent surfaces and anything in front of the prepass geometry get false.
+//
+// Ambient occlusion, reflections, bounce light and the two sun marches each ask this about the
+// same point, so the last answer is kept: one pair of loads a pixel instead of up to five.
+var<private> in_prepass_rel: vec3<f32>;
+var<private> in_prepass_pixel: vec2<i32>;
+var<private> in_prepass_answer: i32 = -1;
+
 fn in_prepass(rel: vec3<f32>, pixel: vec2<i32>) -> bool {
+    if (in_prepass_answer >= 0 && all(in_prepass_rel == rel) && all(in_prepass_pixel == pixel)) {
+        return in_prepass_answer == 1;
+    }
+    let seen = in_prepass_read(rel, pixel);
+    in_prepass_rel = rel;
+    in_prepass_pixel = pixel;
+    in_prepass_answer = select(0, 1, seen);
+    return seen;
+}
+
+fn in_prepass_read(rel: vec3<f32>, pixel: vec2<i32>) -> bool {
     let size = vec2<i32>(textureDimensions(prepass_depth));
     if (any(pixel < vec2<i32>(0)) || any(pixel >= size)) { return false; }
     let z = textureLoad(prepass_depth, pixel, 0);
@@ -291,6 +319,9 @@ const SKIP_TERRAIN: u32 = 1024u;
 const SKIP_MESH_SCENE: u32 = 2048u;
 const SKIP_MESH_PREPASS_MATERIAL: u32 = 4096u;
 const SKIP_SKY_MAP_TAPS: u32 = 8192u;
+// The screen light pass writes no sun: with `CUT_SCREEN_LIGHT` on, the pixels whose shading
+// takes its light from the maps lose their sunlight and the rest keep it.
+const SKIP_SCREEN_LIGHT_SUN: u32 = 16384u;
 
 fn shade_skip(bit: u32) -> bool {
     return (u32(frame.shading.z) & bit) != 0u;
@@ -301,6 +332,13 @@ fn shade_skip(bit: u32) -> bool {
 const CUT_SKY_RING_TAPS: u32 = 1u;
 const CUT_TERRAIN_ANISO_8: u32 = 2u;
 const CUT_TERRAIN_ANISO_4: u32 = 4u;
+const CUT_TERRAIN_COPY_ANISO: u32 = 8u;
+const CUT_TERRAIN_FADE_ANISO: u32 = 16u;
+const CUT_TERRAIN_COPY_SINGLE: u32 = 32u;
+const CUT_SHADOW_UMBRA: u32 = 64u;
+const CUT_SUN_MARCH_STEPS: u32 = 128u;
+const CUT_SPECULAR_SKY_TAPS: u32 = 256u;
+const CUT_SCREEN_LIGHT: u32 = 512u;
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;
@@ -441,6 +479,10 @@ fn cascade_visibility(rel: vec3<f32>, n: vec3<f32>, depth: f32, noise: f32) -> f
         }
     }
     if (blockers < 0.5) { return 1.0; }
+    // Every search tap found a caster: deep in shadow, where the filter would find the same
+    // (its disc is no wider than the search's for casters within 30 m). The taps turn every
+    // frame, so an edge that slips between them one frame is found the next.
+    if (trial_cut(CUT_SHADOW_UMBRA) && blockers > f32(blocker_taps) - 0.5) { return 0.0; }
     let blocker_distance = max(z - blocker_sum / blockers, 0.0) / max(z_per_meter, 1e-9);
     let radius = clamp(blocker_distance * tan_sun / texel_world, min_radius, 24.0);
     // Wider filters reach further across sloped receivers: bias with the slope.
@@ -503,6 +545,7 @@ fn far_shadow_visibility(rel: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
 // small shadows (pebbles, grass, a foot on the ground) the shadow map is too coarse for. Only
 // for surfaces in the prepass, within 60 m.
 const CONTACT_STEPS: i32 = 10;
+const CONTACT_STEPS_CUT: i32 = 6;
 
 fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let len = frame.effects.y;
@@ -516,8 +559,9 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let start = rel + n * (0.005 + depth * 0.002);
     let size = vec2<i32>(textureDimensions(prepass_depth));
     var shadow = 1.0;
-    for (var i = 0; i < CONTACT_STEPS; i++) {
-        let t = (f32(i) + noise) / f32(CONTACT_STEPS);
+    let steps = select(CONTACT_STEPS, CONTACT_STEPS_CUT, trial_cut(CUT_SUN_MARCH_STEPS));
+    for (var i = 0; i < steps; i++) {
+        let t = (f32(i) + noise) / f32(steps);
         let q = start + l * (len * t);
         let clip = frame.view_proj * vec4<f32>(q, 1.0);
         if (clip.w <= 0.0) { break; }
@@ -552,6 +596,7 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
 // steps, offset per pixel and frame (the anti-aliasing's history fills in between): 16 cost
 // about a tenth of the ground's pixel time at the overview for no visible change.
 const DISTANT_SHADOW_STEPS: i32 = 8;
+const DISTANT_SHADOW_STEPS_CUT: i32 = 5;
 
 fn distant_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let scale = frame.distant_shadows.x;
@@ -571,9 +616,10 @@ fn distant_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     // shouldn't throw a shadow as long as the view ray behind it.
     let thickness = clamp(march * 0.3, 3.0, 18.0);
     var lit = 1.0;
-    for (var i = 0; i < DISTANT_SHADOW_STEPS; i++) {
+    let steps = select(DISTANT_SHADOW_STEPS, DISTANT_SHADOW_STEPS_CUT, trial_cut(CUT_SUN_MARCH_STEPS));
+    for (var i = 0; i < steps; i++) {
         // Steps bunch up near the receiver, where small casters (a rock, a bush) are.
-        let t = (f32(i) + noise) / f32(DISTANT_SHADOW_STEPS);
+        let t = (f32(i) + noise) / f32(steps);
         let q = start + l * (march * t * t);
         let clip = frame.view_proj * vec4<f32>(q, 1.0);
         if (clip.w <= 0.0) { break; }
@@ -826,6 +872,8 @@ fn sky_ambient(n: vec3<f32>) -> vec3<f32> {
 // openings and bounced off the walls on the way, so a ceiling indoors isn't lit by the sunlit
 // ground outside, nor a cave's floor by the blue sky overhead.
 fn sky_ambient_covered(n: vec3<f32>, sky_vis: f32) -> vec3<f32> {
+    // In the open the light from all around has no weight: its six lookups are skipped.
+    if (sky_vis >= 1.0) { return sky_ambient(n); }
     let around = (sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) + sky_ambient(vec3<f32>(0.0, -1.0, 0.0))
         + sky_ambient(vec3<f32>(1.0, 0.0, 0.0)) + sky_ambient(vec3<f32>(-1.0, 0.0, 0.0))
         + sky_ambient(vec3<f32>(0.0, 0.0, 1.0)) + sky_ambient(vec3<f32>(0.0, 0.0, -1.0))) / 6.0;
@@ -1235,13 +1283,17 @@ fn specular_sky_visibility(rel: vec3<f32>, dir: vec3<f32>, n: vec3<f32>, roughne
     let bias = 0.05 + (0.25 + params.z) * saturate(n.y);
     // Sine of the elevation of the highest cover seen so far.
     var steepest = -1.0;
-    var t = pow(1.25, frame_noise(pixel_of(rel).yx + 41.0));
+    // Half the taps, each as far again as two of the others: the same reach, and the per-pixel
+    // shift still moves every tap over the gap to the next.
+    let halved = trial_cut(CUT_SPECULAR_SKY_TAPS);
+    let grow = select(1.25, 1.5625, halved);
+    var t = pow(grow, frame_noise(pixel_of(rel).yx + 41.0));
     // No cover anywhere along the march (taps reach 1.25^18 m, their gathers two texels
     // past): skip it.
     let size = vec2<f32>(textureDimensions(sky_occlusion_map));
     let at = (c.xy * vec2<f32>(0.5, -0.5) + 0.5) * size;
     let reach = pow(1.25, f32(SPECULAR_SKY_TAPS)) / params.z + 2.0;
-    var taps = SPECULAR_SKY_TAPS;
+    var taps = select(SPECULAR_SKY_TAPS, SPECULAR_SKY_TAPS / 2u, halved);
     if (!sky_cover_near(at, reach, c.z - bias / params.w * 0.99)) { taps = 0u; }
     for (var i = 0u; i < taps; i++) {
         let uv = (c.xy + step * t) * vec2<f32>(0.5, -0.5) + 0.5;
@@ -1252,7 +1304,7 @@ fn specular_sky_visibility(rel: vec3<f32>, dir: vec3<f32>, n: vec3<f32>, roughne
         if (h > bias) {
             steepest = max(steepest, h * inverseSqrt(h * h + t * t));
         }
-        t *= 1.25;
+        t *= grow;
     }
     // Half the lobe is hidden when the cover is level with the reflection.
     let width = 0.04 + roughness;
@@ -1340,6 +1392,61 @@ fn surface_weather(rel: vec3<f32>) -> vec4<f32> {
     w.y *= 1.0 - k;
     w.w *= 1.0 - k;
     return w;
+}
+
+// ---------------------------------------------------------------- screen light maps
+// What the screen light pass worked out for the surface at a pixel: the lighting terms that
+// depend on where a surface is and which way it faces, not on what it is made of. A pixel's
+// shader runs once for every triangle that touches its 2x2 block of pixels (two to three times
+// a pixel where triangles are a few pixels across), and every run used to read the shadow maps,
+// march the depth, tap the sky map's rings and blend eight probes again; the pass does it once
+// a pixel and shading loads the answers. `on` is false where there are none: the cut is off
+// (`CUT_SCREEN_LIGHT`), the view has no maps (stand-ins) or the prepass didn't draw this
+// surface (transparent things, anything in front of the prepass geometry), and shading then
+// works the terms out itself as before.
+struct ScreenLight {
+    on: bool,
+    sun: f32,        // shadow maps and people's capsules (`shadow_factor`, `capsule_occlusion`.x)
+    contact: f32,    // `contact_shadow`
+    distant: f32,    // `distant_shadow`
+    sky: f32,        // `sky_visibility`
+    people_sky: f32, // `capsule_occlusion`.y
+    canopy: f32,     // `canopy_visibility` as `sky_visibility` leaves it
+    spec_sky: f32,   // `specular_sky_visibility`
+    probes: vec4<f32>, // `probe_gi`
+};
+
+fn screen_light(rel: vec3<f32>) -> ScreenLight {
+    var out: ScreenLight;
+    out.on = false;
+    if (!trial_cut(CUT_SCREEN_LIGHT) || textureDimensions(light_a).x <= 1u) { return out; }
+    let pixel = vec2<i32>(floor(pixel_of(rel)));
+    if (!in_prepass(rel, pixel)) { return out; }
+    let a = textureLoad(light_a, pixel, 0);
+    let b = textureLoad(light_b, pixel, 0);
+    out.on = true;
+    out.sun = a.r;
+    out.contact = a.g;
+    out.distant = a.b;
+    out.sky = a.a;
+    out.people_sky = b.r;
+    out.canopy = b.g;
+    out.spec_sky = b.b;
+    out.probes = textureLoad(light_gi, pixel, 0);
+    return out;
+}
+
+// The side of a surface with normal `n` that the sun is on: what the shadow maps are read
+// for (a thin sheet lit from behind is shadowed as seen from its far side).
+fn sunlit_side(n: vec3<f32>) -> vec3<f32> {
+    return select(-n, n, dot(n, frame.sun_dir.xyz) >= 0.0);
+}
+
+// The direction a surface with normal `n` and squared roughness `roughness`, seen along `v`
+// (toward the viewer), reflects around: between the mirror direction and the normal (Lagarde
+// and de Rousiers 2014).
+fn dominant_reflection(n: vec3<f32>, v: vec3<f32>, roughness: f32) -> vec3<f32> {
+    return normalize(mix(n, reflect(-v, n), (1.0 - roughness) * (sqrt(1.0 - roughness) + roughness)));
 }
 
 // ---------------------------------------------------------------- surface shading
@@ -1431,15 +1538,23 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_above = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
     let in_fog = height_fog_sunlight(rel);
+    // The terms the screen light pass has worked out for this pixel, if it has.
+    let lit = screen_light(rel);
     // People's capsules: their shadow just above the point and the sky they hide.
-    let capsules = capsule_occlusion(rel, n);
+    var capsules = vec2<f32>(1.0, lit.people_sky);
+    if (!lit.on) { capsules = capsule_occlusion(rel, n); }
     let sun_light = sun_above * in_fog.x;
     let sides = thin_surface_sides(face, l);
     if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
         let lit_side = select(-face, face, sides.x > 0.0);
-        var shadow = min(shadow_factor(rel, lit_side), capsules.x) * sun_visibility;
-        if (shadow > 0.0) { shadow *= distant_shadow(rel, lit_side); }
+        var shadow = lit.sun * sun_visibility;
+        if (lit.on) {
+            shadow *= lit.distant;
+        } else {
+            shadow = min(shadow_factor(rel, lit_side), capsules.x) * sun_visibility;
+            if (shadow > 0.0) { shadow *= distant_shadow(rel, lit_side); }
+        }
         if (shadow > 0.0 && n_dot_l > 0.0) {
             // Diffuse light follows the shading normal, whichever way the sheet faces: foliage
             // bends its normals so a crown or a tuft of cards shades as one rounded volume.
@@ -1453,7 +1568,11 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
                     * f_schlick(f0, saturate(dot(l, h)));
                 highlight = spec * sides.x;
                 reflected += highlight;
-                contact = mix(1.0, contact_shadow(rel, face), sides.x);
+                if (lit.on) {
+                    contact = mix(1.0, lit.contact, sides.x);
+                } else {
+                    contact = mix(1.0, contact_shadow(rel, face), sides.x);
+                }
             }
             color += reflected * (n_dot_l * contact * shadow) * sun_light;
             specular += highlight * (n_dot_l * contact * shadow) * sun_light;
@@ -1461,10 +1580,17 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         if (shadow > 0.0 && sides.y > 0.0) {
             color += through_color * (thin_surface_through(n_dot_l_raw, v, l) * sides.y * shadow) * sun_light;
         }
-    } else if (!thin && dot(sun_light, sun_light) > 0.0) {
-        var shadow = min(shadow_factor(rel, n), capsules.x) * sun_visibility;
-        if (shadow > 0.0 && n_dot_l_raw > 0.0) {
-            shadow *= contact_shadow(rel, n) * distant_shadow(rel, n);
+    } else if (!thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l_raw > 0.0 || s.subsurface > 0.0)) {
+        // (A surface turned away from the sun that lets none through gets none of its light,
+        // whatever the shadow maps say: they are not read for it.)
+        var shadow = lit.sun * sun_visibility;
+        if (lit.on) {
+            if (n_dot_l_raw > 0.0) { shadow *= lit.contact * lit.distant; }
+        } else {
+            shadow = min(shadow_factor(rel, n), capsules.x) * sun_visibility;
+            if (shadow > 0.0 && n_dot_l_raw > 0.0) {
+                shadow *= contact_shadow(rel, n) * distant_shadow(rel, n);
+            }
         }
         let h = normalize(l + v);
         let n_dot_h = saturate(dot(n, h));
@@ -1517,7 +1643,12 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     // surface sees comes from its smooth normal, so cover doesn't follow the normal map's
     // wrinkles; the shading normal still picks which part of the sky lights it.
     let smooth_n = surface_smooth_normal(s);
-    let sky_vis = sky_visibility(rel, smooth_n);
+    var sky_vis = lit.sky;
+    if (lit.on) {
+        canopy_last_visibility = lit.canopy;
+    } else {
+        sky_vis = sky_visibility(rel, smooth_n);
+    }
     let fill = frame.ambient.rgb;
     var sky_light = sky_ambient_covered(n, sky_vis);
     // Far below the camera (seen from orbit or a high aircraft) the environment map's sky is
@@ -1538,7 +1669,8 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     irradiance += canopy_leaf_radiance(canopy_last_visibility) * (PI * (1.0 - canopy_last_visibility));
     // Where the probes cover, their light instead: the sky through whatever openings their rays
     // find, and light bounced off everything around, on screen or not.
-    let probes = probe_gi(rel, smooth_n, v);
+    var probes = lit.probes;
+    if (!lit.on) { probes = probe_gi(rel, smooth_n, v); }
     let probe_share = probes.a * frame.gi_size.w;
     // The reflected sky follows them too: dimmed as far as the probes find the point darker than
     // the guess (reflection normalization, Lagarde and Zanuttini 2012).
@@ -1554,14 +1686,15 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     // Rough surfaces reflect around a direction between the mirror direction and the normal
     // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
-    let dominant = normalize(mix(n, r, (1.0 - roughness) * (sqrt(1.0 - roughness) + roughness)));
+    let dominant = dominant_reflection(n, v, roughness);
     // Reflected sky: what the cover overhead leaves, less the low sky that cover around hides
     // along the reflection (trees around a pond; rough surfaces, whose lobe is wide, rely on
     // the cover overhead alone), faded where bumps reflect from below the surface's horizon.
     var spec_sky = sky_vis;
     let lobe_wide = saturate(roughness * 2.0);
     if (lobe_wide < 1.0) {
-        let around = specular_sky_visibility(rel, dominant, smooth_n, roughness);
+        var around = lit.spec_sky;
+        if (!lit.on) { around = specular_sky_visibility(rel, dominant, smooth_n, roughness); }
         spec_sky = min(spec_sky, mix(around, 1.0, lobe_wide));
     }
     spec_sky *= specular_horizon_fade(r, smooth_n) * reflection_scale;

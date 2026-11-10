@@ -101,6 +101,8 @@ pub struct ScreenEffects {
     blur: wgpu::RenderPipeline,
     gtao_group: wgpu::BindGroup,
     blur_group: wgpu::BindGroup,
+    /// The screen light pass (screen_light.wgsl).
+    light: wgpu::RenderPipeline,
     ssr_layout: wgpu::BindGroupLayout,
     ssr: wgpu::RenderPipeline,
     /// SSR input groups, indexed by the history written this frame (they read the other one).
@@ -248,6 +250,7 @@ impl ScreenEffects {
             shared.formats.ao,
             None,
         );
+        let light = light_pipeline(shared);
         let ssr_module = shared.shader("ssr", include_str!("shaders/ssr.wgsl"), true);
         let ssr = fullscreen_pipeline(
             shared,
@@ -331,6 +334,7 @@ impl ScreenEffects {
             blur,
             gtao_group,
             blur_group,
+            light,
             ssr_layout,
             ssr,
             ssr_groups,
@@ -545,6 +549,40 @@ impl ScreenEffects {
         pass.set_pipeline(&self.blur);
         pass.set_bind_group(0, prepass_group, &[]);
         pass.set_bind_group(1, &self.blur_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Record the screen light maps (`Targets::light_a`, `light_b`, `light_gi`) from the
+    /// prepass. `light_group` is the frame group with the prepass's depth and normals bound and
+    /// stand-ins for the maps drawn after it.
+    pub fn encode_light(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        light_group: &wgpu::BindGroup,
+    ) {
+        let attachment = |view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("screen light"),
+            color_attachments: &[
+                attachment(&targets.light_a.view),
+                attachment(&targets.light_b.view),
+                attachment(&targets.light_gi.view),
+            ],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.light);
+        pass.set_bind_group(0, light_group, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -876,6 +914,52 @@ pub fn is_camera_cut(
 
 /// Smallest jump [`is_camera_cut`] calls a cut (meters in one frame).
 pub const CUT_STEP_M: f64 = 5.0;
+
+/// The screen light pass's pipeline: one fullscreen triangle into the three light maps.
+fn light_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
+    let module = shared.shader(
+        "screen light",
+        include_str!("shaders/screen_light.wgsl"),
+        true,
+    );
+    let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("screen light"),
+        bind_group_layouts: &[Some(&shared.frame_layout)],
+        immediate_size: 0,
+    });
+    let target = |format| {
+        Some(wgpu::ColorTargetState {
+            format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })
+    };
+    shared.render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("screen light"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_light"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_light"),
+            compilation_options: Default::default(),
+            targets: &[
+                target(crate::targets::LIGHT_FORMAT),
+                target(crate::targets::LIGHT_FORMAT),
+                target(shared.formats.hdr),
+            ],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
 
 #[cfg(test)]
 mod tests {

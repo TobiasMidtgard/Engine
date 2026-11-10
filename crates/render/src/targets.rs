@@ -67,6 +67,11 @@ pub struct Targets {
     /// Raw ambient occlusion (noisy), then the blurred result shading reads.
     pub ao_raw: Tex,
     pub ao: Tex,
+    /// The screen light maps (`crate::effects::Effects::encode_light`, lib_frame.wgsl
+    /// `screen_light`): the sun and the sky's cover, the sky's other shares, the probes' light.
+    pub light_a: Tex,
+    pub light_b: Tex,
+    pub light_gi: Tex,
     /// Temporal anti-aliasing history (`output` size), ping-ponged every frame. Without TAA, the
     /// finished HDR image is kept here for screen-space reflections.
     pub history: [Tex; 2],
@@ -92,6 +97,9 @@ pub struct Targets {
     /// Bloom mip chain (half resolution and down).
     pub bloom: Vec<Tex>,
 }
+
+/// The format of the two screen light maps that hold shares of the sun and the sky (0..1).
+pub const LIGHT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 impl Targets {
     pub fn new(
@@ -146,6 +154,9 @@ impl Targets {
         );
         let ao_raw = screen("ambient occlusion raw", formats.ao);
         let ao = screen("ambient occlusion", formats.ao);
+        let light_a = screen("screen light: sun and sky", LIGHT_FORMAT);
+        let light_b = screen("screen light: people, leaves, reflections", LIGHT_FORMAT);
+        let light_gi = screen("screen light: probes", formats.hdr);
         let history = [0, 1].map(|i| {
             Tex::new(
                 device,
@@ -233,6 +244,9 @@ impl Targets {
             prepass_depth,
             ao_raw,
             ao,
+            light_a,
+            light_b,
+            light_gi,
             history,
             upscaled,
             ssr,

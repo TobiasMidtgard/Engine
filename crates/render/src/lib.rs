@@ -574,6 +574,11 @@ mod tests {
                 false,
             ),
             ("gtao", include_str!("shaders/gtao.wgsl").into(), true),
+            (
+                "screen_light",
+                include_str!("shaders/screen_light.wgsl").into(),
+                true,
+            ),
             ("taa", include_str!("shaders/taa.wgsl").into(), true),
             ("ssr", include_str!("shaders/ssr.wgsl").into(), true),
             (

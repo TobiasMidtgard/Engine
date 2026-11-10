@@ -194,6 +194,10 @@ pub mod shade_skip {
     pub const MESH_PREPASS_MATERIAL: u32 = 4096;
     /// The sky occlusion map's ring taps (surfaces and fog read open sky; the map is drawn).
     pub const SKY_MAP_TAPS: u32 = 8192;
+    /// The screen light pass writes no sun: with [`trial_cut::SCREEN_LIGHT`] on, the pixels
+    /// whose shading takes its light from the pass's maps lose their sunlight and the rest
+    /// keep it (a picture of where the maps are used).
+    pub const SCREEN_LIGHT_SUN: u32 = 16384;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the same picture, switchable
@@ -207,6 +211,28 @@ pub mod trial_cut {
     pub const TERRAIN_ANISO_8: u32 = 2;
     /// The same with at most 4.
     pub const TERRAIN_ANISO_4: u32 = 4;
+    /// The ground textures' larger copies (the 4x distance blend, rock's 8x and 64x scales) with
+    /// at most 4 anisotropic probes; the texture itself keeps 16.
+    pub const TERRAIN_COPY_ANISO: u32 = 8;
+    /// A ground texture's probes follow how much of it still shows: 16 while it is all there,
+    /// down to 2 as it fades into its mean color with distance.
+    pub const TERRAIN_FADE_ANISO: u32 = 16;
+    /// The larger copies with one lookup each instead of the anti-tiling pair.
+    pub const TERRAIN_COPY_SINGLE: u32 = 32;
+    /// Where every tap of the cascades' blocker search finds a caster the point is taken as
+    /// fully shadowed and the filter taps (up to `shadow_filter_taps`) are not read.
+    pub const SHADOW_UMBRA: u32 = 64;
+    /// The screen-space sun marches with fewer steps: contact shadows 6 instead of 10, the
+    /// march past the cascades 5 instead of 8.
+    pub const SUN_MARCH_STEPS: u32 = 128;
+    /// The sky a reflection sees marched with 9 taps instead of 18 over the same reach.
+    pub const SPECULAR_SKY_TAPS: u32 = 256;
+    /// The sun's shadows, the sky's cover and the probes' light worked out once per pixel in a
+    /// screen pass after the prepass (screen_light.wgsl) and loaded by shading, instead of in
+    /// every run of every pixel's shader: a pixel's shader runs once for each triangle that
+    /// touches its 2x2 block, two to three times a pixel where triangles are a few pixels
+    /// across.
+    pub const SCREEN_LIGHT: u32 = 512;
 }
 
 /// What the screen shows.

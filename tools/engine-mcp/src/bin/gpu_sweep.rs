@@ -323,6 +323,85 @@ fn variants() -> Vec<Variant> {
             "ground textures with at most 4 anisotropic probes",
         ),
         v(
+            "cut_terrain_copy_aniso",
+            r,
+            json!({"trial_cuts": 8}),
+            "the ground textures' larger copies with at most 4 anisotropic probes",
+        ),
+        v(
+            "cut_terrain_fade_aniso",
+            r,
+            json!({"trial_cuts": 16}),
+            "a ground texture's probes follow how much of it still shows (16 down to 2)",
+        ),
+        v(
+            "cut_terrain_copy_single",
+            r,
+            json!({"trial_cuts": 32}),
+            "the ground textures' larger copies with one lookup, not the anti-tiling pair",
+        ),
+        v(
+            "cut_terrain_copies",
+            r,
+            json!({"trial_cuts": 56}),
+            "the three ground texture cuts together",
+        ),
+        v(
+            "cut_shadow_umbra",
+            r,
+            json!({"trial_cuts": 64}),
+            "deep shadow skips the cascades' filter taps",
+        ),
+        v(
+            "cut_sun_march_steps",
+            r,
+            json!({"trial_cuts": 128}),
+            "contact shadows with 6 steps (not 10), the far sun march with 5 (not 8)",
+        ),
+        v(
+            "cut_specular_sky_taps",
+            r,
+            json!({"trial_cuts": 256}),
+            "the reflection's sky march with 9 taps, not 18",
+        ),
+        v(
+            "cut_lighting",
+            r,
+            json!({"trial_cuts": 449}),
+            "the four lighting cuts together (sky rings, deep shadow, sun marches, reflection march)",
+        ),
+        v(
+            "cut_screen_light",
+            r,
+            json!({"trial_cuts": 512}),
+            "shadows, sky cover and probe light once per pixel in a screen pass, not in every shader run",
+        ),
+        v(
+            "show_screen_light",
+            r,
+            json!({"trial_cuts": 512, "debug_skip": 16384}),
+            "a picture, not a cut: the pixels that take their light from the screen pass lose the sun",
+        ),
+        v(
+            "triangle_view",
+            r,
+            json!({
+                "debug_skip": 32768, "tonemapper": "None", "bloom_intensity": 0.0,
+                "sun_glare": 0.0, "saturation": 1.0, "contrast": 1.0, "vignette": 0.0,
+                "film_grain": 0.0, "white_balance": 0.0, "anti_aliasing": "None",
+                "volumetric_fog": false, "screen_space_gi": false,
+                "screen_space_reflections": false, "world_reflections": false,
+                "ambient_occlusion": false, "sharpness": 0.0, "night_desaturation": 0.0
+            }),
+            "a picture for counting shader runs per pixel: only in a build with the triangle-view patch (engine-perf/triangle-view)",
+        ),
+        v(
+            "cut_lighting_all",
+            r,
+            json!({"trial_cuts": 961}),
+            "the screen pass and the four lighting cuts together",
+        ),
+        v(
             "cut_shadow_refresh",
             r,
             json!({"shadow_refresh_secs": 0.25}),
@@ -440,6 +519,20 @@ fn variants() -> Vec<Variant> {
             "TerrainSettings",
             &[("split_factor", 0.7)],
             "ground patches split at 0.7 of the distance: about half the ground triangles",
+        ),
+        // A view on the ground fills the patch budget whatever the split distance is, so
+        // these two are what actually moves the ground's triangle count there.
+        x(
+            "terrain_budget_half",
+            "TerrainSettings",
+            &[("patch_budget", 0.5)],
+            "half the patches the ground may fill the view with: about half its triangles",
+        ),
+        x(
+            "terrain_quads_larger",
+            "TerrainSettings",
+            &[("min_quad_px", 1.5)],
+            "the ground's quads no smaller than 9 pixels on screen, not 6",
         ),
         x(
             "grass_half",
