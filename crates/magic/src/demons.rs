@@ -80,8 +80,6 @@ pub const ARMS_TURN: f32 = 0.9;
 /// Hellstone's grain (and its cracks' tile), m, and the cracks' glow, nits.
 pub const HELLSTONE_TILE_M: f32 = 1.5;
 pub const CRACK_GLOW: f32 = 1600.0;
-/// Fires burn at a gate's feet (a torch fire lasts 8 s), lit again before they go out, s.
-pub const GATE_FIRE_EVERY: f32 = 6.5;
 
 /// An imp flies this high over the floor (bobbing), m.
 pub const IMP_HOVER_M: f32 = 2.1;
@@ -147,8 +145,6 @@ pub struct Hellgate {
     /// to the gate's oval, then the vortex's layers (swirl, arms, eye) and the rim's fire.
     pub stones: Vec<(Entity, Vec3, Quat)>,
     pub membrane: Vec<Entity>,
-    /// When the fires at its feet were last lit, s of its age.
-    pub fires_lit: Option<f32>,
     /// Seconds since it started to close.
     pub closing: Option<f32>,
 }
@@ -388,6 +384,17 @@ pub fn spawn_hellgates(mut queue: ResMut<MagicQueue>, mut commands: Commands) {
                 .id();
             stones.push((e, at, lean));
         }
+        // Fires burn on the stones at its feet for as long as it stands (they go with it).
+        for &(foot, _, _) in [stones[n / 2 - 2], stones[n / 2 + 2]].iter() {
+            queue.looks.push(LookCmd::Attach {
+                entity: foot,
+                look: "fire".into(),
+                role: Role::Aura,
+                scale: 1.3 * k,
+                color: HELLFIRE,
+                power_j: g.cast.spell.power.energy_j as f32 * 0.1,
+            });
+        }
         for (i, (x, y, out)) in [
             (0.0, 1.0, Vec3::new(0.0, 1.0, 0.35)),
             (-0.55, 0.85, Vec3::new(-0.7, 0.8, 0.2)),
@@ -493,7 +500,6 @@ pub fn spawn_hellgates(mut queue: ResMut<MagicQueue>, mut commands: Commands) {
                 imps: 0,
                 stones,
                 membrane,
-                fires_lit: None,
                 closing: None,
             },
         ));
@@ -639,26 +645,6 @@ pub fn run_hellgates(
                     tf.scale = Vec3::new(pulse, pulse, 1.0);
                 }
                 _ => {}
-            }
-        }
-        // Fires burn at its feet while it stands, lit again before they go out.
-        if open > 0.5
-            && g.closing.is_none()
-            && g.left() > 2.0
-            && g.fires_lit.is_none_or(|t| g.age - t >= GATE_FIRE_EVERY)
-        {
-            g.fires_lit = Some(g.age);
-            let right = Vec3::new(-g.facing.z, 0.0, g.facing.x);
-            for side in [-1.0f32, 1.0] {
-                let at = g.at
-                    + (right * side * GATE_RX * 0.85 * k + g.facing * 0.3 * k).as_dvec3()
-                    + DVec3::Y * 0.05;
-                queue.looks.push(LookCmd::Effect {
-                    name: "fire.torch",
-                    at,
-                    up: Vec3::Y,
-                    scale: 2.4 * k,
-                });
             }
         }
         light.intensity_lm = GATE_LIGHT_LM * open * (1.0 + 0.12 * (g.age * 7.0).sin());
