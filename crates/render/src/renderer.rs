@@ -848,6 +848,8 @@ struct ScreenMaps {
     aerial: wgpu::TextureView,
     /// The screen light maps (lib_frame.wgsl `light_a`, `light_b`, `light_gi`).
     light: [wgpu::TextureView; 3],
+    /// The lamps that can reach each tile (lib_frame.wgsl `lamp_tiles`).
+    lamp_tiles: wgpu::TextureView,
 }
 
 impl ScreenMaps {
@@ -865,6 +867,7 @@ impl ScreenMaps {
                 targets.light_b.view.clone(),
                 targets.light_gi.view.clone(),
             ],
+            lamp_tiles: targets.lamp_tiles.view.clone(),
         }
     }
 
@@ -917,6 +920,17 @@ impl ScreenMaps {
             tex("no screen light b", crate::targets::LIGHT_FORMAT).view,
             tex("no screen light gi", shared.formats.hdr).view,
         ];
+        // One texel says "no tiles" to the lamp loop.
+        let lamp_tiles = Tex::new_layers(
+            device,
+            "no lamp tiles",
+            1,
+            1,
+            1,
+            crate::targets::LAMP_TILE_FORMAT,
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        )
+        .view;
         Self {
             ao: ao.view,
             normal: normal.view,
@@ -926,6 +940,7 @@ impl ScreenMaps {
             gi: gi.view,
             aerial: volumetrics.aerial.stand_in().clone(),
             light,
+            lamp_tiles,
         }
     }
 }
@@ -1167,6 +1182,16 @@ impl Renderer {
                 layout_entry(28, all, float_texture),
                 layout_entry(29, all, float_texture),
                 layout_entry(30, all, float_texture),
+                // The lamps that can reach each tile (effects.rs `encode_lamp_tiles`). The 24th.
+                layout_entry(
+                    31,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let shadow_view_layout =
@@ -2857,6 +2882,13 @@ impl Renderer {
             self.effects
                 .encode_light(&mut encoder, &self.targets, &self.light_group);
         }
+        // Which lamps can reach each tile of the screen, from the prepass's depth (shading
+        // goes through those instead of every lamp: lib_frame.wgsl `lamp_mask`).
+        if settings.trial_cuts & crate::settings::trial_cut::TILED_LAMPS != 0 {
+            self.perf.pass(&mut cpu, &mut encoder, "lamp tiles");
+            self.effects
+                .encode_lamp_tiles(&mut encoder, &self.targets, &self.light_group);
+        }
         if ssr {
             // What screen-space reflections can't see, traced against probe GI's scene.
             if !extra {
@@ -4081,6 +4113,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 30,
                 resource: view(&maps.light[2]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 31,
+                resource: view(&maps.lamp_tiles),
             },
         ],
     })

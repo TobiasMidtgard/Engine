@@ -233,6 +233,11 @@ pub mod trial_cut {
     /// touches its 2x2 block, two to three times a pixel where triangles are a few pixels
     /// across.
     pub const SCREEN_LIGHT: u32 = 512;
+    /// Lamps sorted into 16-pixel tiles after the depth pass (lamp_tiles.wgsl): a pixel's
+    /// shader goes through the lamps that can reach its tile instead of every lamp in view
+    /// (61 at the plaza, 153 at the overview). Same picture: a lamp left out reaches no
+    /// surface in the tile.
+    pub const TILED_LAMPS: u32 = 1024;
 }
 
 /// What the screen shows.

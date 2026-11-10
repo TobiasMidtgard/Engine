@@ -103,6 +103,8 @@ pub struct ScreenEffects {
     blur_group: wgpu::BindGroup,
     /// The screen light pass (screen_light.wgsl).
     light: wgpu::RenderPipeline,
+    /// Sorts the lamps into the screen's tiles (lamp_tiles.wgsl).
+    lamp_tiles: wgpu::RenderPipeline,
     ssr_layout: wgpu::BindGroupLayout,
     ssr: wgpu::RenderPipeline,
     /// SSR input groups, indexed by the history written this frame (they read the other one).
@@ -251,6 +253,7 @@ impl ScreenEffects {
             None,
         );
         let light = light_pipeline(shared);
+        let lamp_tiles = lamp_tiles_pipeline(shared);
         let ssr_module = shared.shader("ssr", include_str!("shaders/ssr.wgsl"), true);
         let ssr = fullscreen_pipeline(
             shared,
@@ -335,6 +338,7 @@ impl ScreenEffects {
             gtao_group,
             blur_group,
             light,
+            lamp_tiles,
             ssr_layout,
             ssr,
             ssr_groups,
@@ -582,6 +586,36 @@ impl ScreenEffects {
             ..Default::default()
         });
         pass.set_pipeline(&self.light);
+        pass.set_bind_group(0, light_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Sort the lamps into the screen's tiles (lamp_tiles.wgsl) from the prepass's depth: a
+    /// bit per lamp in `targets.lamp_tiles`. `light_group` as for `encode_light`.
+    pub fn encode_lamp_tiles(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        light_group: &wgpu::BindGroup,
+    ) {
+        let layers = [0, 1].map(|i| targets.lamp_tiles.layer_view(i));
+        let attachment = |view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lamp tiles"),
+            color_attachments: &[attachment(&layers[0]), attachment(&layers[1])],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.lamp_tiles);
         pass.set_bind_group(0, light_group, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -914,6 +948,42 @@ pub fn is_camera_cut(
 
 /// Smallest jump [`is_camera_cut`] calls a cut (meters in one frame).
 pub const CUT_STEP_M: f64 = 5.0;
+
+/// The lamp tiles' pipeline: one fullscreen triangle over the tiles, into both layers.
+fn lamp_tiles_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
+    let module = shared.shader("lamp tiles", include_str!("shaders/lamp_tiles.wgsl"), true);
+    let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lamp tiles"),
+        bind_group_layouts: &[Some(&shared.frame_layout)],
+        immediate_size: 0,
+    });
+    let target = Some(wgpu::ColorTargetState {
+        format: crate::targets::LAMP_TILE_FORMAT,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    });
+    shared.render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("lamp tiles"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_tiles"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_tiles"),
+            compilation_options: Default::default(),
+            targets: &[target.clone(), target],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
 
 /// The screen light pass's pipeline: one fullscreen triangle into the three light maps.
 fn light_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {

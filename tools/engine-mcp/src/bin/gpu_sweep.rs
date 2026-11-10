@@ -377,6 +377,12 @@ fn variants() -> Vec<Variant> {
             "shadows, sky cover and probe light once per pixel in a screen pass, not in every shader run",
         ),
         v(
+            "cut_tiled_lamps",
+            r,
+            json!({"trial_cuts": 1024}),
+            "each pixel goes through the lamps that reach its 16-pixel tile, not every lamp in view",
+        ),
+        v(
             "show_screen_light",
             r,
             json!({"trial_cuts": 512, "debug_skip": 16384}),
@@ -398,8 +404,8 @@ fn variants() -> Vec<Variant> {
         v(
             "cut_lighting_all",
             r,
-            json!({"trial_cuts": 961}),
-            "the screen pass and the four lighting cuts together",
+            json!({"trial_cuts": 1985}),
+            "the screen pass, lamp tiles and the four lighting cuts together",
         ),
         v(
             "cut_shadow_refresh",
@@ -520,19 +526,21 @@ fn variants() -> Vec<Variant> {
             &[("split_factor", 0.7)],
             "ground patches split at 0.7 of the distance: about half the ground triangles",
         ),
-        // A view on the ground fills the patch budget whatever the split distance is, so
-        // these two are what actually moves the ground's triangle count there.
+        // The patch budget raises the detail again when the split distance alone would draw
+        // fewer patches than it allows, so `terrain_coarser` by itself moves the ground's
+        // triangles by 2% at the plaza. With half the budget too: 48 to 72% of them (counted
+        // 10 Nov at the plaza, the overview and the lake).
         x(
-            "terrain_budget_half",
+            "terrain_coarser_ground",
             "TerrainSettings",
-            &[("patch_budget", 0.5)],
-            "half the patches the ground may fill the view with: about half its triangles",
+            &[("split_factor", 0.7), ("patch_budget", 0.5)],
+            "ground patches split at 0.7 of the distance with half the patch budget",
         ),
         x(
-            "terrain_quads_larger",
+            "terrain_coarser_ground_more",
             "TerrainSettings",
-            &[("min_quad_px", 1.5)],
-            "the ground's quads no smaller than 9 pixels on screen, not 6",
+            &[("split_factor", 0.5), ("patch_budget", 0.5)],
+            "ground patches split at half the distance with half the patch budget",
         ),
         x(
             "grass_half",

@@ -42,6 +42,52 @@ impl Tex {
             height: height.max(1),
         }
     }
+
+    /// A texture of `layers` layers, its default view the whole array.
+    pub fn new_layers(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        layers: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: layers.max(1),
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        Self {
+            texture,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
+
+    /// A view of one layer, to draw into.
+    pub fn layer_view(&self, layer: u32) -> wgpu::TextureView {
+        self.texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: layer,
+            array_layer_count: Some(1),
+            ..Default::default()
+        })
+    }
 }
 
 /// Size-dependent targets.
@@ -72,6 +118,9 @@ pub struct Targets {
     pub light_a: Tex,
     pub light_b: Tex,
     pub light_gi: Tex,
+    /// The lamps that can reach each 16-pixel tile: a bit per lamp, two layers of 128
+    /// (lamp_tiles.wgsl).
+    pub lamp_tiles: Tex,
     /// Temporal anti-aliasing history (`output` size), ping-ponged every frame. Without TAA, the
     /// finished HDR image is kept here for screen-space reflections.
     pub history: [Tex; 2],
@@ -100,6 +149,10 @@ pub struct Targets {
 
 /// The format of the two screen light maps that hold shares of the sun and the sky (0..1).
 pub const LIGHT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Pixels across a lamp tile (lamp_tiles.wgsl `LAMP_TILE`).
+pub const LAMP_TILE: u32 = 16;
+/// A lamp tile's bits: 128 a layer.
+pub const LAMP_TILE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
 
 impl Targets {
     pub fn new(
@@ -157,6 +210,15 @@ impl Targets {
         let light_a = screen("screen light: sun and sky", LIGHT_FORMAT);
         let light_b = screen("screen light: people, leaves, reflections", LIGHT_FORMAT);
         let light_gi = screen("screen light: probes", formats.hdr);
+        let lamp_tiles = Tex::new_layers(
+            device,
+            "lamp tiles",
+            width.div_ceil(LAMP_TILE),
+            height.div_ceil(LAMP_TILE),
+            2,
+            LAMP_TILE_FORMAT,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+        );
         let history = [0, 1].map(|i| {
             Tex::new(
                 device,
@@ -247,6 +309,7 @@ impl Targets {
             light_a,
             light_b,
             light_gi,
+            lamp_tiles,
             history,
             upscaled,
             ssr,

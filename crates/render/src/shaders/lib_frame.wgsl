@@ -70,6 +70,9 @@
 @group(0) @binding(28) var light_a: texture_2d<f32>;
 @group(0) @binding(29) var light_b: texture_2d<f32>;
 @group(0) @binding(30) var light_gi: texture_2d<f32>;
+// The lamps that can reach each 16-pixel tile of the screen, a bit per lamp: lamps 0-127 in
+// layer 0, 128-255 in layer 1 (lamp_tiles.wgsl). One texel when there are no tiles.
+@group(0) @binding(31) var lamp_tiles: texture_2d_array<u32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -339,6 +342,7 @@ const CUT_SHADOW_UMBRA: u32 = 64u;
 const CUT_SUN_MARCH_STEPS: u32 = 128u;
 const CUT_SPECULAR_SKY_TAPS: u32 = 256u;
 const CUT_SCREEN_LIGHT: u32 = 512u;
+const CUT_TILED_LAMPS: u32 = 1024u;
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;
@@ -637,6 +641,47 @@ fn distant_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         }
     }
     return mix(1.0, lit, fade);
+}
+
+// ---------------------------------------------------------------- lamp tiles
+// With `CUT_TILED_LAMPS`, the lamps that can reach each 16-pixel tile of the screen are sorted
+// out once after the prepass (lamp_tiles.wgsl), a bit per lamp, and a pixel goes through those
+// instead of every lamp in view. The picture stays the same: a lamp left out of a tile reaches
+// no surface in it.
+const LAMP_TILE_PX: i32 = 16;    // targets.rs LAMP_TILE
+const LAMP_TILE_MAX: u32 = 256u; // two layers of 128 bits
+
+struct LampMask {
+    tiled: bool,
+    lo: vec4<u32>,
+    hi: vec4<u32>,
+};
+
+// The tile of the pixel camera-relative `rel` falls in, of `count` lamps in view. Not tiled
+// (every lamp) without the cut, without tiles (a stand-in), off screen, or over 256 lamps.
+fn lamp_mask(rel: vec3<f32>, count: u32) -> LampMask {
+    var m: LampMask;
+    m.tiled = false;
+    if (count == 0u || count > LAMP_TILE_MAX || !trial_cut(CUT_TILED_LAMPS)) { return m; }
+    let size = vec2<i32>(textureDimensions(lamp_tiles));
+    if (size.x <= 1 && size.y <= 1) { return m; }
+    let p = pixel_of(rel);
+    let tile = vec2<i32>(floor(p)) / LAMP_TILE_PX;
+    if (any(p < vec2<f32>(0.0)) || any(tile >= size)) { return m; }
+    m.tiled = true;
+    m.lo = textureLoad(lamp_tiles, tile, 0, 0);
+    m.hi = textureLoad(lamp_tiles, tile, 1, 0);
+    return m;
+}
+
+// Lamps 32w to 32w + 31 of `count` (w × 32 < count) that `m` lets through, a bit each.
+fn lamp_word(m: LampMask, w: u32, count: u32) -> u32 {
+    let left = count - w * 32u;
+    var bits = select(0xffffffffu, (1u << left) - 1u, left < 32u);
+    if (m.tiled) {
+        bits &= select(m.hi[w & 3u], m.lo[w & 3u], w < 4u);
+    }
+    return bits;
 }
 
 // ---------------------------------------------------------------- capsule shadows
@@ -1608,34 +1653,42 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         }
     }
 
-    // Point lights.
+    // Point lights: every lamp in view, or with `CUT_TILED_LAMPS` those that reach this
+    // pixel's tile (`lamp_mask`), nearest first either way.
     let count = select(frame.counts.x, 0u, shade_skip(SKIP_POINT_LIGHTS));
-    for (var i = 0u; i < count; i++) {
-        let light = point_lights[i];
-        let to_light = light.position_range.xyz - rel;
-        let dist2 = dot(to_light, to_light);
-        let range = light.position_range.w;
-        if (dist2 > range * range) { continue; }
-        let dist = sqrt(dist2);
-        let pl = to_light / max(dist, 1e-4);
-        let nl = saturate(dot(n, pl));
-        if (nl <= 0.0 && s.subsurface <= 0.0) { continue; }
-        let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
-        let h = normalize(pl + v);
-        let spec = d_ggx(saturate(dot(n, h)), max(roughness, 0.02)) *
-            v_smith_ggx_correlated(n_dot_v, nl, roughness) * f_schlick(f0, saturate(dot(pl, h)));
-        if (thin) {
-            // Reflected (highlights only from the side in view), let through from the far side.
-            let lit = thin_surface_sides(face, pl);
-            let reflected = (diffuse_color * INV_PI + spec * lit.x) * nl;
-            let through = through_color * (thin_surface_through(dot(n, pl), v, pl) * lit.y);
-            color += (reflected + through) * light.color_radius.rgb * falloff;
-            specular += spec * (lit.x * nl) * light.color_radius.rgb * falloff;
-            continue;
+    let lamps = lamp_mask(rel, count);
+    for (var w = 0u; w * 32u < count; w++) {
+        var bits = lamp_word(lamps, w, count);
+        loop {
+            if (bits == 0u) { break; }
+            let i = w * 32u + firstTrailingBit(bits);
+            bits &= bits - 1u;
+            let light = point_lights[i];
+            let to_light = light.position_range.xyz - rel;
+            let dist2 = dot(to_light, to_light);
+            let range = light.position_range.w;
+            if (dist2 > range * range) { continue; }
+            let dist = sqrt(dist2);
+            let pl = to_light / max(dist, 1e-4);
+            let nl = saturate(dot(n, pl));
+            if (nl <= 0.0 && s.subsurface <= 0.0) { continue; }
+            let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
+            let h = normalize(pl + v);
+            let spec = d_ggx(saturate(dot(n, h)), max(roughness, 0.02)) *
+                v_smith_ggx_correlated(n_dot_v, nl, roughness) * f_schlick(f0, saturate(dot(pl, h)));
+            if (thin) {
+                // Reflected (highlights only from the side in view), let through from the far side.
+                let lit = thin_surface_sides(face, pl);
+                let reflected = (diffuse_color * INV_PI + spec * lit.x) * nl;
+                let through = through_color * (thin_surface_through(dot(n, pl), v, pl) * lit.y);
+                color += (reflected + through) * light.color_radius.rgb * falloff;
+                specular += spec * (lit.x * nl) * light.color_radius.rgb * falloff;
+                continue;
+            }
+            let wrap = saturate((dot(n, pl) + s.subsurface) / (1.0 + s.subsurface));
+            color += (diffuse_color * INV_PI * max(nl, wrap * s.subsurface) + spec * nl) * light.color_radius.rgb * falloff;
+            specular += spec * nl * light.color_radius.rgb * falloff;
         }
-        let wrap = saturate((dot(n, pl) + s.subsurface) / (1.0 + s.subsurface));
-        color += (diffuse_color * INV_PI * max(nl, wrap * s.subsurface) + spec * nl) * light.color_radius.rgb * falloff;
-        specular += spec * nl * light.color_radius.rgb * falloff;
     }
 
     // Sky / ambient (occluded in caves and interiors; the constant fill stays), darkened in
