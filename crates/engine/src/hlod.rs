@@ -298,6 +298,7 @@ pub(crate) fn update(
         return;
     }
     {
+        let _span = tracing::info_span!("hlod: image means").entered();
         let deadline = Instant::now() + std::time::Duration::from_micros(500);
         let mut means = world.remove_resource::<ImageMeans>().unwrap_or_default();
         means.refresh(world.resource::<Assets<Image>>(), deadline);
@@ -325,7 +326,12 @@ pub(crate) fn update(
     let in_play = !world
         .get_resource::<engine_core::time::Time>()
         .is_none_or(|t| matches!(t.source(), engine_core::time::TimeSource::Manual { .. }));
-    receive_reads(world);
+    tracing::info_span!("hlod: reads").in_scope(|| receive_reads(world));
+    // In play every cell gathering this frame shares one `gather_ms`: zones that load in the
+    // same seconds settle together, and a budget each was 2 ms times their number, frame
+    // after frame. With a manual clock each has its own, as tests and tours expect.
+    let gather_until = in_play
+        .then(|| Instant::now() + std::time::Duration::from_secs_f32(settings.gather_ms / 1000.0));
     let mut to_read: Vec<(usize, std::path::PathBuf)> = Vec::new();
     for (i, (key, center, state)) in cells.iter().enumerate() {
         let config = configs.get(i).copied().unwrap_or_default();
@@ -349,7 +355,7 @@ pub(crate) fn update(
         if let Some(Some(pose)) = poses.get(i) {
             ride(world, i, *pose);
         }
-        collect(world, i, key, config, &settings);
+        tracing::info_span!("hlod: collect").in_scope(|| collect(world, i, key, config, &settings));
         let fading_in = fading.contains(&id);
         let slot = &world.resource::<Proxies>().slots[i];
         let (mesh, entity, empty) = (slot.mesh, slot.entity, slot.empty || slot.reading);
@@ -360,7 +366,8 @@ pub(crate) fn update(
                     despawn(world, i, e);
                 }
                 if mesh.is_none() && !empty && (streaming || settings.bake) {
-                    capture(world, i, id, key, &settings);
+                    tracing::info_span!("hlod: capture")
+                        .in_scope(|| capture(world, i, id, key, &settings, gather_until));
                 }
             }
             CellState::Loaded => {}
@@ -377,7 +384,8 @@ pub(crate) fn update(
                 slot.settled = 0;
                 slot.gather = None;
                 if let (Some(mesh), None) = (mesh, entity) {
-                    show(world, i, id, mesh, &settings);
+                    tracing::info_span!("hlod: show")
+                        .in_scope(|| show(world, i, id, mesh, &settings));
                     // A leaving cell still shows: the proxy comes in as it fades out.
                     if *state == CellState::Unloading {
                         fade_in(world, id, 0.0);
@@ -389,7 +397,7 @@ pub(crate) fn update(
     if !to_read.is_empty() {
         start_reads(world, to_read);
     }
-    bake(world, configs, &cells, &settings);
+    tracing::info_span!("hlod: bake").in_scope(|| bake(world, configs, &cells, &settings));
 }
 
 /// Read `cells`' kept proxies on a worker; [`receive_reads`] stores them as they come.
@@ -564,10 +572,34 @@ fn proxy_material(world: &mut World) -> Handle<StandardMaterial> {
 }
 
 /// One still mesh of a cell: corners, their colors and triangles shared by its instances.
+#[derive(Default)]
 struct Source {
     positions: Vec<Vec3>,
     colors: Vec<Vec3>,
     indices: Vec<u32>,
+}
+
+impl Source {
+    /// Copies up to `chunk` more corners of `mesh` and three times as many indices, from
+    /// where the copy stands; true once it holds all of the mesh.
+    fn extend(&mut self, mesh: &Mesh, chunk: usize) -> bool {
+        let from = self.positions.len().min(mesh.vertices.len());
+        let to = from.saturating_add(chunk).min(mesh.vertices.len());
+        let corners = &mesh.vertices[from..to];
+        self.positions
+            .extend(corners.iter().map(|v| Vec3::from(v.position)));
+        self.colors.extend(
+            corners
+                .iter()
+                .map(|v| Vec3::new(v.color[0], v.color[1], v.color[2])),
+        );
+        let from = self.indices.len().min(mesh.indices.len());
+        let to = from
+            .saturating_add(chunk.saturating_mul(3))
+            .min(mesh.indices.len());
+        self.indices.extend_from_slice(&mesh.indices[from..to]);
+        self.positions.len() >= mesh.vertices.len() && self.indices.len() >= mesh.indices.len()
+    }
 }
 
 /// One instance: which source, where in the proxy's space, which color.
@@ -578,7 +610,14 @@ struct Instance {
 }
 
 /// Gathers the settled cell's still meshes and merges them on a worker.
-fn capture(world: &mut World, i: usize, id: CellId, key: &str, settings: &HlodSettings) {
+fn capture(
+    world: &mut World,
+    i: usize,
+    id: CellId,
+    key: &str,
+    settings: &HlodSettings,
+    until: Option<Instant>,
+) {
     {
         let slot = &mut world.resource_mut::<Proxies>().slots[i];
         if slot.capturing.is_some() {
@@ -592,6 +631,13 @@ fn capture(world: &mut World, i: usize, id: CellId, key: &str, settings: &HlodSe
     let Some(frame) = world.resource::<Proxies>().slots[i].frame else {
         return;
     };
+    let deadline = until.unwrap_or_else(|| {
+        Instant::now() + std::time::Duration::from_secs_f32(settings.gather_ms / 1000.0)
+    });
+    // The frame's time went to cells before this one: it starts another frame.
+    if Instant::now() > deadline && world.resource::<Proxies>().slots[i].gather.is_none() {
+        return;
+    }
     let mut gather = match world.resource_mut::<Proxies>().slots[i].gather.take() {
         Some(g) => g,
         None => {
@@ -604,8 +650,17 @@ fn capture(world: &mut World, i: usize, id: CellId, key: &str, settings: &HlodSe
             Box::new(Gather::new(roots, frame))
         }
     };
-    let deadline = Instant::now() + std::time::Duration::from_secs_f32(settings.gather_ms / 1000.0);
-    if !gather.step(world, deadline) {
+    let started = Instant::now();
+    let done = tracing::info_span!("hlod: gather").in_scope(|| gather.step(world, deadline));
+    let ms = started.elapsed().as_secs_f32() * 1000.0;
+    if ms > 3.0 * settings.gather_ms {
+        engine_core::log::info!(
+            "hlod: a gather step of {key} took {ms:.1} ms ({} meshes, {} instances so far)",
+            gather.sources.len(),
+            gather.instances.len()
+        );
+    }
+    if !done {
         world.resource_mut::<Proxies>().slots[i].gather = Some(gather);
         return;
     }
@@ -758,6 +813,30 @@ struct Gather {
     sources: Vec<Source>,
     by_mesh: HashMap<String, usize>,
     instances: Vec<Instance>,
+    /// A big mesh part copied when the frame's time ran out; its entity goes on next step.
+    copying: Option<Copying>,
+    /// Each image's mean color, taken once a gather (by slot and asset version, so an image
+    /// edited meanwhile is averaged again): a zone's instances share a few textures, and a
+    /// mean is a thousand samples.
+    tints: HashMap<(u32, u64), Option<Vec4>>,
+}
+
+/// Corners (and three times as many indices) copied before the clock is read again: a mesh of
+/// a million corners copied in one go held the frame for 10 ms and more.
+const COPY_CHUNK: usize = 16_384;
+
+/// Times a mesh edited while it was being copied is started over before it is copied whole, so
+/// one rewritten every frame still gets done.
+const COPY_RESTARTS: u32 = 3;
+
+/// A mesh on its way into a [`Source`], over several frames.
+struct Copying {
+    entity: Entity,
+    key: String,
+    /// The mesh's asset version when the copy began: an edit since starts it over.
+    version: u64,
+    restarts: u32,
+    source: Source,
 }
 
 impl Gather {
@@ -768,6 +847,8 @@ impl Gather {
             sources: Vec::new(),
             by_mesh: HashMap::new(),
             instances: Vec::new(),
+            copying: None,
+            tints: HashMap::new(),
         }
     }
 
@@ -780,9 +861,25 @@ impl Gather {
         let inverse = self.frame.rotation.inverse();
         // Skips what moves (a body that isn't static, or anything with a velocity) together
         // with everything under it.
-        while let Some(e) = self.stack.pop() {
-            if Instant::now() > deadline {
-                self.stack.push(e);
+        // A step always does something (an entity, or a chunk of a mesh), so a frame whose
+        // time went before this cell's turn still moves it on.
+        let mut worked = false;
+        loop {
+            // The entity whose mesh was part copied goes on (its children are on the stack
+            // already); gone, moving or hidden since, its copy is dropped with it.
+            let resume = self.copying.take();
+            let Some(e) = resume
+                .as_ref()
+                .map(|c| c.entity)
+                .or_else(|| self.stack.pop())
+            else {
+                break;
+            };
+            if std::mem::replace(&mut worked, true) && Instant::now() > deadline {
+                match resume {
+                    Some(copy) => self.copying = Some(copy),
+                    None => self.stack.push(e),
+                }
                 return false;
             }
             let Ok(entity) = world.get_entity(e) else {
@@ -795,7 +892,9 @@ impl Gather {
             if moves {
                 continue;
             }
-            if let Some(children) = entity.get::<Children>() {
+            if resume.is_none()
+                && let Some(children) = entity.get::<Children>()
+            {
                 self.stack.extend(children.iter());
             }
             let (Some(renderer), Some(global)) = (
@@ -820,23 +919,56 @@ impl Gather {
             let source = match self.by_mesh.get(&mesh_key) {
                 Some(&s) => s,
                 None => {
-                    // Copied once per mesh, corners only; instances share it.
-                    let take = |m: &Mesh| Source {
-                        positions: m.vertices.iter().map(|v| Vec3::from(v.position)).collect(),
-                        colors: m
-                            .vertices
-                            .iter()
-                            .map(|v| Vec3::new(v.color[0], v.color[1], v.color[2]))
-                            .collect(),
-                        indices: m.indices.clone(),
+                    // Copied once per mesh, corners only; instances share it. A stored mesh
+                    // goes a chunk at a time, a shape (made here, small) in one go.
+                    let handle = match &renderer.mesh {
+                        MeshRef::Handle(h) => Some(*h),
+                        MeshRef::Shape(_) => None,
+                        MeshRef::Asset(k) => meshes.by_key(k),
                     };
-                    let source = match &renderer.mesh {
-                        MeshRef::Handle(h) => meshes.get(*h).map(take),
-                        MeshRef::Shape(s) => Some(take(&s.mesh())),
-                        MeshRef::Asset(k) => meshes.by_key(k).and_then(|h| meshes.get(h)).map(take),
-                    };
-                    let Some(source) = source else {
-                        continue;
+                    let source = match (&renderer.mesh, handle) {
+                        (MeshRef::Shape(s), _) => {
+                            let mut source = Source::default();
+                            source.extend(&s.mesh(), usize::MAX);
+                            source
+                        }
+                        (_, Some(h)) => {
+                            let Some(mesh) = meshes.get(h) else {
+                                continue;
+                            };
+                            let version = meshes.version(h);
+                            let mut copy = match resume {
+                                Some(c) if c.key == mesh_key && c.version == version => c,
+                                Some(c) if c.key == mesh_key => Copying {
+                                    version,
+                                    restarts: c.restarts + 1,
+                                    source: Source::default(),
+                                    ..c
+                                },
+                                _ => Copying {
+                                    entity: e,
+                                    key: mesh_key.clone(),
+                                    version,
+                                    restarts: 0,
+                                    source: Source::default(),
+                                },
+                            };
+                            let chunk = if copy.restarts >= COPY_RESTARTS {
+                                usize::MAX
+                            } else {
+                                COPY_CHUNK
+                            };
+                            let mut done = copy.source.extend(mesh, chunk);
+                            while !done && Instant::now() <= deadline {
+                                done = copy.source.extend(mesh, chunk);
+                            }
+                            if !done {
+                                self.copying = Some(copy);
+                                return false;
+                            }
+                            copy.source
+                        }
+                        (_, None) => continue,
                     };
                     self.sources.push(source);
                     self.by_mesh.insert(mesh_key, self.sources.len() - 1);
@@ -857,7 +989,9 @@ impl Gather {
             self.instances.push(Instance {
                 source,
                 matrix,
-                color: material.map_or(Vec4::splat(0.5), |m| albedo(m, images, means)),
+                color: material.map_or(Vec4::splat(0.5), |m| {
+                    albedo(m, images, means, &mut self.tints)
+                }),
             });
         }
         true
@@ -871,14 +1005,23 @@ const AMBIENT_SHARE: f32 = 0.4;
 /// A material's mean color from afar: its base color times its texture's mean (or its preset's;
 /// an untextured material's is its base color alone), darkened by its occlusion map's mean on
 /// the ambient share of the light.
-fn albedo(m: &StandardMaterial, images: &Assets<Image>, means: Option<&ImageMeans>) -> Vec4 {
+fn albedo(
+    m: &StandardMaterial,
+    images: &Assets<Image>,
+    means: Option<&ImageMeans>,
+    seen: &mut HashMap<(u32, u64), Option<Vec4>>,
+) -> Vec4 {
     let base = Vec4::from(m.base_color);
-    let mean = |h: Handle<Image>| {
-        images
-            .get(h)
-            .filter(|img| !img.is_released())
-            .map(mean_of)
-            .or_else(|| means.and_then(|m| m.get(h)))
+    let mut mean = |h: Handle<Image>| {
+        *seen
+            .entry((h.index(), images.version(h)))
+            .or_insert_with(|| {
+                images
+                    .get(h)
+                    .filter(|img| !img.is_released())
+                    .map(mean_of)
+                    .or_else(|| means.and_then(|m| m.get(h)))
+            })
     };
     let tint = match (m.base_color_texture, m.preset) {
         (Some(h), preset) => mean(h)
@@ -1467,7 +1610,7 @@ mod tests {
             occlusion_texture: Some(ao),
             ..Default::default()
         };
-        let c = albedo(&wall, &images, Some(&means));
+        let c = albedo(&wall, &images, Some(&means), &mut HashMap::new());
         let occlusion = 1.0 - AMBIENT_SHARE * (1.0 - 128.0 / 255.0);
         for (got, want) in [(c.x, 1.0), (c.y, 0.8), (c.z, 0.6)] {
             let want = want * 0.5 * occlusion;
@@ -1480,7 +1623,7 @@ mod tests {
             base_color_texture: Some(unseen),
             ..Default::default()
         };
-        assert!(albedo(&lost, &images, Some(&means)).x < 0.5);
+        assert!(albedo(&lost, &images, Some(&means), &mut HashMap::new()).x < 0.5);
 
         // A quad tinted dark on one side: the proxy keeps the tint.
         let positions = vec![
@@ -1555,6 +1698,231 @@ mod tests {
         let far = Instant::now() + std::time::Duration::from_secs(10);
         assert!(gather.step(&world, far));
         assert_eq!(gather.instances.len(), 1);
+    }
+
+    /// A mesh of `corners` corners in a strip of triangles, each corner with its own place.
+    fn strip(corners: u32) -> Mesh {
+        let vertices = (0..corners)
+            .map(|i| {
+                Vertex::new(
+                    Vec3::new(i as f32, (i % 7) as f32, 0.0),
+                    Vec3::Y,
+                    Vec2::ZERO,
+                )
+            })
+            .collect();
+        let indices = (0..corners - 2).flat_map(|i| [i, i + 1, i + 2]).collect();
+        Mesh::new(vertices, indices)
+    }
+
+    /// A parent drawing a big stored mesh, a child drawing it too and a child drawing a cube.
+    fn big_mesh_tree(world: &mut World, corners: u32) -> (Entity, Handle<Mesh>) {
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<Assets<Image>>();
+        let big = world.resource_mut::<Assets<Mesh>>().add(strip(corners));
+        let t = Transform::default();
+        let drawn = || MeshRenderer {
+            mesh: MeshRef::Handle(big),
+            ..Default::default()
+        };
+        let tree = world
+            .spawn((t, GlobalTransform::from(t), drawn()))
+            .with_children(|c| {
+                c.spawn((t, GlobalTransform::from(t), drawn()));
+                c.spawn((
+                    t,
+                    GlobalTransform::from(t),
+                    MeshRenderer::new(
+                        Shape::Cuboid { size: [1.0; 3] },
+                        StandardMaterial::default(),
+                    ),
+                ));
+            })
+            .id();
+        (tree, big)
+    }
+
+    #[test]
+    fn a_big_mesh_is_copied_a_chunk_a_step() {
+        let mut world = World::new();
+        let corners = 3 * COPY_CHUNK as u32 + 100;
+        let (tree, big) = big_mesh_tree(&mut world, corners);
+        // Out of time from the start: each step does one thing and stops.
+        let past = Instant::now();
+        let mut gather = Gather::new(vec![tree], Transform::default());
+        let mut steps = 1;
+        while !gather.step(&world, past) {
+            steps += 1;
+            assert!(steps < 20, "the gather never ends");
+        }
+        // Four chunks of corners for the big mesh, then the two children.
+        assert_eq!(steps, 4 + 2);
+        // Both that draw the big mesh share one copy; the children were walked once.
+        assert_eq!(gather.sources.len(), 2);
+        assert_eq!(gather.instances.len(), 3);
+        let mesh = world.resource::<Assets<Mesh>>().get(big).unwrap();
+        let copy = &gather.sources[gather.by_mesh[&format!("h{}", big.index())]];
+        assert_eq!(copy.indices, mesh.indices);
+        assert_eq!(copy.colors.len(), mesh.vertices.len());
+        assert!(
+            copy.positions
+                .iter()
+                .zip(&mesh.vertices)
+                .all(|(p, v)| *p == Vec3::from(v.position))
+        );
+        // With time to spare it is one step, and the same copy.
+        let far = Instant::now() + std::time::Duration::from_secs(10);
+        let mut whole = Gather::new(vec![tree], Transform::default());
+        assert!(whole.step(&world, far));
+        let at_once = &whole.sources[whole.by_mesh[&format!("h{}", big.index())]];
+        assert_eq!(at_once.positions, copy.positions);
+        assert_eq!(at_once.indices, copy.indices);
+        assert_eq!(whole.instances.len(), 3);
+        // The proxy made from either is the same, bit for bit.
+        same_proxy(&gather, &whole);
+    }
+
+    /// Two gathers of one cell hold the same sources and instances and cluster into the same
+    /// proxy mesh.
+    fn same_proxy(a: &Gather, b: &Gather) {
+        assert_eq!(a.sources.len(), b.sources.len());
+        for (x, y) in a.sources.iter().zip(&b.sources) {
+            assert_eq!(x.positions, y.positions);
+            assert_eq!(x.colors, y.colors);
+            assert_eq!(x.indices, y.indices);
+        }
+        assert_eq!(a.instances.len(), b.instances.len());
+        for (x, y) in a.instances.iter().zip(&b.instances) {
+            assert_eq!((x.source, x.matrix, x.color), (y.source, y.matrix, y.color));
+        }
+        let (ma, ga) = cluster(&a.sources, &a.instances, 2_000).expect("a proxy");
+        let (mb, gb) = cluster(&b.sources, &b.instances, 2_000).expect("a proxy");
+        assert_eq!(ga, gb);
+        assert_eq!(ma.indices, mb.indices);
+        assert_eq!(ma.vertices.len(), mb.vertices.len());
+        for (x, y) in ma.vertices.iter().zip(&mb.vertices) {
+            assert_eq!(
+                (x.position, x.normal, x.color),
+                (y.position, y.normal, y.color)
+            );
+        }
+    }
+
+    /// A textured, tinted crowd gathered a little a step makes the proxy one long step makes.
+    #[test]
+    fn a_gather_over_many_steps_makes_the_same_proxy() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let mut images = Assets::<Image>::default();
+        let textures: Vec<Handle<Image>> = (0..3u8)
+            .map(|i| {
+                let img = Image::new(2, 2, [40 + 60 * i, 200 - 50 * i, 90, 255].repeat(4), true);
+                images.add(img)
+            })
+            .collect();
+        world.insert_resource(images);
+        let meshes: Vec<Handle<Mesh>> = (0..4)
+            .map(|i| {
+                world
+                    .resource_mut::<Assets<Mesh>>()
+                    .add(strip(COPY_CHUNK as u32 / 2 * (i + 1)))
+            })
+            .collect();
+        let roots: Vec<Entity> = (0..40usize)
+            .map(|i| {
+                let t =
+                    Transform::from_translation(DVec3::new(i as f64 * 3.0, 0.0, (i % 5) as f64));
+                let material = StandardMaterial {
+                    base_color: [0.2 + 0.02 * i as f32, 0.5, 0.7, 1.0],
+                    ..Default::default()
+                }
+                .with_base_color_texture(textures[i % 3]);
+                let mesh = if i % 4 == 3 {
+                    MeshRef::Shape(Shape::Cuboid {
+                        size: [1.0, 2.0, 1.0],
+                    })
+                } else {
+                    MeshRef::Handle(meshes[i % 4])
+                };
+                world
+                    .spawn((
+                        t,
+                        GlobalTransform::from(t),
+                        MeshRenderer {
+                            mesh,
+                            material: MaterialRef::Inline(material),
+                            ..Default::default()
+                        },
+                    ))
+                    .id()
+            })
+            .collect();
+        let mut stepped = Gather::new(roots.clone(), Transform::default());
+        let past = Instant::now();
+        let mut steps = 1;
+        while !stepped.step(&world, past) {
+            steps += 1;
+            assert!(steps < 200, "the gather never ends");
+        }
+        assert!(steps > 40, "one entity or one chunk a step");
+        let mut whole = Gather::new(roots, Transform::default());
+        assert!(whole.step(&world, Instant::now() + std::time::Duration::from_secs(60)));
+        assert_eq!(whole.instances.len(), 40);
+        same_proxy(&stepped, &whole);
+    }
+
+    #[test]
+    fn a_mesh_edited_while_it_is_copied_is_copied_again() {
+        let mut world = World::new();
+        let corners = 3 * COPY_CHUNK as u32 + 100;
+        let (tree, big) = big_mesh_tree(&mut world, corners);
+        let past = Instant::now();
+        let mut gather = Gather::new(vec![tree], Transform::default());
+        assert!(!gather.step(&world, past));
+        // An edit after the first chunk: the corners move and one triangle goes.
+        {
+            let mut meshes = world.resource_mut::<Assets<Mesh>>();
+            let mesh = meshes.get_mut(big).unwrap();
+            for v in &mut mesh.vertices {
+                v.position[2] = 5.0;
+            }
+            mesh.indices.truncate(mesh.indices.len() - 3);
+        }
+        let mut steps = 1;
+        while !gather.step(&world, past) {
+            steps += 1;
+            assert!(steps < 20, "the gather never ends");
+        }
+        let mesh = world.resource::<Assets<Mesh>>().get(big).unwrap();
+        let copy = &gather.sources[gather.by_mesh[&format!("h{}", big.index())]];
+        assert_eq!(copy.indices, mesh.indices);
+        assert!(
+            copy.positions.iter().all(|p| p.z == 5.0),
+            "no corner of the old mesh"
+        );
+        assert_eq!(copy.positions.len(), mesh.vertices.len());
+
+        // Edited before every step, it is copied whole once it has started over enough.
+        let mut gather = Gather::new(vec![tree], Transform::default());
+        let mut steps = 0;
+        loop {
+            let mut meshes = world.resource_mut::<Assets<Mesh>>();
+            meshes.get_mut(big).unwrap().vertices[0].position[0] = steps as f32;
+            steps += 1;
+            if gather.step(&world, past) {
+                break;
+            }
+            assert!(steps < 20, "the gather never ends");
+        }
+        let mesh = world.resource::<Assets<Mesh>>().get(big).unwrap();
+        let copy = &gather.sources[gather.by_mesh[&format!("h{}", big.index())]];
+        // The copy is the mesh as it stood at the step after the last start-over.
+        assert_eq!(copy.positions[0].x, COPY_RESTARTS as f32);
+        assert_eq!(copy.positions.len(), mesh.vertices.len());
+        assert_eq!(copy.indices, mesh.indices);
+        assert_eq!(gather.instances.len(), 3);
     }
 
     #[test]
