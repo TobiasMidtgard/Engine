@@ -34,6 +34,9 @@
 //! asks for them ([`GpuShared::material_textures`](crate::features::GpuShared::material_textures)).
 //! [`GpuShared::read_material_maps`](crate::features::GpuShared::read_material_maps) copies them
 //! back as [`Image`]s (tests, exporting to PNG).
+//! With `RenderSettings::texture_compression` a set's maps are block-compressed a few frames
+//! after they are generated and the set replaced by the compressed one under a new id
+//! ([`Compressing`]): a quarter of the video memory, like material images.
 //!
 //! Heights and normals are physical: each preset is authored in millimeters for a tile of a
 //! known size ([`MaterialPreset::tile_size`]), and its height map spans
@@ -326,6 +329,28 @@ pub struct MaterialTextures {
     pub height: wgpu::TextureView,
     textures: [wgpu::Texture; 4],
     stats: wgpu::Buffer,
+    /// The maps are the block-compressed copies (see [`Compressing`]).
+    compressed: bool,
+}
+
+impl MaterialTextures {
+    /// The maps are block-compressed (BC7, and BC4 for height) rather than RGBA8 as generated.
+    pub fn compressed(&self) -> bool {
+        self.compressed
+    }
+}
+
+/// A set whose maps are being block-compressed. They are generated as RGBA8 (compute passes
+/// write them), 22 MB a preset at 1024² with mips, and once the image cache has compressed
+/// them with what its frame budget has left (`ImageCache::compress_generated`: BC7 for base
+/// color, normal and ORM, BC4 for height, as for material images) the set is replaced by one
+/// of the compressed copies under a new id, at 5 MB. Materials pick the new set up at their
+/// next periodic check and the RGBA8 maps go when the last bind group lets go of them.
+struct Compressing {
+    /// The id of the RGBA8 set.
+    set: u64,
+    tickets: [u64; 4],
+    done: [Option<wgpu::Texture>; 4],
 }
 
 /// Maps of a preset copied back to the CPU (mip 0) by
@@ -379,6 +404,8 @@ struct Common {
 #[derive(Default)]
 struct Inner {
     sets: HashMap<(MaterialPreset, u32), Arc<MaterialTextures>>,
+    /// Sets whose maps are being compressed.
+    compressing: HashMap<(MaterialPreset, u32), Compressing>,
     pipelines: HashMap<MaterialPreset, Arc<PresetPipelines>>,
     common: Option<Arc<Common>>,
     /// Every preset's pipelines compiling on worker threads (see [`MaterialLibrary::warm`]).
@@ -399,6 +426,7 @@ pub struct MaterialLibrary {
 const MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const WORK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 const BASE_COLOR: usize = 0;
+const HEIGHT: usize = 3;
 const MAP_LABELS: [&str; 4] = [
     "material base color",
     "material normal",
@@ -411,8 +439,8 @@ impl MaterialLibrary {
     pub fn get(&self, gpu: &GpuShared, preset: MaterialPreset, size: u32) -> Arc<MaterialTextures> {
         let size = clamp_size(size);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(set) = inner.sets.get(&(preset, size)) {
-            return set.clone();
+        if let Some(set) = inner.sets.get(&(preset, size)).cloned() {
+            return inner.compressed(gpu, set);
         }
         let started = std::time::Instant::now();
         let common = inner.common(gpu);
@@ -429,6 +457,25 @@ impl MaterialLibrary {
             started.elapsed().as_secs_f64() * 1000.0
         );
         inner.sets.insert((preset, size), set.clone());
+        let tickets: Vec<u64> = set
+            .textures
+            .iter()
+            .enumerate()
+            .map_while(|(i, t)| {
+                gpu.images
+                    .compress_generated(gpu, t, i == BASE_COLOR, i == HEIGHT)
+            })
+            .collect();
+        if let Ok(tickets) = <[u64; 4]>::try_from(tickets) {
+            inner.compressing.insert(
+                (preset, size),
+                Compressing {
+                    set: id,
+                    tickets,
+                    done: Default::default(),
+                },
+            );
+        }
         set
     }
 
@@ -484,7 +531,14 @@ impl MaterialLibrary {
         preset: MaterialPreset,
         size: u32,
     ) -> Result<MaterialMaps, String> {
-        let set = self.get(gpu, preset, size);
+        let mut set = self.get(gpu, preset, size);
+        if set.compressed {
+            // Compressed maps can't be copied out as pixels: generate the set once more.
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let common = inner.common(gpu);
+            let pipelines = inner.pipelines(gpu, &common, preset);
+            set = Arc::new(generate(gpu, &common, &pipelines, preset, set.size, 0));
+        }
         let device = &gpu.device;
         let size = set.size;
         let row = size * 4;
@@ -589,6 +643,50 @@ fn clamp_size(size: u32) -> u32 {
 }
 
 impl Inner {
+    /// `set`, or the set of its compressed maps when they have all arrived (see
+    /// [`Compressing`]).
+    fn compressed(&mut self, gpu: &GpuShared, set: Arc<MaterialTextures>) -> Arc<MaterialTextures> {
+        let key = (set.preset, set.size);
+        let Some(job) = self.compressing.get_mut(&key) else {
+            return set;
+        };
+        if job.set != set.id {
+            self.compressing.remove(&key);
+            return set;
+        }
+        for (ticket, done) in job.tickets.iter().zip(&mut job.done) {
+            if done.is_none() {
+                *done = gpu.images.take_generated(*ticket);
+            }
+        }
+        if job.done.iter().any(Option::is_none) {
+            return set;
+        }
+        let Some(Compressing {
+            done: [Some(base_color), Some(normal), Some(orm), Some(height)],
+            ..
+        }) = self.compressing.remove(&key)
+        else {
+            return set;
+        };
+        self.next_id += 1;
+        let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+        let compressed = Arc::new(MaterialTextures {
+            preset: set.preset,
+            size: set.size,
+            id: self.next_id,
+            base_color: view(&base_color),
+            normal: view(&normal),
+            orm: view(&orm),
+            height: view(&height),
+            textures: [base_color, normal, orm, height],
+            stats: set.stats.clone(),
+            compressed: true,
+        });
+        self.sets.insert(key, compressed.clone());
+        compressed
+    }
+
     fn common(&mut self, gpu: &GpuShared) -> Arc<Common> {
         if let Some(c) = &self.common {
             return c.clone();
@@ -980,6 +1078,7 @@ fn generate(
         height: view(&textures[3], None),
         textures,
         stats,
+        compressed: false,
     }
 }
 

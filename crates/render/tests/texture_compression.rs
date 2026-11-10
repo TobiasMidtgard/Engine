@@ -226,6 +226,98 @@ fn material_images_compress_and_look_the_same() {
     assert!(max < 24, "a pixel changed a lot: {max}");
 }
 
+/// A wall of generated brick beside one of generated rock, drawn until their maps are
+/// compressed and bound (or for as many frames when nothing is to be compressed).
+fn preset_scene(compression: TextureCompression, name: &str) -> Option<(App, RgbaImage)> {
+    let mut app = still_app(compression);
+    app.world
+        .resource_mut::<RenderSettings>()
+        .material_texture_size = 256;
+    for (x, preset) in [(-0.75, MaterialPreset::Brick), (0.75, MaterialPreset::Rock)] {
+        app.world.spawn((
+            Transform::from_xyz(x, 0.0, 0.0),
+            MeshRenderer::new(
+                Shape::Quad { size: [1.4, 2.0] },
+                StandardMaterial::preset(preset),
+            ),
+        ));
+    }
+    if !run(&mut app, 4, name) || !bc_supported(&app) {
+        return None;
+    }
+    let started = Instant::now();
+    let mut frames = 0;
+    // Four maps a preset.
+    while compression != TextureCompression::Off && cache(&app).compressed < 8 && frames < 2000 {
+        app.update();
+        frames += 1;
+    }
+    // Materials look for new textures every 64 frames (`mesh_feature`).
+    app.update_n(70);
+    eprintln!(
+        "{name}: {} frames in {:.2} s",
+        frames + 70,
+        started.elapsed().as_secs_f32()
+    );
+    let shot = shot(&mut app, name);
+    Some((app, shot))
+}
+
+#[test]
+fn generated_material_maps_compress_and_look_the_same() {
+    let Some((plain_app, plain)) = preset_scene(TextureCompression::Off, "presets_plain") else {
+        return;
+    };
+    let sets = |app: &App| {
+        let shared = &app.world.resource::<Renderer>().shared;
+        [MaterialPreset::Brick, MaterialPreset::Rock].map(|p| shared.material_textures(p, 256))
+    };
+    assert!(sets(&plain_app).iter().all(|s| !s.compressed()));
+    drop(plain_app);
+    let Some((app, compressed)) = preset_scene(TextureCompression::Quality, "presets_bc") else {
+        return;
+    };
+    let stats = cache(&app);
+    assert_eq!(stats.compressed, 8, "four maps of two presets: {stats:?}");
+    // Base color, normal and ORM go BC7 (a quarter), height BC4 (an eighth).
+    let rgba = (1..=9).map(|l| (256u64 >> (l - 1)).pow(2)).sum::<u64>() * 4;
+    let saved = 2 * (rgba * 3 / 4 * 3 + rgba * 7 / 8);
+    assert!(
+        stats.bytes_compressed_away.abs_diff(saved) < saved / 50,
+        "saved {} bytes, expected about {saved}",
+        stats.bytes_compressed_away
+    );
+    assert!(
+        sets(&app).iter().all(|s| s.compressed()),
+        "materials get the compressed sets"
+    );
+    // The maps can still be read back as pixels.
+    let maps = app
+        .world
+        .resource::<Renderer>()
+        .shared
+        .read_material_maps(MaterialPreset::Brick, 256)
+        .expect("maps");
+    assert_eq!(maps.base_color.data.len(), 256 * 256 * 4);
+    assert_eq!(maps.non_finite_texels, 0);
+
+    let (mean, max) = difference(&plain, &compressed);
+    let off = plain
+        .pixels()
+        .zip(compressed.pixels())
+        .filter(|(p, q)| (0..3).any(|k| p.0[k].abs_diff(q.0[k]) > 12))
+        .count();
+    eprintln!("generated maps, BC vs RGBA8: mean {mean:.3}, max {max}, {off} pixels over 12");
+    // As close as compressed material images are (above), but for the dark cracks between
+    // stones and bricks, where a pixel on a crack's edge can change more.
+    assert!(mean < 1.5, "the picture changed: mean {mean}");
+    assert!(
+        off < (SIZE * SIZE) as usize * 3 / 1000,
+        "{off} pixels changed by more than 12 of 255"
+    );
+    assert!(max < 64, "a pixel changed a lot: {max}");
+}
+
 #[test]
 fn images_that_dont_split_into_blocks_and_exact_slots_stay_rgba8() {
     let mut app = still_app(TextureCompression::Quality);

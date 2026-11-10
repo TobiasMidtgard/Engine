@@ -422,6 +422,11 @@ struct Inner {
     uploading: std::collections::HashSet<(u32, usize)>,
     /// Finished views' blocks on their way back from the GPU to the disk cache.
     readbacks: Vec<Readback>,
+    /// Textures other parts of the renderer generated on the GPU, waiting to be compressed
+    /// ([`ImageCache::compress_generated`]): ticket, source and encoding.
+    generated: std::collections::VecDeque<(u64, Arc<ImageTexture>, Encoding)>,
+    /// Those that are done, until their owner takes them.
+    generated_done: Vec<(u64, wgpu::Texture)>,
 }
 
 /// The disk cache of compressed images: opened with the first image that could use it.
@@ -831,9 +836,13 @@ impl ImageCache {
         };
         if inner.compression == TextureCompression::Off {
             inner.encoding = None;
+            inner.generated.clear();
             return;
         }
-        if inner.encoding.is_none() && !inner.images.values().any(&due) {
+        if inner.encoding.is_none()
+            && !inner.images.values().any(&due)
+            && inner.generated.is_empty()
+        {
             return;
         }
         let compressor = match &mut inner.compressor {
@@ -878,20 +887,31 @@ impl ImageCache {
                                 Some((index, slot, encoding, source))
                             })
                         });
-                let Some((index, slot, encoding, source)) = next else {
-                    break;
+                inner.encoding = match next {
+                    Some((index, slot, encoding, source)) => {
+                        Some(Encode::new(gpu, index, slot, encoding, true, source))
+                    }
+                    // Generated textures come after the images.
+                    None => {
+                        let Some((ticket, source, encoding)) = inner.generated.pop_front() else {
+                            break;
+                        };
+                        let mut job = Encode::new(gpu, u32::MAX, 0, encoding, true, source);
+                        job.generated = Some(ticket);
+                        Some(job)
+                    }
                 };
-                inner.encoding = Some(Encode::new(gpu, index, slot, encoding, true, source));
             }
             let Some(job) = &mut inner.encoding else {
                 break;
             };
             // Re-uploaded (new pixels) or dropped since it started: give it up.
-            let current = inner
-                .images
-                .get(&job.index)
-                .and_then(|c| c.views[job.slot].as_ref())
-                .is_some_and(|v| Arc::ptr_eq(v, &job.source));
+            let current = job.generated.is_some()
+                || inner
+                    .images
+                    .get(&job.index)
+                    .and_then(|c| c.views[job.slot].as_ref())
+                    .is_some_and(|v| Arc::ptr_eq(v, &job.source));
             if !current {
                 inner.encoding = None;
                 continue;
@@ -991,9 +1011,23 @@ impl ImageCache {
             encoding,
             source,
             out,
+            generated,
             ..
         } in finished
         {
+            let rgba = texels_with_mips(source.width, source.height, source.mip_levels) * 4;
+            let saved = rgba.saturating_sub(compressed_bytes(
+                encoding,
+                source.width,
+                source.height,
+                source.mip_levels,
+            ));
+            if let Some(ticket) = generated {
+                inner.generated_done.push((ticket, out.texture));
+                inner.stats.compressed += 1;
+                inner.stats.bytes_compressed_away += saved;
+                continue;
+            }
             let Some(cached) = inner.images.get_mut(&index) else {
                 continue;
             };
@@ -1013,14 +1047,75 @@ impl ImageCache {
             cached.views[slot] = Some(view);
             cached.keys[slot] = None;
             inner.stats.compressed += 1;
-            let rgba = texels_with_mips(source.width, source.height, source.mip_levels) * 4;
-            inner.stats.bytes_compressed_away += rgba.saturating_sub(compressed_bytes(
-                encoding,
-                source.width,
-                source.height,
-                source.mip_levels,
-            ));
+            inner.stats.bytes_compressed_away += saved;
         }
+    }
+
+    /// Queue `texture`, RGBA8 with every level filled on the GPU by another part of the
+    /// renderer (a generated material map), to be compressed with what the frame's compression
+    /// budget has left after the images: BC4 from its red channel when `red`, else BC7 without
+    /// alpha (an sRGB texture when `srgb`). Returns a ticket for
+    /// [`ImageCache::take_generated`], or `None` when it stays as it is (compression off or not
+    /// possible here, or a size that isn't whole blocks).
+    pub(crate) fn compress_generated(
+        &self,
+        gpu: &GpuShared,
+        texture: &wgpu::Texture,
+        srgb: bool,
+        red: bool,
+    ) -> Option<u64> {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let (width, height, levels) =
+            (texture.width(), texture.height(), texture.mip_level_count());
+        let whole = (0..levels).all(|l| {
+            let (w, h) = ((width >> l).max(1), (height >> l).max(1));
+            w < 4 || h < 4 || (w % 4 == 0 && h % 4 == 0)
+        });
+        let compressible = whole
+            && width.min(height) >= COMPRESS_MIN_SIZE
+            && texture.format().remove_srgb_suffix() == wgpu::TextureFormat::Rgba8Unorm
+            && inner.compression != TextureCompression::Off
+            && gpu
+                .features
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+            && gpu.adapter_info.backend != wgpu::Backend::Gl
+            && (gpu.adapter_info.device_type != wgpu::DeviceType::Cpu || inner.compress_on_cpu)
+            && inner.compressor_usable();
+        if !compressible {
+            return None;
+        }
+        inner.start_compressor(gpu);
+        inner.next_id += 1;
+        let ticket = inner.next_id;
+        let source = Arc::new(ImageTexture {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            srgb,
+            width,
+            height,
+            mip_levels: levels,
+            id: ticket,
+            texture: texture.clone(),
+            aliasable: false,
+        });
+        let encoding = if red {
+            Encoding::Bc4
+        } else {
+            Encoding::Bc7 { alpha: false }
+        };
+        inner.generated.push_back((ticket, source, encoding));
+        Some(ticket)
+    }
+
+    /// The compressed texture of a [`ImageCache::compress_generated`] ticket, once: `None`
+    /// until it is done.
+    pub(crate) fn take_generated(&self, ticket: u64) -> Option<wgpu::Texture> {
+        let mut inner = self.lock();
+        let at = inner
+            .generated_done
+            .iter()
+            .position(|(t, _)| *t == ticket)?;
+        Some(inner.generated_done.swap_remove(at).1)
     }
 
     /// After the frame: release the pixels of images that have been on the GPU unchanged for
@@ -1511,6 +1606,9 @@ struct Encode {
     fast: bool,
     /// The RGBA8 view it compresses (still bound until this is done).
     source: Arc<ImageTexture>,
+    /// Not an image's view but a generated texture, with its ticket
+    /// ([`ImageCache::compress_generated`]).
+    generated: Option<u64>,
     out: Compressed,
     /// The next slice: level, and first row (a multiple of 4).
     level: u32,
@@ -1553,6 +1651,7 @@ impl Encode {
             encoding,
             fast,
             source,
+            generated: None,
             out: Compressed {
                 texture,
                 buffer,
