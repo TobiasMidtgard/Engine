@@ -3768,13 +3768,16 @@ impl RenderFeature for MeshFeature {
                 {
                     // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
                     let lods = lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index);
+                    let _span = crate::perf::HitchStep::new("meshes: upload a mesh");
                     if self.upload_mesh(gpu, mesh.index, asset, mesh.version, lods) {
                         self.uploads += 1;
                         self.edits += resident.is_some() as u32;
                         self.reuploads +=
                             (resident.is_none() && !self.uploaded_before.insert(mesh.index)) as u32;
                     }
+                    drop(_span);
                     if lods {
+                        let _span = crate::perf::HitchStep::new("meshes: start mesh levels");
                         self.request_lods(mesh.index, handle, asset, mesh.version);
                     }
                 }

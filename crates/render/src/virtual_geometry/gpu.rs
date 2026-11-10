@@ -428,6 +428,7 @@ impl Pool {
         if capacity < needed {
             return None;
         }
+        let _span = crate::perf::HitchStep::new("clusters: grow a pool");
         let buffer = pool_buffer(&gpu.device, self.label, capacity * self.stride);
         let mut encoder = gpu
             .device
