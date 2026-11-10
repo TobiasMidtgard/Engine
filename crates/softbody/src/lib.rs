@@ -149,6 +149,7 @@ impl Plugin for SoftBodyPlugin {
                     .before(UpdateSet::Propagate),
             )
             .add_render_feature(render::SoftBodyFeature::default());
+        engine_world::draws_fur_coats(app, "engine_softbody");
         api::register(app);
         demo::register(app);
     }

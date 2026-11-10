@@ -14,6 +14,7 @@ pub mod events;
 pub mod face;
 pub mod footwork;
 pub mod freeflow;
+pub mod fur_coat;
 pub mod graph;
 pub mod grip;
 pub mod hit;
@@ -176,6 +177,7 @@ impl Plugin for AnimationPlugin {
                     .chain()
                     .in_set(AnimSet::Setup),
                 animator::evaluate_animators.in_set(AnimSet::Graph),
+                fur_coat::export_fur_coats.after(AnimSet::Graph),
                 props::fly_arrows,
             ),
         )

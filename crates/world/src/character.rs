@@ -718,6 +718,24 @@ impl Default for FurStyle {
     }
 }
 
+/// Present while a module grows and draws fur from every [`FurCoat`] (see
+/// [`draws_fur_coats`]). Animal modules export coats and stop their own fur (shells, cards)
+/// only while it is present, so a game without that module keeps its animals' own fur. Check
+/// for it when systems run, not in `Plugin::build`, since the drawing plugin may be added later.
+#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+pub struct FurCoatDrawer {
+    pub drawn_by: String,
+}
+
+/// Call from a hair plugin's `build` once it grows and draws fur from every [`FurCoat`].
+pub fn draws_fur_coats(app: &mut App, name: &str) {
+    if app.world.get_resource::<FurCoatDrawer>().is_none() {
+        app.insert_resource(FurCoatDrawer {
+            drawn_by: name.to_string(),
+        });
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
     app.register_component::<Appearance>(
         "A person's look: sex, age (years), body shape, face sliders, skin, eyes, hair, wear, \
