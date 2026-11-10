@@ -256,6 +256,12 @@ impl AppearanceExt for Appearance {
 
     fn from_request(req: &AppearanceRequest) -> Self {
         let mut a = generate(req.seed, req);
+        if let Some(outfit) = &req.outfit {
+            a.outfit = outfit.clone();
+        }
+        if let Some(headgear) = &req.headgear {
+            a.headgear = headgear.clone();
+        }
         let Some(family) = req.family else {
             return a;
         };
@@ -701,6 +707,25 @@ mod tests {
     }
 
     #[test]
+    fn a_request_can_dress_the_person_it_asks_for() {
+        let kit = engine_world::character::Outfit {
+            top_color: [0.6, 0.05, 0.05],
+            accent_on: "armband_l".into(),
+            ..Default::default()
+        };
+        let req = AppearanceRequest {
+            seed: 9,
+            family: Some(3),
+            outfit: Some(kit.clone()),
+            headgear: Some("hood".into()),
+            ..Default::default()
+        };
+        let a = Appearance::from_request(&req);
+        assert_eq!(a.outfit, kit);
+        assert_eq!(a.headgear, "hood");
+    }
+
+    #[test]
     fn requests_keep_their_limits_and_families_look_related() {
         let req = |seed, family| AppearanceRequest {
             seed,
@@ -708,6 +733,7 @@ mod tests {
             sex: Some(1.0),
             age: Some([20.0, 30.0]),
             ancestry: None,
+            ..Default::default()
         };
         let a = Appearance::from_request(&req(5, None));
         assert_eq!(a, Appearance::from_request(&req(5, None)));

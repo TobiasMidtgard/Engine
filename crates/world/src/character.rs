@@ -346,6 +346,11 @@ pub struct AppearanceRequest {
     pub age: Option<[f32; 2]>,
     /// Ancestry weights; `None` picks.
     pub ancestry: Option<Ancestry>,
+    /// What the person wears (a team kit); `None` picks. Set here rather than on the
+    /// answered [`Appearance`], so the first build is already dressed.
+    pub outfit: Option<Outfit>,
+    /// What covers the head ([`Appearance::headgear`] ids); `None` picks.
+    pub headgear: Option<String>,
 }
 
 /// The ARKit blendshape names, in ARKit order. `Left` and `Right` are the character's own.
@@ -742,8 +747,8 @@ pub(crate) fn register(app: &mut App) {
          headgear, outfit (garment ids, linear RGB colours, accent).",
     )
     .register_component::<AppearanceRequest>(
-        "Ask for a person by seed, family seed, sex and age range (years); the character module \
-         picks their Appearance.",
+        "Ask for a person by seed, family seed, sex and age range (years), optionally with \
+         their outfit and headgear; the character module picks the rest of their Appearance.",
     )
     .register_component::<FaceControls>(
         "Expression this frame: ARKit blendshape weights (0..1) and gaze yaw/pitch (rad).",

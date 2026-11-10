@@ -297,6 +297,7 @@ pub(crate) fn appearance_request(
         sex: Some(sex),
         age: Some([young, young + 8.0 + 10.0 * level]),
         ancestry: None,
+        ..Default::default()
     }
 }
 
