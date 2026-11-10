@@ -24,7 +24,8 @@
 //!   the burning dead. The masters on the plinths have 4000 health this stop, so none falls.
 //!
 //! The dead rise mid-floor between the two sides (x -0.6 to 2.8, z 5.8 to 7.4), so the whole
-//! fight stays in the stop's one picture.
+//! fight stays in the stop's one picture; the golems rise nearer the necromancers and meet the
+//! spirit blades before they reach a plinth (a master a golem knocks off its plinth goes limp).
 
 use super::{AimAt, Cast, Lane, d};
 use crate::design::{CastType, Modifier, SpellDesign};
@@ -131,6 +132,8 @@ pub(super) fn lanes() -> Vec<Lane> {
     vec![
         // Lane 0 stands far out on the left of the line: its glintblades fly into the picture.
         of(vec![
+            cast(3.6, glintblades(), AimAt::Golem),
+            cast(5.0, glintblades(), AimAt::Golem),
             cast(6.6, glintblades(), AimAt::Golem),
             cast(8.2, glintblades(), AimAt::Golem),
             cast(11.4, glintblades(), AimAt::Foe),
@@ -156,9 +159,9 @@ pub(super) fn lanes() -> Vec<Lane> {
         // The dead rise mid-floor before the plinths, between the two sides, near enough to
         // the camera that the whole fight stays in one picture.
         of(vec![
-            cast(0.0, golem(), AimAt::Floor(1.8, 7.0)),
+            cast(0.0, golem(), AimAt::Floor(3.4, 8.0)),
             cast(1.8, fire_weapon(), AimAt::Foe),
-            cast(14.6, last_golem(), AimAt::Floor(1.6, 7.2)),
+            cast(14.6, last_golem(), AimAt::Floor(3.2, 7.8)),
             cast(16.2, fire_weapon(), AimAt::Foe),
         ]),
         of(vec![

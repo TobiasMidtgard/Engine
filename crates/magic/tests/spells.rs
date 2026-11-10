@@ -4502,6 +4502,10 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
             }
         }
     }
+    let masters: Vec<Entity> = {
+        let mut q = app.world.query::<(Entity, &demo::art::HallMage)>();
+        q.iter(&app.world).map(|(e, _)| e).collect()
+    };
     let count = |k: &str| seen_blades.values().filter(|v| **v == k).count();
     let seen = app.world.resource::<Seen>();
     let spirits: Vec<Entity> = seen_blades
@@ -4514,6 +4518,14 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
         .iter()
         .filter(|d| d.source.is_some_and(|s| spirits.contains(&s)))
         .count();
+    // Blows that shove a master on its plinth (a body knocked off one goes limp, as the third
+    // film showed): the golems never reach the plinths, and a skeleton seldom does.
+    let shoves: Vec<Option<summon::MinionKind>> = seen
+        .damage
+        .iter()
+        .filter(|d| masters.contains(&d.target) && d.impulse.length() > 1.0)
+        .filter_map(|d| d.source.and_then(|s| kinds.get(&s).copied()).map(Some))
+        .collect();
     let burning_cuts = seen
         .hits
         .iter()
@@ -4528,11 +4540,12 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
     println!(
         "phalanx {}, spirit {}, bound {}, bladefall {} (most stuck {most_stuck}); imbued at most \
          {most_imbued}; spirit cuts {spirit_cuts}, burning cuts {burning_cuts}, blade hits \
-         {blade_hits}; bound at {bound_at:?}; lowest master {lowest}",
+         {blade_hits}; bound at {bound_at:?}; lowest master {lowest}; shoves {}",
         count("phalanx"),
         count("spirit"),
         count("bound"),
         count("bladefall"),
+        shoves.len(),
     );
     assert_eq!(count("phalanx"), 20, "four phalanxes of five");
     assert_eq!(count("spirit"), 2);
@@ -4550,5 +4563,9 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
     assert!(
         lowest > 1000.0,
         "a master on a plinth nearly fell: {lowest}"
+    );
+    assert!(
+        !shoves.contains(&Some(summon::MinionKind::Golem)) && shoves.len() <= 4,
+        "{shoves:?}"
     );
 }
