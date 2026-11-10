@@ -75,7 +75,12 @@ type BrainItem<'a> = (
     &'a NpcVitals,
     &'a NpcMotor,
     &'a NpcClock,
-    (&'a Faction, Option<&'a Squad>, Option<&'a Downed>),
+    (
+        &'a Faction,
+        Option<&'a Squad>,
+        Option<&'a Downed>,
+        Option<&'a crate::minds::Spellbound>,
+    ),
     &'a mut NpcBrain,
     &'a mut NpcMemory,
     &'a mut NpcCombat,
@@ -277,7 +282,7 @@ pub(crate) fn think_and_act(
         }
     }
     s.paths.waiting.clear();
-    for (e, npc, t, _, _, vitals, _, clock, (faction, squad, downed), brain, ..) in q.iter() {
+    for (e, npc, t, _, _, vitals, _, clock, (faction, squad, downed, _), brain, ..) in q.iter() {
         if brain.home.is_none() && npc.active && !vitals.downed && clock.dt > 0.0 {
             s.waking += 1;
         }
@@ -323,7 +328,7 @@ pub(crate) fn think_and_act(
         vitals,
         motor,
         clock,
-        (faction, squad, _),
+        (faction, squad, _, mind),
         mut brain,
         mut memory,
         mut combat,
@@ -384,7 +389,7 @@ pub(crate) fn think_and_act(
                 skills,
                 weapon,
                 vitals,
-                (faction, squad),
+                (faction, squad, mind),
                 (now, world_now),
                 &mut brain,
                 &mut memory,
@@ -473,7 +478,7 @@ fn think(
     skills: &NpcSkills,
     weapon: &NpcWeapon,
     vitals: &NpcVitals,
-    (faction, squad): (&Faction, Option<&Squad>),
+    (faction, squad, mind): (&Faction, Option<&Squad>, Option<&crate::minds::Spellbound>),
     (now, world_now): (f64, f64),
     brain: &mut NpcBrain,
     memory: &mut NpcMemory,
@@ -498,6 +503,13 @@ fn think(
         }
         _ => threat,
     };
+    // Spells on the mind (`minds`): the calmed have no enemies (nor orders to attack), the
+    // terrified only what they run from, the frenzied nothing but the fight.
+    let calm = mind.is_some_and(|m| m.calm(world_now));
+    let fear = mind.filter(|m| m.afraid(world_now));
+    let frenzied = mind.is_some_and(|m| m.frenzied(world_now));
+    let threat = threat.filter(|_| !calm);
+    let ordered_target = ordered_target.filter(|_| !calm);
     brain.target = threat.as_ref().map(|k| k.entity).or(ordered_target);
 
     let confirmed = threat.as_ref().is_some_and(|k| k.awareness >= 0.8);
@@ -510,7 +522,10 @@ fn think(
         .as_ref()
         .map(|k| k.last_position.distance(pos) as f32)
         .unwrap_or(f32::INFINITY);
-    let stimulus = memory.stimulus.filter(|s| now - s.time < 10.0);
+    let stimulus = memory
+        .stimulus
+        .filter(|s| now - s.time < 10.0)
+        .filter(|_| !calm);
 
     brain.alert = if confirmed && lost_secs < 6.0 {
         AlertLevel::Combat
@@ -592,6 +607,9 @@ fn think(
         } else {
             0.6 + 0.3 * skills.aggression
         };
+        if frenzied {
+            engage += 1.0;
+        }
         // A mate is reviving someone: hold here and keep the enemy busy (or stand between the
         // reviver and the enemy); or an enemy stands over a downed mate: drive it off. (Not
         // the one whose turn it is to revive: it goes.)
@@ -604,7 +622,9 @@ fn think(
         add(NpcAction::Engage, engage);
         // Cover: when pinned down, and smart shooters take it as soon as they're exposed.
         let exposed = visible && !brain.in_cover;
-        let cover = if ranged {
+        let cover = if frenzied {
+            0.0
+        } else if ranged {
             0.25 + 0.7 * supp * (1.2 - skills.courage)
                 + if exposed { 0.35 * skills.logic } else { 0.0 }
         } else if dist > 6.0 && skills.logic > 0.4 {
@@ -628,7 +648,7 @@ fn think(
             add(NpcAction::UseExplosive, 1.0);
         }
     }
-    if confirmed && health < 0.4 {
+    if confirmed && health < 0.4 && !frenzied {
         let outnumbered = if enemies > allies_near + 1 { 0.25 } else { 0.0 };
         add(
             NpcAction::Retreat,
@@ -685,22 +705,51 @@ fn think(
     if smoke.is_some() {
         brain.smoke_ready = world_now + SMOKE_EVERY_SECS;
     }
-    let throw = smoke.map(Throw::Smoke).or_else(|| {
-        flush(
-            me,
-            pos,
-            skills,
-            weapon,
-            faction,
-            (now, world_now),
-            brain,
-            memory,
-            w,
-            claims,
-        )
-    });
-    if brain.order.is_some() {
+    let throw = smoke
+        .map(Throw::Smoke)
+        .filter(|_| fear.is_none() && !calm)
+        .or_else(|| {
+            if fear.is_some() || calm {
+                return None;
+            }
+            flush(
+                me,
+                pos,
+                skills,
+                weapon,
+                faction,
+                (now, world_now),
+                brain,
+                memory,
+                w,
+                claims,
+            )
+        });
+    if brain.order.is_some() && !calm {
         add(NpcAction::Obey, 2.0);
+    }
+    // Terror: away from what it dreads, flat out. The spot ahead is kept while it still leads
+    // away (a fresh one each think would mean a fresh path search each think).
+    if let Some(m) = fear {
+        let from = crate::minds::fear_source(m, |e| w.seen.get(e).map(|p| p.position));
+        let away = DVec3::new(pos.x - from.x, 0.0, pos.z - from.z);
+        let away = if away.length() > 0.1 {
+            away.normalize()
+        } else {
+            let a = brain.random() * TAU;
+            DVec3::new(a.cos() as f64, 0.0, a.sin() as f64)
+        };
+        let keep = brain.action == NpcAction::Flee
+            && brain.destination_reason == "flee"
+            && brain.destination.is_some_and(|d| {
+                let ahead = DVec3::new(d.x - pos.x, 0.0, d.z - pos.z);
+                ahead.length() > FLEE_REPLAN && ahead.normalize().dot(away) > 0.7
+            });
+        if !keep {
+            brain.destination = Some(pos + away * FLEE_AHEAD);
+            brain.destination_reason = "flee";
+        }
+        add(NpcAction::Flee, 4.0);
     }
     // Inertia: keep doing the current thing unless something is clearly better.
     let current = brain.action;
@@ -712,7 +761,8 @@ fn think(
         .map(|x| x.0)
         .unwrap_or(NpcAction::Idle);
     let current_still_valid = scores.iter().any(|(a, v)| *a == current && *v > 0.0);
-    if !(committed && current_still_valid) {
+    // Terror and calm take hold at once.
+    if !(committed && current_still_valid) || fear.is_some() || calm {
         brain.switch(best, now);
     }
     brain.scores = scores;
@@ -1624,6 +1674,11 @@ const COVER_PROBE: f64 = 2.5;
 
 /// How long a squad keeps pinning an enemy in cover or going round it without seeing it (s).
 const MANEUVER_SECS: f32 = 10.0;
+
+/// Running in terror: the spot it runs for, this far ahead (m), and how near it gets before it
+/// picks the next.
+const FLEE_AHEAD: f64 = 16.0;
+const FLEE_REPLAN: f64 = 5.0;
 /// Below this much logic a shooter rushes straight at its enemy (to this far from it, m).
 const RUSH_LOGIC: f32 = 0.3;
 const RUSH_GAP: f64 = 4.0;
@@ -2078,6 +2133,19 @@ fn drive(
                     }
                 }
                 _ => brain.next_think = now,
+            }
+        }
+        NpcAction::Flee => {
+            if let Some(dest) = brain.destination {
+                if follow(pos, dest, 1.0, nav, now, w, s, &mut out) {
+                    brain.destination = None;
+                    brain.next_think = now;
+                }
+                // Flat out, looking where it runs.
+                out.sprint = true;
+                out.look = None;
+            } else {
+                brain.next_think = now;
             }
         }
         NpcAction::Obey => match brain.order {

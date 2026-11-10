@@ -1170,6 +1170,7 @@ mod tests {
             stamina: 1.0,
             reloading: false,
             shooter: false,
+            veil: 0.0,
         };
         let swing = |at: f64, heavy: bool, moving: bool| Strike {
             attacker: Entity::PLACEHOLDER,

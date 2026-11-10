@@ -31,7 +31,8 @@ use crate::skills::{NpcSkills, Perception};
     NpcCombat,
     NavAgent,
     NpcClock,
-    crate::locomotion::MoverState
+    crate::locomotion::MoverState,
+    crate::minds::Spellbound
 )]
 pub struct Npc {
     /// Where it patrols and returns to; `None` = where it was spawned.
@@ -354,10 +355,12 @@ pub enum NpcAction {
     /// Go to a downed squad mate, kneel beside it and get it back on its feet where it lies
     /// (see `NpcSettings::ally_revive_secs`).
     Revive,
+    /// Run from what a fear spell made it dread (`minds`), heedless of everything else.
+    Flee,
 }
 
 impl NpcAction {
-    pub const ALL: [NpcAction; 13] = [
+    pub const ALL: [NpcAction; 14] = [
         NpcAction::Idle,
         NpcAction::Patrol,
         NpcAction::Investigate,
@@ -371,6 +374,7 @@ impl NpcAction {
         NpcAction::Obey,
         NpcAction::Down,
         NpcAction::Revive,
+        NpcAction::Flee,
     ];
 
     pub fn name(self) -> &'static str {
@@ -388,6 +392,7 @@ impl NpcAction {
             NpcAction::Obey => "obey",
             NpcAction::Down => "down",
             NpcAction::Revive => "revive",
+            NpcAction::Flee => "flee",
         }
     }
 }

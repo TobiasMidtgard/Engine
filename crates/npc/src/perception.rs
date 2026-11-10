@@ -224,6 +224,9 @@ pub struct Perceivable {
     pub reloading: bool,
     /// An NPC with a ranged weapon (see [`Snapshot::shooter`]).
     pub shooter: bool,
+    /// 0 seen .. 1 gone: a veil spell ([`engine_world::Statuses::veil`], or
+    /// [`crate::minds::Spellbound`]); from [`crate::minds::VEIL_UNSEEN`] it isn't seen at all.
+    pub veil: f32,
 }
 
 /// Everything with a [`Faction`] this tick, with a spatial hash (rebuilt every tick).
@@ -289,6 +292,8 @@ type PerceivableItem<'a> = (
     Option<&'a NpcClock>,
     Option<&'a AnimationParams>,
     Option<&'a NpcWeapon>,
+    Option<&'a engine_world::Statuses>,
+    Option<&'a crate::minds::Spellbound>,
 );
 
 pub(crate) fn tick_clocks(time: Res<Time>, mut q: Query<(&mut NpcClock, Option<&LocalTimeScale>)>) {
@@ -301,13 +306,34 @@ pub(crate) fn tick_clocks(time: Res<Time>, mut q: Query<(&mut NpcClock, Option<&
     }
 }
 
-pub(crate) fn collect_perceivables(mut out: ResMut<Perceivables>, q: Query<PerceivableItem>) {
+pub(crate) fn collect_perceivables(
+    mut out: ResMut<Perceivables>,
+    q: Query<PerceivableItem>,
+    time: Res<Time>,
+) {
+    let world_now = time.elapsed_secs_f64();
     out.list.clear();
     out.index.clear();
     for v in out.hash.values_mut() {
         v.clear();
     }
-    for (e, faction, t, loco, cc, motor, body, vitals, combat, clock, params, weapon) in &q {
+    for (
+        e,
+        faction,
+        t,
+        loco,
+        cc,
+        motor,
+        body,
+        vitals,
+        combat,
+        clock,
+        params,
+        weapon,
+        statuses,
+        mind,
+    ) in &q
+    {
         if vitals.is_some_and(|v| v.downed) {
             continue;
         }
@@ -335,6 +361,13 @@ pub(crate) fn collect_perceivables(mut out: ResMut<Perceivables>, q: Query<Perce
             stamina: loco.stamina,
             reloading: params.is_some_and(|p| p.get("reloading") > 0.5),
             shooter: weapon.is_some_and(|w| w.style == WeaponStyle::Ranged),
+            veil: statuses.map_or(0.0, |s| s.veil).max(
+                if mind.is_some_and(|m| m.veiled(world_now)) {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
         });
         out.index.insert(e, i);
         let key = (
@@ -519,7 +552,10 @@ pub(crate) fn perceive(
         seen.near(pos, range as f64, &mut near);
         for &i in &near {
             let other = seen.list[i as usize];
-            if other.entity == me || !relevant(&factions, *faction, other.faction) {
+            if other.entity == me
+                || !relevant(&factions, *faction, other.faction)
+                || other.veil >= crate::minds::VEIL_UNSEEN
+            {
                 continue;
             }
             let to = other.position - pos;
@@ -557,10 +593,18 @@ pub(crate) fn perceive(
             };
             let moving = 1.0 + (other.velocity.length() / 5.0).min(1.0) * 0.6;
             let prev = memory.get(other.entity).map(|k| k.awareness).unwrap_or(0.0);
-            let rate =
-                zone * close * light * stance * moving * haze * (0.4 + 0.6 * awareness_skill)
-                    / perception.detection_secs.max(0.05)
-                    * if prev > 0.5 { 2.0 } else { 1.0 };
+            // Half veiled (fading in or out), it is that much harder to make out.
+            let veil = 1.0 - other.veil / crate::minds::VEIL_UNSEEN;
+            let rate = zone
+                * close
+                * light
+                * stance
+                * moving
+                * haze
+                * veil
+                * (0.4 + 0.6 * awareness_skill)
+                / perception.detection_secs.max(0.05)
+                * if prev > 0.5 { 2.0 } else { 1.0 };
             let k = memory.entry(other.entity, other.faction, now, other.position);
             k.visible = true;
             k.reported = false;
@@ -588,6 +632,13 @@ pub(crate) fn perceive(
         // Forget what has been out of mind for long.
         let memory_secs = perception.memory_secs as f64;
         memory.known.retain_mut(|k| {
+            // Sides change (a spell commands or maddens someone): a friend now is no enemy to
+            // keep in mind, and an enemy now is one whatever it was when first seen.
+            match seen.get(k.entity) {
+                Some(s) if !relevant(&factions, *faction, s.faction) => return false,
+                Some(s) => k.faction = s.faction,
+                None => {}
+            }
             if !k.visible {
                 let since = now - k.last_seen;
                 if since > 3.0 {

@@ -280,7 +280,8 @@ struct Traits {
     Footfall,
     BodyHeight,
     Faction,
-    AnimalMind
+    AnimalMind,
+    crate::minds::Spellbound
 )]
 pub struct Animal {
     pub species: Species,
@@ -687,7 +688,7 @@ impl AnimalMind {
         1.0 - x * x * (3.0 - 2.0 * x)
     }
 
-    fn set(&mut self, state: AnimalState, now: f64) {
+    pub(crate) fn set(&mut self, state: AnimalState, now: f64) {
         if self.state != state {
             self.state = state;
             self.since = now;

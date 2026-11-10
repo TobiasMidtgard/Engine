@@ -11,6 +11,7 @@ pub mod features;
 pub mod grenade;
 pub mod learning;
 pub mod locomotion;
+pub mod minds;
 pub mod nav;
 pub mod perception;
 pub mod rest;
@@ -35,6 +36,7 @@ pub use features::ExplosiveProp;
 pub use grenade::Grenades;
 pub use learning::{OpponentModel, OpponentModels};
 pub use locomotion::{FootKind, Footfall, MoverState, SelfPropelled};
+pub use minds::Spellbound;
 pub use nav::{NavAgent, NavGrid, NavSettings, PathStatus};
 pub use perception::{BodyHeight, Known, NpcMemory, Perceivables};
 pub use seed::Seed;
@@ -109,6 +111,9 @@ impl Plugin for NpcPlugin {
             .register_component::<Squad>(
                 "Squad id: squad mates share sightings, take turns attacking, suppress and flank.",
             )
+            .register_component::<Spellbound>(
+                "What spells do to this mind (engine_world::MindEffect): fear, calm, veil, command, frenzy, each until a world time.",
+            )
             .register_component::<ExplosiveProp>(
                 "Explodes when damaged: radius (m), damage, health. NPCs shoot it near enemies.",
             )
@@ -162,6 +167,7 @@ impl Plugin for NpcPlugin {
                         rest::rest_far_agents,
                         nav::warm_nav,
                         perception::tick_clocks,
+                        minds::take_minds,
                         perception::collect_perceivables,
                     )
                         .chain()
