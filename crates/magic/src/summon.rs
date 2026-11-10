@@ -181,6 +181,8 @@ pub const SLAM_M: f32 = 2.8;
 pub const SHOOT_EVERY: f32 = 1.8;
 pub const GATHER_SECS: f32 = 0.5;
 pub const HEAL_EVERY: f32 = 1.2;
+/// A wisp's halo, after its heart and three motes.
+pub const WISP_HALO: usize = 4;
 /// Seconds rubble lies before it sinks, and how long sinking takes.
 pub const RUBBLE_SECS: f32 = 4.0;
 pub const SINK_SECS: f32 = 1.5;
@@ -1040,15 +1042,49 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
             ));
         }
         MinionKind::Wisp => {
-            part(commands, 0, Vec3::ZERO, glow(0.22, color, 120.0));
+            // A white-gold heart, three motes circling it and a halo round it (round 19), a
+            // trail of light behind it (its look), bright enough to read across the hall.
+            let gold = crate::life::RING;
+            part(
+                commands,
+                0,
+                Vec3::ZERO,
+                glow(0.17, [1.0, 0.9, 0.66], 26_000.0),
+            );
             for i in 0..3 {
-                part(commands, 1 + i, Vec3::ZERO, glow(0.05, color, 70.0));
+                part(commands, 1 + i, Vec3::ZERO, glow(0.045, gold, 30_000.0));
             }
+            part(
+                commands,
+                WISP_HALO,
+                Vec3::ZERO,
+                MeshRenderer::new(
+                    MeshRef::Shape(Shape::Torus {
+                        radius: 0.34,
+                        tube: 0.012,
+                        segments: 40,
+                    }),
+                    MaterialRef::Inline(
+                        StandardMaterial::default()
+                            .with_tint(gold[0], gold[1], gold[2])
+                            .with_emissive(gold, crate::life::RING_NITS),
+                    ),
+                )
+                .without_shadows(),
+            );
             commands.entity(root).insert(PointLight {
-                color,
-                intensity_lm: 1400.0,
-                range: 5.0,
+                color: crate::life::LIFE,
+                intensity_lm: 2600.0,
+                range: 6.0,
                 radius: 0.1,
+            });
+            looks.push(LookCmd::Attach {
+                entity: root,
+                look: spell.weave.key.clone(),
+                role: Role::Bolt,
+                scale: 0.6,
+                color: crate::life::LIFE,
+                power_j: 0.0,
             });
         }
     }
@@ -1188,6 +1224,16 @@ pub fn run_minions(
     if minions.is_empty() {
         return;
     }
+    // How tall each creature stands, for a wisp to keep over its head.
+    let tall: std::collections::HashMap<Entity, (MinionKind, f32)> =
+        if minions.iter().any(|(_, m, ..)| m.kind == MinionKind::Wisp) {
+            minions
+                .iter()
+                .map(|(e, m, ..)| (e, (m.kind, body_height(m.kind, m.size))))
+                .collect()
+        } else {
+            Default::default()
+        };
     // Past the limit: the oldest of a summoner's kind goes.
     // A creature held by Command isn't its holder's to retire.
     let mut kept: Vec<(Option<Entity>, MinionKind, f32, Entity, Mastery)> = minions
@@ -1282,10 +1328,29 @@ pub fn run_minions(
                     creature: creatures.contains(b),
                 });
             m.target = match m.kind {
-                MinionKind::Wisp => seen
-                    .filter(|s| s.friend && s.hurt > 0.001 && leash(s.at))
-                    .max_by(|a, b| a.hurt.total_cmp(&b.hurt))
-                    .map(|s| s.e),
+                // The most hurt ally; with none hurt, it keeps over the nearest of its side's
+                // creatures (a wisp keeps its golem and treant), else by its summoner.
+                MinionKind::Wisp => {
+                    let friends: Vec<Seen> = seen
+                        .filter(|s| s.friend && s.hurt >= 0.0 && leash(s.at))
+                        .collect();
+                    friends
+                        .iter()
+                        .filter(|s| s.hurt > 0.001)
+                        .max_by(|a, b| a.hurt.total_cmp(&b.hurt))
+                        .or_else(|| {
+                            friends
+                                .iter()
+                                .filter(|s| {
+                                    s.creature
+                                        && tall.get(&s.e).is_some_and(|t| t.0 != MinionKind::Wisp)
+                                })
+                                .min_by(|a, b| {
+                                    a.at.distance(m.pos).total_cmp(&b.at.distance(m.pos))
+                                })
+                        })
+                        .map(|s| s.e)
+                }
                 _ => {
                     // Creatures fight creatures first (minions engage minions); a caster or a
                     // dummy only when no enemy creature is in reach.
@@ -1869,14 +1934,18 @@ pub fn run_minions(
                 crate::dragon::live_dragon(&mut m, &mut dragon, &mut tf, &mut life, &mut parts);
             }
             MinionKind::Wisp => {
-                // Circle above the hurt ally's shoulder (or the summoner) and heal.
+                // Circle above the hurt ally's head (or the creature it keeps, or the
+                // summoner) and heal.
                 let host = target.map(|t| t.1).or(owner.map(|o| o.0));
+                let over = target
+                    .and_then(|t| tall.get(&t.0))
+                    .map_or(2.0, |t| (t.1 + 0.55).max(2.0));
                 let a = m.age * 1.4 + m.flank;
                 let goal = host
                     .map(|h| {
                         h + DVec3::new(
                             (a.cos() * 0.7) as f64,
-                            (2.0 + 0.15 * (a * 2.3).sin()) as f64,
+                            (over + 0.15 * (a * 2.3).sin()) as f64,
                             (a.sin() * 0.7) as f64,
                         )
                     })
@@ -1886,13 +1955,15 @@ pub fn run_minions(
                     .as_vec3()
                     .clamp_length_max(6.0 * dt);
                 m.pos += mv.as_dvec3();
+                let hurt = |t: Entity| bodies.get(t).is_ok_and(|b| b.2.health < b.2.max - 1e-3);
                 if let Some((te, tp)) = target
                     && m.cooldown <= 0.0
-                    && m.pos.distance(tp + DVec3::Y * 1.2) < 2.8
+                    && hurt(te)
+                    && m.pos.distance(tp + DVec3::Y * (over as f64 - 0.8)) < 2.8
                 {
                     m.cooldown = HEAL_EVERY;
                     m.attacks += 1;
-                    let at = tp + DVec3::Y * 1.1;
+                    let at = tp + DVec3::Y * ((over as f64 - 0.55) * 0.62).max(1.1);
                     hits.0.push(PendingHit {
                         cast: minion_cast(&m, e, &m.attack, 1.0),
                         target: Some(te),
@@ -2015,6 +2086,14 @@ fn pose_shell(
         };
         if part.index == 0 {
             tf.scale = Vec3::splat(1.0 + 0.35 * gather);
+            continue;
+        }
+        if m.kind == MinionKind::Wisp && part.index == WISP_HALO {
+            // The halo turns on a slow wobble round the heart.
+            tf.translation = DVec3::ZERO;
+            tf.rotation = Quat::from_rotation_y(m.spin * 0.4)
+                * Quat::from_rotation_x(0.35 + 0.2 * (m.spin * 0.7).sin());
+            tf.scale = Vec3::splat(1.0 + 0.08 * (m.spin * 2.1).sin());
             continue;
         }
         let i = (part.index - 1) as f32;

@@ -67,6 +67,10 @@ pub const SEAR_CAP: f32 = 0.34;
 pub const LIFE: [f32; 3] = [1.0, 0.82, 0.42];
 /// A glow's brightness, nits: bright enough to read in the daylit hall (magic-hall-pictures).
 pub const LIFE_NITS: f32 = 14_000.0;
+/// A ring of light's colour: a deeper gold than [`LIFE`], so it blooms gold rather than cream.
+pub const RING: [f32; 3] = [1.0, 0.62, 0.2];
+/// A ring's (and a mote's) brightness, nits: a line of light, not a hoop.
+pub const RING_NITS: f32 = 32_000.0;
 /// Least seconds between two glows on one body.
 pub const GLOW_EVERY: f32 = 0.45;
 /// Seconds a ring of light takes to run up a body.
@@ -96,7 +100,8 @@ pub struct HealAt {
     pub sear: bool,
     /// The healer's side: it revives that side's fallen.
     pub side: u32,
-    /// A mage's heal revives; a wisp's light mends the living but raises no one.
+    /// A mage's heal revives; a wisp's light, or a drop of healing rain, mends the living but
+    /// raises no one.
     pub revives: bool,
     /// The body's height and girth, for its glow (it may be gone by the time it shows).
     pub height: f32,
@@ -273,7 +278,7 @@ fn ring_mesh(tube: f32) -> MeshRenderer {
             tube,
             segments: 48,
         }),
-        MaterialRef::Inline(light(LIFE, LIFE_NITS)),
+        MaterialRef::Inline(light(RING, RING_NITS)),
     )
     .without_shadows()
 }
@@ -284,7 +289,7 @@ fn mote_mesh() -> MeshRenderer {
             radius: 1.0,
             segments: 8,
         }),
-        MaterialRef::Inline(light([1.0, 0.9, 0.62], LIFE_NITS * 1.6)),
+        MaterialRef::Inline(light([1.0, 0.84, 0.46], RING_NITS)),
     )
     .without_shadows()
 }
@@ -314,7 +319,7 @@ fn glow(
     commands.spawn((
         Name::new("Healing light"),
         Transform::from_translation(base).with_scale(Vec3::ZERO),
-        ring_mesh(0.045),
+        ring_mesh(0.028),
         HealRing {
             target,
             base,
@@ -532,7 +537,7 @@ fn lay_circle(
         .spawn((
             Name::new("Healing circle"),
             Transform::from_translation(ground).with_scale(Vec3::ZERO),
-            ring_mesh(0.06),
+            ring_mesh(0.016),
         ))
         .id();
     let mut blooms = Vec::new();
@@ -947,7 +952,7 @@ pub fn run_circles(
                 commands.spawn((
                     Name::new("Wave of light"),
                     Transform::from_translation(c.center).with_scale(Vec3::ZERO),
-                    ring_mesh(0.035),
+                    ring_mesh(0.012),
                     Wave {
                         center: c.center,
                         radius: c.radius,

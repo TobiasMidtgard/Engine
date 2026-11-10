@@ -6413,6 +6413,41 @@ fn a_mending_bolt_heals_a_golem_and_a_ring_of_light_runs_up_it() {
 }
 
 #[test]
+fn a_wisp_keeps_over_its_golem_and_pours_light_into_it_when_it_is_hurt() {
+    let mut app = life_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
+    run(&mut app, 0.1);
+    let (g, m) = summon_golem(&mut app, me, DVec3::new(3.0, 0.0, 0.0));
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["heal"], CastType::Summon).named("Wisp"),
+        Aim::Point(DVec3::new(-1.0, 0.0, 3.0)),
+    );
+    run(&mut app, 4.0);
+    let wisp = minions(&mut app)
+        .into_iter()
+        .find(|m| m.1.kind == summon::MinionKind::Wisp)
+        .expect("a wisp")
+        .0;
+    // No one is hurt: it keeps over the golem's head, not by its summoner.
+    let w = app.world.get::<Transform>(wisp).unwrap().translation;
+    let at = app.world.get::<GlobalTransform>(g).unwrap().translation();
+    let top = summon::body_height(m.kind, m.size) as f64;
+    let d = w - at;
+    assert!(
+        d.x.hypot(d.z) < 1.6 && w.y > at.y + top,
+        "the wisp at {w}, the golem at {at}, {top} m tall"
+    );
+    // Hurt, the golem gets its light.
+    hurt(&mut app, g, 0.5);
+    let before = app.world.get::<Vitality>(g).unwrap().health;
+    run(&mut app, 2.6);
+    let after = app.world.get::<Vitality>(g).unwrap().health;
+    assert!(after > before + 1.0, "{before} -> {after}");
+}
+
+#[test]
 fn a_heal_on_a_fallen_golems_pieces_puts_it_back_together_at_half_health() {
     let mut app = life_app();
     let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Expert);
@@ -6665,9 +6700,9 @@ fn the_life_hall_heals_the_golem_burns_the_dead_and_revives_the_golem_when_it_fa
         .count();
     assert!(skeletons >= 4, "{skeletons} skeletons fell");
     let fell_at = golem_fell.expect("the golem never fell");
-    assert!(fell_at > 10.5 && fell_at < 14.2, "it fell at {fell_at}");
+    assert!(fell_at > 10.5 && fell_at < 15.0, "it fell at {fell_at}");
     let back = revived.expect("the golem was never revived");
-    assert!(back > 14.0 && back < 15.5, "revived at {back}");
+    assert!(back > fell_at && back < 16.8, "revived at {back}");
     assert!(
         missed * 10 <= looked,
         "the golem and treant out of view {missed} of {looked}"

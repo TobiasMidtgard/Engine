@@ -919,7 +919,8 @@ pub fn apply_hits(
                 amount,
                 sear: dead,
                 side: h.cast.side,
-                revives: h.cast.caster.is_none_or(|c| !minions.contains(c)),
+                revives: h.cast.caster.is_none_or(|c| !minions.contains(c))
+                    && h.cast.spell.cast != CastType::Rain,
                 height,
                 radius,
             });

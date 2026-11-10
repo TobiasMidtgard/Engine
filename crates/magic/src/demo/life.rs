@@ -3,7 +3,8 @@
 //! the necromancers raise (lanes 3 to 5):
 //!
 //! * Lane 0 summons a stone golem mid-floor (0.1 s) and lane 1 a treant beside it (0.4 s), and
-//!   lane 1 a wisp that flies to whichever of them is most hurt (1.0 s).
+//!   lane 1 a wisp that keeps over them and flies to whichever of them is most hurt (1.0 s),
+//!   pouring a stream of light into it.
 //! * The necromancers raise eight skeleton warriors on their side (0 to 1.3 s, and three more at
 //!   7 s) that charge the golem and treant. Under their blades the golem sheds a shoulder plate,
 //!   the other, then its left arm from the elbow.
@@ -13,8 +14,9 @@
 //!   stand in it, gold fire off their bones.
 //! * Lane 0 throws mending bolts at the golem (6.6 and 8.8 s): a ring of light runs up it.
 //! * The necromancers throw bone spears at the golem (10.8 to 12.6 s) and it falls apart.
-//!   Lane 0 revives it (14 s): a mending bolt on its pieces, which rise off the floor and fly
-//!   together, and it stands again at half health; lane 2's second circle lands on it (15.4 s).
+//!   Lane 0 revives it (14.9 s): a mending bolt on its pieces, which rise off the floor and fly
+//!   together, and it stands again at half health; lane 2's second circle lands on it (16 s),
+//!   or on its pieces if the bolt missed them, and the circle's wave puts it back.
 //! * Lane 1 lets healing rain fall over the treant and the dead (11.6 s): drops of light that
 //!   mend the treant and burn the skeletons.
 //! * The masters on the plinths have 4000 health this stop, so none falls.
@@ -31,7 +33,7 @@ pub const PERIOD: f32 = 24.0;
 /// Where the golem stands (x, z).
 pub const GOLEM: [f64; 2] = [-1.0, 5.4];
 /// Where the treant stands (x, z).
-pub const TREANT: [f64; 2] = [-3.4, 3.6];
+pub const TREANT: [f64; 2] = [-4.4, 6.4];
 
 fn golem() -> SpellDesign {
     d(&["stone"], CastType::Summon)
@@ -116,7 +118,7 @@ pub(super) fn lanes() -> Vec<Lane> {
             cast(0.1, golem(), AimAt::Floor(GOLEM[0], GOLEM[1])),
             cast(6.6, mending(), own_golem),
             cast(8.8, mending(), own_golem),
-            cast(14.0, mending(), AimAt::Fallen),
+            cast(14.9, mending(), AimAt::Fallen),
             cast(18.4, mending(), own_golem),
         ]),
         of(vec![
@@ -126,7 +128,8 @@ pub(super) fn lanes() -> Vec<Lane> {
         ]),
         of(vec![
             cast(4.4, circle(), own_golem),
-            cast(15.4, circle(), own_golem),
+            // On the golem's pieces if the revive missed them, so its wave puts it back.
+            cast(16.0, circle(), AimAt::Fallen),
         ]),
         // The dead rise in the middle of the necromancers' side of the floor and charge.
         of(vec![

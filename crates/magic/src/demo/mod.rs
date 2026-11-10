@@ -329,11 +329,12 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_life",
         name: "Life: wounds that heal, a healing circle, mending bolts, a revived golem",
-        // From down the floor on the healers' side, a little above head height and looking down
-        // over the golem's ground: the circle's blossoms read on the floor, the golem and the
-        // treant before the dais, the dead charging in from the left.
-        eye: [-2.2, 4.0, -3.5],
-        target: [-0.6, 0.9, 6.0],
+        // From down the middle of the floor, above head height and looking down over the
+        // golem's ground: the circle's blossoms read on the floor, the golem and the treant side
+        // by side before the dais, the dead charging in from the left (chosen offline from the
+        // stop's own positions: the treant never in front of the golem).
+        eye: [0.0, 4.2, -2.5],
+        target: [0.8, 1.0, 6.5],
         hour: 16.6,
         // The circle open under the golem, the dead burning in it.
         warmup: 6.0,

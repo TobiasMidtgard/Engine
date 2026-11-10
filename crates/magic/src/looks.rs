@@ -140,6 +140,8 @@ pub struct LookLibrary {
     pub stand_ins: Vec<String>,
     /// Whether the particles module has its own effect for each of the dead's looks.
     dead_looks: HashMap<String, bool>,
+    /// Healing's gold looks are in vfx's library ([`crate::life_art::heal_looks`]).
+    life_looks: bool,
 }
 
 /// Looks of the dead (round-6-plan.md "Asks"): grave dust where they rise, ash where a thrall
@@ -545,6 +547,10 @@ pub fn apply(world: &mut World, looks: Vec<LookCmd>) {
         world.resource_mut::<LookLibrary>().no_particles = true;
         return;
     }
+    if !world.resource::<LookLibrary>().life_looks {
+        world.resource_mut::<LookLibrary>().life_looks = true;
+        define_life_looks(world);
+    }
     // Named effects: no contract carries them, so they go to vfx directly either way.
     for cmd in &looks {
         if let LookCmd::Effect {
@@ -732,6 +738,29 @@ pub fn apply(world: &mut World, looks: Vec<LookCmd>) {
                     let _ = call_api(world, "vfx.mark", args);
                 }
             }
+        }
+    }
+}
+
+/// Put healing's gold looks into vfx's library, before vfx first asks for them (it would borrow
+/// blight's green bubbles by colour): each one vfx lacks, or has only as such a borrow, so looks
+/// of its own made later win.
+fn define_life_looks(world: &mut World) {
+    for desc in crate::life_art::heal_looks() {
+        let Some(name) = desc["name"].as_str().map(str::to_string) else {
+            continue;
+        };
+        let borrowed = match call_api(world, "vfx.describe", json!({ "effect": name })) {
+            Ok(have) => have["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("borrowed from")),
+            Err(_) => true,
+        };
+        if !borrowed {
+            continue;
+        }
+        if let Err(e) = call_api(world, "vfx.define", json!({ "effect": desc })) {
+            tracing::warn!("magic: {name} refused: {e}");
         }
     }
 }
