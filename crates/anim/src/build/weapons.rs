@@ -29,6 +29,7 @@ use crate::animator::PoseEdit;
 use crate::clip::AnimationClip;
 use crate::ik::{Limb, rest_hinge, two_bone_live};
 use crate::skeleton::Skeleton;
+use crate::validate::{wrist_in_range, wrist_strain};
 use crate::xform::Xf;
 
 /// The middle of the fist in either hand's frame.
@@ -389,6 +390,8 @@ struct Moves {
     keys: Vec<Key>,
     /// Each key's holds, resolved (left, right).
     holds: Vec<[Hold; 2]>,
+    /// How much a held thing gives way to wrist strain ([`ArmMemo`]).
+    give: f32,
 }
 
 impl Moves {
@@ -409,9 +412,16 @@ impl Moves {
                     } => {
                         assert!(k > 0, "a weapon clip can't start on a cut");
                         let axis = axis.normalize();
-                        // The edge leads: it faces the way the tip moves.
+                        // An edge leads: it faces the way the tip moves. Either edge of a
+                        // two-edged blade can, so the one nearer where the face already is
+                        // (the hand turning least into the cut).
                         let from = &mut holds[k - 1][side];
-                        from.face = square(axis.cross(from.axis), from.axis);
+                        let lead = square(axis.cross(from.axis), from.axis);
+                        from.face = if lead.dot(from.face) < 0.0 {
+                            -lead
+                        } else {
+                            lead
+                        };
                         let r = Quat::from_axis_angle(axis, degrees.to_radians());
                         Hold {
                             at: to,
@@ -429,7 +439,18 @@ impl Moves {
                 holds[k][0] = below(&holds[k][1], d);
             }
         }
-        Self { rigs, keys, holds }
+        Self {
+            rigs,
+            keys,
+            holds,
+            give: 1.0,
+        }
+    }
+
+    /// Give way to only `give` of the wrists' strain (0 holds the keys exactly: a paired
+    /// thrust; between, a cut that has to stay on its line).
+    fn give(self, give: f32) -> Self {
+        Self { give, ..self }
     }
 
     fn secs(&self) -> f32 {
@@ -493,9 +514,9 @@ impl Moves {
     }
 
     /// The pose `t` seconds in.
-    fn pose(&self, s: &Skeleton, t: f32) -> Vec<(&'static str, Xf)> {
+    fn pose(&self, s: &Skeleton, t: f32, memo: &mut ArmMemo) -> Vec<(&'static str, Xf)> {
         let (body, hands) = self.sample(t);
-        solve(s, self.rigs, &body, &hands)
+        solve(s, self.rigs, &body, &hands, memo)
     }
 
     /// The clip, sampled 120 times a second (a cut turns the blade 20° in a 60th).
@@ -506,10 +527,14 @@ impl Moves {
         let trail: Vec<f32> = (0..trail_keys)
             .map(|k| self.cutting(k as f32 / (trail_keys - 1) as f32 * secs))
             .collect();
+        let mut memo = ArmMemo {
+            give: self.give,
+            ..Default::default()
+        };
         let clip = AnimationClip::from_fn(name, secs, keys, looping, |ph| {
             #[cfg(test)]
             tests::sampling(name, ph * secs);
-            self.pose(s, ph * secs)
+            self.pose(s, ph * secs, &mut memo)
         });
         clip.with_curve("trail", trail_keys, move |ph| {
             trail[((ph * (trail_keys - 1) as f32).round() as usize).min(trail_keys - 1)]
@@ -565,9 +590,95 @@ fn wrist_pole(
     }
 }
 
+/// A shield held by `rig` at `hold` (its centre and face normal, model space), if `rig`
+/// holds one.
+fn shield_of(rig: Rig, hold: &Hold) -> Option<(Vec3, Vec3)> {
+    match rig {
+        Rig::Held { axis, face } if axis == HANDLE_AXIS && face == HANDLE_FACE => {
+            let r = hold.frame() * frame(axis, face).inverse();
+            let origin = hold.at - r * GRIP;
+            Some((origin + r * SHIELD_CENTER, (r * HANDLE_FACE).normalize()))
+        }
+        _ => None,
+    }
+}
+
+/// How deep the blade from `a` to `b` cuts into a shield at `centre` facing `normal`
+/// (meters inside its rim where it crosses the shield's face, or lies within 2 cm of it:
+/// negative when it passes outside the rim, −∞ when it never comes near the face).
+fn blade_through_shield(a: Vec3, b: Vec3, centre: Vec3, normal: Vec3) -> f32 {
+    let (da, db) = ((a - centre).dot(normal), (b - centre).dot(normal));
+    let depth = |p: Vec3| {
+        let d = (p - centre).dot(normal);
+        SHIELD_RADIUS - (p - centre - normal * d).length()
+    };
+    let mut worst = f32::NEG_INFINITY;
+    if da.signum() != db.signum() {
+        worst = worst.max(depth(a.lerp(b, da / (da - db))));
+    }
+    for k in 0..=20 {
+        let u = k as f32 / 20.0;
+        if (da + (db - da) * u).abs() < 0.02 {
+            worst = worst.max(depth(a.lerp(b, u)));
+        }
+    }
+    worst
+}
+
+/// How each arm (left, right) reached its hold at the last sample: the elbow turned this many
+/// degrees round the shoulder–wrist line from [`wrist_pole`]'s choice, and the fist this many
+/// round the grip's axis from the hold's frame (an off hand on a two-handed grip only).
+/// Samples carry it on so the search for the least strained wrist moves the arm smoothly.
+/// `give` is how much of a wrist's strain a held thing gives way to (1 all of it, 0 none: a
+/// thrust that has to go into a body where a paired clip puts it).
+#[derive(Clone, Copy, Debug)]
+struct ArmMemo {
+    arms: [Option<(f32, f32)>; 2],
+    give: f32,
+}
+
+impl Default for ArmMemo {
+    fn default() -> Self {
+        Self {
+            arms: [None; 2],
+            give: 1.0,
+        }
+    }
+}
+
+/// How far either way the first sample of a clip searches round the shoulder–wrist line, and
+/// round a two-handed grip, degrees, and in what steps.
+const SWIVEL_SEARCH: (f32, f32) = (90.0, 10.0);
+const SPIN_SEARCH: (f32, f32) = (120.0, 15.0);
+/// Later samples search this far either way of the last, in these steps.
+const FOLLOW_SEARCH: (f32, f32) = (6.0, 2.0);
+/// An off hand on a grip moves no blade: its turn round the grip and its elbow may follow
+/// faster.
+const FOLLOW_SPIN: (f32, f32) = (15.0, 3.0);
+/// Strain-degrees a degree of swivel or spin away from the plain reach costs: a strained
+/// wrist is worth fixing, an arm turned out of the way for nothing is not.
+const TURN_COST: f32 = 0.04;
+/// How far clear of the bearer's shield rim a blade the solver turns stays, meters.
+const SHIELD_CLEARANCE: f32 = 0.03;
+/// How far inside each wrist limit a hand the solver turns back is left, degrees.
+const WRIST_MARGIN: f32 = 2.0;
+
+/// Angles from `-reach` to `reach` about `centre`, `step` apart.
+fn around(centre: f32, (reach, step): (f32, f32)) -> impl Iterator<Item = f32> {
+    let n = (reach / step).round() as i32;
+    (-n..=n).map(move |k| centre + k as f32 * step)
+}
+
 /// Pose the skeleton: the body by its angles, then legs and arms by two-bone IK onto the feet
 /// and holds.
-fn solve(s: &Skeleton, rigs: [Rig; 2], body: &Body, hands: &[Hold; 2]) -> Vec<(&'static str, Xf)> {
+fn solve(
+    s: &Skeleton,
+    rigs: [Rig; 2],
+    body: &Body,
+    hands: &[Hold; 2],
+    memo: &mut ArmMemo,
+) -> Vec<(&'static str, Xf)> {
+    let mut hands = *hands;
     let mut p = PoseBuilder::new(s);
     let (turn, trunk) = (body.turn, body.trunk);
     p.rot_move("hips", body.hips, turn.x, turn.y, turn.z)
@@ -636,21 +747,146 @@ fn solve(s: &Skeleton, rigs: [Rig; 2], body: &Body, hands: &[Hold; 2]) -> Vec<(&
         );
         match rigs[side] {
             Rig::Held { axis, face } => {
-                let r = h.frame() * frame(axis, face).inverse();
+                let held = h.frame() * frame(axis, face).inverse();
                 let hinge = rest_hinge(s, upper, lower, Vec3::Z);
-                let wrist = h.at - r * GRIP;
-                let pole = wrist_pole(&edit, upper, lower, hand, wrist, r, h.elbow);
-                let _miss = two_bone_live(
-                    &mut edit,
-                    upper,
-                    lower,
-                    hand,
-                    wrist,
-                    Limb::posed(pole, hinge),
-                );
+                // An off hand on the main hand's grip may wrap it from its own side: turned
+                // about the grip's axis, the fist staying on it.
+                let two_handed = side == 0
+                    && matches!(rigs[1], Rig::Held { .. })
+                    && h.axis.dot(hands[1].axis) > 0.999
+                    && (h.at - hands[1].at).cross(h.axis).length() < 0.01;
+                // The elbow turned round the shoulder–wrist line, and the fist round the grip,
+                // where the wrist strains least: searched widely at a clip's first sample,
+                // then near the last one's.
+                let (swivels, spins): (Vec<f32>, Vec<f32>) = match memo.arms[side] {
+                    None => (
+                        around(0.0, SWIVEL_SEARCH).collect(),
+                        if two_handed {
+                            around(0.0, SPIN_SEARCH).collect()
+                        } else {
+                            vec![0.0]
+                        },
+                    ),
+                    Some((swivel, spin)) => (
+                        around(
+                            swivel,
+                            if two_handed {
+                                FOLLOW_SPIN
+                            } else {
+                                FOLLOW_SEARCH
+                            },
+                        )
+                        .collect(),
+                        if two_handed {
+                            around(spin, FOLLOW_SPIN).collect()
+                        } else {
+                            vec![0.0]
+                        },
+                    ),
+                };
+                let shoulder = edit.position(upper);
+                type Trial = (f32, f32, f32, f32, Vec3, Vec<Xf>, Vec<Xf>);
+                let mut best: Option<Trial> = None;
+                for &spin in &spins {
+                    let r = Quat::from_axis_angle(h.axis, spin.to_radians()) * held;
+                    let wrist = h.at - r * GRIP;
+                    let plain = wrist_pole(&edit, upper, lower, hand, wrist, r, h.elbow);
+                    let line = (wrist - shoulder).normalize_or(Vec3::NEG_Y);
+                    for &swivel in &swivels {
+                        let pole = Quat::from_axis_angle(line, swivel.to_radians()) * plain;
+                        let mut local = edit.local.to_vec();
+                        let mut model = edit.model.to_vec();
+                        let mut trial = PoseEdit {
+                            skeleton: s,
+                            local: &mut local,
+                            model: &mut model,
+                        };
+                        let miss = two_bone_live(
+                            &mut trial,
+                            upper,
+                            lower,
+                            hand,
+                            wrist,
+                            Limb::posed(pole, hinge),
+                        );
+                        trial.set_model_rotation(hand, r);
+                        let cost = wrist_strain(s, &model, lower, hand, side)
+                            + (swivel.abs() + spin.abs()) * TURN_COST
+                            + miss * 1000.0;
+                        if best.as_ref().is_none_or(|b| cost < b.0) {
+                            best = Some((cost, swivel, spin, miss, pole, local, model));
+                        }
+                    }
+                }
+                let (_, swivel, spin, _miss, pole, local, model) = best.expect("a reach to try");
+                edit.local.copy_from_slice(&local);
+                edit.model.copy_from_slice(&model);
+                memo.arms[side] = Some((swivel, spin));
+                // What strain is left, a held thing gives way to: the wrist turned back into
+                // its range, the thing with it, the fist kept where the key holds it (a key
+                // asking past what a wrist can do gets the nearest it can). Not past the
+                // bearer's own shield, though, and not an off hand, which keeps to the grip.
+                let shield = (side == 1).then(|| shield_of(rigs[0], &hands[0])).flatten();
+                if !two_handed
+                    && memo.give > 0.0
+                    && wrist_strain(s, edit.model, lower, hand, side) > 0.0
+                {
+                    let asked = edit.model[hand].r;
+                    for _ in 0..3 {
+                        let eased = wrist_in_range(s, edit.model, lower, hand, side, WRIST_MARGIN);
+                        let clear = |u: f32| {
+                            let r = asked.slerp(eased, u);
+                            shield.is_none_or(|(centre, normal)| {
+                                let axis = r * axis;
+                                let a = h.at + axis * SWORD_BLADE[0];
+                                let b = h.at + axis * SWORD_BLADE[1];
+                                blade_through_shield(a, b, centre, normal) <= -SHIELD_CLEARANCE
+                            })
+                        };
+                        let u = if clear(1.0) {
+                            1.0
+                        } else {
+                            let (mut lo, mut hi) = (0.0, 1.0);
+                            for _ in 0..8 {
+                                let mid = (lo + hi) * 0.5;
+                                if clear(mid) { lo = mid } else { hi = mid }
+                            }
+                            lo
+                        };
+                        let r = asked.slerp(eased, u * memo.give);
+                        two_bone_live(
+                            &mut edit,
+                            upper,
+                            lower,
+                            hand,
+                            h.at - r * GRIP,
+                            Limb::posed(pole, hinge),
+                        );
+                        edit.set_model_rotation(hand, r);
+                    }
+                    // An off hand on this grip goes where the grip went.
+                    if side == 1
+                        && let Rig::Held { axis, face } = rigs[1]
+                        && matches!(rigs[0], Rig::Held { .. })
+                        && hands[0].axis.dot(hands[1].axis) > 0.999
+                        && (hands[0].at - hands[1].at).cross(hands[0].axis).length() < 0.01
+                    {
+                        let r = edit.model[hand].r;
+                        let down = (hands[1].at - hands[0].at).dot(hands[1].axis);
+                        let main = Hold {
+                            at: edit.model[hand].transform_point(GRIP),
+                            axis: r * axis,
+                            face: r * face,
+                            elbow: hands[1].elbow,
+                        };
+                        hands[0] = Hold {
+                            elbow: hands[0].elbow,
+                            ..below(&main, down)
+                        };
+                    }
+                }
                 #[cfg(test)]
                 tests::note_miss(side, _miss);
-                edit.set_model_rotation(hand, r);
             }
             Rig::Free => {
                 // The fist is a hand's length past the wrist along a straight forearm.
@@ -1430,6 +1666,7 @@ fn greatsword_rise(s: &Skeleton) -> AnimationClip {
             key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
         ],
     )
+    .give(0.7)
     .clip(s, WeaponMove::GreatswordRise.clip_name(), false)
     .with_curve("effort", 31, move |ph| {
         keyed(
@@ -1628,6 +1865,7 @@ fn sword_riposte(s: &Skeleton) -> AnimationClip {
             ),
         ],
     )
+    .give(0.0)
     .clip(s, SWORD_RIPOSTE, false)
     .with_curve("effort", 31, move |ph| {
         keyed(
@@ -1659,11 +1897,11 @@ fn greatsword_riposte(s: &Skeleton) -> AnimationClip {
         1.12,
         point,
     );
-    let through = Hold::new(fist, point, Vec3::NEG_Y, Vec3::new(0.6, -0.8, 0.0));
+    let through = Hold::new(fist, point, Vec3::Y, Vec3::new(0.6, -0.8, 0.0));
     let ochs = Hold::new(
         Vec3::new(0.2, 1.45, 0.02),
         Vec3::new(-0.1, -0.14, -1.0),
-        Vec3::NEG_Y,
+        Vec3::Y,
         Vec3::new(0.9, 0.2, 0.3),
     );
     let drawn = GS_STANCE.hips([0.0, -0.08, 0.06], [0.0, -26.0, 0.0], [-4.0, -8.0, 0.0]);
@@ -1692,6 +1930,7 @@ fn greatsword_riposte(s: &Skeleton) -> AnimationClip {
             key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
         ],
     )
+    .give(0.0)
     .clip(s, GREATSWORD_RIPOSTE, false)
     .with_curve("effort", 31, move |ph| {
         keyed(
@@ -1944,24 +2183,7 @@ mod tests {
         let left = m[s.bone("hand_l")];
         let center = left.transform_point(SHIELD_CENTER);
         let normal = (left.r * HANDLE_FACE).normalize();
-        // Where the blade crosses the shield's plane, and any of it lying within the
-        // shield's thickness of the plane.
-        let (da, db) = ((a - center).dot(normal), (b - center).dot(normal));
-        let depth = |p: Vec3| {
-            let d = (p - center).dot(normal);
-            SHIELD_RADIUS - (p - center - normal * d).length()
-        };
-        let mut worst: f32 = 0.0;
-        if da.signum() != db.signum() {
-            worst = worst.max(depth(a.lerp(b, da / (da - db))));
-        }
-        for k in 0..=20 {
-            let u = k as f32 / 20.0;
-            if (da + (db - da) * u).abs() < 0.02 {
-                worst = worst.max(depth(a.lerp(b, u)));
-            }
-        }
-        worst
+        blade_through_shield(a, b, center, normal)
     }
 
     #[test]
@@ -2006,7 +2228,13 @@ mod tests {
         let s = humanoid::skeleton();
         let ready = sword_ready();
         let shield = shield_low();
-        let pose = solve(&s, [HANDLE, SWORD], &STANCE, &[shield, ready]);
+        let pose = solve(
+            &s,
+            [HANDLE, SWORD],
+            &STANCE,
+            &[shield, ready],
+            &mut ArmMemo::default(),
+        );
         let mut local = s.rest.clone();
         for (bone, x) in pose {
             let i = s.bone(bone);
@@ -2163,5 +2391,83 @@ mod tests {
         );
         assert!(clip.curve("draw", release - 0.05).unwrap() > 0.99);
         assert!(clip.curve("draw", release + 0.02).unwrap() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod wrists {
+    use super::*;
+    use crate::build::humanoid;
+
+    /// Every weapon clip's wrists, sampled at 60 Hz, stay in their range (5° slack, the
+    /// validator's) but for a few samples where a sword would otherwise cut its own shield or
+    /// an off hand follows its grip round, and the paired thrusts (held exactly, not counted);
+    /// the table gives the samples out, the worst strain
+    /// and the worst flexion, extension, deviation and roll per hand.
+    #[test]
+    fn weapon_clips_keep_their_wrists_in_range() {
+        let s = humanoid::skeleton();
+        let mut lines = Vec::new();
+        let mut total = 0;
+        for clip in clips(&s) {
+            let binding = crate::clip::ClipBinding::new(&clip, &s);
+            let n = ((clip.duration * 60.0).ceil() as usize).max(1);
+            let mut out = [0usize; 2];
+            let mut worst = [0.0f32; 2];
+            let mut angles = [[0.0f32; 4]; 2];
+            for k in 0..=n {
+                let t = clip.duration * k as f32 / n as f32;
+                let mut local = s.rest.clone();
+                clip.sample(t, &binding, &mut local);
+                let mut model = s.rest_model.clone();
+                s.to_model(&local, &mut model);
+                for side in 0..2 {
+                    let strain = wrist_strain(
+                        &s,
+                        &model,
+                        s.bone(LOWER_ARM[side]),
+                        s.bone(HAND[side]),
+                        side,
+                    );
+                    if strain > 5.0 {
+                        out[side] += 1;
+                    }
+                    worst[side] = worst[side].max(strain);
+                    let [f, d, r] = crate::validate::wrist_angles(
+                        &s,
+                        &model,
+                        s.bone(LOWER_ARM[side]),
+                        s.bone(HAND[side]),
+                        side,
+                    );
+                    angles[side][0] = angles[side][0].max(f);
+                    angles[side][1] = angles[side][1].max(-f);
+                    angles[side][2] = angles[side][2].max(d);
+                    angles[side][3] = angles[side][3].max(r);
+                }
+            }
+            // The paired thrusts are held exactly where their foes take them.
+            if clip.name != SWORD_RIPOSTE && clip.name != GREATSWORD_RIPOSTE {
+                total += out[0] + out[1];
+            }
+            lines.push(format!(
+                "{:28} L {:3}/{:3} {:5.1}° {:3.0?}  R {:3}/{:3} {:5.1}° {:3.0?}",
+                clip.name,
+                out[0],
+                n + 1,
+                worst[0],
+                angles[0],
+                out[1],
+                n + 1,
+                worst[1],
+                angles[1]
+            ));
+        }
+        eprintln!("{}", lines.join("\n"));
+        assert!(
+            total <= 60,
+            "{total} samples out of range\n{}",
+            lines.join("\n")
+        );
     }
 }

@@ -849,6 +849,12 @@ pub struct ReachIk {
     /// when it turns to it. For the pose validator.
     #[serde(skip)]
     pub misses: Vec<(f32, f32)>,
+    /// Per chain, for a fist kept turned round its grip as the clip has it: how far its elbow
+    /// is turned round the shoulder–fist line from where the clip bends it, and the fist round
+    /// the grip from the clip's turn (degrees), last frame: where this frame's search for the
+    /// least strained wrist starts.
+    #[serde(skip)]
+    pub eased: Vec<(f32, f32)>,
 }
 
 impl ReachIk {
@@ -856,6 +862,7 @@ impl ReachIk {
         Self {
             chains,
             misses: Vec::new(),
+            eased: Vec::new(),
         }
     }
 }
@@ -888,6 +895,10 @@ pub struct Reach {
     /// [`GRIP`](crate::grip::GRIP), and both hands' measured fists are used
     /// ([`crate::grip`]).
     pub fist: bool,
+    /// With `fist` and `turn`: keep the animation's turn of this fist round the handle (about
+    /// its axis, from the holding hand's way round), so an off hand the clip wraps round the
+    /// grip from its own side stays so; only its place on the grip is fixed.
+    pub keep_spin: bool,
 }
 
 impl Default for Reach {
@@ -905,6 +916,7 @@ impl Default for Reach {
             weight_curve: String::new(),
             turn: 0.0,
             fist: false,
+            keep_spin: false,
         }
     }
 }
@@ -1271,7 +1283,7 @@ pub(crate) fn reach_ik_system(
         }
         let reach = &mut *reach;
         reach.misses.clear();
-        for chain in &reach.chains {
+        for (k, chain) in reach.chains.iter().enumerate() {
             let mut weight = chain.weight;
             if !chain.weight_curve.is_empty() {
                 weight *= animator.curve(&chain.weight_curve);
@@ -1289,7 +1301,7 @@ pub(crate) fn reach_ik_system(
             };
             animator.refresh_model();
             // The end bone's wanted frame (its rotation only matters when it turns).
-            let frame = match s.index_of(&chain.target_bone) {
+            let target = match s.index_of(&chain.target_bone) {
                 Some(t) if !chain.target_bone.is_empty() => {
                     let offset = Xf::from_t(chain.target_offset);
                     // The fist and the item's seat in it: the reaching hand holds the item
@@ -1303,43 +1315,118 @@ pub(crate) fn reach_ik_system(
                         }
                         _ => Xf::IDENTITY,
                     };
-                    animator.model[t]
-                        .mul(&fit(&chain.target_bone))
-                        .mul(&offset)
-                        .mul(&fit(&chain.end).inverse())
+                    let on_grip = animator.model[t].mul(&fit(&chain.target_bone)).mul(&offset);
+                    // The animated fist's turn round the handle from the holding hand's way
+                    // round, kept (a half turn either way is ambiguous: kept short of it).
+                    let fit_end = fit(&chain.end);
+                    match crate::grip::side_of(&chain.end)
+                        .and_then(|side| Some((side, held?.hands[side]?)))
+                    {
+                        Some((side, handle)) if chain.fist && chain.keep_spin => {
+                            let animated = animator.model[c].mul(&fit_end);
+                            let rel = on_grip.inverse().mul(&animated).r;
+                            let angle = twist_angle(rel, handle.axis).clamp(-2.6, 2.6);
+                            let [a, b] = handle.ends(side);
+                            Target::Grip {
+                                on_grip,
+                                fit_end,
+                                mid: (a + b) * 0.5,
+                                axis: handle.axis,
+                                angle,
+                            }
+                        }
+                        _ => Target::Frame(on_grip.mul(&fit_end.inverse())),
+                    }
                 }
-                _ => Xf::from_t(to_model(gt, chain.target)),
+                _ => Target::Frame(Xf::from_t(to_model(gt, chain.target))),
             };
             let w = weight.min(1.0);
-            let mut edit = animator.edit();
             // A hand on a grip bends its elbow where the clip does (the pole only for a
             // straight arm) and reaches exactly: no soft approach for a seat on a handle.
             let on_bone = !chain.target_bone.is_empty();
+            let hinge = rest_hinge(
+                &s,
+                a,
+                b,
+                if chain.upper.contains("leg") {
+                    Vec3::NEG_Z
+                } else {
+                    Vec3::Z
+                },
+            );
             let limb = Limb {
                 weight: w,
                 soft: !on_bone,
                 // The anatomical hinge, not the pole: an elbow points back at rest (a knee,
                 // for a leg chain, forward) whichever way this reach wants it to point.
-                hinge: rest_hinge(
-                    &s,
-                    a,
-                    b,
-                    if chain.upper.contains("leg") {
-                        Vec3::NEG_Z
-                    } else {
-                        Vec3::Z
-                    },
-                ),
+                hinge,
                 ..Limb::animated(chain.pole)
             };
-            let miss = two_bone_live(&mut edit, a, b, c, frame.t, limb);
-            if chain.turn > 0.0 {
-                let r = edit.model[c].r.slerp(frame.r, (chain.turn * w).min(1.0));
-                edit.set_model_rotation(c, r);
-            }
+            // One way to reach: the elbow turned `swivel` degrees round the shoulder–target
+            // line from the clip's bend, the fist `spin` round its grip.
+            let reach_with = |edit: &mut PoseEdit, swivel: f32, spin: f32| -> (f32, Xf) {
+                let frame = target.frame(spin.to_radians());
+                let limb = if !matches!(target, Target::Grip { .. }) {
+                    limb
+                } else {
+                    let shoulder = edit.position(a);
+                    let line = (frame.t - shoulder).normalize_or(Vec3::NEG_Y);
+                    let bend = edit.position(b) - shoulder;
+                    let bend = bend - line * line.dot(bend);
+                    Limb {
+                        pole: Quat::from_axis_angle(line, swivel.to_radians()) * bend,
+                        pole_weight: 1.0,
+                        ..limb
+                    }
+                };
+                let miss = two_bone_live(edit, a, b, c, frame.t, limb);
+                if chain.turn > 0.0 {
+                    let r = edit.model[c].r.slerp(frame.r, (chain.turn * w).min(1.0));
+                    edit.set_model_rotation(c, r);
+                }
+                (miss, frame)
+            };
+            // A fist the clip turns round its grip may turn its elbow and itself a little
+            // further, frame by frame, toward where its wrist strains least.
+            let side = crate::grip::side_of(&chain.end);
+            let (miss, frame) = match (side, &target) {
+                (Some(side), Target::Grip { .. }) if on_bone && chain.upper.contains("arm") => {
+                    reach.eased.resize(reach.chains.len(), (0.0, 0.0));
+                    let (sw, sp) = reach.eased[k];
+                    let mut best: Option<(f32, f32, f32)> = None;
+                    let mut local = animator.local.clone();
+                    let mut model = animator.model.clone();
+                    for swivel in [sw - EASE_STEP, sw, sw + EASE_STEP] {
+                        for spin in [sp - EASE_STEP, sp, sp + EASE_STEP] {
+                            let (swivel, spin) = (
+                                swivel.clamp(-EASE_MAX, EASE_MAX),
+                                spin.clamp(-EASE_MAX, EASE_MAX),
+                            );
+                            local.copy_from_slice(&animator.local);
+                            model.copy_from_slice(&animator.model);
+                            let mut trial = PoseEdit {
+                                skeleton: &s,
+                                local: &mut local,
+                                model: &mut model,
+                            };
+                            let (miss, _) = reach_with(&mut trial, swivel, spin);
+                            let cost = crate::validate::wrist_strain(&s, &model, b, c, side)
+                                + (swivel.abs() + spin.abs()) * EASE_COST
+                                + miss * 1000.0;
+                            if best.is_none_or(|x| cost < x.0) {
+                                best = Some((cost, swivel, spin));
+                            }
+                        }
+                    }
+                    let (_, swivel, spin) = best.expect("a reach to try");
+                    reach.eased[k] = (swivel, spin);
+                    reach_with(&mut animator.edit(), swivel, spin)
+                }
+                _ => reach_with(&mut animator.edit(), 0.0, 0.0),
+            };
             if on_bone && w > 0.99 {
                 let turned = if chain.turn > 0.99 {
-                    edit.model[c].r.angle_between(frame.r).to_degrees()
+                    animator.model[c].r.angle_between(frame.r).to_degrees()
                 } else {
                     0.0
                 };
@@ -1348,6 +1435,48 @@ pub(crate) fn reach_ik_system(
         }
     }
 }
+
+/// Where a reach goes.
+enum Target {
+    /// The end bone to this frame.
+    Frame(Xf),
+    /// A fist onto a grip: the item placement `on_grip` (with `fit_end` the item's seat in
+    /// this fist), turned `angle` radians round the grip's line through `mid` along `axis`.
+    Grip {
+        on_grip: Xf,
+        fit_end: Xf,
+        mid: Vec3,
+        axis: Vec3,
+        angle: f32,
+    },
+}
+
+impl Target {
+    /// The end bone's frame, a fist turned `more` radians further round its grip.
+    fn frame(&self, more: f32) -> Xf {
+        match self {
+            Target::Frame(x) => *x,
+            Target::Grip {
+                on_grip,
+                fit_end,
+                mid,
+                axis,
+                angle,
+            } => {
+                let spin = Xf::from_tr(*mid, Quat::from_axis_angle(*axis, angle + more))
+                    .mul(&Xf::from_t(-*mid));
+                on_grip.mul(&spin).mul(&fit_end.inverse())
+            }
+        }
+    }
+}
+
+/// How far a fist kept on its grip eases its elbow round, or itself round the grip, past
+/// where the clip has them in a frame (degrees), at most in all, and what each degree costs
+/// against a degree of wrist strain.
+const EASE_STEP: f32 = 8.0;
+const EASE_MAX: f32 = 90.0;
+const EASE_COST: f32 = 0.05;
 
 #[cfg(test)]
 mod tests {

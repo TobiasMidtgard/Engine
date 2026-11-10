@@ -102,6 +102,10 @@ pub struct PoseStats {
     /// Hinge-bad, flip and roll-jitter frames per limb (left arm, right arm, left leg, right
     /// leg), to tell which limb a regression is in.
     pub by_limb: [[u32; 3]; 4],
+    /// Per wrist (left, right): frames out of range, and the largest excess by rule (flex,
+    /// extend, deviate, roll), to tell which hand and which way a wrist breaks.
+    pub wrist_frames: [u32; 2],
+    pub wrist_rules: [[f32; 4]; 2],
 }
 
 impl PoseStats {
@@ -143,6 +147,12 @@ impl PoseStats {
                 *x += y;
             }
         }
+        for side in 0..2 {
+            self.wrist_frames[side] += o.wrist_frames[side];
+            for (x, y) in self.wrist_rules[side].iter_mut().zip(o.wrist_rules[side]) {
+                *x = x.max(y);
+            }
+        }
     }
 }
 
@@ -152,13 +162,13 @@ pub fn table(rows: &[(String, PoseStats)]) -> String {
         "character | frames | nan | wrist out (worst°, rule) | hinge bad (worst°) | pole flips | \
          roll jitter (worst°) | grip miss cm / ° | palm gap cm | finger sink mm / gap mm | \
          foot slide cm/s (frames) | stretch % | hinge/flip/jitter by limb (arm L, arm R, leg L, \
-         leg R)\n",
+         leg R) | wrist frames (worst° flex/extend/deviate/roll) L; R\n",
     );
     for (name, r) in rows {
         let _ = writeln!(
             s,
             "{name} | {} | {} | {} ({:.1}, {}) | {} ({:.1}) | {} | {} ({:.2}) | {:.2} / {:.1} | \
-             {:.2} | {:.1} / {:.1} | {:.2} ({}) | {:.2} | {}",
+             {:.2} | {:.1} / {:.1} | {:.2} ({}) | {:.2} | {} | {}",
             r.frames,
             r.nan,
             r.wrist_out,
@@ -186,6 +196,13 @@ pub fn table(rows: &[(String, PoseStats)]) -> String {
                 .map(|[h, f, j]| format!("{h}/{f}/{j}"))
                 .collect::<Vec<_>>()
                 .join(", "),
+            (0..2)
+                .map(|k| {
+                    let [f, e, d, o] = r.wrist_rules[k];
+                    format!("{} ({f:.0}/{e:.0}/{d:.0}/{o:.0})", r.wrist_frames[k])
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
         );
     }
     s
@@ -231,6 +248,88 @@ fn local_turn(s: &Skeleton, model: &[Xf], parent: usize, bone: usize) -> Quat {
     let now = model[parent].r.conjugate() * model[bone].r;
     let rest = s.rest_model[parent].r.conjugate() * s.rest_model[bone].r;
     (rest.conjugate() * now).normalize()
+}
+
+/// A wrist's turn from its forearm, radians: flexion (positive toward the palm, negative
+/// extension), deviation (signed, about the palm's axis) and roll, as the validator
+/// measures them (the hand points down −Y, its palm faces
+/// [`PALM`]`[side]`).
+fn wrist_parts(s: &Skeleton, model: &[Xf], lower: usize, hand: usize, side: usize) -> [f32; 3] {
+    let turn = local_turn(s, model, lower, hand);
+    let along = Vec3::Y;
+    let roll = twist_angle(turn, along);
+    let swing = (turn * Quat::from_axis_angle(along, roll).conjugate()).normalize();
+    let (axis, angle) = swing.to_axis_angle();
+    let angle = if angle > std::f32::consts::PI {
+        angle - std::f32::consts::TAU
+    } else {
+        angle
+    };
+    let v = axis * angle;
+    let palm = PALM[side];
+    let flex_axis = Vec3::NEG_Y.cross(palm).normalize();
+    [v.dot(flex_axis), v.dot(palm), roll]
+}
+
+/// A wrist's turn from its forearm, degrees: flexion (positive toward the palm, negative
+/// extension), deviation (either way) and roll, as the validator measures them.
+pub fn wrist_angles(
+    s: &Skeleton,
+    model: &[Xf],
+    lower: usize,
+    hand: usize,
+    side: usize,
+) -> [f32; 3] {
+    let [flex, deviate, roll] = wrist_parts(s, model, lower, hand, side);
+    [
+        flex.to_degrees(),
+        deviate.to_degrees().abs(),
+        roll.to_degrees().abs(),
+    ]
+}
+
+/// The hand's model rotation with its wrist turned back inside [`Limits`]' wrist range,
+/// `margin` degrees short of each limit (the hand as it is when already inside).
+pub fn wrist_in_range(
+    s: &Skeleton,
+    model: &[Xf],
+    lower: usize,
+    hand: usize,
+    side: usize,
+    margin: f32,
+) -> Quat {
+    let l = Limits::default();
+    let [flex, deviate, roll] = wrist_parts(s, model, lower, hand, side);
+    let lim = |d: f32| (d - margin).max(0.0).to_radians();
+    let flex = flex.clamp(-lim(l.wrist_extend), lim(l.wrist_flex));
+    let deviate = deviate.clamp(-lim(l.wrist_deviate), lim(l.wrist_deviate));
+    let roll = roll.clamp(-lim(l.wrist_roll), lim(l.wrist_roll));
+    let palm = PALM[side];
+    let flex_axis = Vec3::NEG_Y.cross(palm).normalize();
+    let v = flex_axis * flex + palm * deviate;
+    let swing = Quat::from_scaled_axis(v);
+    let turn = swing * Quat::from_axis_angle(Vec3::Y, roll);
+    // Back from the turn (rest-relative, in the forearm's frame) to a model rotation.
+    let rest = s.rest_model[lower].r.conjugate() * s.rest_model[hand].r;
+    (model[lower].r * rest * turn).normalize()
+}
+
+/// How far a wrist is past its range ([`Limits`]' wrist rules, no slack), degrees: the root
+/// of the summed squares of each rule's excess, 0 inside the range. What IK that can choose
+/// how an arm reaches minimises.
+pub fn wrist_strain(s: &Skeleton, model: &[Xf], lower: usize, hand: usize, side: usize) -> f32 {
+    let l = Limits::default();
+    let [flex, deviate, roll] = wrist_angles(s, model, lower, hand, side);
+    [
+        flex - l.wrist_flex,
+        -flex - l.wrist_extend,
+        deviate - l.wrist_deviate,
+        roll - l.wrist_roll,
+    ]
+    .iter()
+    .map(|e| e.max(0.0).powi(2))
+    .sum::<f32>()
+    .sqrt()
 }
 
 /// The per-frame memory a check needs, and the worst values so far.
@@ -287,38 +386,34 @@ impl PoseCheck {
         // Wrists.
         let mut out = false;
         for side in 0..2 {
-            let turn = local_turn(skeleton, model, bones.lower_arm[side], bones.hand[side]);
-            let along = Vec3::Y;
-            let roll = twist_angle(turn, along);
-            let swing = (turn * Quat::from_axis_angle(along, roll).conjugate()).normalize();
-            let (axis, angle) = swing.to_axis_angle();
-            let angle = if angle > std::f32::consts::PI {
-                angle - std::f32::consts::TAU
-            } else {
-                angle
-            };
-            let v = axis * angle;
-            // The hand points down −Y; the palm faces PALM[side]: positive turns about
-            // (−Y × palm) bend it toward the palm.
-            let palm = PALM[side];
-            let flex_axis = Vec3::NEG_Y.cross(palm).normalize();
-            let flex = v.dot(flex_axis).to_degrees();
-            let deviate = v.dot(palm).to_degrees().abs();
-            let roll = roll.to_degrees().abs();
-            for (excess, rule) in [
+            let mut side_out = false;
+            let [flex, deviate, roll] = wrist_angles(
+                skeleton,
+                model,
+                bones.lower_arm[side],
+                bones.hand[side],
+                side,
+            );
+            for (k, (excess, rule)) in [
                 (flex - limits.wrist_flex, "flex"),
                 (-flex - limits.wrist_extend, "extend"),
                 (deviate - limits.wrist_deviate, "deviate"),
                 (roll - limits.wrist_roll, "roll"),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 if excess > limits.slack {
                     out = true;
+                    side_out = true;
+                    st.wrist_rules[side][k] = st.wrist_rules[side][k].max(excess);
                     if excess > st.wrist_worst_deg {
                         st.wrist_worst_deg = excess;
                         st.wrist_worst = format!("{rule} {}", ["L", "R"][side]);
                     }
                 }
             }
+            st.wrist_frames[side] += side_out as u32;
         }
         if out {
             st.wrist_out += 1;

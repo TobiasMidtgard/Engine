@@ -1,7 +1,8 @@
 //! Held weapons in the paddock: the great sword's off hand closes on the grip below the main
-//! hand, turned the same way round (with or without the fetched models), and on the
-//! paddock's imported people (when fetched) each hand holding something has its palm on the
-//! handle, its fingers round it without sinking in, and its thumb on the far side.
+//! hand, the grip running through both fists the same way (with or without the fetched
+//! models), and on the paddock's imported people (when fetched) each hand holding something
+//! has its palm on the handle, its fingers round it without sinking in, and its thumb on the
+//! far side.
 
 use engine_anim::build::weapons::{BLADE_AXIS, GREATSWORD_HANDS};
 use engine_anim::demo::spawn_demo_world;
@@ -62,8 +63,15 @@ fn the_paddocks_people_hold_their_weapons_in_their_hands() {
                 got.t,
                 want.t
             );
-            let turn = got.r.angle_between(want.r).to_degrees();
-            assert!(turn < 3.0, "the left fist is turned {turn}° off the grip");
+            // It may wrap the grip from its own side (turned about the grip's axis), but the
+            // grip runs through it the same way.
+            let turn = (got.r * BLADE_AXIS)
+                .angle_between(want.r * BLADE_AXIS)
+                .to_degrees();
+            assert!(
+                turn < 3.0,
+                "the grip runs {turn}° off through the left fist"
+            );
             two_handed += 1;
         }
         for (who, e) in people {

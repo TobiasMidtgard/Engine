@@ -189,7 +189,7 @@ pub fn spawn_greatsword(world: &mut World, person: Entity) -> Vec<Entity> {
     let parts = sword_parts(world, person, GREATSWORD_BLADE, 0.055, 0.32, grip);
     hold(world, person, 1, "greatsword", BLADE_AXIS, 0.0);
     hold(world, person, 0, "greatsword", BLADE_AXIS, GREATSWORD_HANDS);
-    // The left fist on the grip below the right, turned the same way round as the right.
+    // The left fist on the grip below the right, wrapped round it as the clip wraps it.
     world.entity_mut(person).insert(ReachIk::new(vec![Reach {
         target_bone: "hand_r".into(),
         target_offset: -BLADE_AXIS * GREATSWORD_HANDS,
@@ -197,6 +197,7 @@ pub fn spawn_greatsword(world: &mut World, person: Entity) -> Vec<Entity> {
         weight_curve: "grip".into(),
         turn: 1.0,
         fist: true,
+        keep_spin: true,
         ..Reach::arm(0)
     }]));
     parts
