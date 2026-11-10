@@ -1048,6 +1048,17 @@ const STATIC_KEEP: f64 = 1.2;
 impl Simulation {
     // ------------------------------------------------------------------ regions
 
+    /// Is `e`'s body moving and awake (not fixed, not asleep)?
+    pub(crate) fn is_awake(&self, e: Entity) -> bool {
+        self.bodies.get(&e).is_some_and(|b| {
+            self.regions
+                .get(b.region as usize)
+                .and_then(|r| r.as_ref())
+                .and_then(|r| r.world.bodies.get(b.handle))
+                .is_some_and(|rb| !rb.is_fixed() && !rb.is_sleeping())
+        })
+    }
+
     pub fn region(&self, id: RegionId) -> &Region {
         self.regions[id as usize].as_ref().expect("live region")
     }

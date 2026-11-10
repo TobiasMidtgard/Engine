@@ -650,16 +650,46 @@ fn a_walker_wakes_the_resting_yard_and_leaves_it_resting() {
     let resting = *app.world.resource::<PhysicsStats>();
     assert!(resting.awake < 100, "the yard didn't rest: {resting:?}");
     // Walk in to the ragdoll stairs and back out, the camera following.
-    let mut woke = false;
+    let mut peak = 0;
+    // Bodies the stations build as they wake, by frame.
+    let dynamic = |app: &mut App| -> std::collections::HashSet<Entity> {
+        app.world
+            .query::<(Entity, &RigidBody)>()
+            .iter(&app.world)
+            .filter(|(_, rb)| rb.kind == BodyKind::Dynamic)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let mut seen = dynamic(&mut app);
+    let mut built = Vec::new();
     for frame in 0..20 * 60 {
         let x = if frame < 9 * 60 { -12.0 } else { 12.0 };
         app.world.get_mut::<CharacterMove>(walker).unwrap().velocity = Vec3::new(x, 0.0, 0.0);
         app.update();
         let at = app.world.get::<Transform>(walker).unwrap().translation;
         app.world.get_mut::<Transform>(focus).unwrap().translation = at;
-        woke |= app.world.resource::<PhysicsStats>().awake > 500;
+        peak = peak.max(app.world.resource::<PhysicsStats>().awake);
+        let now = dynamic(&mut app);
+        built.push(now.difference(&seen).count());
+        seen = now;
     }
-    assert!(woke, "the yard never woke round the walker");
+    assert!(
+        peak > 150,
+        "the yard never woke round the walker ({peak} awake at most)"
+    );
+    // The stations woke one at a time, nearest first, not the whole yard's ~1,500 bodies
+    // dropping together (48 ms a step on the RTX 5080 PC): no second of the walk built much
+    // more than the Galton board's 500 balls. (All at once, it was 835 here.)
+    let worst = built
+        .windows(60)
+        .map(|w| w.iter().sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let all: usize = built.iter().sum();
+    assert!(
+        worst < 700,
+        "{worst} bodies were built in one second as the yard woke ({all} in all)"
+    );
     let at = app.world.get::<Transform>(walker).unwrap().translation;
     assert!(
         at.x > 90.0,

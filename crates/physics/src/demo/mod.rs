@@ -943,6 +943,21 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
 const STATION_REST_M: f64 = 70.0;
 /// A resting station wakes, replaying from the start, once a focus comes this near, meters.
 const STATION_WAKE_M: f64 = 55.0;
+/// Stations woken together drop together: the whole yard at once was ~1,500 bodies falling
+/// (48 ms a step on the RTX 5080 PC, 40-140 ms on the VM, which the frame waited for on the
+/// streaming lap). So they wake one at a time, nearest first, the next once fewer than this
+/// many bodies of the one before are still awake...
+const WAKE_AWAKE_MAX: usize = 60;
+/// ...or once it has run this many world seconds (a station that never sleeps: pendulums,
+/// the paddle wheel; the Galton board pours for a minute). The heavy part of a drop is its
+/// first second, when everything lands at once.
+const WAKE_HOLD_SECS: f64 = 1.2;
+/// `PHYSICS_STATION_WAKE=together` wakes every station someone came near at once, as before
+/// (for A/B runs).
+fn wake_together() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("PHYSICS_STATION_WAKE").is_ok_and(|v| v == "together"))
+}
 /// How long a station takes to drop what it builds, seconds: one that rests sooner after it
 /// was built (nobody near) has its loose bodies dropped once off the frame (`settle`), so
 /// nothing hangs in the air. A station rests as soon as nobody is near, the wheel and table
@@ -1006,6 +1021,12 @@ pub(crate) struct StationWork {
     /// The frame a station was last built in, under a real clock: one a frame
     /// ([`replay_stations`]).
     built_frame: Option<u64>,
+    /// Resting stations someone came near, with the distance to them: they wake one at a
+    /// time, nearest first ([`wake_next`]).
+    wakes: Vec<(Entity, Station, f64)>,
+    /// The station woken last and the world seconds since: the next waits until its drop
+    /// has mostly settled.
+    waking: Option<(Entity, Station, f64)>,
 }
 
 /// Follow a [`WorldShift`] (a floating-origin move, a re-homing, a trip to another body):
@@ -1048,6 +1069,7 @@ pub(crate) fn stations_have_work(
     pours: Option<Res<galton::GaltonPours>>,
 ) -> bool {
     !work.due.is_empty()
+        || !work.wakes.is_empty()
         || !work.rest.is_empty()
         || !work.pause.is_empty()
         || !work.resume.is_empty()
@@ -1089,6 +1111,9 @@ pub(crate) fn tick_stations(
             .fold(if focus.is_empty() { 0.0 } else { f64::INFINITY }, f64::min)
     };
     let work = &mut *work;
+    if let Some(w) = &mut work.waking {
+        w.2 += dt;
+    }
     for (e, mut g) in &mut grounds {
         if !g.replay {
             continue;
@@ -1104,7 +1129,7 @@ pub(crate) fn tick_stations(
             let looked_at = focus.is_empty() || watched(&foci, at);
             if g.resting[i] {
                 if d < STATION_WAKE_M && looked_at {
-                    work.due.push((e, station));
+                    work.wakes.push((e, station, d));
                 }
                 continue;
             }
@@ -1178,6 +1203,7 @@ pub(crate) fn replay_stations(world: &mut World) {
         may
     };
     let built_one = may_build && build_unbuilt(world, 1);
+    wake_next(world);
     let (due, rest, unsettled, pause, resume) = {
         let mut work = world.resource_mut::<StationWork>();
         (
@@ -1297,6 +1323,61 @@ pub(crate) fn replay_stations(world: &mut World) {
         }
         let shared = world.resource::<crate::SharedSimulation>().0.clone();
         shared.write().resting.extend(bodies);
+    }
+}
+
+/// Move the resting stations someone came near ([`StationWork::wakes`]) to `due`: one at a
+/// time, nearest first, the next once the one before has mostly settled
+/// ([`WAKE_AWAKE_MAX`], [`WAKE_HOLD_SECS`]); all at once with `PHYSICS_STATION_WAKE=together`.
+fn wake_next(world: &mut World) {
+    let (mut wakes, waking) = {
+        let mut work = world.resource_mut::<StationWork>();
+        (std::mem::take(&mut work.wakes), work.waking)
+    };
+    if wakes.is_empty() {
+        return;
+    }
+    if wake_together() {
+        let mut work = world.resource_mut::<StationWork>();
+        for (g, s, _) in wakes {
+            work.due.push((g, s));
+        }
+        return;
+    }
+    if let Some((g, s, secs)) = waking
+        && secs < WAKE_HOLD_SECS
+    {
+        // Built yet (a woken station builds a step or a few later), and still dropping?
+        let built = world
+            .get::<ProvingGround>(g)
+            .is_some_and(|p| !p.resting[s as usize] && !p.unbuilt[s as usize]);
+        let parts: Vec<Entity> = world
+            .query_filtered::<(Entity, &StationPart), With<RigidBody>>()
+            .iter(world)
+            .filter(|(_, p)| p.ground == g && p.station == s)
+            .map(|(e, _)| e)
+            .collect();
+        let shared = world.resource::<crate::SharedSimulation>().0.clone();
+        let sim = shared.read();
+        let awake = parts.iter().filter(|e| sim.is_awake(**e)).count();
+        drop(sim);
+        if !built || awake >= WAKE_AWAKE_MAX {
+            return;
+        }
+    }
+    wakes.sort_by(|a, b| a.2.total_cmp(&b.2));
+    let (g, s, _) = wakes[0];
+    let mut work = world.resource_mut::<StationWork>();
+    if !work.due.contains(&(g, s)) {
+        work.due.push((g, s));
+    }
+    work.waking = Some((g, s, 0.0));
+    if crate::report::wanted() {
+        engine_core::log::info!(
+            "proving ground: {} wakes ({} more near, waiting their turn)",
+            s.key(),
+            wakes.iter().filter(|w| (w.0, w.1) != (g, s)).count()
+        );
     }
 }
 
