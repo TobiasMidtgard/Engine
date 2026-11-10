@@ -95,6 +95,10 @@ pub struct HorseCharacter {
     /// The horse's gait with soles, hooves and steps sized to the model.
     pub gait: LeggedGait,
     pub tail: SpringChainDef,
+    /// Its coat, mane, forelock and tail for the one fur renderer (see [`crate::fur_coat`]).
+    pub coat: Option<engine_world::FurCoat>,
+    /// The first index of the hair cards in `mesh` (drawn until the shared fur shows).
+    pub cards_from: u32,
 }
 
 /// A leg found in the file.
@@ -461,6 +465,12 @@ pub fn from_rigged_horse(
         coat.get(i).copied().unwrap_or(false) && xs[i] * side >= 0.0
     });
 
+    // The coat for the one fur renderer, then the cards it replaces once it shows.
+    let fur = horse_coat(
+        &mesh, &coat, &surfaces, &materials, &images, &fitted, ground,
+    );
+    let cards_from = mesh.indices.len() as u32;
+
     // Mane, forelock and tail.
     let hair_surface = materials.len();
     let skin = Skin::new(
@@ -507,7 +517,169 @@ pub fn from_rigged_horse(
         images,
         gait,
         tail,
+        coat: fur,
+        cards_from,
     })
+}
+
+/// Coat length (m) for a horse the size of the procedural one; the mane, forelock and tail
+/// as multiples of it.
+const COAT_LENGTH: f32 = 0.012;
+const MANE: f32 = 18.0;
+const FORELOCK: f32 = 11.0;
+const TAIL_HAIR: f32 = 55.0;
+/// Mane and tail colour (linear), the cards' own.
+const MANE_COLOR: Vec3 = Vec3::new(0.16, 0.042, 0.015);
+
+/// The horse's coat as a `FurCoat`: a short summer coat over the textured skin (its colour
+/// read from the texture), shorter on the face and legs and none on the hooves, with a mane
+/// along the crest falling to the right, a forelock, and the tail hanging from the dock.
+fn horse_coat(
+    mesh: &SkinnedMesh,
+    coat: &[bool],
+    surfaces: &[usize],
+    materials: &[ImportedMaterial],
+    images: &[Image],
+    f: &Fitted,
+    ground: f32,
+) -> Option<engine_world::FurCoat> {
+    let s = f.s;
+    let name = |i: u16| mesh.joints.get(i as usize).map_or("", String::as_str);
+    let srgb = |c: u8| (c as f32 / 255.0).powf(2.2);
+    let crest_dist = |p: Vec3| {
+        f.crest
+            .windows(2)
+            .map(|w| {
+                let d = w[1] - w[0];
+                let t = ((p - w[0]).dot(d) / d.length_squared().max(1e-8)).clamp(0.0, 1.0);
+                p.distance(w[0] + d * t)
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    let n = mesh.vertices.len();
+    let (mut color, mut amount, mut length, mut comb) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        let is_coat = coat.get(i).copied().unwrap_or(false);
+        let material = surfaces.get(i).and_then(|m| materials.get(*m));
+        let texel = material
+            .and_then(|m| m.base_color_texture)
+            .and_then(|t| images.get(t))
+            .filter(|img| img.width > 0 && img.height > 0)
+            .map(|img| {
+                let x = (v.uv.x.rem_euclid(1.0) * img.width as f32) as u32;
+                let y = (v.uv.y.rem_euclid(1.0) * img.height as f32) as u32;
+                let px = img.pixel(x, y);
+                Vec3::new(srgb(px[0]), srgb(px[1]), srgb(px[2]))
+            })
+            .unwrap_or(Vec3::ONE);
+        let base = material.map_or(Vec3::ONE, |m| Vec3::from_slice(&m.base_color[..3]));
+        let skin = texel * base * v.color.truncate();
+        let bone = name(v.joints[0]);
+        // Long hair: the mane on the crest, the forelock, the tail on the dock.
+        let mane = (1.0 - smoothstep_between(0.015 * s, 0.04 * s, crest_dist(v.position)))
+            * smoothstep_between(-0.02 * s, 0.06 * s, v.position.y - f.neck[0].y);
+        let forelock =
+            1.0 - smoothstep_between(0.03 * s, 0.07 * s, v.position.distance(f.forelock));
+        let tail = if bone.starts_with("tail") { 1.0 } else { 0.0 };
+        let long = mane.max(forelock).max(tail);
+        let short = if bone == "head" {
+            0.55
+        } else if bone.starts_with("front_") || bone.starts_with("hind_") {
+            0.7
+        } else {
+            1.0
+        };
+        let multiple = if tail >= mane.max(forelock) {
+            TAIL_HAIR
+        } else if forelock > mane {
+            FORELOCK
+        } else {
+            MANE
+        };
+        length.push(short + (multiple - short) * long);
+        // None on the hooves and anything not coat.
+        let hoof = smoothstep_between(0.07 * s, 0.1 * s, v.position.y - ground);
+        amount.push(if is_coat { hoof } else { 0.0 });
+        color.push(
+            skin.lerp(MANE_COLOR, smoothstep_between(0.0, 0.3, long))
+                .to_array(),
+        );
+        // The mane falls to the right, the tail and forelock hang down; the rest lies as the
+        // skeleton runs (no comb given).
+        comb.push(if long < 0.05 {
+            Vec3::ZERO
+        } else if tail >= mane.max(forelock) {
+            Vec3::new(0.0, -1.0, 0.3)
+        } else if forelock > mane {
+            Vec3::new(0.0, -1.0, -0.4)
+        } else {
+            Vec3::new(1.0, -0.6, 0.15)
+        });
+    }
+    // Bind poses in model space; the mesh's joints are the fitted skeleton's bones, in order.
+    let grown_on: Vec<engine_world::animation::BonePose> = mesh
+        .inverse_bind
+        .iter()
+        .map(|inv| {
+            let (scale, rotation, translation) = inv.inverse().to_scale_rotation_translation();
+            engine_world::animation::BonePose {
+                translation,
+                rotation,
+                scale,
+            }
+        })
+        .collect();
+    Some(engine_world::FurCoat {
+        version: 1,
+        positions: mesh
+            .vertices
+            .iter()
+            .map(|v| v.position)
+            .collect::<Vec<_>>()
+            .into(),
+        normals: mesh
+            .vertices
+            .iter()
+            .map(|v| v.normal)
+            .collect::<Vec<_>>()
+            .into(),
+        indices: mesh.indices.clone().into(),
+        joints: mesh
+            .vertices
+            .iter()
+            .map(|v| v.joints)
+            .collect::<Vec<_>>()
+            .into(),
+        weights: mesh
+            .vertices
+            .iter()
+            .map(|v| v.weights)
+            .collect::<Vec<_>>()
+            .into(),
+        grown_on: grown_on.into(),
+        color: color.into(),
+        amount: amount.into(),
+        length: length.into(),
+        comb: comb.into(),
+        style: engine_world::FurStyle {
+            length: COAT_LENGTH * s,
+            density: 300.0,
+            tip: [1.08, 1.06, 1.03],
+            radius: 0.00004,
+            stiffness: 0.9,
+            curl: 0.0,
+        },
+    })
+}
+
+fn smoothstep_between(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The horse skeleton at the fitted joints (identity rest rotations, like
@@ -1318,6 +1490,9 @@ pub struct LoadedHorse {
     pub surfaces: Vec<StandardMaterial>,
     pub gait: LeggedGait,
     pub tail: SpringChainDef,
+    pub coat: Option<engine_world::FurCoat>,
+    /// `mesh` without its hair cards, worn once the shared fur shows.
+    pub bare: Handle<SkinnedMesh>,
 }
 
 enum Load {
@@ -1391,9 +1566,13 @@ fn register(world: &mut World, c: HorseCharacter) -> LoadedHorse {
         .iter()
         .map(|m| m.to_standard(&handles))
         .collect();
-    let mesh = world
-        .get_resource_or_init::<Assets<SkinnedMesh>>()
-        .add(c.mesh);
+    let mut bare = c.mesh.clone();
+    bare.indices.truncate(c.cards_from as usize);
+    bare.submeshes.retain(|m| m.first_index < c.cards_from);
+    let (mesh, bare) = {
+        let mut meshes = world.get_resource_or_init::<Assets<SkinnedMesh>>();
+        (meshes.add(c.mesh), meshes.add(bare))
+    };
     let logic = world
         .get_resource_or_init::<AnimationLibrary>()
         .add_skeleton(c.logic);
@@ -1403,10 +1582,13 @@ fn register(world: &mut World, c: HorseCharacter) -> LoadedHorse {
         surfaces,
         gait: c.gait,
         tail: c.tail,
+        coat: c.coat,
+        bare,
     }
 }
 
 fn wear(world: &mut World, entity: Entity, key: String, loaded: &LoadedHorse) {
+    let fur_drawn = world.contains_resource::<engine_world::FurCoatDrawer>();
     let names = world
         .get_resource::<Assets<SkinnedMesh>>()
         .and_then(|m| m.get(loaded.mesh))
@@ -1418,6 +1600,8 @@ fn wear(world: &mut World, entity: Entity, key: String, loaded: &LoadedHorse) {
     if let Some(mut s) = e.get_mut::<AnimatorSettings>() {
         s.skeleton = loaded.skeleton.clone();
     }
+    // With a fur drawer, the shared fur grows the coat, mane and tail, and the hair cards go.
+    let coat = loaded.coat.clone().filter(|_| fur_drawn);
     let renderer = e.get::<SkinnedMeshRenderer>().cloned().unwrap_or_default();
     let muscles = e.get::<MuscleRig>().cloned().unwrap_or_default();
     let mut rig = MuscleRig::new(horse::muscles());
@@ -1428,7 +1612,11 @@ fn wear(world: &mut World, entity: Entity, key: String, loaded: &LoadedHorse) {
     let enabled = e.get::<LeggedGait>().is_none_or(|g| g.enabled);
     e.insert((
         SkinnedMeshRenderer {
-            mesh: Some(loaded.mesh),
+            mesh: Some(if coat.is_some() {
+                loaded.bare
+            } else {
+                loaded.mesh
+            }),
             surfaces: loaded.surfaces.clone(),
             ..renderer
         },
@@ -1441,6 +1629,10 @@ fn wear(world: &mut World, entity: Entity, key: String, loaded: &LoadedHorse) {
         SpringChains::new(vec![loaded.tail.clone()]),
         AppliedHorseModel(key),
     ));
+    match coat {
+        Some(coat) => e.insert(coat),
+        None => e.remove::<engine_world::FurCoat>(),
+    };
 }
 
 /// Start loads for newly requested files, register finished ones and dress the horses

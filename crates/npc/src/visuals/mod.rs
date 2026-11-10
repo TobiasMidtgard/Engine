@@ -72,6 +72,7 @@
 
 mod animal;
 pub(crate) mod character;
+pub(crate) mod fur;
 mod humanoid;
 
 use engine_core::prelude::*;

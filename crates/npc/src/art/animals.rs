@@ -1859,7 +1859,7 @@ fn tuft_table(n: i32, len: f32, seed: u32) -> Vec<Tuft> {
 const HOOF_SWATCH: f32 = 3.0;
 
 /// Whether `uv` is in the hoof swatch of a `size`-texel coat texture.
-fn in_hoof_swatch(uv: Vec2, size: u32) -> bool {
+pub(crate) fn in_hoof_swatch(uv: Vec2, size: u32) -> bool {
     let near = |c: f32| {
         let t = c * size as f32;
         t < HOOF_SWATCH || t > size as f32 - HOOF_SWATCH

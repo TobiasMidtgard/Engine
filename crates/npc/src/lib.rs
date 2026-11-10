@@ -214,6 +214,9 @@ impl Plugin for NpcPlugin {
                     )
                         .chain()
                         .in_set(NpcSet::Show),
+                    // Unordered, so its Commands add no sync point to the chain: a coat lands
+                    // at the step's end, once per stand-in part.
+                    visuals::fur::export_wild_coats.in_set(NpcSet::Show),
                 ),
             )
             // Re-anchoring: what NPCs and animals keep in world space follows the world.

@@ -73,29 +73,29 @@ use crate::wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Species};
 /// Middle leg segments (forearm, gaskin) of legs 0..4.
 const LEG_MID: u8 = 0;
 /// Lower leg segments (cannon, metapodial) of legs 0..4.
-const LEG_LOW: u8 = 4;
+pub(super) const LEG_LOW: u8 = 4;
 /// Feet (pastern, paw) of legs 0..4.
-const LEG_FOOT: u8 = 8;
+pub(super) const LEG_FOOT: u8 = 8;
 /// Eyes and nose (or beak).
-const GLOSS: u8 = 16;
+pub(super) const GLOSS: u8 = 16;
 const NECK2: u8 = 17;
-const TAIL2: u8 = 18;
+pub(super) const TAIL2: u8 = 18;
 /// A bird's tail spread in flight.
-const TAIL_FAN: u8 = 19;
+pub(super) const TAIL_FAN: u8 = 19;
 /// A bird's wings folded on its back (left, right).
 const WING_FOLDED: u8 = 20;
 /// The hind half of a deer's, wolf's or boar's torso.
-const CROUP: u8 = 22;
+pub(super) const CROUP: u8 = 22;
 /// A boar's lower tusks.
-const TUSKS: u8 = 23;
+pub(super) const TUSKS: u8 = 23;
 /// A boar's crests (nape, withers).
-const MANE: u8 = 24;
+pub(super) const MANE: u8 = 24;
 /// A boar's upper tusks.
 const UPPER_TUSKS: u8 = 26;
 /// How far a boar's crests slide up out of the coat when raised (rig m).
 const MANE_LIFT: f32 = 0.045;
 /// A deer's flared rump patch.
-const RUMP: u8 = 27;
+pub(super) const RUMP: u8 = 27;
 /// How far a deer's rump patch lies sunk in the coat (rig m), and how far further out it
 /// stands when flared.
 const RUMP_SINK: f32 = 0.022;
