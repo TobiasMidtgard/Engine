@@ -793,23 +793,26 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     let wear = pose.wear;
     if (any(wear > vec4<f32>(0.0))) {
         let low = 1.0 - smoothstep(0.15, 1.2, r.y);
-        let dn = fbm3(r * 8.0 + seed, 3) / 0.875 * 0.75 + low * 0.35 + value_noise3(r * 90.0 + seed) * 0.12;
-        let dirt = smoothstep(1.05 - wear.x, 1.25 - wear.x, dn);
-        albedo = mix(albedo, albedo * vec3<f32>(0.5, 0.45, 0.4) + vec3<f32>(0.035, 0.028, 0.02), dirt * 0.85);
+        let dn = fbm3(r * 8.0 + seed, 3) / 0.875 * 0.7 + low * 0.3 + value_noise3(r * 90.0 + seed) * 0.15;
+        let dirt = smoothstep(1.0 - 0.75 * wear.x, 1.2 - 0.75 * wear.x, dn) * step(0.001, wear.x);
+        albedo = mix(albedo, albedo * 0.4 + vec3<f32>(0.05, 0.038, 0.026), dirt * 0.8);
         rough = mix(rough, 0.92, dirt);
         specular = specular * (1.0 - 0.5 * dirt);
-        let bn = fbm3(r * 13.0 + seed * 3.1 + 7.0, 3) / 0.875 + value_noise3(r * 60.0 + seed) * 0.1;
-        let blood = smoothstep(1.0 - 0.55 * wear.y, 1.04 - 0.55 * wear.y, bn) * step(0.001, wear.y);
-        let blood_color = mix(vec3<f32>(0.2, 0.014, 0.01), vec3<f32>(0.07, 0.008, 0.006), cloth);
-        albedo = mix(albedo, blood_color, blood * 0.92);
-        rough = mix(rough, 0.28, blood);
-        specular = mix(specular, 0.9, blood);
+        // Blood: small splashes and drips, at most about a fifth of the body.
+        let bn = fbm3(r * vec3<f32>(24.0, 12.0, 24.0) + seed * 3.1 + 7.0, 3) / 0.875
+            + value_noise3(r * 140.0 + seed) * 0.12;
+        let blood = smoothstep(0.98 - 0.36 * wear.y, 1.0 - 0.36 * wear.y, bn) * step(0.001, wear.y);
+        let blood_color = mix(vec3<f32>(0.11, 0.009, 0.006), vec3<f32>(0.03, 0.005, 0.004), cloth);
+        albedo = mix(albedo, blood_color, blood * 0.95);
+        rough = mix(rough, 0.35, blood);
+        specular = mix(specular, 0.6, blood);
         let brn = fbm3(r * 6.0 + seed * 5.3 + 13.0, 2) / 0.75;
-        let bruise = smoothstep(1.0 - 0.6 * wear.z, 1.15 - 0.6 * wear.z, brn) * (1.0 - cloth);
-        albedo = albedo * mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.5, 0.7), bruise * 0.8);
-        albedo = albedo * (1.0 - wear.w * mix(0.25, 0.45, cloth));
-        rough = rough * (1.0 - 0.55 * wear.w);
-        specular = specular + 0.35 * wear.w;
+        let bruise = smoothstep(1.0 - 0.6 * wear.z, 1.12 - 0.6 * wear.z, brn) * (1.0 - cloth)
+            * step(0.001, wear.z);
+        albedo = albedo * mix(vec3<f32>(1.0), vec3<f32>(0.5, 0.38, 0.55), bruise * 0.9);
+        albedo = albedo * (1.0 - wear.w * mix(0.15, 0.4, cloth));
+        rough = rough * (1.0 - 0.35 * wear.w);
+        specular = specular + 0.12 * wear.w;
     }
     var s: SkinLight;
     s.albedo = albedo;
