@@ -735,3 +735,54 @@ fn the_pose_is_sized_to_the_person_drawn() {
         grip(hand2, sword2)
     );
 }
+
+#[test]
+fn fighters_are_built_finely_only_near_the_camera() {
+    use engine_world::SimulationFocus;
+    use engine_world::character::CharacterQuality;
+    let mut app = app();
+    app.world.spawn((
+        SimulationFocus::default(),
+        Transform::from_translation(DVec3::ZERO),
+    ));
+    let at = |d: f64| DVec3::new(d, 0.0, 0.0);
+    let ds = [2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 15.0, 16.0, 17.0, 30.0];
+    let es: Vec<Entity> = ds
+        .iter()
+        .map(|&d| {
+            let e = fighter(
+                &mut app,
+                at(d),
+                Vec3::NEG_Z,
+                Faction::ENEMY,
+                NpcWeapon::sword(),
+            );
+            app.world.get_mut::<Npc>(e).unwrap().active = false;
+            e
+        })
+        .collect();
+    run(&mut app, 1.2);
+    let q: Vec<CharacterQuality> = es
+        .iter()
+        .map(|&e| *app.world.get::<CharacterQuality>(e).expect("a detail"))
+        .collect();
+    use CharacterQuality::*;
+    // The two nearest in close-up, the next four (six in all) in mid, the rest a crowd.
+    assert_eq!(
+        q,
+        [
+            CloseUp, CloseUp, Mid, Mid, Mid, Mid, Crowd, Crowd, Crowd, Crowd
+        ],
+        "{ds:?}"
+    );
+    // The camera walks off: everyone steps down, the farthest first.
+    app.world
+        .query_filtered::<&mut Transform, With<SimulationFocus>>()
+        .single_mut(&mut app.world)
+        .unwrap()
+        .translation = DVec3::new(-40.0, 0.0, 0.0);
+    run(&mut app, 1.2);
+    for &e in &es {
+        assert_eq!(*app.world.get::<CharacterQuality>(e).unwrap(), Crowd);
+    }
+}

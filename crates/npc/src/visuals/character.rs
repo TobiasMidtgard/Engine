@@ -12,6 +12,10 @@
 //!   arm, an open helmet for those who fight hand to hand (the person's hair, ears and neck
 //!   left to the fighter's own helmet and coif) and a hood (in the top's colour) for archers
 //!   and riflemen. A look given outright is kept.
+//! * **Detail.** Each fighter is built at a `CharacterQuality` for its distance from the
+//!   camera (the nearest simulation focus), re-ranked twice a second: the two nearest within
+//!   5 m in close-up, up to six within 18 m in mid, the rest as a crowd (no hair, no face
+//!   detail); a little farther out before it steps down, as a change rebuilds the person.
 //! * **Hands.** `HandControls` from what each hand holds ([`super::humanoid::hand_controls`]):
 //!   a power grip round the handle (sword grips, the carbine's pistol grip and handguard, the
 //!   bow's riser, a magazine), through the shield's straps, the bow hand hooking the string or
@@ -55,9 +59,11 @@ use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use engine_core::prelude::*;
+use engine_world::FocusPoints;
 use engine_world::animation::{BodyRequest, BonePose, SkeletonPose};
 use engine_world::character::{
-    ARKIT, Appearance, AppearanceRequest, BodyFit, FaceControls, HandControls, Outfit, arkit,
+    ARKIT, Appearance, AppearanceRequest, BodyFit, CharacterQuality, FaceControls, HandControls,
+    Outfit, arkit,
 };
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::{DamageEvent, DamageKind};
@@ -442,13 +448,60 @@ type Unasked<'a> = (
     Option<&'a crate::agent::NpcWeapon>,
 );
 
-/// Give each new fighter its `AppearanceRequest`.
-#[allow(clippy::type_complexity)]
+/// How near the camera (the nearest simulation focus) a fighter is built at each detail, m:
+/// promoted inside the first distance, kept up to the second; and how many fighters at most
+/// are built that finely. A close-up person (subdivided skin, every hair, the face's parts)
+/// holds about 156 MB, a mid one 62 MB and a crowd one 7 MB (8 built headless, VM), so a
+/// zone's worth of fighters all in close-up filled the machine's memory.
+const CLOSE_UP_DETAIL: (f64, f64, usize) = (5.0, 6.5, 2);
+const MID_DETAIL: (f64, f64, usize) = (18.0, 23.0, 6);
+/// How often the detail is re-ranked, s (a change rebuilds the person in the background).
+const DETAIL_EVERY: f64 = 0.5;
+
+/// The detail a fighter `d` m from the camera is built at, with `close` and `mid` fighters
+/// nearer already at those details (see [`CLOSE_UP_DETAIL`]); `now` is what it has, so it
+/// keeps it a little farther out than it would get it.
+pub(crate) fn detail_for(
+    d: f64,
+    now: Option<CharacterQuality>,
+    close: usize,
+    mid: usize,
+) -> CharacterQuality {
+    let (c_in, c_out, c_max) = CLOSE_UP_DETAIL;
+    let (m_in, m_out, m_max) = MID_DETAIL;
+    let close_r = if now == Some(CharacterQuality::CloseUp) {
+        c_out
+    } else {
+        c_in
+    };
+    let mid_r = if matches!(now, Some(CharacterQuality::CloseUp | CharacterQuality::Mid)) {
+        m_out
+    } else {
+        m_in
+    };
+    if close < c_max && d < close_r {
+        CharacterQuality::CloseUp
+    } else if close + mid < m_max && d < mid_r {
+        CharacterQuality::Mid
+    } else {
+        CharacterQuality::Crowd
+    }
+}
+
+/// The fighters whose detail is ranked: where each is and what it is built at.
+type Ranked<'a> = (Entity, &'a Transform, &'a mut CharacterQuality);
+
+/// Give each new fighter its `AppearanceRequest` and a `CharacterQuality` for its distance from
+/// the camera, and every [`DETAIL_EVERY`] re-rank the detail fighters are built at: the
+/// nearest few in close-up, a few more in mid, the rest as a crowd ([`detail_for`]).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn request_appearances(
     mut commands: Commands,
     settings: Res<NpcSettings>,
+    focus: Res<FocusPoints>,
+    time: Res<Time>,
     q: Query<
-        Unasked,
+        (Unasked, &Transform),
         (
             With<Npc>,
             Without<Animal>,
@@ -456,13 +509,50 @@ pub(crate) fn request_appearances(
             Without<Appearance>,
         ),
     >,
+    mut ranked: Query<Ranked, (With<Npc>, Without<Animal>)>,
+    mut next: Local<f64>,
+    mut order: Local<Vec<(f64, Entity)>>,
 ) {
     if !settings.character_looks {
         return;
     }
-    for (e, &seed, squad, faction, skills, weapon) in &q {
+    let away = |p: DVec3| {
+        focus
+            .points
+            .iter()
+            .map(|f| f.distance(p))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let now = time.elapsed_secs_f64();
+    if now >= *next {
+        *next = now + DETAIL_EVERY;
+        order.clear();
+        order.extend(ranked.iter().map(|(e, t, _)| (away(t.translation), e)));
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut close, mut mid) = (0, 0);
+        for &(d, e) in order.iter() {
+            let Ok((_, _, mut q)) = ranked.get_mut(e) else {
+                continue;
+            };
+            let want = detail_for(d, Some(*q), close, mid);
+            match want {
+                CharacterQuality::CloseUp => close += 1,
+                CharacterQuality::Mid => mid += 1,
+                CharacterQuality::Crowd => {}
+            }
+            if *q != want {
+                *q = want;
+            }
+        }
+    }
+    for ((e, &seed, squad, faction, skills, weapon), t) in &q {
         let request = appearance_request(seed, squad.copied(), faction.copied(), skills, weapon);
-        commands.entity(e).try_insert(request);
+        // Close-up only once ranked among the nearest.
+        let detail = match detail_for(away(t.translation), None, 0, 0) {
+            CharacterQuality::CloseUp => CharacterQuality::Mid,
+            d => d,
+        };
+        commands.entity(e).try_insert((request, detail));
     }
 }
 
