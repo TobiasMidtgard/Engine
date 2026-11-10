@@ -129,7 +129,9 @@ Storage (the first rule is a test, so CI enforces it):
   `CC0-1.0` preferred, CC-BY with an `author` to credit, MIT, Apache-2.0 or OFL-1.1 with the
   `copyright` line from the origin's license file; nothing non-commercial or no-derivatives
   (most motion-capture datasets, such as LAFAN1 and Bandai Namco's, are CC BY-NC-ND, so they
-  are out). Format and checks: `tools/fetch-assets` docs.
+  are out). The CMU motion capture database is allowed as `LicenseRef-CMU-mocap` (its notice
+  ships with it; `copyright = "Carnegie Mellon University"`). Format and checks:
+  `tools/fetch-assets` docs.
 - Hosts that serve a material as a zip (ambientCG, ShareTextures) are pinned as the archive with
   `unpack = "pbr"`: fetching writes its maps next to it as `<folder>_{diff,nor_gl,arm,disp}_2k.jpg`,
   the Poly Haven names the terrain and foliage loaders read (`unpack = "zip"` extracts as is).

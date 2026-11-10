@@ -1,0 +1,8 @@
+Carnegie Mellon University Graphics Lab Motion Capture Database (http://mocap.cs.cmu.edu/)
+
+The data used in this project was obtained from mocap.cs.cmu.edu.
+The database was created with funding from NSF EIA-0196217.
+
+Terms (from the database's FAQ, http://mocap.cs.cmu.edu/faqs.php): the motion capture data may be
+copied, modified, or redistributed without permission, and may be used in commercial products
+such as games; it may not be resold or redistributed as a motion capture data product of its own.

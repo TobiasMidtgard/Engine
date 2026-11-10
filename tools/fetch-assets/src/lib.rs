@@ -85,6 +85,9 @@ pub const LICENSES: &[&str] = &[
     "MIT",
     "Apache-2.0",
     "MIT OR Apache-2.0",
+    // The CMU Graphics Lab Motion Capture Database: free to copy, modify and redistribute, also
+    // in commercial games; not for resale as mocap data (Tobias approved it, 2026-11-10).
+    "LicenseRef-CMU-mocap",
 ];
 
 /// Licenses whose full text must ship with their files, and that text (each entry adds its own
@@ -93,6 +96,10 @@ pub const LICENSE_TEXTS: &[(&str, &str)] = &[
     ("MIT", include_str!("../licenses/MIT.txt")),
     ("Apache-2.0", include_str!("../licenses/Apache-2.0.txt")),
     ("OFL-1.1", include_str!("../licenses/OFL-1.1.txt")),
+    (
+        "LicenseRef-CMU-mocap",
+        include_str!("../licenses/LicenseRef-CMU-mocap.txt"),
+    ),
 ];
 
 /// The notices file [`notices`] makes, in `assets/fetched/` and on the mirror.
