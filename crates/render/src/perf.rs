@@ -1089,6 +1089,7 @@ const CENSUS_STATS: &[&str] = &[
     "render.meshes.pool_index_mb",
     "render.meshes.pool_index_used_mb",
     "render.meshes.pool_lods_refused",
+    "render.meshes.pool_index_growths",
     "render.meshes.resident",
 ];
 

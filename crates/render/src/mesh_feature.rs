@@ -1434,6 +1434,9 @@ pub struct MeshFeature {
     /// Level-of-detail builds collected so far, for the profile log: all, those the simplifier
     /// gave no level for, and those the index pool had no room to keep every level of.
     lod_built: [u32; 3],
+    /// The indices of the meshes whose levels were built so far, and of those levels (for the
+    /// profile log).
+    lod_indices: [u64; 2],
     /// Meshes waiting for a free worker to build their levels.
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
@@ -1827,15 +1830,7 @@ impl MeshFeature {
 
     /// Put `mesh` on the GPU as mesh `index`, replacing its old copy. False when it can't go
     /// there (no triangles, or too large): it is then left off until it changes.
-    /// `lods`: its levels of detail will be asked for, so its pool page holds room for them.
-    fn upload_mesh(
-        &mut self,
-        gpu: &GpuShared,
-        index: u32,
-        mesh: &Mesh,
-        version: u64,
-        lods: bool,
-    ) -> bool {
+    fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) -> bool {
         let edit = self.meshes.contains_key(&index);
         if let Some(old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
@@ -1851,18 +1846,10 @@ impl MeshFeature {
             return false;
         }
         let aabb = mesh.aabb();
-        let lod_room = if lods && mesh.indices.len() / 3 >= crate::mesh_lod::MIN_TRIANGLES {
-            (mesh.indices.len() as f32 * crate::mesh_lod::USUAL_INDEX_SHARE) as u32
-        } else {
-            0
-        };
-        let Some(pool) = self.pool.add(
-            &gpu.device,
-            &gpu.queue,
-            &mesh.vertices,
-            &mesh.indices,
-            lod_room,
-        ) else {
+        let Some(pool) = self
+            .pool
+            .add(&gpu.device, &gpu.queue, &mesh.vertices, &mesh.indices)
+        else {
             tracing::warn!(
                 "mesh {index} ({} vertices) is larger than a GPU buffer may be",
                 mesh.vertices.len()
@@ -1942,7 +1929,7 @@ impl MeshFeature {
     }
 
     /// Upload the levels of detail that finished building, and start queued builds.
-    fn collect_lods(&mut self, queue: &wgpu::Queue, meshes: &Assets<Mesh>) {
+    fn collect_lods(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, meshes: &Assets<Mesh>) {
         let done: Vec<u32> = self
             .lod_jobs
             .iter()
@@ -1959,25 +1946,27 @@ impl MeshFeature {
             else {
                 continue;
             };
-            // The room its page held for these levels is theirs now.
             let pool = &mut self.pool;
-            pool.release_lod_room(&mut gpu_mesh.pool);
             let Ok((levels, movable)) = levels else {
                 tracing::warn!("building the levels of detail of mesh {index} failed");
                 continue;
             };
-            // Finest first, as many as its page has room for.
+            // Finest first. A level its page has no room for (its index buffer is as large as
+            // one may be) is left out and the smaller ones after it still tried: they are what
+            // most far views draw.
             let page = gpu_mesh.pool.page;
             for l in gpu_mesh.lods.drain(..) {
                 pool.free_indices(page, l.first_index, l.index_count);
             }
             let built = levels.len();
+            self.lod_indices[0] += gpu_mesh.pool.index_count as u64;
+            self.lod_indices[1] += levels.iter().map(|l| l.indices.len() as u64).sum::<u64>();
             gpu_mesh.movable = movable;
             gpu_mesh.lods = levels
                 .into_iter()
-                .map_while(|l| {
+                .filter_map(|l| {
                     Some(GpuLod {
-                        first_index: pool.add_indices(queue, page, &l.indices)?,
+                        first_index: pool.add_indices(device, queue, page, &l.indices)?,
                         index_count: l.indices.len() as u32,
                         error: l.error,
                     })
@@ -2468,6 +2457,12 @@ impl MeshFeature {
             self.lod_built[2],
             self.lod_jobs.len(),
             self.lod_waiting.len(),
+        );
+        let _ = writeln!(
+            out,
+            "  the levels built hold {:.0}% of their meshes' own indices; the pool's index buffers grew {} times",
+            self.lod_indices[1] as f64 * 100.0 / self.lod_indices[0].max(1) as f64,
+            self.pool.index_growths,
         );
         let mut rows: Vec<_> = dense.into_iter().collect();
         rows.sort_by_key(|r| std::cmp::Reverse(r.1.0));
@@ -3430,7 +3425,7 @@ impl RenderFeature for MeshFeature {
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
         let lod_pixels = settings.mesh_lod_pixels.max(0.0);
         if new_tables && let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
-            self.collect_lods(&gpu.queue, meshes);
+            self.collect_lods(&gpu.device, &gpu.queue, meshes);
         }
 
         // This view's camera position last frame (each view has its own).
@@ -3918,7 +3913,7 @@ impl RenderFeature for MeshFeature {
                     // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
                     let lods = lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index);
                     let _span = crate::perf::HitchStep::new("meshes: upload a mesh");
-                    if self.upload_mesh(gpu, mesh.index, asset, mesh.version, lods) {
+                    if self.upload_mesh(gpu, mesh.index, asset, mesh.version) {
                         self.uploads += 1;
                         self.edits += resident.is_some() as u32;
                         self.reuploads +=
@@ -4695,6 +4690,11 @@ impl RenderFeature for MeshFeature {
             d.set(
                 "render.meshes.pool_lods_refused",
                 self.pool.lods_refused as f64,
+            );
+            // Times an index buffer grew (a copy on the GPU into a larger one).
+            d.set(
+                "render.meshes.pool_index_growths",
+                self.pool.index_growths as f64,
             );
             // Meshes with a copy in the pool.
             d.set("render.meshes.resident", self.meshes.len() as f64);

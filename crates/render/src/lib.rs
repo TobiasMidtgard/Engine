@@ -90,6 +90,8 @@ mod mesh_cull;
 pub mod mesh_feature;
 mod mesh_lod;
 mod mesh_pool;
+#[doc(hidden)]
+pub use mesh_pool::set_index_share as set_mesh_index_share;
 mod mesh_scene;
 mod mipmaps;
 pub mod motion_blur;

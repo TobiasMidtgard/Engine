@@ -19,10 +19,6 @@ const FLOOR_TRIANGLES: usize = 48;
 const STEP: f32 = 0.35;
 /// A level that keeps more than this share of the one above isn't worth one.
 const MIN_GAIN: f32 = 0.8;
-/// The indices of a mesh's levels together, as a share of its own, when every level reaches
-/// [`STEP`] (0.35 + 0.35² + ...), rounded up: the room the mesh pool holds for them.
-pub const USUAL_INDEX_SHARE: f32 = 0.6;
-
 /// One level of a mesh: its triangles as indices into the mesh's vertices, and how far its
 /// surface strays from the full mesh (meters in mesh space).
 #[derive(Debug, Clone)]
@@ -381,6 +377,7 @@ pub fn meters_per_pixel(fov_y: f32, height: u32, distance: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::rock::rock;
 
     #[test]
