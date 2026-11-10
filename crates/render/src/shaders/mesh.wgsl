@@ -1088,8 +1088,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
 // opaque scene pass (depth equal to the prepass's, nothing written to it). The programs here
 // can write a virtual texture request (`vt_feedback_store`), and a program that writes
 // anywhere but its targets must by the rules run before the depth test, hidden fragments
-// included, unless it asks for the test first: this asks. (`GpuShared::shader` drops the
-// attribute on a device without `SHADER_EARLY_DEPTH_TEST`.)
+// included, unless it asks for the test first: this asks. (With `VT_ENABLED` off the write
+// is dead code, and a driver that sees that tests first without being asked.
+// `GpuShared::shader` drops the attribute on a device without `SHADER_EARLY_DEPTH_TEST`.)
 @fragment @early_depth_test(force)
 fn fs_main_early(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     return scene_fragment(in, front);

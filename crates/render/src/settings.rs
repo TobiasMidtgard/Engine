@@ -228,15 +228,20 @@ pub mod trial_cut {
     /// A ground texture's probes follow how much of it still shows: 16 while it is all there,
     /// down to 2 as it fades into its mean color with distance.
     pub const TERRAIN_FADE_ANISO: u32 = 16;
-    /// The larger copies with one lookup each instead of the anti-tiling pair.
+    /// The 4x distance copy of meadows, fields and roads with one lookup instead of the
+    /// anti-tiling pair. Same picture.
     pub const TERRAIN_COPY_SINGLE: u32 = 32;
     /// Where every tap of the cascades' blocker search finds a caster the point is taken as
-    /// fully shadowed and the filter taps (up to `shadow_filter_taps`) are not read.
+    /// fully shadowed and the filter taps (up to `shadow_filter_taps`) are not read. NOT quite
+    /// the same picture: the faint outer rim of dappled light under trees is trimmed (1% of
+    /// the forest's pixels darker, 10 Nov).
     pub const SHADOW_UMBRA: u32 = 64;
     /// The screen-space sun marches with fewer steps: contact shadows 6 instead of 10, the
     /// march past the cascades 5 instead of 8.
     pub const SUN_MARCH_STEPS: u32 = 128;
-    /// The sky a reflection sees marched with 9 taps instead of 18 over the same reach.
+    /// The sky a reflection sees marched with 9 taps instead of 18 over the same reach. NOT
+    /// quite the same picture: thin cover is found half as often, so a reflection under it
+    /// comes out brighter (the plaza fountain's water by 4 of 255, 10 Nov).
     pub const SPECULAR_SKY_TAPS: u32 = 256;
     /// The sun's shadows, the sky's cover and the probes' light worked out once per pixel in a
     /// screen pass after the prepass (screen_light.wgsl) and loaded by shading, instead of in
@@ -276,12 +281,14 @@ pub mod trial_cut {
     /// once for every triangle that touches its 2x2 block. Impostors and virtual geometry
     /// keep the old way.
     pub const MESHES_ONCE: u32 = 32768;
-    /// The opaque meshes' scene program runs after the depth test, not before it. Their
-    /// programs can write a virtual texture request, and a program that writes anywhere but
-    /// its targets must run before the depth test unless it asks for the test first: without
-    /// this the scene pass shades every layer of meshes and throws away all but the one
-    /// whose depth equals the prepass's. With it (a device with `SHADER_EARLY_DEPTH_TEST`:
-    /// Vulkan), `fs_main_early` asks. Same picture.
+    /// The opaque meshes' scene program asks for the depth test before it runs. Their
+    /// programs contain a virtual texture request (a storage write), and a program that
+    /// writes anywhere but its targets must run before the depth test unless it asks for the
+    /// test first. A driver may therefore shade every layer of meshes in the scene pass and
+    /// throw away all but the one whose depth equals the prepass's; where no material uses
+    /// virtual textures the write is compiled out behind `VT_ENABLED`, and a driver that
+    /// removes dead code first tests early by itself (then this changes nothing). With it
+    /// (a device with `SHADER_EARLY_DEPTH_TEST`: Vulkan), `fs_main_early` asks. Same picture.
     pub const MESHES_EARLY_Z: u32 = 65536;
     /// With [`MESHES_ONCE`]: the meshes' own pass draws their depth first (a program that
     /// only discards what the material would) and then their material where the depth is
@@ -303,6 +310,11 @@ pub mod trial_cut {
     /// the CPU more batches (a mesh in view in several bands is a batch in each) and binds.
     /// Same picture.
     pub const MESHES_NEAR_FIRST: u32 = 524288;
+    /// Rock's 8x and 64x copies with one lookup each instead of the anti-tiling pair. NOT the
+    /// same picture: the pair's seams are part of what far mountainsides show, and without
+    /// them the rock there reads smoother (plaza pair, 10 Nov). Kept apart from
+    /// [`TERRAIN_COPY_SINGLE`] so the PC can say what the difference would buy.
+    pub const TERRAIN_ROCK_SINGLE: u32 = 1048576;
 }
 
 /// What the screen shows.

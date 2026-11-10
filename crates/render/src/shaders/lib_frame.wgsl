@@ -361,6 +361,7 @@ const CUT_GROUND_ONCE: u32 = 16384u;
 // program after the depth test; 131072: their depth first in the pass of 32768; 262144:
 // alpha-tested ones in that depth step too; 524288: meshes in bands of distance, nearest
 // first. CPU side.)
+const CUT_TERRAIN_ROCK_SINGLE: u32 = 1048576u;
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;
@@ -501,9 +502,10 @@ fn cascade_visibility(rel: vec3<f32>, n: vec3<f32>, depth: f32, noise: f32) -> f
         }
     }
     if (blockers < 0.5) { return 1.0; }
-    // Every search tap found a caster: deep in shadow, where the filter would find the same
-    // (its disc is no wider than the search's for casters within 30 m). The taps turn every
-    // frame, so an edge that slips between them one frame is found the next.
+    // Every search tap found a caster: taken as deep in shadow. Not quite what the filter
+    // would find: where a soft shadow lets a little light in, the filter's finer and (for
+    // casters far above) wider disc still catches some that the search missed, so the faint
+    // outer rim of dappled light is trimmed (forest pair, 10 Nov: 1% of pixels darker).
     if (trial_cut(CUT_SHADOW_UMBRA) && blockers > f32(blocker_taps) - 0.5) { return 0.0; }
     let blocker_distance = max(z - blocker_sum / blockers, 0.0) / max(z_per_meter, 1e-9);
     let radius = clamp(blocker_distance * tan_sun / texel_world, min_radius, 24.0);

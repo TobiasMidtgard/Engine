@@ -1699,7 +1699,7 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
     let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), n >= vec3<f32>(0.0));
     let period = 4096.0 / tile;
     let most = mat_most(scale, fade);
-    let single = scale > 1.0 && trial_cut(CUT_TERRAIN_COPY_SINGLE);
+    let single = scale > 1.0 && trial_cut(CUT_TERRAIN_ROCK_SINGLE);
     var albedo = vec4<f32>(0.0);
     var packed = vec4<f32>(0.0);
     var nd = vec3<f32>(0.0);

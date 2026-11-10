@@ -338,7 +338,13 @@ fn variants() -> Vec<Variant> {
             "cut_terrain_copy_single",
             r,
             json!({"trial_cuts": 32}),
-            "the ground textures' larger copies with one lookup, not the anti-tiling pair",
+            "the 4x distance copy of meadows, fields and roads with one lookup, not the anti-tiling pair",
+        ),
+        v(
+            "cut_terrain_rock_single",
+            r,
+            json!({"trial_cuts": 1_048_576}),
+            "rock's 8x and 64x copies with one lookup each, not the pair: far mountainsides read smoother, so this one is a trade to judge from its picture",
         ),
         v(
             "cut_terrain_copies",
@@ -538,6 +544,17 @@ fn variants() -> Vec<Variant> {
             r,
             json!({"trial_cuts": 4033}),
             "the screen pass with fog, lamp tiles and the four lighting cuts together",
+        ),
+        v(
+            "cut_all",
+            r,
+            // 4033 lighting, 56 ground texture copies, 2 ground aniso 8, 4096 ground lines,
+            // 16384 ground once, 32768..524288 the meshes' five. Not the three that change the
+            // picture: the deep-shadow shortcut (64: dappled light's outer rim trimmed), a
+            // reflection's halved cover taps (256: the plaza fountain's water 4 of 255
+            // brighter) and rock's single lookup (1048576).
+            json!({"trial_cuts": 1_040_059, "shadow_refresh_secs": 0.25}),
+            "every same-picture cut in RenderSettings at once (lighting but for the deep-shadow shortcut and the reflection taps, ground textures but for rock's single lookup, ground lines, ground and objects once a pixel, depth first, holes first, nearest first, far shadow refresh): the frame if all of them pass",
         ),
         v(
             "cut_shadow_refresh",
