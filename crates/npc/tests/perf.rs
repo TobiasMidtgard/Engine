@@ -24,15 +24,16 @@ fn mark(name: &'static str) -> impl FnMut(ResMut<Marks>) {
     move |mut m: ResMut<Marks>| m.0.push((name, Instant::now()))
 }
 
-/// Flat ground that takes about as long to ask as a planet's terrain does, and counts how
-/// often it is asked.
-struct SlowGround(Arc<AtomicU64>);
+/// Flat ground that takes about as long to ask as a planet's terrain does (`.1` sine terms a
+/// sample: 64 is a few microseconds, 512 about what the planet costs on the session VM, ~20
+/// ms a nav chunk), and counts how often it is asked.
+struct SlowGround(Arc<AtomicU64>, u32);
 
 impl GroundQuery for SlowGround {
     fn sample(&self, p: DVec3) -> Option<GroundSample> {
         self.0.fetch_add(1, Ordering::Relaxed);
         let mut h = 0.0;
-        for i in 0..64 {
+        for i in 0..self.1 {
             h += (p.x * 0.01 * i as f64).sin() * (p.z * 0.013 * i as f64).cos();
         }
         Some(GroundSample {
@@ -44,6 +45,10 @@ impl GroundQuery for SlowGround {
 }
 
 fn app(samples: &Arc<AtomicU64>) -> App {
+    app_on(samples, 64)
+}
+
+fn app_on(samples: &Arc<AtomicU64>, terms: u32) -> App {
     let mut app = App::new();
     app.world
         .resource_mut::<Time>()
@@ -51,7 +56,7 @@ fn app(samples: &Arc<AtomicU64>) -> App {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((WorldPlugin, NpcPlugin));
-    app.insert_resource(Ground(Arc::new(SlowGround(samples.clone()))));
+    app.insert_resource(Ground(Arc::new(SlowGround(samples.clone(), terms))));
     app.init_resource::<Marks>();
     app.add_systems(
         FixedUpdate,
@@ -208,5 +213,84 @@ fn npc_step_cost_near_and_far() {
     println!(
         "camera 2 km away: {mean:.2} ms per step on average, worst {worst:.2} ms, \
          {asked:.0} ground samples per step; {npc}"
+    );
+}
+
+/// Arriving at the arena as a zone loads: the fighters wake with no nav grid round them yet
+/// and look for spots at once. The worst step of the first ten seconds, on ground as slow as
+/// the planet's, with work spread off the step as in the game: run with
+/// `ENGINE_OFF_FRAME=always` (without it, headless work is done at once and this measures
+/// that). `NPC_PERF_CSV=<file>` writes each step's NPC time.
+#[test]
+#[ignore]
+fn npc_arrival_cost() {
+    if std::env::var("ENGINE_OFF_FRAME").as_deref() != Ok("always") {
+        eprintln!("ENGINE_OFF_FRAME=always is not set: work is done at once, not as in the game");
+    }
+    // `ENGINE_PROFILE=1` (with `ENGINE_HITCH_MS`) logs each slow step's spans to
+    // engine-hitches.txt in the working directory.
+    engine_core::log::init("warn");
+    let samples = Arc::new(AtomicU64::new(0));
+    let mut app = app_on(&samples, 512);
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    focus(&mut app, ARENA + DVec3::new(0.0, 2.0, -30.0));
+    let mut steps = Vec::new();
+    let mut chosen = Vec::new();
+    for i in 0..600 {
+        app.world.resource_mut::<Marks>().0.clear();
+        let t = Instant::now();
+        app.update();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let marks = &app.world.resource::<Marks>().0;
+        let npc = match (marks.first(), marks.last()) {
+            (Some(a), Some(b)) => (b.1 - a.1).as_secs_f64() * 1e3,
+            _ => 0.0,
+        };
+        let decide = marks
+            .windows(2)
+            .find(|w| w[1].0 == "decide")
+            .map_or(0.0, |w| (w[1].1 - w[0].1).as_secs_f64() * 1e3);
+        if std::env::var("NPC_PERF_SPIKES").is_ok() && npc > 8.0 {
+            let phases: Vec<String> = marks
+                .windows(2)
+                .map(|w| format!("{} {:.1}", w[1].0, (w[1].1 - w[0].1).as_secs_f64() * 1e3))
+                .collect();
+            println!("  step {i}: {ms:.1} ms; {}", phases.join(", "));
+        }
+        steps.push((ms, npc, decide));
+        // How soon the fighters choose where to go (deferring the ground mustn't stall them).
+        if [30, 60, 90, 120, 180, 240, 599].contains(&i) {
+            let mut q = app.world.query::<&NpcBrain>();
+            let brains: Vec<_> = q.iter(&app.world).collect();
+            let placed = brains.iter().filter(|b| b.destination.is_some()).count();
+            let chunks = app.world.resource::<nav::NavGrid>().chunks_built;
+            chosen.push(format!(
+                "{placed}/{} at {:.1} s ({chunks} nav chunks)",
+                brains.len(),
+                i as f64 / 60.0
+            ));
+        }
+    }
+    println!("fighters with a spot to go to: {}", chosen.join(", "));
+    // The slow-frame log goes out as the app leaves.
+    app.world
+        .resource_mut::<Messages<AppExit>>()
+        .write(AppExit::Success);
+    let _ = app.should_exit();
+    if let Ok(path) = std::env::var("NPC_PERF_CSV") {
+        let mut out = String::from("step,step_ms,npc_ms,decide_ms\n");
+        for (i, (ms, npc, decide)) in steps.iter().enumerate() {
+            out += &format!("{i},{ms:.3},{npc:.3},{decide:.3}\n");
+        }
+        std::fs::write(path, out).expect("csv");
+    }
+    // The first steps spawn the demo and gather the colliders, as a zone's load does.
+    let judged = &steps[5..];
+    let worst = judged.iter().map(|s| s.1).fold(0.0, f64::max);
+    let over = judged.iter().filter(|s| s.1 > 15.0).count();
+    let mean = judged.iter().map(|s| s.1).sum::<f64>() / judged.len() as f64;
+    println!(
+        "arriving at the arena: NPC systems {mean:.2} ms a step on average, worst {worst:.1} ms, \
+         {over} steps over 15 ms (steps 5-599)"
     );
 }

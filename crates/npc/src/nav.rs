@@ -27,9 +27,6 @@ use crate::world_model::TacticalWorld;
 
 /// Cells per chunk side.
 const CHUNK: i32 = 32;
-/// Chunks of ground nobody has sampled yet that one path search builds (the start's and the
-/// goal's first); the rest wait for `warm_nav`.
-const PATH_COLD_CHUNKS: usize = 2;
 
 /// How much cheaper a well-worn path (wear 1) is to walk than untouched ground.
 pub const WORN_DISCOUNT: f32 = 0.5;
@@ -133,10 +130,11 @@ pub struct NavGrid {
     ground_jobs: HashMap<(i32, i32), GroundJob>,
     /// Ground heights worked out off the main thread, waiting for their chunk to be built.
     ground_ready: HashMap<(i32, i32), Vec<f64>>,
-    /// Chunks a look wanted but left for [`warm_nav`] to work out first
-    /// ([`NavCtx::ensure_around_within`]).
+    /// Chunks asked for whose ground isn't sampled yet, left for [`warm_nav`] to work out
+    /// first (see [`NavCtx::ensure_around`]).
     ground_wanted: Vec<(i32, i32)>,
-    /// Set once [`warm_nav`] runs with an async pool: only then do looks leave chunks to it.
+    /// Set while [`warm_nav`] runs with an async pool: then no chunk whose ground hasn't been
+    /// sampled is built on the step; it is asked of `warm_nav` and isn't walkable until then.
     warming: bool,
 }
 
@@ -243,10 +241,15 @@ impl NavGrid {
                     }
                 }
                 None => {
-                    // Everything may have moved (a world shift): ground worked out ahead too.
-                    self.chunks.clear();
-                    self.ground_jobs.clear();
-                    self.ground_ready.clear();
+                    // Every obstacle may have changed (a rebuild): every chunk goes, but its
+                    // ground stays for the rebuild, and so does ground being worked out. A
+                    // world shift moves the ground too: it changes the ground generation,
+                    // handled above, which has emptied both.
+                    for (key, chunk) in self.chunks.drain() {
+                        if !chunk.ground.is_empty() {
+                            self.ground_ready.insert(key, chunk.ground);
+                        }
+                    }
                 }
             }
             self.generation = world.generation;
@@ -360,6 +363,8 @@ impl<'a> NavCtx<'a> {
     /// [`nearest_walkable`](Self::nearest_walkable)s that follow don't build them one after
     /// another (`tactics::choose_position` weighs up to ~100 spots around an enemy: arriving at
     /// the fortress, one look built their chunks in a row for 102 ms, round 25 on Tobias's PC).
+    /// While [`warm_nav`] samples ground off the step, only chunks whose ground is in are
+    /// built; the rest are asked of it (see [`ensure_chunks`](Self::ensure_chunks)).
     pub fn ensure_around(&mut self, points: impl IntoIterator<Item = DVec3>, radius: f64) {
         let mut keys = Vec::new();
         for p in points {
@@ -368,49 +373,10 @@ impl<'a> NavCtx<'a> {
         self.ensure_chunks(&keys);
     }
 
-    /// [`ensure_around`](Self::ensure_around), but of the chunks whose ground hasn't been
-    /// sampled yet only the first `cold` (in `points` order) are built now; the rest are left
-    /// to [`warm_nav`], which samples their ground off the main thread first (once it runs
-    /// with an async pool; until then all are built now). Chunks whose
-    /// ground is ready are cheap and always built. A look at the fortress built eight chunks
-    /// at once, 66 ms in one step (VM, 2026-11-06).
-    pub fn ensure_around_within(
-        &mut self,
-        points: impl IntoIterator<Item = DVec3>,
-        radius: f64,
-        cold: usize,
-    ) {
-        let mut keys = Vec::new();
-        for p in points {
-            self.chunks_around(p, radius, &mut keys);
-        }
-        self.ensure_keys_within(keys, cold);
-    }
-
-    /// Build the chunks `keys` whose ground is ready, and of the rest the first `cold`; the
-    /// others go to [`NavGrid::ground_wanted`] for [`warm_nav`] (see
-    /// [`ensure_around_within`](Self::ensure_around_within)).
-    fn ensure_keys_within(&mut self, keys: Vec<(i32, i32)>, cold: usize) {
-        let mut now = Vec::with_capacity(keys.len());
-        // Without warm_nav sampling ground on a pool (tests, tools), nothing is gained by
-        // waiting.
-        let mut cold_left = if self.grid.warming { cold } else { usize::MAX };
-        for key in keys {
-            if self.grid.chunks.contains_key(&key) || now.contains(&key) {
-                continue;
-            }
-            if self.grid.ground_ready.contains_key(&key) {
-                now.push(key);
-            } else if cold_left > 0 {
-                cold_left -= 1;
-                now.push(key);
-            } else if !self.grid.ground_wanted.contains(&key)
-                && self.grid.ground_wanted.len() < MAX_WANTED
-            {
-                self.grid.ground_wanted.push(key);
-            }
-        }
-        self.ensure_chunks(&now);
+    /// Whether ground not worked out yet is left to [`warm_nav`] rather than built when asked
+    /// for (see [`ensure_chunks`](Self::ensure_chunks)).
+    pub fn warming(&self) -> bool {
+        self.grid.warming
     }
 
     /// Whether every chunk within `radius` meters of `p` is built (so asking there builds
@@ -437,14 +403,28 @@ impl<'a> NavCtx<'a> {
     /// system's task runs other systems while it waits): a search into new ground needs a
     /// window of them, and built one after another they stalled a step for 150-415 ms on
     /// Tobias's PC (round 23, `find path` arriving at the field and the plaza).
+    ///
+    /// While [`warm_nav`] samples ground on the async pool (in play), a chunk whose ground
+    /// isn't in yet isn't built here: it goes to [`NavGrid::ground_wanted`] (in `keys` order,
+    /// so the first asked is worked out first) and is built a step or so later. Sampling the
+    /// ground is the slow part (12-25 ms a chunk on the VM's stand-in for a planet): arriving
+    /// at a zone, the fighters' and animals' first looks and paths each built one or two on
+    /// the step, 48 steps over 15 ms on the route lap (2026-11-09).
     fn ensure_chunks(&mut self, keys: &[(i32, i32)]) {
-        let mut missing: Vec<(i32, i32)> = keys
-            .iter()
-            .copied()
-            .filter(|k| !self.grid.chunks.contains_key(k))
-            .collect();
+        let mut missing: Vec<(i32, i32)> = Vec::with_capacity(keys.len());
+        for &key in keys {
+            if self.grid.chunks.contains_key(&key) || missing.contains(&key) {
+                continue;
+            }
+            if !self.grid.warming || self.grid.ground_ready.contains_key(&key) {
+                missing.push(key);
+            } else if !self.grid.ground_wanted.contains(&key)
+                && self.grid.ground_wanted.len() < MAX_WANTED
+            {
+                self.grid.ground_wanted.push(key);
+            }
+        }
         missing.sort_unstable();
-        missing.dedup();
         if missing.is_empty() {
             return;
         }
@@ -620,8 +600,11 @@ impl<'a> NavCtx<'a> {
             return (chunk.base + chunk.h[i] as f64, chunk.walk[i]);
         }
         self.ensure_chunk(key);
-        let chunk = &self.grid.chunks[&key];
-        (chunk.base + chunk.h[i] as f64, chunk.walk[i])
+        // Ground not worked out yet (see `ensure_chunks`) isn't walkable until it is.
+        match self.grid.chunks.get(&key) {
+            Some(chunk) => (chunk.base + chunk.h[i] as f64, chunk.walk[i]),
+            None => (0.0, false),
+        }
     }
 
     /// Height of the walkable surface at `p` and whether it is walkable.
@@ -684,15 +667,14 @@ impl<'a> NavCtx<'a> {
         let mut walk = vec![false; (w * d) as usize];
         let (kx0, kx1) = (x0.div_euclid(CHUNK), (x0 + w - 1).div_euclid(CHUNK));
         let (kz0, kz1) = (z0.div_euclid(CHUNK), (z0 + d - 1).div_euclid(CHUNK));
-        // The start's chunk first, then the goal's: of ground nobody has sampled yet a search
-        // builds only those (`PATH_COLD_CHUNKS`) and leaves the rest to `warm_nav`, as a look
-        // does. Until it is built, ground there isn't walkable to the search: the path stops
-        // short (partial) and is planned again. A path at the fortress built five chunks at
-        // once, 15-22 ms each (VM).
+        // The start's chunk first, then the goal's: ground nobody has sampled yet is left to
+        // `warm_nav` (see `ensure_chunks`), those two first. Until it is built, ground there
+        // isn't walkable to the search: the path stops short (partial) and is planned again.
+        // A path at the fortress built five chunks at once, 15-22 ms each (VM).
         let key = |c: (i32, i32)| (c.0.div_euclid(CHUNK), c.1.div_euclid(CHUNK));
         let mut keys: Vec<(i32, i32)> = vec![key(a), key(b)];
         keys.extend((kz0..=kz1).flat_map(|kz| (kx0..=kx1).map(move |kx| (kx, kz))));
-        self.ensure_keys_within(keys, PATH_COLD_CHUNKS);
+        self.ensure_chunks(&keys);
         // Copy chunk by chunk: one map lookup per chunk, not per cell.
         for kz in kz0..=kz1 {
             for kx in kx0..=kx1 {
@@ -781,6 +763,13 @@ impl<'a> NavCtx<'a> {
             return PathPlan::Done(PathStatus::Complete);
         }
         let win = self.window(start, goal, 24);
+        // The ground under the start not worked out yet (see `ensure_chunks`): nowhere to go
+        // for now. Partial with no path, so a walker stands and plans again (Failed would
+        // send it straight at the goal through whatever is in the way).
+        let home = (start.0.div_euclid(CHUNK), start.1.div_euclid(CHUNK));
+        if !self.grid.chunks.contains_key(&home) {
+            return PathPlan::Done(PathStatus::Partial);
+        }
         let Some(mut si) = win.idx(start.0, start.1) else {
             return PathPlan::Done(PathStatus::Failed);
         };
@@ -842,9 +831,8 @@ impl<'a> NavCtx<'a> {
         if n > s.max_window {
             return None;
         }
-        // The chunks along the line: the start's and the goal's are built now, of the others
-        // only those whose ground is ready; a line over ground not worked out yet isn't
-        // walked (the search after it stops short there, see `window`).
+        // The chunks along the line; a line over ground not worked out yet isn't walked (the
+        // search after it stops short there, see `window`).
         let key = |c: (i32, i32)| (c.0.div_euclid(CHUNK), c.1.div_euclid(CHUNK));
         let mut keys = vec![key(a), key(b)];
         for k in 0..=n.max(1) {
@@ -857,7 +845,7 @@ impl<'a> NavCtx<'a> {
                 }
             }
         }
-        self.ensure_keys_within(keys.clone(), PATH_COLD_CHUNKS);
+        self.ensure_chunks(&keys);
         if keys.iter().any(|k| !self.grid.chunks.contains_key(k)) {
             return None;
         }
@@ -1314,8 +1302,18 @@ impl NavAgent {
 const WARM_CHUNKS: i32 = 3;
 /// Chunks whose ground is worked out off the main thread at once.
 const WARM_JOBS: usize = 4;
+/// Most chunks whose ground is in finished a step, and the time after which no more are
+/// started that step (a chunk's obstacles and clearance take 0.3-1 ms).
+const FINISH_PER_STEP: usize = 4;
+const FINISH_BUDGET_SECS: f64 = 0.002;
 
-/// Works out the walkable grid round awake NPCs ahead of need, nearest first, so their first
+/// Who [`warm_nav`] works the grid out round: awake fighters and animals.
+type WarmFor = (
+    Or<(With<crate::agent::Npc>, With<crate::wildlife::Animal>)>,
+    Without<crate::rest::Resting>,
+);
+
+/// Works out the walkable grid round awake NPCs and animals ahead of need, nearest first, so their first
 /// look round a new place (spots, high ground, a route) doesn't build a dozen chunks in a
 /// single step. The ground under a chunk (the slow part on real terrain) is sampled on the
 /// async pool and the chunk finished here a step or more later; without a pool, one chunk is
@@ -1326,7 +1324,7 @@ pub(crate) fn warm_nav(
     world: Res<TacticalWorld>,
     ground: Res<Ground>,
     water: Res<Water>,
-    agents: Query<&Transform, (With<crate::agent::Npc>, Without<crate::rest::Resting>)>,
+    agents: Query<(&Transform, Has<crate::wildlife::Animal>), WarmFor>,
     config: Option<Res<EngineConfig>>,
     time: Res<Time>,
 ) {
@@ -1353,12 +1351,14 @@ pub(crate) fn warm_nav(
     let pool = AsyncComputeTaskPool::try_get().filter(|_| off_the_step(config.as_deref(), &time));
     grid.warming = pool.is_some();
     let mut ctx = grid.ctx(&world, &ground, &water);
-    // Finish one chunk whose ground is ready (its obstacles and clearance are quick), one
-    // an awake NPC is near: ground kept from chunks an obstacle change dropped elsewhere
-    // waits until something needs it.
+    // Finish chunks whose ground is ready (their obstacles and clearance are quick): those
+    // asked for first, then those an awake NPC is near (ground kept from chunks an obstacle
+    // change dropped elsewhere waits until something needs it). One a step without a pool
+    // (the same every run); in play a few, while the step's budget lasts, so ground asked for
+    // by a dozen fighters waking at once is walkable within a few steps.
     let homes: Vec<(i32, i32)> = agents
         .iter()
-        .map(|t| {
+        .map(|(t, _)| {
             let (x, z) = ctx.cell_of(t.translation);
             (x.div_euclid(CHUNK), z.div_euclid(CHUNK))
         })
@@ -1375,15 +1375,24 @@ pub(crate) fn warm_nav(
         .into_iter()
         .filter(|k| !ctx.grid.chunks.contains_key(k))
         .collect();
-    let ready = ctx
-        .grid
-        .ground_wanted
-        .iter()
-        .copied()
-        .find(|k| ctx.grid.ground_ready.contains_key(k));
-    // (The lowest key, not the map's first: which chunk is built first decides paths.)
-    let near_ready = || ctx.grid.ground_ready.keys().copied().filter(near_one).min();
-    if let Some(key) = ready.or_else(near_ready) {
+    let started = std::time::Instant::now();
+    let finish = if pool.is_some() { FINISH_PER_STEP } else { 1 };
+    for _ in 0..finish {
+        if pool.is_some() && started.elapsed().as_secs_f64() > FINISH_BUDGET_SECS {
+            break;
+        }
+        let ready = ctx
+            .grid
+            .ground_wanted
+            .iter()
+            .copied()
+            .find(|k| ctx.grid.ground_ready.contains_key(k));
+        // (The lowest key, not the map's first: which chunk is built first decides paths.)
+        let near_ready = || ctx.grid.ground_ready.keys().copied().filter(near_one).min();
+        let Some(key) = ready.or_else(near_ready) else {
+            break;
+        };
+        ctx.grid.ground_wanted.retain(|k| *k != key);
         if ctx.grid.chunks.contains_key(&key) {
             ctx.grid.ground_ready.remove(&key);
         } else {
@@ -1399,20 +1408,23 @@ pub(crate) fn warm_nav(
         return;
     }
     let mut wanted: Vec<(i32, (i32, i32))> = Vec::new();
-    // What a look asked for first, then the ground round awake NPCs, nearest first.
+    // What a look asked for first, then the ground round awake NPCs, nearest first. An
+    // animal wanders and flees close by: only the chunks next to its own, after the
+    // fighters' nearest (a herd waking beside a fight mustn't hold up the fighters' ground).
     for &key in &ctx.grid.ground_wanted {
         if !ctx.grid.ground_jobs.contains_key(&key) && !ctx.grid.ground_ready.contains_key(&key) {
             wanted.push((-1, key));
         }
     }
-    for t in &agents {
+    for (t, animal) in &agents {
         let (x, z) = ctx.cell_of(t.translation);
         let (kx, kz) = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
-        for dz in -WARM_CHUNKS..=WARM_CHUNKS {
-            for dx in -WARM_CHUNKS..=WARM_CHUNKS {
-                let d2 = dx * dx + dz * dz;
+        let (reach, after) = if animal { (1, 2) } else { (WARM_CHUNKS, 0) };
+        for dz in -reach..=reach {
+            for dx in -reach..=reach {
+                let d2 = dx * dx + dz * dz + after;
                 let key = (kx + dx, kz + dz);
-                if d2 > WARM_CHUNKS * WARM_CHUNKS
+                if d2 - after > reach * reach
                     || ctx.grid.chunks.contains_key(&key)
                     || ctx.grid.ground_jobs.contains_key(&key)
                     || ctx.grid.ground_ready.contains_key(&key)
@@ -1488,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn a_look_builds_one_unsampled_chunk_and_leaves_the_rest_for_warming() {
+    fn while_warming_no_unsampled_chunk_is_built_on_the_step() {
         let (ground, water) = (Ground::default(), Water::default());
         let world = TacticalWorld::from_obstacles(Vec::new(), &ground);
         let mut grid = NavGrid {
@@ -1499,26 +1511,40 @@ mod tests {
         // Four spots in the middles of four chunks along x.
         let size = CHUNK as f64 * ctx.grid.settings.cell as f64;
         let spots = [0.5, 3.5, 6.5, 9.5].map(|k| DVec3::new(k * size, 0.0, 0.5 * size));
-        ctx.ensure_around_within(spots, 0.1, 1);
-        assert_eq!(ctx.grid.chunks.len(), 1, "one chunk sampled on the frame");
+        ctx.ensure_around(spots, 0.1);
+        assert!(ctx.grid.chunks.is_empty(), "no ground sampled on the step");
+        let key = |p: DVec3| {
+            let (x, z) = ctx.cell_of(p);
+            (x.div_euclid(CHUNK), z.div_euclid(CHUNK))
+        };
+        let keys = spots.map(key);
         assert_eq!(
-            ctx.grid.ground_wanted.len(),
-            3,
-            "the rest asked of warm_nav"
+            ctx.grid.ground_wanted,
+            keys.to_vec(),
+            "all asked of warm_nav, first asked first"
         );
-        assert!(ctx.built_around(spots[0], 0.1) && !ctx.built_around(spots[1], 0.1));
-        // Ground worked out off the frame makes a chunk cheap: the next look builds it.
-        let key = ctx.grid.ground_wanted[0];
+        // Asking there doesn't build it either: it isn't walkable until worked out.
+        assert_eq!(ctx.sample(spots[2]), (0.0, false));
+        assert!(ctx.grid.chunks.is_empty());
+        assert_eq!(ctx.grid.ground_wanted.len(), 4, "asked once");
+        // Ground worked out off the step makes a chunk cheap: the next look builds it.
         let margin = (ctx.grid.settings.agent_radius / ctx.grid.settings.cell).ceil() as i32;
         let side = (CHUNK + 2 * margin) as usize;
-        ctx.grid.ground_ready.insert(key, vec![0.0; side * side]);
-        ctx.ensure_around_within(spots, 0.1, 0);
-        assert_eq!(ctx.grid.chunks.len(), 2);
-        assert!(ctx.grid.chunks.contains_key(&key));
+        ctx.grid
+            .ground_ready
+            .insert(keys[0], vec![0.0; side * side]);
+        ctx.ensure_around(spots, 0.1);
+        assert_eq!(ctx.grid.chunks.len(), 1);
+        assert!(ctx.built_around(spots[0], 0.1) && !ctx.built_around(spots[1], 0.1));
+        assert!(ctx.sample(spots[0]).1, "open ground, walkable once built");
+        // Without warming (tests, tools) everything asked for is built at once.
+        ctx.grid.warming = false;
+        ctx.ensure_around(spots, 0.1);
+        assert!(spots.iter().all(|&p| ctx.built_around(p, 0.1)));
     }
 
     #[test]
-    fn a_far_path_builds_its_ends_and_leaves_the_ground_between_for_warming() {
+    fn while_warming_a_far_path_waits_for_its_ground_ends_first() {
         let (ground, water) = (Ground::default(), Water::default());
         let world = TacticalWorld::from_obstacles(Vec::new(), &ground);
         let mut grid = NavGrid {
@@ -1535,16 +1561,16 @@ mod tests {
         );
         let mut path = Vec::new();
         let status = ctx.find_path(from, to, &mut |_| 0.0, &mut path);
-        assert_eq!(status, PathStatus::Partial, "{path:?}");
-        assert!(ctx.built_around(from, 0.1) && ctx.built_around(to, 0.1));
-        assert!(
-            ctx.grid.chunks.len() <= 2 * PATH_COLD_CHUNKS,
-            "{} chunks built on the frame",
-            ctx.grid.chunks.len()
-        );
-        assert!(
-            !ctx.grid.ground_wanted.is_empty(),
-            "the rest asked of warm_nav"
+        assert_ne!(status, PathStatus::Complete, "{path:?}");
+        assert!(ctx.grid.chunks.is_empty(), "no ground sampled on the step");
+        let key = |p: DVec3| {
+            let (x, z) = ctx.cell_of(p);
+            (x.div_euclid(CHUNK), z.div_euclid(CHUNK))
+        };
+        assert_eq!(
+            ctx.grid.ground_wanted[..2],
+            [key(from), key(to)],
+            "the start's and the goal's ground asked for first"
         );
         // Once the ground between is worked out, the same trip is a straight walk.
         let margin = (ctx.grid.settings.agent_radius / ctx.grid.settings.cell).ceil() as i32;

@@ -1437,6 +1437,14 @@ fn pick_spot(
         ..
     } = w;
     let mut navctx = grid.ctx(world, ground, water);
+    // Arriving somewhere new, the ground round us and the enemy is worked out off the step
+    // first (`nav::NavCtx::ensure_around`): look again in a moment rather than weighing spots
+    // on ground that isn't walkable yet and settling on none for seconds.
+    navctx.ensure_around([pos, target_pos], 1.5);
+    if !navctx.built_around(pos, 1.5) || !navctx.built_around(target_pos, 1.5) {
+        brain.next_position = now + 0.1;
+        return;
+    }
     let mut ctx = TacticsCtx {
         sight: Sight {
             world,
@@ -1476,7 +1484,13 @@ fn pick_spot(
         NpcAction::Flank => 3.0,
         _ => 2.0,
     } * (0.8 + 0.4 * brain.random() as f64);
-    brain.next_position = now + settle;
+    // Nothing found while the ground round the enemy is still being worked out: look
+    // again soon, not after settling.
+    brain.next_position = if chosen.is_none() && ctx.nav.warming() {
+        now + 0.25
+    } else {
+        now + settle
+    };
     if let Some(spot) = chosen.filter(|_| going_round) {
         // Round to the flank with the squad: a way out of the enemy's sight, taken from cover
         // to cover in turns (see `bound`).

@@ -583,6 +583,7 @@ impl TacticalWorld {
     pub(crate) fn shift(&mut self, s: &WorldShift) {
         if self.generation == 0 {
             self.epoch += 1; // not built yet: the first build happens in the new frame
+            self.forget_ground(); // ground sampled in the old frame is somewhere else now
             return;
         }
         for o in &mut self.obstacles {
@@ -1283,6 +1284,8 @@ pub(crate) struct PendingBuild {
     slot: Option<Arc<Mutex<Option<TacticalWorld>>>>,
     /// `TacticalWorld::epoch` when its obstacles were collected.
     epoch: u64,
+    /// `TacticalWorld::ground_generation` then (the ground it cached may be older).
+    ground_generation: u64,
     /// Ground edits made while it builds, applied once it is in.
     regions: Vec<(DVec2, DVec2)>,
 }
@@ -1349,9 +1352,17 @@ pub(crate) fn rebuild_world_model(
         if pending.epoch != model.epoch {
             model.rebuild = true; // the world shifted while it built: start again
         } else {
+            // The ground is the ground: what navigation sampled of it (the slow part of a nav
+            // chunk) still holds, unless it changed while this built. Bumping it on every
+            // rebuild threw away all ground sampled ahead, round the arrival at a zone too.
+            let ground_changed = pending.ground_generation != model.ground_generation;
             built.generation = model.generation + 1;
-            built.ground_generation = model.ground_generation + 1;
+            built.ground_generation = model.ground_generation;
+            built.ground_changes = std::mem::take(&mut model.ground_changes);
             built.epoch = model.epoch;
+            if ground_changed {
+                built.forget_ground(); // its cached heights may be from before
+            }
             *model = built;
             regions = std::mem::take(&mut pending.regions);
             poll = true; // catch up with colliders that changed while it built
@@ -1383,14 +1394,17 @@ pub(crate) fn rebuild_world_model(
             *pending = PendingBuild {
                 slot: Some(slot),
                 epoch,
+                ground_generation: model.ground_generation,
                 regions,
             };
             return;
         }
-        let ground_generation = model.ground_generation + 1;
+        let ground_generation = model.ground_generation;
+        let ground_changes = std::mem::take(&mut model.ground_changes);
         *model = TacticalWorld::from_obstacles(obstacles, &ground);
         model.generation = generation;
         model.ground_generation = ground_generation;
+        model.ground_changes = ground_changes;
         model.epoch = epoch;
         return;
     }

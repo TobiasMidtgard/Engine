@@ -174,10 +174,6 @@ pub struct TacticsCtx<'a, 'b> {
     pub heat: &'a HeatField,
 }
 
-/// Chunks of ground nobody has sampled yet that one [`choose_position`] look builds; the rest
-/// wait for `warm_nav` (one such chunk costs ~10-15 ms on the VM).
-const COLD_CHUNKS_PER_LOOK: usize = 1;
-
 /// Pick the best reachable spot. Writes the path to it into `path` (so the caller can follow
 /// it without searching again). `scored` receives the top candidates for debugging.
 pub fn choose_position(
@@ -265,9 +261,9 @@ pub fn choose_position(
     drop(_high_span);
 
     // The ground under every spot, worked out at once (snapping each below would build its
-    // chunk alone, one after another), with the snap's reach around it. Where we stand and
-    // where we're going always; of ground nobody has sampled yet only a chunk or two a look,
-    // the rest is sampled off the main thread and its spots weighed on a later look.
+    // chunk alone, one after another), with the snap's reach around it. In play, ground
+    // nobody has sampled yet is sampled off the main thread first (where we stand and where
+    // we're going asked for first) and its spots weighed on a later look.
     let ground_span = tracing::info_span!("choose position: ground").entered();
     ctx.nav.ensure_around(
         raw.iter()
@@ -275,8 +271,7 @@ pub fn choose_position(
             .map(|r| r.0),
         1.5,
     );
-    ctx.nav
-        .ensure_around_within(raw.iter().map(|r| r.0), 1.5, COLD_CHUNKS_PER_LOOK);
+    ctx.nav.ensure_around(raw.iter().map(|r| r.0), 1.5);
     drop(ground_span);
     // Snap every spot onto the walkable surface (the nav grid, so one after another), then
     // weigh them side by side on the leaf pool: each spot's sight lines are a physics ray and
