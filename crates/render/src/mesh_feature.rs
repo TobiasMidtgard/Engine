@@ -171,6 +171,23 @@ const SLOT_USE: [TextureUse; TEXTURE_SLOTS] = [
     TextureUse::Red,
     TextureUse::Red,
 ];
+/// How `slot` of a material whose slots hold the images `images` reads its image: as
+/// [`SLOT_USE`] says, but a red-only slot whose image the material also reads whole (occlusion
+/// in the red of its metallic-roughness map, the usual packing) reads that copy's red. Asked
+/// for as [`TextureUse::Red`] the image would go to the GPU a second time, as a one-channel
+/// copy beside the full one.
+fn slot_use<T: PartialEq>(images: &[Option<T>; TEXTURE_SLOTS], slot: usize) -> TextureUse {
+    let whole = |other: usize| {
+        other != slot && SLOT_USE[other] == TextureUse::Linear && images[other] == images[slot]
+    };
+    if SLOT_USE[slot] == TextureUse::Red && images[slot].is_some() && (0..TEXTURE_SLOTS).any(whole)
+    {
+        TextureUse::Linear
+    } else {
+        SLOT_USE[slot]
+    }
+}
+
 /// Default 1×1 textures: white base color, flat normal, neutral metallic/roughness (factors
 /// pass through), black emissive, white (unoccluded) AO, height at the top (no parallax).
 const DEFAULT_TEXELS: [[u8; 4]; TEXTURE_SLOTS] = [
@@ -2560,7 +2577,8 @@ impl MeshFeature {
                     continue;
                 }
             }
-            if let Some(texture) = gpu.image_texture_for(images, *handle, SLOT_USE[slot]) {
+            let usage = slot_use(&handles.map(|h| h.map(|h| h.index())), slot);
+            if let Some(texture) = gpu.image_texture_for(images, *handle, usage) {
                 bound[slot] = Some(Bound::Image(texture.id));
                 textures[slot] = Some(texture);
             }
@@ -4958,6 +4976,22 @@ impl RenderFeature for MeshFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_red_slot_reads_the_whole_copy_of_an_image_the_material_also_reads_whole() {
+        // Slots: base color, normal, metallic-roughness, emissive, occlusion, height.
+        let packed = [Some(1), Some(2), Some(3), None, Some(3), Some(4)];
+        assert_eq!(slot_use(&packed, 4), TextureUse::Linear);
+        assert_eq!(slot_use(&packed, 5), TextureUse::Red);
+        assert_eq!(slot_use(&packed, 2), TextureUse::Linear);
+        assert_eq!(slot_use(&packed, 0), TextureUse::Color);
+        // Its own image, the color map's image (another color space), or none: as before.
+        let own = [Some(1), None, Some(3), None, Some(5), Some(1)];
+        assert_eq!(slot_use(&own, 4), TextureUse::Red);
+        assert_eq!(slot_use(&own, 5), TextureUse::Red);
+        let none: [Option<u32>; TEXTURE_SLOTS] = [None; TEXTURE_SLOTS];
+        assert_eq!(slot_use(&none, 4), TextureUse::Red);
+    }
 
     /// Other crates bind `MeshInstance::layout()` next to their own vertex data at locations 11
     /// and up (the skinning feature does), so the shared layout must stay at 4–10.

@@ -226,6 +226,74 @@ fn material_images_compress_and_look_the_same() {
     assert!(max < 24, "a pixel changed a lot: {max}");
 }
 
+/// A quad whose metallic-roughness map also holds its occlusion in red (the usual packing),
+/// drawn until its maps are compressed. `shared`: the material names one image for both
+/// slots; else the occlusion slot gets its own image with the same pixels.
+fn packed_scene(shared: bool, name: &str) -> Option<(App, RgbaImage)> {
+    let mut app = still_app(TextureCompression::Quality);
+    let color = add(&mut app, photo(256));
+    let packed = || {
+        let mut image = Image::from_fn(256, 256, false, |x, y| {
+            // Occlusion in soft blotches, roughness in stripes, a metal patch.
+            let (u, v) = (x as f32 / 256.0, y as f32 / 256.0);
+            let occlusion = 150.0 + 100.0 * (u * 9.0).sin() * (v * 7.0).cos();
+            let roughness = 90.0 + 120.0 * ((x / 16) % 2) as f32 + ((x * 5 + y * 3) % 11) as f32;
+            let metal = if (x / 64 + y / 64) % 2 == 0 { 255 } else { 0 };
+            [occlusion as u8, roughness as u8, metal, 255]
+        });
+        image.generate_mips();
+        image
+    };
+    let orm = add(&mut app, packed());
+    let occlusion = if shared { orm } else { add(&mut app, packed()) };
+    let mut material = StandardMaterial::color(1.0, 1.0, 1.0)
+        .with_base_color_texture(color)
+        .with_metallic_roughness_texture(orm);
+    material.occlusion_texture = Some(occlusion);
+    app.world.spawn((
+        Transform::default(),
+        MeshRenderer::new(Shape::Quad { size: [2.0, 2.0] }, material),
+    ));
+    if !run(&mut app, 4, name) || !bc_supported(&app) {
+        return None;
+    }
+    let maps = if shared { 2 } else { 3 };
+    let mut frames = 0;
+    while cache(&app).compressed < maps && frames < 2000 {
+        app.update();
+        frames += 1;
+    }
+    // The compressed copies are bound at the next material check.
+    app.update_n(70);
+    let shot = shot(&mut app, name);
+    Some((app, shot))
+}
+
+#[test]
+fn an_occlusion_map_packed_with_roughness_goes_to_the_gpu_once() {
+    let Some((split_app, split)) = packed_scene(false, "packed_split") else {
+        return;
+    };
+    let Some((shared_app, shared)) = packed_scene(true, "packed_shared") else {
+        return;
+    };
+    let (split_stats, shared_stats) = (cache(&split_app), cache(&shared_app));
+    eprintln!("split {split_stats:?}\nshared {shared_stats:?}");
+    // Color and the packed map, each once; the split scene adds a one-channel occlusion map.
+    assert_eq!(
+        (shared_stats.uploads, shared_stats.compressed),
+        (2, 2),
+        "the packed map went up or was compressed more than once: {shared_stats:?}"
+    );
+    assert_eq!((split_stats.uploads, split_stats.compressed), (3, 3));
+    // Occlusion read from the full copy's red looks like occlusion read from its own map.
+    let (mean, max) = difference(&split, &shared);
+    eprintln!("occlusion from the packed map vs its own: mean {mean:.3}, max {max}");
+    // Measured: mean 0.35, largest 2 (BC7's red against BC4's).
+    assert!(mean < 0.7, "the picture changed: mean {mean}");
+    assert!(max < 6, "a pixel changed a lot: {max}");
+}
+
 /// A wall of generated brick beside one of generated rock, drawn until their maps are
 /// compressed and bound (or for as many frames when nothing is to be compressed).
 fn preset_scene(compression: TextureCompression, name: &str) -> Option<(App, RgbaImage)> {

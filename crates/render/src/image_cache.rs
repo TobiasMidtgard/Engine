@@ -663,6 +663,15 @@ impl ImageCache {
             (Some((plan, encoding)), Some(_)) => Some(cache_key(image, srgb, *encoding, *plan)),
             _ => None,
         };
+        // For finding the same picture uploaded as several images (`RUST_LOG` with
+        // `engine_render::image_cache=debug`): equal keys are equal pixels.
+        if let Some((a, b)) = key {
+            tracing::debug!(
+                "image {index}: {}x{} as {usage:?} slot {slot} key {a:016x}{b:016x}",
+                image.width,
+                image.height
+            );
+        }
         let from_disk = match (&planned, &disk, key) {
             (Some((plan, encoding)), Some(disk), Some(key)) => {
                 let _span = crate::perf::HitchStep::new("images: upload");
