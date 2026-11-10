@@ -62,6 +62,7 @@ impl Plugin for SoftBodyPlugin {
             .init_resource::<systems::SurfaceSeen>()
             .init_resource::<systems::FrameShift>()
             .init_resource::<coat::CoatGrooms>()
+            .init_resource::<coat::PieceGrooms>()
             .init_resource::<gpu_cloth::GpuClothShift>()
             .register_resource::<SoftBodyConfig>(
                 "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier), beside_frame (heavy bodies solved beside the frame, a step behind; null = in play only).",
@@ -144,7 +145,7 @@ impl Plugin for SoftBodyPlugin {
             // propagate, beside the rest of the frame.
             .add_systems(
                 PostUpdate,
-                (strand_draw::draw_strands, coat::draw_coats)
+                (strand_draw::draw_strands, coat::draw_coats, coat::draw_piece_coats)
                     .after(engine_world::WorldShiftSet::Apply)
                     .before(UpdateSet::Propagate),
             )
