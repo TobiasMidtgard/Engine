@@ -305,6 +305,13 @@ pub struct MagicQueue {
     pub hedges: Vec<crate::wilds::NewHedge>,
     pub barks: Vec<crate::wilds::NewBark>,
     pub root_burns: Vec<Entity>,
+    /// Bone (bones.rs): prisons to close over bodies, bodies whose prison a heavy blow
+    /// shattered, bone spikes across areas, ribcages along walls, armour over bodies.
+    pub cages: Vec<crate::bones::NewCage>,
+    pub cage_breaks: Vec<Entity>,
+    pub spikes: Vec<crate::wilds::NewPatch>,
+    pub ribcages: Vec<crate::wilds::NewHedge>,
+    pub armours: Vec<crate::bones::NewArmour>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -2717,13 +2724,24 @@ pub fn flush(
                 if m.cast.spell.payload.demons > 0 {
                     ec.insert(crate::demons::MeteorRide::default());
                 }
+                // A bone spear is drawn on the missile, its dust a faint trail (bones.rs).
+                let spear = m.cast.spell.payload.spear;
+                if spear {
+                    ec.insert(crate::bones::SpearRide::default());
+                }
                 looks.push(LookCmd::Attach {
                     entity: id,
                     look: m.cast.spell.weave.key.clone(),
                     role: Role::Bolt,
                     scale: (m.cast.spell.carrier.radius / 0.16 * m.cast.scale.sqrt())
                         .clamp(0.2, 30.0)
-                        * if blade { 0.5 } else { 1.0 },
+                        * if blade {
+                            0.5
+                        } else if spear {
+                            0.3
+                        } else {
+                            1.0
+                        },
                     color: m.cast.spell.weave.color,
                     power_j: m.cast.spell.power.energy_j as f32 * m.cast.scale,
                 });
@@ -2733,18 +2751,39 @@ pub fn flush(
                 // Living wood sends free roots up across an area's ground (wilds.rs), or grows
                 // a thorn hedge along a wall instead of the wall's look.
                 let wild = f.cast.spell.payload.roots_secs > 0.0;
-                if wild
+                // Bone sends spikes up across an area's ground instead (bones.rs).
+                let bone = f.cast.spell.payload.prison_secs > 0.0;
+                if (wild || bone)
                     && matches!(f.kind, FieldKind::Burst | FieldKind::Lasting)
                     && f.cone.is_none()
                     && f.wall.is_none()
                     && f.follow.is_none()
                     && f.wave.is_none()
                 {
-                    queue.patches.push(crate::wilds::NewPatch {
+                    let p = crate::wilds::NewPatch {
                         cast: f.cast.clone(),
                         at: pos,
                         radius: f.radius,
+                    };
+                    if bone {
+                        queue.spikes.push(p);
+                    } else {
+                        queue.patches.push(p);
+                    }
+                }
+                // A ribcage stands along a bone wall instead of the wall's look.
+                if f.cast.spell.payload.ribcage
+                    && let Some((along, half)) = f.wall
+                {
+                    queue.ribcages.push(crate::wilds::NewHedge {
+                        cast: f.cast.clone(),
+                        field: id,
+                        at: pos,
+                        along,
+                        half,
                     });
+                    ec.insert(f);
+                    continue;
                 }
                 if f.cast.spell.payload.hedge
                     && let Some((along, half)) = f.wall

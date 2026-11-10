@@ -549,6 +549,10 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
         // Living wood breaks out of the ground: stone's look (dust, grit, clods) in the soil's
         // brown (wilds.rs), not the Life domain's green mist.
         ("stone".to_string(), name, crate::wilds::SOIL)
+    } else if ingredients.iter().any(|k| k == "bone") && elements.is_empty() {
+        // Bone out of the ground: the bones look (splinters and grave dust; stone's until vfx
+        // has its own) in old ivory (bones.rs).
+        ("bones".to_string(), name, crate::bones::BONE_DUST)
     } else if ingredients.iter().any(|k| k == "raise") && elements.is_empty() {
         // Raising the dead is dark: it looks like shadow, in the grave's violet, not like the
         // green of the Life domain its dials sit in (a bone blade's cut would puff green).

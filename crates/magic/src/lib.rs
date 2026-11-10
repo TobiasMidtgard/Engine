@@ -6,7 +6,7 @@
 //! |---|---|
 //! | [`dials`] | the seven domains and fourteen poles every effect is made of |
 //! | [`schools`] | elements, statuses, classes and subclasses, mastery tiers, power |
-//! | [`effects`] | the 33 effects |
+//! | [`effects`] | the 34 effects |
 //! | [`design`] | `SpellDesign`: effects + cast type + modifiers + stages, as JSON |
 //! | [`combine`] | the combination table and the systemic fallback |
 //! | [`compile`] | from a design and a caster to the numbers a spell flies with |
@@ -28,6 +28,9 @@
 //! | [`demons`] | a pact's demons: hellgates, demonic meteors, imps and hellhounds |
 //! | [`wilds`] | living wood: roots that burst up and hold, seeds, thorn hedges, bark skin, treants |
 //! | [`wilds_art`] | bark roots, thorns and leaves made in code |
+//! | [`bones`] | bone out of the ground: prisons of ribs, bone spears, ribcage walls, bone armour |
+//! | [`dragon`] | the bone dragon: its bones fly together, it flies, breathes grave frost, lands and bites |
+//! | [`bone_art`] | bone, ribs and torn wing membrane made in code |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
 //! | [`crafter`] | the Spellcrafter: an altar where you build a spell in four steps, see its cost, watch it fly at a dummy and put it on a key |
@@ -40,6 +43,8 @@
 
 pub mod api;
 pub mod blades;
+pub mod bone_art;
+pub mod bones;
 pub mod caster;
 pub mod cataclysm;
 pub mod chains;
@@ -50,6 +55,7 @@ pub mod demo;
 pub mod demons;
 pub mod design;
 pub mod dials;
+pub mod dragon;
 pub mod effects;
 pub mod growth;
 pub mod hits;
@@ -174,6 +180,7 @@ impl Plugin for MagicPlugin {
                     minds::draw_threads,
                     demons::dress_demons,
                     wilds::dress_wilds,
+                    dragon::dress_dragons,
                 )
                     .chain(),
             )
@@ -222,6 +229,13 @@ impl Plugin for MagicPlugin {
                     )
                         .chain(),
                     (wilds::spawn_wilds, wilds::burn_hedges, wilds::run_wilds).chain(),
+                    (
+                        bones::spawn_bones,
+                        bones::run_bones,
+                        bones::ride_spears,
+                        bones::run_spears,
+                    )
+                        .chain(),
                 )
                     .chain()
                     .in_set(MagicSet::Carriers),
@@ -255,6 +269,7 @@ impl Plugin for MagicPlugin {
                     runtime::sync_transforms,
                     blades::hold_blades,
                     wilds::hold_bark,
+                    bones::hold_armour,
                 )
                     .before(UpdateSet::Propagate),
             )
@@ -282,16 +297,19 @@ impl Plugin for MagicPlugin {
         chains::register(app);
         demons::register(app);
         wilds::register(app);
+        bones::register(app);
+        dragon::register(app);
         demo::build(app);
     }
 }
 
 /// The pictures and meshes magic makes in code (a hellgate's vortex and hellstone cracks, an
-/// imp's wing, the Wilds' leaf cluster), made once at startup rather than in the frame the first
+/// imp's wing, the Wilds' leaf cluster, the bone dragon's torn wings), made once at startup rather than in the frame the first
 /// gate or leaf appears: the leaf picture alone took 60 ms on the build server, a stutter.
 fn paint_pictures(
     mut wilds: ResMut<wilds::WildsMeshes>,
     mut demons: ResMut<demons::DemonMeshes>,
+    mut dragons: ResMut<dragon::DragonMeshes>,
     images: Option<ResMut<engine_assets::Assets<engine_render::Image>>>,
     meshes: Option<ResMut<engine_assets::Assets<engine_render::Mesh>>>,
 ) {
@@ -304,5 +322,6 @@ fn paint_pictures(
         wilds.card(&mut meshes);
         demons.wing(&mut meshes);
         demons.disc(&mut meshes);
+        dragons.ready(&mut meshes);
     }
 }

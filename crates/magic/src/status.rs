@@ -145,6 +145,13 @@ pub struct Afflictions {
     pub tangled: f32,
     /// Seconds left under bark skin (wilds.rs): it takes a share off the harm.
     pub bark: f32,
+    /// Seconds left caged in a prison of ribs or snagged in a ribcage (bones.rs; a heavy blow
+    /// shatters a prison, fire does nothing to bone).
+    pub caged: f32,
+    /// The side whose prison holds it (its own blows don't break it).
+    pub caged_by: Option<u32>,
+    /// Seconds left in bone armour (bones.rs): it takes a share off weapon blows.
+    pub armour: f32,
     /// Who last hurt it (damage over time is theirs).
     #[serde(skip)]
     pub source: Option<Entity>,
@@ -452,6 +459,8 @@ impl Afflictions {
         self.bound = (self.bound - dt).max(0.0);
         self.tangled = (self.tangled - dt).max(0.0);
         self.bark = (self.bark - dt).max(0.0);
+        self.caged = (self.caged - dt).max(0.0);
+        self.armour = (self.armour - dt).max(0.0);
         if self.ward_secs > 0.0 {
             self.ward_secs -= dt;
             if self.ward_secs <= 0.0 {
@@ -511,7 +520,7 @@ impl Afflictions {
             rot: dot_level(&self.rot),
             // Three seconds of terror is full fright.
             dread: (self.dread / 3.0).clamp(0.0, 1.0),
-            rooted: self.rooted > 0.0 || self.bound > 0.0 || self.tangled > 0.0,
+            rooted: self.rooted > 0.0 || self.bound > 0.0 || self.tangled > 0.0 || self.caged > 0.0,
             staggered: self.staggered > 0.0,
             shielding: self.shielding > 0.0,
             veil: self.veil_shown,

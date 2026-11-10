@@ -166,6 +166,16 @@ pub struct Payload {
     pub hedge: bool,
     /// Seconds bark covers the caster (wilds.rs; 0: none).
     pub bark_secs: f32,
+    /// Seconds a prison of ribs holds a body it closes over (bones.rs; 0: none).
+    pub prison_secs: f32,
+    /// A spear of bone that pierces every body in its line and sticks where it lands (bones.rs).
+    pub spear: bool,
+    /// A ribcage stands along the wall (bones.rs).
+    pub ribcage: bool,
+    /// Seconds bone armour covers the caster (bones.rs; 0: none).
+    pub armour_secs: f32,
+    /// A summon of it raises a bone dragon (dragon.rs).
+    pub bone_dragon: bool,
     /// A light it leaves, lumens.
     pub light_lm: f32,
     /// Flame temperature for igniting fuel, °C (0: doesn't ignite).
@@ -196,6 +206,8 @@ impl Payload {
             || self.wrath_secs > 0.0
             || self.roots_secs > 0.0
             || self.hedge
+            || self.prison_secs > 0.0
+            || self.ribcage
     }
 }
 
@@ -352,6 +364,12 @@ fn compile_inner(
         .ingredients
         .iter()
         .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Wilds)));
+    // Bone out of the ground (Necromancy's Undeath, bones.rs).
+    let bone = w
+        .ingredients
+        .iter()
+        .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Bone)));
+    let spear = bone && matches!(cast, CastType::Bolt | CastType::Lob);
     let mods = &design.modifiers;
     let factor = |f: &dyn Fn(&Modifier) -> Option<f32>| -> f32 {
         mods.iter().filter_map(f).product::<f32>().max(0.05)
@@ -455,11 +473,13 @@ fn compile_inner(
         } else {
             0.0
         },
+        // A bone spear goes through every body in its line.
         pierce: count_of(&|m| match m {
             Modifier::Pierce { count } => Some(*count),
             _ => None,
         })
-        .unwrap_or(0),
+        .unwrap_or(0)
+        .max(if spear { crate::bones::SPEAR_PIERCE } else { 0 }),
         bounce: count_of(&|m| match m {
             Modifier::Bounce { count } => Some(*count),
             _ => None,
@@ -555,6 +575,16 @@ fn compile_inner(
         } else if wild && !harm && cast == CastType::Wall {
             // A hedge's thorns scratch on each tick (its damage is per tick, two a second).
             ctx.power.damage() * 0.035 * strength
+        } else if spear && !harm {
+            // A bone spear runs through whatever stands in its line, each body in turn: a
+            // little less than a bolt that stops at the first.
+            ctx.power.damage() * 0.75 * cast.strength() * strength * spread
+        } else if bone && !harm && crate::bones::prison_holds(cast) {
+            // The ribs' points bite as they close; the hold is the point.
+            ctx.power.damage() * 0.2 * cast.strength() * strength * spread
+        } else if bone && !harm && cast == CastType::Wall {
+            // A ribcage's points snag and scratch what pushes through (per tick).
+            ctx.power.damage() * 0.03 * strength
         } else {
             0.0
         };
@@ -618,7 +648,7 @@ fn compile_inner(
             DamageKind::Slash
         } else if demon && w.elements.is_empty() {
             DamageKind::Fire
-        } else if wild && w.elements.is_empty() {
+        } else if (wild || bone) && w.elements.is_empty() {
             DamageKind::Pierce
         } else {
             damage_kind(&w)
@@ -841,6 +871,20 @@ fn compile_inner(
         } else {
             0.0
         },
+        // A prison holds 4 s (a little more with power), more with Duration.
+        prison_secs: if bone && crate::bones::prison_holds(cast) {
+            (4.0 * duration_k * (0.85 + 0.15 * size)).clamp(1.5, 15.0)
+        } else {
+            0.0
+        },
+        spear,
+        ribcage: bone && cast == CastType::Wall,
+        armour_secs: if bone && cast == CastType::OnSelf {
+            (20.0 * duration_k).clamp(4.0, 90.0)
+        } else {
+            0.0
+        },
+        bone_dragon: bone && cast == CastType::Summon,
         light_lm: if has(&|k| matches!(k, EffectKind::Light)) {
             4000.0 * size
         } else {

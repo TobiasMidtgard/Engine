@@ -525,6 +525,7 @@ pub fn auto_name(design: &SpellDesign, spell: Option<&Spell>) -> String {
                 Some(MinionKind::Imp) => "Imps".into(),
                 Some(MinionKind::Hellhound) => "Hellhounds".into(),
                 Some(MinionKind::Treant) => "Treant".into(),
+                Some(MinionKind::BoneDragon) => "Bone dragon".into(),
                 None => format!("{} familiar", w.name),
             };
         }

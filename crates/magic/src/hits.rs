@@ -16,8 +16,8 @@ use engine_world::physics::{
     QueryFilter, RigidBody,
 };
 use engine_world::{
-    Combustible, DamageEvent, Died, Faction, Factions, FreezeRequest, Gravity, Ground, GrowthPulse,
-    IgniteRequest, MindEffect, MindKind, NoiseEvent, SmokeEmission, WorldImpulse,
+    Combustible, DamageEvent, DamageKind, Died, Faction, Factions, FreezeRequest, Gravity, Ground,
+    GrowthPulse, IgniteRequest, MindEffect, MindKind, NoiseEvent, SmokeEmission, WorldImpulse,
 };
 
 use crate::caster::{MagicCaster, Vitality};
@@ -354,6 +354,44 @@ pub fn apply_hits(
                     secs,
                 });
             }
+            // Bone (bones.rs): ribs close over a body and cage it, and a heavy blow from anyone
+            // but its jailers' side (blunt, or a shove) shatters the prison; a ribcage snags
+            // what pushes through it; armour grows over its caster.
+            let blow = p.damage_kind == DamageKind::Blunt && base_damage > 0.0
+                || p.force
+                    .is_some_and(|(_, i)| i * scale >= crate::bones::SHATTER_IMPULSE);
+            if aff.caged > 0.0
+                && p.prison_secs <= 0.0
+                && !p.ribcage
+                && !h.multi
+                && blow
+                && aff.caged_by != Some(h.cast.side)
+            {
+                aff.caged = aff.caged.min(0.05);
+                queue.cage_breaks.push(t);
+            } else if p.prison_secs > 0.0 && !h.cast.reaction && !friend {
+                let secs = p.prison_secs * scale.clamp(0.5, 1.5);
+                queue.cages.push(crate::bones::NewCage {
+                    cast: h.cast.clone(),
+                    target: t,
+                    secs,
+                });
+                aff.caged = aff.caged.max(secs);
+                aff.caged_by = Some(h.cast.side);
+            }
+            if p.ribcage && !friend {
+                aff.caged = aff.caged.max(crate::bones::RIBCAGE_SNAG);
+                aff.caged_by = Some(h.cast.side);
+            }
+            if p.armour_secs > 0.0 && !h.multi {
+                let secs = p.armour_secs * scale.clamp(0.5, 1.5);
+                aff.armour = aff.armour.max(secs);
+                queue.armours.push(crate::bones::NewArmour {
+                    cast: h.cast.clone(),
+                    target: t,
+                    secs,
+                });
+            }
             if p.fear_secs > 0.0 && base_damage <= 0.0 {
                 aff.dread = aff.dread.max(p.fear_secs);
             }
@@ -433,6 +471,15 @@ pub fn apply_hits(
                     } else {
                         crate::wilds::BARK_SHARE
                     };
+            }
+            // Bone armour turns weapons: a share off cuts, stabs and blows.
+            if aff.armour > 0.0
+                && matches!(
+                    p.damage_kind,
+                    DamageKind::Slash | DamageKind::Pierce | DamageKind::Blunt
+                )
+            {
+                damage *= 1.0 - crate::bones::ARMOUR_SHARE;
             }
             // A hard blow shakes off terror (WoW's fear breaks past a share of health): a
             // fifth of the body's health in one hit, from anything but the terror itself.

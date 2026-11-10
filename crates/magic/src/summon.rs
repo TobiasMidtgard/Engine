@@ -66,6 +66,9 @@ pub enum MinionKind {
     /// A walking tree that guards and smashes; its slam roots what it strikes (Vitalism's
     /// Wilds, wilds.rs). It walks and fights as a golem does.
     Treant,
+    /// Bone cast as a summon (dragon.rs): a dragon of bones that flies a circle over its foes
+    /// breathing grave frost, lands, bites and sweeps its tail.
+    BoneDragon,
 }
 
 impl MinionKind {
@@ -99,7 +102,9 @@ impl MinionKind {
 
 /// The creature a summon spell makes, or None (it casts as an area, as before).
 pub fn kind_of(spell: &Spell) -> Option<MinionKind> {
-    if spell.payload.roots_secs > 0.0 && spell.cast == CastType::Summon {
+    if spell.payload.bone_dragon && spell.cast == CastType::Summon {
+        Some(MinionKind::BoneDragon)
+    } else if spell.payload.roots_secs > 0.0 && spell.cast == CastType::Summon {
         Some(MinionKind::Treant)
     } else if spell.payload.stone_m > 0.0 {
         // With raise, the bone golem.
@@ -125,6 +130,10 @@ pub fn kind_of(spell: &Spell) -> Option<MinionKind> {
 pub fn limit(kind: MinionKind, mastery: Mastery) -> usize {
     if kind.demon() {
         return crate::demons::limit(kind, mastery);
+    }
+    if kind == MinionKind::BoneDragon {
+        // One dragon, whatever the mastery: it is the summon's whole power.
+        return 1;
     }
     if kind.skeletal() {
         match mastery {
@@ -400,6 +409,7 @@ pub fn weapon_parts(kind: MinionKind) -> &'static [usize] {
         MinionKind::Elemental | MinionKind::Wisp => &[0],
         MinionKind::Imp => &[crate::demons::IMP_FIRE],
         MinionKind::Hellhound => &[crate::demons::HOUND_JAW],
+        MinionKind::BoneDragon => &[crate::dragon::JAW],
     }
 }
 
@@ -672,6 +682,9 @@ pub fn attacks(kind: MinionKind, spell: &Spell, k: f32) -> (Arc<Spell>, Option<A
     if kind.demon() {
         return (crate::demons::attacks(kind, spell, k), None);
     }
+    if kind == MinionKind::BoneDragon {
+        return crate::dragon::attacks(spell, k);
+    }
     let blow = |dir: ForceDir, impulse: f32, damage: f32| {
         let mut s = spell.clone();
         s.cast = CastType::Touch;
@@ -703,7 +716,9 @@ pub fn attacks(kind: MinionKind, spell: &Spell, k: f32) -> (Arc<Spell>, Option<A
         // A bone blade's cut: quick, light, a little push. One skeleton is weak (Diablo IV's
         // minions take about 30% of their master's strength); a pack is not.
         MinionKind::Skeleton => (blow(ForceDir::Away, 90.0, 0.3), None),
-        MinionKind::Imp | MinionKind::Hellhound => unreachable!("demons are made above"),
+        MinionKind::Imp | MinionKind::Hellhound | MinionKind::BoneDragon => {
+            unreachable!("demons and dragons are made above")
+        }
         MinionKind::Elemental | MinionKind::SkeletalMage => {
             let keys: Vec<&str> = spell.weave.elements.iter().map(|e| e.key()).collect();
             let bolt = compile(
@@ -804,6 +819,8 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     let spell = m.cast.spell.clone();
     let k = if m.kind == MinionKind::Treant {
         crate::wilds::treant_size(&spell, m.cast.scale)
+    } else if m.kind == MinionKind::BoneDragon {
+        crate::dragon::dragon_size(&spell, m.cast.scale)
     } else {
         size_of(&spell, m.cast.scale)
     };
@@ -833,6 +850,11 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         // Out of a crater or a gate, flying.
         MinionKind::Imp => (m.at + DVec3::Y * 1.2, crate::demons::IMP_HEALTH * k),
         MinionKind::Hellhound => (m.at, crate::demons::HOUND_HEALTH * k),
+        // Its middle stands over the floor; its bones lie in the floor until they fly up.
+        MinionKind::BoneDragon => (
+            m.at + DVec3::Y * (crate::dragon::STAND_H * k) as f64,
+            crate::dragon::HEALTH * k,
+        ),
     };
     // A walker climbs out of the floor: it starts below it.
     let start = if m.kind.walks() {
@@ -851,6 +873,7 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         MinionKind::SkeletalMage => "Skeletal mage",
         MinionKind::Imp => "Imp",
         MinionKind::Hellhound => "Hellhound",
+        MinionKind::BoneDragon => "Bone dragon",
     };
     let root = commands
         .spawn((
@@ -875,7 +898,9 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     if let Some(f) = m.cast.faction {
         commands.entity(root).insert(f);
     }
-    if health > 0.0 {
+    // A bone dragon is no body to strike until its bones are together (dragon.rs gives it its
+    // health then).
+    if health > 0.0 && m.kind != MinionKind::BoneDragon {
         commands.entity(root).insert(Vitality::new(health));
     }
     let mut parts = Vec::new();
@@ -1006,6 +1031,14 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
                 });
             }
         }
+        MinionKind::BoneDragon => {
+            crate::dragon::build(commands, root, k, seed, &mut parts);
+            commands.entity(root).insert(crate::dragon::Dragon::new(
+                crate::dragon::breath(&spell, k),
+                k,
+                seed,
+            ));
+        }
         MinionKind::Wisp => {
             part(commands, 0, Vec3::ZERO, glow(0.22, color, 120.0));
             for i in 0..3 {
@@ -1024,7 +1057,7 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     looks.push(LookCmd::Burst {
         at: m.at,
         up: Vec3::Y,
-        look: if bone || m.kind.skeletal() {
+        look: if bone || m.kind.skeletal() || m.kind == MinionKind::BoneDragon {
             "raise".into()
         } else if m.kind.demon() {
             "fire".into()
@@ -1035,7 +1068,7 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         },
         role: Role::Impact,
         scale: 1.2 * k,
-        color: if bone || m.kind.skeletal() {
+        color: if bone || m.kind.skeletal() || m.kind == MinionKind::BoneDragon {
             crate::undead::GRAVE_DUST
         } else {
             spell.weave.color
@@ -1134,6 +1167,7 @@ pub fn run_minions(
         Option<&crate::status::Afflictions>,
         Has<crate::minds::Commanded>,
         Option<&crate::blades::Imbued>,
+        Option<&mut crate::dragon::Dragon>,
     )>,
     bodies: Query<(Entity, &GlobalTransform, &Vitality, Allegiance)>,
     creatures: Query<
@@ -1158,7 +1192,7 @@ pub fn run_minions(
     // A creature held by Command isn't its holder's to retire.
     let mut kept: Vec<(Option<Entity>, MinionKind, f32, Entity, Mastery)> = minions
         .iter()
-        .filter(|(_, m, .., held, _)| m.age < m.life && !held)
+        .filter(|(_, m, .., held, _, _)| m.age < m.life && !held)
         .map(|(e, m, ..)| (m.cast.caster, m.kind, m.age, e, m.cast.spell.mastery))
         .collect();
     kept.sort_by(|a, b| a.2.total_cmp(&b.2));
@@ -1190,7 +1224,7 @@ pub fn run_minions(
         .filter(|(_, m, ..)| m.kind.grounded() && !matches!(m.act, Act::Rise { .. }))
         .map(|(e, m, ..)| (e, m.pos, body_radius(m.kind, m.size)))
         .collect();
-    for (e, mut m, mut tf, vit, local, statuses, afflictions, _, imbued) in &mut minions {
+    for (e, mut m, mut tf, vit, local, statuses, afflictions, _, imbued, dragon) in &mut minions {
         let dt = time.delta_for(local);
         m.age += dt;
         if retire.contains(&e) {
@@ -1800,6 +1834,40 @@ pub fn run_minions(
                     crate::demons::live_hound(&mut m, &mut tf, &mut life, &mut parts);
                 }
             }
+            MinionKind::BoneDragon => {
+                let Some(mut dragon) = dragon else {
+                    continue;
+                };
+                // Its foes under its circle: every body not of its side, up and within reach.
+                let reach = (crate::dragon::CIRCLE_M * 2.5) as f64;
+                let foes: Vec<(Entity, DVec3)> = bodies
+                    .iter()
+                    .filter(|(b, g, v, al)| {
+                        *b != e
+                            && !v.down()
+                            && flat_distance(g.translation(), m.pos) <= reach
+                            && !m
+                                .cast
+                                .friend(*b, al.caster, al.faction, factions.as_deref())
+                    })
+                    .map(|(b, g, ..)| (b, g.translation()))
+                    .collect();
+                let mut life = crate::dragon::Life {
+                    e,
+                    dt,
+                    g,
+                    queries: &queries,
+                    exclude,
+                    target,
+                    owner,
+                    held,
+                    foes: &foes,
+                    hits: &mut hits,
+                    queue: &mut queue,
+                    commands: &mut commands,
+                };
+                crate::dragon::live_dragon(&mut m, &mut dragon, &mut tf, &mut life, &mut parts);
+            }
             MinionKind::Wisp => {
                 // Circle above the hurt ally's shoulder (or the summoner) and heal.
                 let host = target.map(|t| t.1).or(owner.map(|o| o.0));
@@ -1902,6 +1970,10 @@ pub fn limb_parts(kind: MinionKind) -> [usize; 4] {
         }
         MinionKind::Elemental | MinionKind::Wisp => [0; 4],
         MinionKind::Imp | MinionKind::Hellhound => crate::demons::limb_parts(kind),
+        MinionKind::BoneDragon => {
+            use crate::dragon::{FORE, HIND};
+            [FORE[0] + 2, FORE[1] + 2, HIND[0] + 2, HIND[1] + 2]
+        }
     }
 }
 
@@ -1914,6 +1986,7 @@ pub fn body_height(kind: MinionKind, k: f32) -> f32 {
         MinionKind::Wisp => 0.6,
         MinionKind::Imp => 0.9 * k,
         MinionKind::Hellhound => 1.0 * k,
+        MinionKind::BoneDragon => 1.0 * k,
     }
 }
 
@@ -1924,6 +1997,7 @@ pub fn chest_height(kind: MinionKind, k: f32) -> f32 {
         MinionKind::Skeleton | MinionKind::SkeletalMage => 1.25 * k,
         MinionKind::Elemental | MinionKind::Wisp | MinionKind::Imp => 0.0,
         MinionKind::Hellhound => 0.7 * k,
+        MinionKind::BoneDragon => 0.0,
     }
 }
 
@@ -1979,7 +2053,8 @@ fn fall(
     queue: &mut MagicQueue,
 ) {
     let spell = &m.cast.spell;
-    let skeletal = m.kind.skeletal();
+    // A dragon's bones clatter down as a skeleton's do.
+    let skeletal = m.kind.skeletal() || m.kind == MinionKind::BoneDragon;
     let center = tf.translation
         + DVec3::Y
             * match m.kind {
@@ -2117,11 +2192,18 @@ pub fn settle_rubble(
 }
 
 /// Minions keep world positions of their own; move them when the world re-anchors.
-pub fn follow_world_shift(mut shifts: MessageReader<WorldShift>, mut q: Query<&mut Minion>) {
+pub fn follow_world_shift(
+    mut shifts: MessageReader<WorldShift>,
+    mut q: Query<(&mut Minion, Option<&mut crate::dragon::Dragon>)>,
+) {
     let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
         return;
     };
-    for mut m in &mut q {
+    for (mut m, dragon) in &mut q {
+        if let Some(mut d) = dragon {
+            d.center = s.point(d.center);
+            d.land_at = s.point(d.land_at);
+        }
         m.pos = s.point(m.pos);
         m.vel = s.direction(m.vel);
         for f in m.feet.iter_mut() {
@@ -2163,6 +2245,7 @@ mod tests {
         assert_eq!(kind_of(&spell(&["heal"])), Some(MinionKind::Wisp));
         assert_eq!(kind_of(&spell(&["push"])), None);
         assert_eq!(kind_of(&spell(&["raise"])), Some(MinionKind::Skeleton));
+        assert_eq!(kind_of(&spell(&["bone"])), Some(MinionKind::BoneDragon));
         assert_eq!(
             kind_of(&spell(&["raise", "frost"])),
             Some(MinionKind::SkeletalMage)

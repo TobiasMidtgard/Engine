@@ -27,6 +27,7 @@
 //! | `spells_blades` | spellblades: necromancers imbue their golem and skeletons with fire (blades and fists burn, every cut sets fire); students answer with a phalanx of five swords over a head that loose themselves at the dead, two spirit blades that fence with skeletons, fans of glintblades at the golem, frost bladefalls down the line of the dead, and a bound blade in the hand ([`blades`], [`crate::blades`]) |
 //! | `spells_pacts` | pacts: warlocks open a hellgate on the floor that hellhounds leap out of and imps fly from, bind the students' golem in chains out of a burning sigil, drag their elemental in on a chain hook, bind their creatures' fates together and throw demonic meteors that burst into imps; the students answer with storm: a phalanx, bladefalls and lightning bolts and glintblades that break the gate ([`pacts`], [`crate::chains`], [`crate::demons`]) |
 //! | `spells_wilds` | the Wilds: druids against the dead: bark skin grows over one, a thorn hedge across the floor snags the charge, a treant wades in and its slam roots what it strikes, roots break out of the floor and coil up the skeletons' legs, Thornvine seeds burst into roots where they land, and a necromancer's fire runs along the hedge and burns it away ([`wilds`], [`crate::wilds`]) |
+//! | `spells_bones` | bone: necromancers raise a bone dragon whose bones fly up out of the floor and lock together, that flies a circle breathing grave frost and lands to bite and sweep its tail; a prison of ribs closes over the students' golem until a push bolt shatters it, a ribcage wall arches across the floor, bone armour locks onto a necromancer and bone spears go through the students' line; the students answer with fire and storm ([`bones`], [`crate::bones`], [`crate::dragon`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -35,6 +36,7 @@
 
 pub mod art;
 pub mod blades;
+pub mod bones;
 pub mod cataclysm;
 pub mod craft;
 pub mod duel;
@@ -308,6 +310,19 @@ pub const VIEWS: &[DemoView] = &[
         // The front of the charge held in roots at the hedge, the treant at them.
         warmup: 5.4,
     },
+    DemoView {
+        key: "spells_bones",
+        name: "Bones: a bone dragon, a prison of ribs, a ribcage wall, bone armour and bone spears",
+        // From down the floor, back and up, looking up the hall at the dais: the dragon's circle
+        // over the students' creatures fills the sky over the middle of the picture, the
+        // ribcage runs across the floor before them and the necromancers' plinths are on the
+        // left (the camera looks +z, so +x is left).
+        eye: [2.2, 4.4, -9.5],
+        target: [0.4, 3.0, 5.0],
+        hour: 16.6,
+        // The dragon whole and rearing over the caged golem, the ribcage rising.
+        warmup: 5.0,
+    },
 ];
 
 /// What the hall is running.
@@ -337,10 +352,11 @@ pub enum Program {
     Blades,
     Pacts,
     Wilds,
+    Bones,
 }
 
 impl Program {
-    pub const ALL: [Program; 22] = [
+    pub const ALL: [Program; 23] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -363,6 +379,7 @@ impl Program {
         Program::Blades,
         Program::Pacts,
         Program::Wilds,
+        Program::Bones,
     ];
 
     pub fn key(self) -> &'static str {
@@ -389,6 +406,7 @@ impl Program {
             Program::Blades => "spells_blades",
             Program::Pacts => "spells_pacts",
             Program::Wilds => "spells_wilds",
+            Program::Bones => "spells_bones",
         }
     }
 
@@ -435,6 +453,8 @@ impl Program {
             Program::Pacts => pacts::PERIOD,
             // The first dead and the treant last 21.6 s; the hedge burns at 11 s.
             Program::Wilds => wilds::PERIOD,
+            // The dragon and the students' creatures last 21.6 s.
+            Program::Bones => bones::PERIOD,
         }
     }
 
@@ -466,6 +486,8 @@ enum AimAt {
     Kind(crate::summon::MinionKind),
     /// The nearest hellgate of another side, else the nearest foe.
     Gate,
+    /// The nearest creature of that kind on the caster's own side, else the nearest foe.
+    Own(crate::summon::MinionKind),
     /// A point (x, y, z) from the hall's center.
     At(f64, f64, f64),
 }
@@ -999,6 +1021,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
         Program::Blades => blades::lanes(),
         Program::Pacts => pacts::lanes(),
         Program::Wilds => wilds::lanes(),
+        Program::Bones => bones::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -1071,6 +1094,7 @@ fn two_sides(program: Program) -> bool {
             | Program::Blades
             | Program::Pacts
             | Program::Wilds
+            | Program::Bones
     )
 }
 
@@ -1213,6 +1237,7 @@ fn setup_program(
         commands.queue(crate::chains::clear);
         commands.queue(crate::demons::clear);
         commands.queue(crate::wilds::clear);
+        commands.queue(crate::bones::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -1269,7 +1294,10 @@ fn setup_program(
             };
             if program == Program::Duel {
                 commands.entity(e).insert(duel::student(&mut c, m.lane));
-            } else if matches!(program, Program::Blades | Program::Pacts | Program::Wilds) {
+            } else if matches!(
+                program,
+                Program::Blades | Program::Pacts | Program::Wilds | Program::Bones
+            ) {
                 // Three waves of burning dead reach the plinths: the masters on them stand the
                 // whole period (a body that falls goes limp off its plinth, and its lane's
                 // blades never come).
@@ -1346,6 +1374,7 @@ fn setup_program(
                 | Program::Minds
                 | Program::Blades
                 | Program::Pacts
+                | Program::Bones
         ) {
             t.home - DVec3::Y * 40.0
         } else {
@@ -1570,6 +1599,7 @@ fn run_hall(
             | Program::Minds
             | Program::Blades
             | Program::Pacts
+            | Program::Bones
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
@@ -1613,7 +1643,7 @@ fn run_hall(
                         hall.origin
                             + DVec3::new(LANES.get(lane).copied().unwrap_or(0.0), FLOOR, MAGE_Z),
                     )),
-                AimAt::Golem | AimAt::Foe | AimAt::Kind(_) | AimAt::Gate => {
+                AimAt::Golem | AimAt::Foe | AimAt::Kind(_) | AimAt::Gate | AimAt::Own(_) => {
                     let me = mage_at
                         .get(e)
                         .map(|g| g.translation())
@@ -1659,6 +1689,18 @@ fn run_hall(
                                     .min_by(near)
                                     .map(|f| Aim::Entity(f.0))
                             })
+                            .unwrap_or(far),
+                        AimAt::Own(k) => creatures
+                            .iter()
+                            .filter(|(_, mn, _)| {
+                                mn.cast.side == caster.side
+                                    && mn.kind == k
+                                    && !matches!(mn.act, crate::summon::Act::Rise { .. })
+                            })
+                            .map(|(c, _, g)| (c, g.translation()))
+                            .min_by(near)
+                            .or_else(|| foe(None).min_by(near))
+                            .map(|f| Aim::Entity(f.0))
                             .unwrap_or(far),
                         AimAt::Kind(k) => foe(Some(k))
                             .min_by(near)

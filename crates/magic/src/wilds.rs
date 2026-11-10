@@ -196,6 +196,44 @@ pub enum Rider {
     Thorn { phi: f32, length: f32 },
     /// A leaf card off the bark toward `dir` (in the segment's frame), turned `rot`, this big.
     Leaf { dir: Vec3, rot: Quat, size: f32 },
+    /// A knob round the segment (a vertebra on a spine of bone), this big against its girth.
+    Knob { size: f32, turn: f32 },
+}
+
+/// What a root is made of and what rides it: bark with thorns and leaves (the Wilds'), or bone
+/// with spurs and knobs (bones.rs).
+#[derive(Debug, Clone, Copy)]
+pub struct RootLook {
+    pub wood: StandardMaterial,
+    pub spur: StandardMaterial,
+    /// A thorn (spur) every this many segments (0: none), this long against the girth.
+    pub spur_every: usize,
+    pub spur_length: (f32, f32),
+    /// A leaf every this many segments (0: none), about this big.
+    pub leaf_every: usize,
+    pub leaf_size: f32,
+    /// A knob every this many segments (0: none), this big against the girth.
+    pub knob_every: usize,
+    pub knob: f32,
+    /// Bone: grave dust flies where it breaks out, not earth.
+    pub bone: bool,
+}
+
+impl RootLook {
+    /// Bark with thorns every `thorn_every` segments and leaves every `leaf_every`.
+    pub fn bark(thorn_every: usize, leaf_every: usize, leaf_size: f32) -> Self {
+        Self {
+            wood: bark(),
+            spur: thorn(),
+            spur_every: thorn_every,
+            spur_length: (2.4, 3.8),
+            leaf_every,
+            leaf_size,
+            knob_every: 0,
+            knob: 0.0,
+            bone: false,
+        }
+    }
 }
 
 /// A thorn or a leaf on a root.
@@ -227,6 +265,8 @@ pub struct Root {
     pub shown: f32,
     /// Its dust has flown.
     pub burst: bool,
+    /// Bone (bones.rs): grave dust where it breaks out.
+    pub bone: bool,
 }
 
 impl Root {
@@ -439,6 +479,33 @@ fn spawn_root(
     leaf_every: usize,
     leaf_size: f32,
 ) -> Entity {
+    grow_root(
+        commands,
+        origin,
+        path,
+        step,
+        girth,
+        delay,
+        until,
+        seed,
+        &RootLook::bark(thorn_every, leaf_every, leaf_size),
+    )
+}
+
+/// A root of any make (bark or bone), spawned hidden: it grows when its time comes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn grow_root(
+    commands: &mut Commands,
+    origin: DVec3,
+    path: &[Vec3],
+    step: f32,
+    girth: f32,
+    delay: f32,
+    until: Option<f32>,
+    seed: u64,
+    look: &RootLook,
+) -> Entity {
+    let (thorn_every, leaf_every, leaf_size) = (look.spur_every, look.leaf_every, look.leaf_size);
     let pts = art::resample(path, step);
     let root = commands
         .spawn((Name::new("Root"), Transform::from_translation(origin)))
@@ -452,7 +519,7 @@ fn spawn_root(
                 .spawn((
                     Name::new("Root segment"),
                     hidden,
-                    MeshRenderer::new(capsule(), MaterialRef::Inline(bark())),
+                    MeshRenderer::new(capsule(), MaterialRef::Inline(look.wood)),
                     WildPiece,
                     ChildOf(root),
                 ))
@@ -471,7 +538,34 @@ fn spawn_root(
                 .spawn((
                     Name::new("Thorn"),
                     hidden,
-                    MeshRenderer::new(cone(), MaterialRef::Inline(thorn())),
+                    MeshRenderer::new(cone(), MaterialRef::Inline(look.spur)),
+                    WildPiece,
+                    ChildOf(root),
+                ))
+                .id();
+            let (lo, hi) = look.spur_length;
+            extras.push(Extra {
+                entity: e,
+                seg: i,
+                rider: Rider::Thorn {
+                    phi: h(1) * TAU,
+                    length: lo + (hi - lo) * h(2),
+                },
+            });
+        }
+        if look.knob_every > 0 && i % look.knob_every == 0 {
+            let e = commands
+                .spawn((
+                    Name::new("Knob"),
+                    hidden,
+                    MeshRenderer::new(
+                        MeshRef::Shape(Shape::Rock {
+                            size: [1.0, 0.8, 1.0],
+                            seed: ((seed ^ i as u64) % 100_000) as u32,
+                            detail: 1,
+                        }),
+                        MaterialRef::Inline(look.wood),
+                    ),
                     WildPiece,
                     ChildOf(root),
                 ))
@@ -479,9 +573,9 @@ fn spawn_root(
             extras.push(Extra {
                 entity: e,
                 seg: i,
-                rider: Rider::Thorn {
-                    phi: h(1) * TAU,
-                    length: 2.4 + 1.4 * h(2),
+                rider: Rider::Knob {
+                    size: look.knob * (0.85 + 0.3 * h(9)),
+                    turn: h(10) * TAU,
                 },
             });
         }
@@ -523,12 +617,25 @@ fn spawn_root(
         burnt: None,
         shown: -1.0,
         burst: false,
+        bone: look.bone,
     });
     root
 }
 
 /// A clod of heaved earth where a root breaks out (a child of `parent`, `at` in its frame).
 fn spawn_clod(commands: &mut Commands, parent: Entity, at: Vec3, size: f32, seed: u64) -> Entity {
+    heave(commands, parent, at, size, seed, soil())
+}
+
+/// A clod of heaved ground of `material` (a child of `parent`, `at` in its frame).
+pub(crate) fn heave(
+    commands: &mut Commands,
+    parent: Entity,
+    at: Vec3,
+    size: f32,
+    seed: u64,
+    material: StandardMaterial,
+) -> Entity {
     let s = Vec3::new(size, size * 0.32, size * (0.8 + 0.4 * roll(seed, 2)));
     commands
         .spawn((
@@ -541,7 +648,7 @@ fn spawn_clod(commands: &mut Commands, parent: Entity, at: Vec3, size: f32, seed
                     seed: (seed % 100_000) as u32,
                     detail: 2,
                 }),
-                MaterialRef::Inline(soil()),
+                MaterialRef::Inline(material),
             ),
             WildPiece,
             ChildOf(parent),
@@ -550,7 +657,7 @@ fn spawn_clod(commands: &mut Commands, parent: Entity, at: Vec3, size: f32, seed
 }
 
 /// Draw a root with `length` of it out of the ground.
-fn draw_root(
+pub(crate) fn draw_root(
     r: &Root,
     length: f32,
     crumble: f32,
@@ -598,6 +705,11 @@ fn draw_root(
                 tf.translation = (c + rot * (dir * (g + size * 0.35))).as_dvec3();
                 tf.rotation = rot * turn;
                 tf.scale = Vec3::splat(size * squash);
+            }
+            Rider::Knob { size, turn } => {
+                tf.translation = c.as_dvec3();
+                tf.rotation = rot * Quat::from_rotation_y(turn);
+                tf.scale = Vec3::splat(2.0 * g * size * squash);
             }
         }
     }
@@ -1104,13 +1216,18 @@ pub fn run_wilds(
             if r.until.is_some() || r.girth > 0.06 {
                 // Earth flies where it breaks out.
                 let p = r.at(0.0);
+                let (look, color) = if r.bone {
+                    ("raise", crate::undead::GRAVE_DUST)
+                } else {
+                    ("stone", SOIL)
+                };
                 queue.looks.push(LookCmd::Burst {
                     at: g.translation() + p.with_y(0.0).as_dvec3(),
                     up: Vec3::Y,
-                    look: "stone".into(),
+                    look: look.into(),
                     role: Role::Impact,
                     scale: 0.45,
-                    color: SOIL,
+                    color,
                 });
             }
         }
@@ -1230,7 +1347,7 @@ pub fn burn_hedges(
 }
 
 /// An owner's clods rise as its roots break out, and sink when they let go.
-fn sink(
+pub(crate) fn sink(
     children: &Query<&Children>,
     owner: Entity,
     d: f32,
@@ -1709,6 +1826,7 @@ mod tests {
             burnt: None,
             shown: 0.0,
             burst: false,
+            bone: false,
         }
     }
 

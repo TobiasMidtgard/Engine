@@ -76,6 +76,10 @@ pub enum EffectKind {
     /// Living wood (Vitalism's Wilds, wilds.rs): the cast type makes it roots that burst up
     /// and hold, a seed that bursts into them, a thorn hedge, bark skin or a treant.
     Wilds,
+    /// Bone out of the ground (Necromancy's Undeath, bones.rs): the cast type makes it a prison
+    /// of ribs that closes over a foe, a spear that pierces a line, a ribcage across a way,
+    /// bone armour or a bone dragon (dragon.rs).
+    Bone,
 }
 
 /// One entry of the effect catalog.
@@ -124,6 +128,7 @@ impl EffectDef {
             EffectKind::Blade => Dials::pole(Pole::Push, 0.8) + Dials::pole(Pole::Form, 0.5),
             EffectKind::Demon => Dials::pole(Pole::Heat, 0.6) + Dials::pole(Pole::Form, 0.6),
             EffectKind::Wilds => Dials::pole(Pole::Grow, 0.8) + Dials::pole(Pole::Form, 0.6),
+            EffectKind::Bone => Dials::pole(Pole::Wither, 0.6) + Dials::pole(Pole::Form, 0.8),
         }
     }
 
@@ -152,6 +157,7 @@ impl EffectDef {
                 | EffectKind::Blade
                 | EffectKind::Demon
                 | EffectKind::Wilds
+                | EffectKind::Bone
                 | EffectKind::Force { .. }
                 | EffectKind::TimeScale { factor: ..1.0 }
         )
@@ -364,6 +370,15 @@ pub const EFFECTS: &[EffectDef] = &[
         Subclass::Necromancy,
         EffectKind::Raise,
         "The dead rise and serve: a fallen body stands for you, or bones climb out of the ground.",
+    ),
+    def(
+        "bone",
+        "Bone",
+        Subclass::Necromancy,
+        EffectKind::Bone,
+        "Bone out of the ground: on a foe great ribs close over it and cage it, thrown a spear \
+         of bone pierces all in its line, as a wall a ribcage bars the way, on yourself bone \
+         armour turns blades, summoned a dragon of bones rises and flies.",
     ),
     // Pactbinding: chains and dark passage.
     def(

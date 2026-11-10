@@ -5722,3 +5722,565 @@ fn the_wilds_hall_holds_the_dead_in_roots_and_thorns_and_a_treant_smashes_them()
         "the fight left the picture {missed} of {looked} looks"
     );
 }
+
+// ------------------------------------------------------------------------------- bones
+
+fn cages(app: &mut App) -> Vec<(Entity, bones::Cage)> {
+    let mut q = app.world.query::<(Entity, &bones::Cage)>();
+    let mut v: Vec<_> = q.iter(&app.world).map(|(e, c)| (e, c.clone())).collect();
+    v.sort_by_key(|c| c.0);
+    v
+}
+
+fn caged(app: &mut App, e: Entity) -> bool {
+    cages(app)
+        .iter()
+        .any(|c| c.1.target == e && c.1.done.is_none())
+}
+
+fn stuck_spears(app: &mut App) -> Vec<(Entity, bones::StuckSpear, DVec3)> {
+    let mut q = app
+        .world
+        .query::<(Entity, &bones::StuckSpear, &Transform)>();
+    q.iter(&app.world)
+        .map(|(e, s, t)| (e, *s, t.translation))
+        .collect()
+}
+
+fn dragons(app: &mut App) -> Vec<(Entity, dragon::Dragon, summon::Minion)> {
+    let mut q = app
+        .world
+        .query::<(Entity, &dragon::Dragon, &summon::Minion)>();
+    q.iter(&app.world)
+        .map(|(e, d, m)| (e, d.clone(), m.clone()))
+        .collect()
+}
+
+#[test]
+fn the_dragons_wings_are_made_at_startup() {
+    let mut app = wild_app();
+    app.update();
+    assert!(app.world.resource::<dragon::DragonMeshes>().is_ready());
+}
+
+#[test]
+fn a_bone_prison_closes_eight_ribs_over_a_dummy_and_holds_it_until_they_sink() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -8.0));
+    run(&mut app, 0.1);
+    let prison = SpellDesign::new(&["bone"], CastType::Area).named("Bone prison");
+    cast(&mut app, me, prison, Aim::Entity(d));
+    run(&mut app, 1.8);
+    let found = cages(&mut app);
+    assert_eq!(found.len(), 1, "one prison");
+    let (_, cage) = &found[0];
+    assert_eq!(cage.target, d);
+    assert_eq!(cage.ribs.len(), bones::PRISON_RIBS as usize);
+    assert!(cage.secs >= 3.0 && cage.secs <= 7.0, "{}", cage.secs);
+    assert!(rooted(&app, d), "held");
+    let mut tips = Vec::new();
+    for r in &cage.ribs {
+        let root = app.world.get::<wilds::Root>(*r).unwrap().clone();
+        assert!(root.bone);
+        // Out of the floor round the dummy, all the way out, up over its head.
+        assert!(root.pts[0].y < 0.0, "{}", root.pts[0]);
+        let from = root.pts[0].with_y(0.0).length();
+        assert!(from > 0.4 && from < 1.4, "{from}");
+        assert!((root.length_now() - root.total()).abs() < 0.02);
+        let tip = *root.pts.last().unwrap();
+        assert!(tip.y > 1.7 && tip.y < 2.8, "{tip}");
+        tips.push(tip);
+        // It bulges out round the body on the way up.
+        let widest = root
+            .pts
+            .iter()
+            .map(|p| p.with_y(0.0).length())
+            .fold(0.0, f32::max);
+        assert!(widest > from, "{widest} vs {from}");
+    }
+    // The tips close over its head like fingers: near its middle, each nearer than its root.
+    for t in &tips {
+        assert!(t.with_y(0.0).length() < 0.45, "{t}");
+    }
+    let seen = app.world.resource::<Seen>();
+    assert!(seen.damage.iter().any(|x| x.target == d && x.amount > 0.0));
+    // When its time is up the ribs let go and sink, and the dummy is free.
+    let (secs, age) = (cage.secs, cage.age);
+    let took = run_until(&mut app, secs + 1.0, |a| !caged(a, d)).expect("it held on");
+    assert!((age + took - secs).abs() < 0.2, "{age} + {took} vs {secs}");
+    run(&mut app, 0.5);
+    assert!(!rooted(&app, d));
+    run(&mut app, 5.0);
+    assert!(cages(&mut app).is_empty());
+    assert!(wild_roots(&mut app).is_empty());
+}
+
+#[test]
+fn a_heavy_blow_shatters_a_bone_prison_and_the_jailers_own_blows_do_not() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -8.0));
+    let student = mage(&mut app, DVec3::new(6.0, 0.0, -8.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(student).unwrap().side = 2;
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["bone"], CastType::Area),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.6);
+    assert!(caged(&mut app, d));
+    // The jailer's own shove leaves it standing.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["push"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.0);
+    assert!(caged(&mut app, d), "its own side broke it");
+    let (_, cage) = cages(&mut app)[0].clone();
+    // A blow from the other side shatters it at once into tumbling shards.
+    cast(
+        &mut app,
+        student,
+        SpellDesign::new(&["push"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    let took = run_until(&mut app, 1.5, |a| !caged(a, d));
+    assert!(took.is_some(), "the student's blow left it whole");
+    run(&mut app, 0.1);
+    assert!(!rooted(&app, d));
+    let now = cages(&mut app);
+    assert_eq!(now[0].1.shatter, Some(true));
+    assert!(
+        cage.ribs
+            .iter()
+            .all(|r| app.world.get::<wilds::Root>(*r).is_none())
+    );
+    let mut q = app.world.query::<&wilds::Falling>();
+    let shards = q.iter(&app.world).count();
+    assert!(shards >= 30, "{shards} shards");
+    run(&mut app, 4.0);
+    assert!(cages(&mut app).is_empty());
+    let mut q = app.world.query::<&wilds::Falling>();
+    assert_eq!(q.iter(&app.world).count(), 0, "the shards settle and go");
+}
+
+#[test]
+fn a_bone_spear_goes_through_two_dummies_and_stands_quivering_in_the_floor() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let near = dummy(&mut app, DVec3::new(0.0, 0.0, -6.0));
+    let far = dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    let spear = SpellDesign::new(&["bone"], CastType::Bolt).named("Bone spear");
+    cast(&mut app, me, spear, Aim::Point(DVec3::new(0.0, 0.0, -16.0)));
+    let landed = run_until(&mut app, 3.0, |a| {
+        stuck_spears(a).iter().any(|s| s.1.stuck.is_some())
+    });
+    assert!(landed.is_some(), "no spear in the floor");
+    let (a, b) = (damage_to(&app, near), damage_to(&app, far));
+    assert!(a > 0.0 && b > 0.0, "{a} {b}");
+    let kinds: Vec<_> = app
+        .world
+        .resource::<Seen>()
+        .damage
+        .iter()
+        .map(|x| x.kind)
+        .collect();
+    assert!(
+        kinds.iter().all(|k| *k == engine_world::DamageKind::Pierce),
+        "{kinds:?}"
+    );
+    let found = stuck_spears(&mut app);
+    assert_eq!(found.len(), 1);
+    let (e, s, at) = found[0];
+    // Past the far dummy, stood in the floor leaning back the way it came.
+    assert!(at.z < -10.5, "{at}");
+    assert!(at.y > 0.0 && at.y < bones::SPEAR_M as f64, "{at}");
+    assert!(s.dir.y < -0.05 && s.dir.z < 0.0, "{}", s.dir);
+    // It quivers: its turn changes from step to step while it stands.
+    let turn = |app: &App| app.world.get::<Transform>(e).unwrap().rotation;
+    let q0 = turn(&app);
+    run(&mut app, 1.0 / 60.0);
+    let q1 = turn(&app);
+    assert!(q0.angle_between(q1) > 1e-4, "it stands still");
+    run(&mut app, bones::SPEAR_STAND + bones::SPEAR_CRUMBLE + 0.5);
+    assert!(stuck_spears(&mut app).is_empty(), "it crumbles and goes");
+}
+
+#[test]
+fn a_ribcage_wall_arches_over_its_line_and_snags_what_pushes_through() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -8.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["bone"], CastType::Wall).named("Bone wall"),
+        Aim::Point(DVec3::new(0.0, 0.0, -8.0)),
+    );
+    run(&mut app, 1.0);
+    let mut q = app.world.query::<&bones::Ribcage>();
+    let cage = q.iter(&app.world).next().expect("a ribcage").clone();
+    // The spine slides along the ridge and the ribs come up under it: all out in a few seconds.
+    let all_out = |a: &mut App| {
+        cage.ribs.iter().all(|r| {
+            a.world
+                .get::<wilds::Root>(*r)
+                .is_some_and(|r| (r.length_now() - r.total()).abs() < 0.05)
+        })
+    };
+    let took = run_until(&mut app, 6.0, all_out);
+    assert!(took.is_some_and(|t| t < 4.0), "{took:?}");
+    assert!(cage.ribs.len() >= 11, "{}", cage.ribs.len());
+    let mut tall = 0.0f32;
+    let mut wide = 0.0f32;
+    let mut out = 0;
+    for r in &cage.ribs {
+        let root = app.world.get::<wilds::Root>(*r).unwrap();
+        assert!(root.bone);
+        if (root.length_now() - root.total()).abs() < 0.05 {
+            out += 1;
+        }
+        for p in &root.pts {
+            tall = tall.max(p.y);
+            wide = wide.max(p.x.abs().max(p.z.abs()));
+        }
+    }
+    assert_eq!(out, cage.ribs.len(), "every rib is out by now");
+    assert!(tall > 1.9 && tall < 2.7, "{tall}");
+    assert!(wide > 2.0, "{wide}");
+    let mut snagged = 0;
+    for _ in 0..60 {
+        run(&mut app, 1.0 / 30.0);
+        if rooted(&app, d) {
+            snagged += 1;
+        }
+    }
+    assert!(snagged > 25, "{snagged} of 60");
+    run(&mut app, 30.0);
+    let mut q = app.world.query::<&bones::Ribcage>();
+    assert_eq!(q.iter(&app.world).count(), 0);
+    assert!(wild_roots(&mut app).is_empty());
+}
+
+#[test]
+fn bone_armour_swirls_up_locks_on_and_takes_two_fifths_off_weapon_blows_not_magic() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Expert);
+    app.world.entity_mut(me).insert(Body(0.5));
+    let plain = dummy(&mut app, DVec3::new(0.0, 0.0, -20.0));
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, -10.0), Mastery::Expert);
+    {
+        let mut c = app.world.get_mut::<MagicCaster>(foe).unwrap();
+        c.side = 2;
+        // Every blow lands: no fizzles to spoil the comparison.
+        (c.mana, c.max_mana, c.steady) = (1000.0, 1000.0, true);
+    }
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["bone"], CastType::OnSelf).named("Bone armour"),
+        Aim::Entity(me),
+    );
+    let started = run_until(&mut app, 1.5, |a| {
+        let mut q = a.world.query::<&bones::BoneArmour>();
+        q.iter(&a.world).next().is_some()
+    });
+    assert!(started.is_some(), "no armour");
+    run(&mut app, 0.2);
+    let mut q = app.world.query::<&bones::BoneArmour>();
+    let armour = q.iter(&app.world).next().unwrap().clone();
+    assert_eq!(armour.target, me);
+    assert!(armour.plates.len() >= 20, "{}", armour.plates.len());
+    assert!(armour.secs >= 15.0, "{}", armour.secs);
+    // In the swirl the shards are spread round it, out from its body.
+    let body = app.world.get::<Transform>(me).unwrap().translation;
+    let spread = |app: &App| -> f32 {
+        armour
+            .plates
+            .iter()
+            .filter_map(|p| app.world.get::<GlobalTransform>(p.0))
+            .map(|g| {
+                let d = (g.translation() - body).as_vec3();
+                Vec3::new(d.x, 0.0, d.z).length()
+            })
+            .sum::<f32>()
+            / armour.plates.len() as f32
+    };
+    let swirling = spread(&app);
+    run(&mut app, bones::SWIRL_SECS + 0.6);
+    let locked = spread(&app);
+    assert!(swirling > locked * 1.4, "swirl {swirling} locked {locked}");
+    // A bone spear does 40% less to it than to a plain body; a frost bolt the same.
+    let on = |app: &mut App, design: SpellDesign, target: Entity| -> f32 {
+        let before = damage_to(app, target);
+        cast(app, foe, design, Aim::Entity(target));
+        run(app, 1.5);
+        damage_to(app, target) - before
+    };
+    let spear = SpellDesign::new(&["bone"], CastType::Bolt);
+    let frost = SpellDesign::new(&["frost"], CastType::Bolt);
+    let armoured = on(&mut app, spear.clone(), me);
+    let bare = on(&mut app, spear, plain);
+    assert!(bare > 0.0);
+    assert!(
+        (armoured / bare - (1.0 - bones::ARMOUR_SHARE)).abs() < 0.05,
+        "{armoured} of {bare}"
+    );
+    let cold_on = on(&mut app, frost.clone(), me);
+    let cold_off = on(&mut app, frost, plain);
+    assert!(cold_off > 0.0);
+    assert!(
+        (cold_on / cold_off - 1.0).abs() < 0.08,
+        "{cold_on} of {cold_off}"
+    );
+    // When its time is up it cracks off and falls.
+    let plates: Vec<Entity> = armour.plates.iter().map(|p| p.0).collect();
+    run(&mut app, 25.0);
+    let mut q = app.world.query::<&bones::BoneArmour>();
+    assert_eq!(q.iter(&app.world).count(), 0);
+    assert!(plates.iter().all(|p| app.world.get_entity(*p).is_err()));
+}
+
+#[test]
+fn a_bone_dragon_assembles_rears_flies_a_circle_breathing_frost_and_lands_to_bite() {
+    let mut app = wild_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 8.0), Mastery::Expert);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -5.0));
+    run(&mut app, 0.1);
+    let summon = SpellDesign::new(&["bone"], CastType::Summon).named("Bone dragon");
+    cast(&mut app, me, summon, Aim::Point(DVec3::ZERO));
+    run(&mut app, 0.6);
+    let found = dragons(&mut app);
+    assert_eq!(found.len(), 1, "one dragon");
+    let (e, dr, m) = found[0].clone();
+    assert_eq!(m.kind, summon::MinionKind::BoneDragon);
+    assert_eq!(dr.phase, dragon::Phase::Assemble);
+    assert_eq!(m.parts.len(), dragon::PARTS);
+    // Its bones fly up out of the floor: half-way through, some are still under it.
+    let under = m
+        .parts
+        .iter()
+        .filter(|p| {
+            app.world
+                .get::<GlobalTransform>(**p)
+                .is_some_and(|g| g.translation().y < 0.0)
+        })
+        .count();
+    assert!(under >= 10, "{under} under the floor");
+    let phase = |a: &mut App| dragons(a).first().map(|x| x.1.phase);
+    let took = run_until(&mut app, dragon::ASSEMBLE_SECS + 0.5, |a| {
+        phase(a) == Some(dragon::Phase::Rear)
+    });
+    assert!(
+        took.is_some(),
+        "it never stood whole: {:?}",
+        phase(&mut app)
+    );
+    // Whole: every bone above the floor, its heart lit.
+    let (_, _, m) = dragons(&mut app)[0].clone();
+    let low = m
+        .parts
+        .iter()
+        .filter_map(|p| app.world.get::<GlobalTransform>(*p))
+        .map(|g| g.translation().y)
+        .fold(f64::MAX, f64::min);
+    assert!(low > -0.05, "{low}");
+    let took = run_until(&mut app, 6.0, |a| phase(a) == Some(dragon::Phase::Circle));
+    assert!(took.is_some(), "it never took off: {:?}", phase(&mut app));
+    let (_, _, m) = dragons(&mut app)[0].clone();
+    assert!(m.pos.y > 3.5, "{}", m.pos.y);
+    let took = run_until(&mut app, 12.0, |a| phase(a) == Some(dragon::Phase::Land));
+    assert!(took.is_some(), "it never came down: {:?}", phase(&mut app));
+    let (_, dr, _) = dragons(&mut app)[0].clone();
+    assert!(dr.gouts >= 4, "{} gouts", dr.gouts);
+    let seen = app.world.resource::<Seen>();
+    let cold = seen
+        .damage
+        .iter()
+        .filter(|x| x.target == d && x.kind == engine_world::DamageKind::Cold)
+        .count();
+    assert!(cold >= 2, "{cold} breaths on the dummy");
+    let took = run_until(&mut app, 6.0, |a| phase(a) == Some(dragon::Phase::Ground));
+    assert!(took.is_some(), "it never landed: {:?}", phase(&mut app));
+    let before = app
+        .world
+        .resource::<Seen>()
+        .damage
+        .iter()
+        .filter(|x| {
+            x.target == d && x.source == Some(e) && x.kind != engine_world::DamageKind::Cold
+        })
+        .count();
+    run(&mut app, dragon::GROUND_SECS);
+    let after = app
+        .world
+        .resource::<Seen>()
+        .damage
+        .iter()
+        .filter(|x| {
+            x.target == d && x.source == Some(e) && x.kind != engine_world::DamageKind::Cold
+        })
+        .count();
+    assert!(after - before >= 2, "{} blows on the floor", after - before);
+    // And it flies again.
+    let took = run_until(&mut app, 4.0, |a| phase(a).is_some_and(|p| p.flying()));
+    assert!(took.is_some(), "it stayed down: {:?}", phase(&mut app));
+}
+
+#[test]
+fn the_bones_hall_raises_a_dragon_cages_the_golem_and_the_students_break_it_out() {
+    let mut app = blade_app();
+    app.world
+        .init_resource::<engine_assets::Assets<engine_render::Image>>();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Bones;
+        hall.restart = true;
+    }
+    let view = demo::VIEWS
+        .iter()
+        .find(|v| v.key == "spells_bones")
+        .unwrap();
+    let eye = DVec3::from(view.eye);
+    let fwd = (DVec3::from(view.target) - eye).normalize();
+    let right = fwd.cross(DVec3::Y).normalize();
+    let up = right.cross(fwd);
+    let tan_y = (55f64.to_radians() / 2.0).tan();
+    let in_view = |p: DVec3| {
+        let d = p - eye;
+        let z = d.dot(fwd);
+        z > 0.5
+            && (d.dot(right) / (z * tan_y * 16.0 / 9.0)).abs() < 0.92
+            && (d.dot(up) / (z * tan_y)).abs() < 0.92
+    };
+    let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
+    let mut dragon_at: Option<f32> = None;
+    let mut phases: Vec<(f32, dragon::Phase)> = Vec::new();
+    let mut gouts = 0u32;
+    let mut armoured: Option<f32> = None;
+    let mut caged_golem: Option<f32> = None;
+    let mut shattered: Option<f32> = None;
+    let mut ribcage: Option<(f32, DVec3)> = None;
+    let mut spears = 0usize;
+    let mut fell: Vec<Entity> = Vec::new();
+    let (mut looked, mut missed) = (0usize, 0usize);
+    let steps = (demo::bones::PERIOD * 60.0) as usize;
+    for i in 0..steps {
+        app.update();
+        let t = i as f32 / 60.0;
+        let now = minions(&mut app);
+        for (e, k) in &kinds {
+            if !now.iter().any(|m| m.0 == *e) && !fell.contains(e) {
+                println!("{t:.2}: {e:?} {k:?} falls");
+                fell.push(*e);
+            }
+        }
+        for (e, m) in now {
+            if kinds.insert(e, m.kind).is_none() {
+                println!("{t:.2}: {e:?} {:?} comes at {:.1}", m.kind, m.pos);
+            }
+            if m.kind == summon::MinionKind::BoneDragon && i % 15 == 0 && t > 2.0 && m.age < m.life
+            {
+                looked += 1;
+                if !in_view(m.pos) {
+                    missed += 1;
+                    println!("  {t:.2}: the dragon is out of the picture at {:.1}", m.pos);
+                }
+            }
+        }
+        for (_, dr, _) in dragons(&mut app) {
+            dragon_at.get_or_insert(t);
+            if phases.last().is_none_or(|p| p.1 != dr.phase) {
+                println!("{t:.2}: the dragon {:?}", dr.phase);
+                phases.push((t, dr.phase));
+            }
+            gouts = gouts.max(dr.gouts);
+        }
+        let mut q = app.world.query::<&bones::BoneArmour>();
+        if armoured.is_none() && q.iter(&app.world).next().is_some() {
+            println!("{t:.2}: bone armour");
+            armoured = Some(t);
+        }
+        for (_, c) in cages(&mut app) {
+            if kinds.get(&c.target) == Some(&summon::MinionKind::Golem) {
+                if caged_golem.is_none() {
+                    println!("{t:.2}: the golem is caged");
+                    caged_golem = Some(t);
+                }
+                if shattered.is_none() && c.shatter.is_some() {
+                    println!("{t:.2}: the prison shatters");
+                    shattered = Some(t);
+                }
+            }
+        }
+        let mut q = app.world.query::<(Entity, &bones::Ribcage)>();
+        if ribcage.is_none()
+            && let Some((e, _)) = q.iter(&app.world).next()
+        {
+            let at = app.world.get::<Transform>(e).unwrap().translation;
+            println!("{t:.2}: a ribcage at {at:.1}");
+            assert!(in_view(at + DVec3::Y), "the ribcage is out of the picture");
+            ribcage = Some((t, at));
+        }
+        spears = spears.max(stuck_spears(&mut app).len());
+    }
+    let seen = app.world.resource::<Seen>();
+    let dragon = kinds
+        .iter()
+        .find(|k| *k.1 == summon::MinionKind::BoneDragon)
+        .map(|k| *k.0);
+    let burnt = dragon.map_or(0, |e| {
+        seen.damage
+            .iter()
+            .filter(|x| x.target == e && x.kind == engine_world::DamageKind::Fire)
+            .count()
+    });
+    let bitten = dragon.map_or(0, |e| {
+        seen.damage
+            .iter()
+            .filter(|x| x.source == Some(e) && x.kind != engine_world::DamageKind::Cold)
+            .count()
+    });
+    println!(
+        "gouts {gouts}, burnt {burnt}, blows {bitten}, spears {spears}, missed {missed} of {looked}"
+    );
+    assert!(armoured.is_some_and(|t| t < 1.5), "no armour");
+    assert!(dragon_at.is_some_and(|t| t < 2.0), "no dragon");
+    let reached = |p: dragon::Phase| phases.iter().any(|x| x.1 == p);
+    for p in [
+        dragon::Phase::Rear,
+        dragon::Phase::Circle,
+        dragon::Phase::Land,
+        dragon::Phase::Ground,
+    ] {
+        assert!(reached(p), "the dragon never reached {p:?}: {phases:?}");
+    }
+    assert!(gouts >= 4, "{gouts}");
+    assert!(bitten >= 2, "{bitten}");
+    assert!(burnt >= 2, "{burnt}");
+    assert!(caged_golem.is_some_and(|t| t < 4.5), "{caged_golem:?}");
+    assert!(
+        shattered.is_some_and(|t| t > 5.0 && t < 8.5),
+        "{shattered:?}"
+    );
+    assert!(ribcage.is_some_and(|r| r.0 < 6.0), "no ribcage");
+    assert!(spears >= 1, "no spear stood in the floor");
+    assert!(
+        missed * 10 < looked * 2,
+        "the dragon left the picture {missed} of {looked} looks"
+    );
+}
