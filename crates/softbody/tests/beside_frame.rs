@@ -1,7 +1,8 @@
 //! Heavy cloth whose frames don't ride the physics step is solved beside the frame, from the
 //! end of one fixed step to the start of the next, when the game asks for it: the same steps
 //! as at once, a step later, and readers meanwhile see the last step's sim. A body written
-//! while its solve is out (cut, grabbed, rebuilt) keeps the write.
+//! while its solve is out (cut, grabbed, rebuilt) keeps the write. Under a real clock a solve
+//! not done by the next step is left to run, and lands whole a step or more later.
 
 use engine_core::diagnostics::Diagnostics;
 use engine_core::prelude::*;
@@ -108,4 +109,31 @@ fn a_body_written_while_its_solve_is_out_keeps_the_write() {
     app.update_n(5);
     assert_eq!(metric(&app, "softbody.beside_frame_dropped"), 0.0);
     assert!(metric(&app, "softbody.beside_frame_bodies") >= 1.0);
+}
+
+#[test]
+fn under_a_real_clock_a_solve_not_done_is_let_run_and_lands_whole() {
+    let (mut app, e) = app(Some(true));
+    app.update_n(3);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Realtime);
+    let (mut held, mut solved, mut dropped) = (0.0f64, 0.0, 0.0);
+    let start = positions(&app, e);
+    for _ in 0..30 {
+        // A slow frame: several fixed steps in one update, with no time between them for
+        // the solve started at the end of one before the next begins.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        app.update();
+        held = held.max(metric(&app, "softbody.beside_frame_held"));
+        solved += metric(&app, "softbody.beside_frame_bodies");
+        dropped += metric(&app, "softbody.beside_frame_dropped");
+    }
+    // Nothing writes a body whose solve is out, so none is dropped for being held.
+    assert_eq!(dropped, 0.0, "held solves are kept");
+    assert!(solved >= 1.0, "the curtain was solved beside the frame");
+    let end = positions(&app, e);
+    assert!(end.iter().all(|p| p.is_finite()));
+    assert_ne!(start, end, "and it moved");
+    eprintln!("steps run past at most: {held}");
 }

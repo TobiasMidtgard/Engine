@@ -2,12 +2,13 @@
 //! events, step every body (in parallel) and send the results back to the world.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
 use bevy_ecs::change_detection::Tick;
 use bevy_ecs::system::SystemChangeTick;
-use engine_core::ecs::entity::EntityHashMap;
+use engine_core::ecs::entity::{EntityHashMap, EntityHashSet};
 use engine_core::prelude::*;
 use engine_world::animation::SkeletonPose;
 use engine_world::physics::{
@@ -16,8 +17,8 @@ use engine_world::physics::{
 };
 use engine_world::{
     ContactKind, Env, FocusPoints, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace,
-    Scalability, SimulationRange, SmokeEmission, SurfaceMaterials, SurfaceMoved, WaterDisturbance,
-    WorldImpulse, WorldShift,
+    Scalability, SimulationRange, SmokeEmission, SurfaceId, SurfaceMaterials, SurfaceMoved,
+    WaterDisturbance, WorldImpulse, WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -50,8 +51,8 @@ pub struct StepOutput {
     /// position).
     pub pulls: Vec<(Entity, ColliderImpulse, DVec3)>,
     pub smoke: Vec<DVec3>,
-    /// Landing speed and point.
-    pub impact: Option<(f32, DVec3)>,
+    /// Landing speed, point and the ground's surface there (when known).
+    pub impact: Option<(f32, DVec3, Option<SurfaceId>)>,
     /// Where it pushed the water's surface this step: point on the surface, velocity
     /// relative to the water, radius and mass (for `WaterDisturbance`).
     pub water: Vec<(DVec3, Vec3, f32, f32)>,
@@ -1246,15 +1247,17 @@ pub fn snapshot_frames(
     config: Res<SoftBodyConfig>,
     focus: Res<FocusPoints>,
     range: Option<Res<SimulationRange>>,
-    mut bodies: Query<&mut SoftBodySim>,
+    mut bodies: Query<(Entity, &mut SoftBodySim)>,
     transforms: TransformQuery,
     poses: Query<&'static SkeletonPose>,
     movers: Query<(Option<&RigidBody>, Has<CharacterController>)>,
     mut physical: Local<HashMap<Entity, bool>>,
-    (time, engine): (Res<Time>, Option<Res<EngineConfig>>),
+    (time, engine, job): (Res<Time>, Option<Res<EngineConfig>>, Res<FrameJob>),
 ) {
     let range = range.map_or_else(SimulationRange::default, |r| *r);
     let beside = beside_frame(&config, engine.as_deref(), &time);
+    // While last step's job still runs, nothing new joins it (see `join_heavy_bodies`).
+    let kick = !job.job.is_pending();
     let live = LiveFrames {
         transforms: &transforms,
         poses: &poses,
@@ -1275,7 +1278,11 @@ pub fn snapshot_frames(
             false
         })
     };
-    for mut b in &mut bodies {
+    for (e, mut b) in &mut bodies {
+        // Still being solved: written now, its solve would be dropped.
+        if job.in_flight.contains(&e) {
+            continue;
+        }
         let b = &mut *b;
         b.overlaps = config.enabled
             && b.bridge.is_none()
@@ -1285,7 +1292,7 @@ pub fn snapshot_frames(
                 FrameSource::Bone { owner, .. } => rides(owner),
                 FrameSource::Blend(blend) => rides(blend.owner),
             });
-        b.kicked = beside && b.overlaps && costly(b);
+        b.kicked = beside && kick && b.overlaps && costly(b);
         b.snapshot.clear();
         // Only what its step reads: frames a body at rest doesn't follow (hair rides them).
         if b.overlaps && (b.strands.is_some() || !rests(b, &focus, &range, &config, 0.0)) {
@@ -1382,6 +1389,17 @@ pub struct FrameJob {
     /// grabbed, rebuilt, moved by a world shift) keeps what was done to it, and its solve is
     /// dropped.
     tick: Tick,
+    /// Set by the job as it ends, so a step can tell it isn't done without waiting for it.
+    done: Arc<AtomicBool>,
+    /// The bodies the running job is solving: they keep what they had as they left until
+    /// it is taken, and no step touches them meanwhile.
+    in_flight: EntityHashSet,
+    /// Whether a step may go on without the running job (a real clock: a manual one, in
+    /// tests and tours, waits, so a run is the same every time).
+    may_hold: bool,
+    /// Fixed steps the running job was let run past (they come out of a frame-time cliff:
+    /// two fixed steps in one frame give the job no time between them).
+    held: u32,
     /// Work of the solves taken this step (ms, summed), the slowest, how long the step waited
     /// for them (ms) and how many were dropped, for the diagnostics [`step_bodies`] writes.
     busy: f64,
@@ -1412,7 +1430,9 @@ pub fn kick_heavy_bodies(
     mut job: ResMut<FrameJob>,
     ticks: SystemChangeTick,
 ) {
-    if !config.enabled {
+    // The last job still runs (see `join_heavy_bodies`): its bodies wait for it, and no
+    // others were sent (`snapshot_frames`).
+    if !config.enabled || job.job.is_pending() {
         return;
     }
     let ctx = StepContext {
@@ -1456,13 +1476,20 @@ pub fn kick_heavy_bodies(
     // Longest first, so the costly ones start at once (see step_all).
     work.sort_by(|a, b| b.0.total_cmp(&a.0));
     let work: Vec<InFlight> = work.into_iter().map(|(_, w)| w).collect();
+    job.in_flight = work.iter().map(|w| w.entity).collect();
     job.tick = ticks.this_run();
     let beside = beside_frame(&config, engine.as_deref(), &time);
     // Under a real clock settling stops for the frame by time, as on the frame; a manual
     // clock (tests, tours) settles by count alone.
     let timed = !matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
-    job.job
-        .start("softbody solve", beside, move || solve_beside(work, timed));
+    let done = Arc::new(AtomicBool::new(false));
+    job.done = done.clone();
+    job.may_hold = timed;
+    job.job.start("softbody solve", beside, move || {
+        let work = solve_beside(work, timed);
+        done.store(true, Ordering::Release);
+        work
+    });
 }
 
 /// Solve the bodies sent beside the frame, each its own task on the split pool when there
@@ -1497,6 +1524,11 @@ fn solve_beside(mut work: Vec<InFlight>, timed: bool) -> Vec<InFlight> {
 /// steps (sleep, tearing and fire, planks, what they send the world, which goes out this step).
 /// A body written since it left (cut, grabbed, rebuilt, moved by a world shift) keeps that
 /// and loses the step.
+///
+/// Under a real clock a job not done yet is left to run rather than waited for: the frame went on without it
+/// (two fixed steps in one frame give it no time between them; 99 frames of the stutter
+/// flight waited 12-44 ms here, VM), its bodies keep last step's state, and when it is taken
+/// they make up the steps it ran past (up to [`MAX_CATCH_UP`]).
 pub fn join_heavy_bodies(
     mut job: ResMut<FrameJob>,
     mut bodies: Query<&mut SoftBodySim>,
@@ -1505,7 +1537,23 @@ pub fn join_heavy_bodies(
 ) {
     let job = &mut *job;
     (job.busy, job.slowest, job.wait, job.dropped, job.solved) = (0.0, None, 0.0, 0, 0);
+    if job.may_hold && job.job.is_pending() && !job.done.load(Ordering::Acquire) {
+        job.held += 1;
+        if job.held == 1 {
+            // Drawn where the last step left them, not moving through it again each step
+            // (without marking them written, which would drop their solve).
+            for &e in &job.in_flight {
+                if let Ok(mut b) = bodies.get_mut(e) {
+                    let sim = &mut b.bypass_change_detection().sim;
+                    sim.step_start.clone_from(&sim.pos);
+                }
+            }
+        }
+        return;
+    }
     let waited = Instant::now();
+    let held = std::mem::take(&mut job.held).min(MAX_CATCH_UP);
+    job.in_flight.clear();
     let Some(done) = job.job.take() else {
         return;
     };
@@ -1526,9 +1574,15 @@ pub fn join_heavy_bodies(
         job.solved += 1;
         let b = &mut *b;
         b.sim = f.sim;
+        // The steps it ran past go into its next one, as a far body's skipped steps do.
+        b.lod_debt += held as f32 * f.prep.dt;
         finish(b, f.prep, solved, &colliders, &env);
     }
 }
+
+/// Fixed steps a heavy body makes up for when its solve ran past them: its next step is at
+/// most this many longer (more would loosen it).
+const MAX_CATCH_UP: u32 = 3;
 
 /// Step `bodies`, longest first, each its own task (the pool takes them in order), so the
 /// costly bodies start at once and the cheap ones fill in around them: the step takes about
@@ -1663,6 +1717,7 @@ pub fn step_bodies(
     diagnostics.set("softbody.beside_frame_wait_ms", frame_job.wait);
     diagnostics.set("softbody.beside_frame_bodies", frame_job.solved as f64);
     diagnostics.set("softbody.beside_frame_dropped", frame_job.dropped as f64);
+    diagnostics.set("softbody.beside_frame_held", f64::from(frame_job.held));
     diagnostics.set("softbody.busy_ms", busy);
     diagnostics.set("softbody.slowest_ms", slowest.map_or(0.0, |s| s.1));
     slowest_body.0 = slowest;
@@ -2028,9 +2083,10 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
             *asked_origin = origin;
         }
         b.sim.ground.resize(b.sim.len(), [0.0; 4]);
+        b.ground_surface.resize(b.sim.len(), None);
         // Particles over the same patch of ground share one question: asked all at once
         // (on arrival, after a world shift), 2576 of a curtain's were an 86 ms step.
-        let mut asked: HashMap<(i64, i64), [f32; 4]> = HashMap::new();
+        let mut asked: HashMap<(i64, i64), Ground> = HashMap::new();
         for i in 0..b.sim.len() {
             let wp = origin + b.sim.pos[i].as_dvec3();
             if fresh {
@@ -2046,7 +2102,7 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
                 (wp.x / GROUND_CELL).floor() as i64,
                 (wp.z / GROUND_CELL).floor() as i64,
             );
-            b.sim.ground[i] = *asked
+            (b.sim.ground[i], b.ground_surface[i]) = *asked
                 .entry(cell)
                 .or_insert_with(|| ground_plane(env, wp, origin));
         }
@@ -2061,8 +2117,11 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
         {
             *at = vec![b.center];
             *asked_origin = origin;
+            let (plane, surface) = ground_plane(env, b.center, origin);
             b.sim.ground.clear();
-            b.sim.ground.push(ground_plane(env, b.center, origin));
+            b.sim.ground.push(plane);
+            b.ground_surface.clear();
+            b.ground_surface.push(surface);
         }
     }
 
@@ -2323,7 +2382,7 @@ fn finish(
     }
     let (speed, at) = b.sim.ground_impact;
     if b.kind == SoftKind::Volume && speed > 1.5 {
-        b.out.impact = Some((speed, origin + at.as_dvec3()));
+        b.out.impact = Some((speed, origin + at.as_dvec3(), surface_at(b, at)));
     }
     b.out.water = surface_pushes(&b.sim, origin);
     b.update_bounds();
@@ -2534,16 +2593,38 @@ fn moves_near(b: &SoftBodySim, c: &WorldCollider) -> bool {
         && ((c.pos - c.prev_pos).length_squared() > 1e-8 || c.rot.angle_between(c.prev_rot) > 1e-4)
 }
 
-fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> [f32; 4] {
+/// A ground plane (`n.xyz`, offset; see `Sim::ground`) and the surface it is of.
+type Ground = ([f32; 4], Option<SurfaceId>);
+
+fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> Ground {
     match env.ground(at) {
         Some(g) => {
             let n = g.normal.normalize_or(Vec3::Y);
             let q = (DVec3::new(at.x, g.height, at.z) - origin).as_vec3();
-            [n.x, n.y, n.z, -n.dot(q)]
+            ([n.x, n.y, n.z, -n.dot(q)], Some(g.surface))
         }
         // No ground: a plane far below.
-        None => [0.0, 1.0, 0.0, 1e6],
+        None => ([0.0, 1.0, 0.0, 1e6], None),
     }
+}
+
+/// The surface under a body's landing at `at` (local): the one plane's, or the plane of
+/// the particle nearest it.
+fn surface_at(b: &SoftBodySim, at: Vec3) -> Option<SurfaceId> {
+    if b.ground_surface.len() <= 1 {
+        return b.ground_surface.first().copied().flatten();
+    }
+    let nearest = b
+        .sim
+        .pos
+        .iter()
+        .enumerate()
+        .min_by(|x, y| {
+            x.1.distance_squared(at)
+                .total_cmp(&y.1.distance_squared(at))
+        })?
+        .0;
+    b.ground_surface.get(nearest).copied().flatten()
 }
 
 /// Send reaction impulses, smoke, landings and noise to the world.
@@ -2606,7 +2687,7 @@ pub fn emit_outputs(
                 darkness: 0.55,
             });
         }
-        if let Some((speed, at)) = body.out.impact {
+        if let Some((speed, at, surface)) = body.out.impact {
             let mass = body
                 .sim
                 .base_inv_mass
@@ -2621,7 +2702,7 @@ pub fn emit_outputs(
                 load_kg: mass,
                 speed,
                 kind: ContactKind::Body,
-                surface: None,
+                surface,
                 entity: None,
             });
             noise.write(NoiseEvent {

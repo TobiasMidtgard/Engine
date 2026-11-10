@@ -141,6 +141,9 @@ pub struct SoftBodySim {
     /// at: a big body asks the ground again only under particles that moved (a planet's
     /// ground is costly to ask: 96 questions a step were the rope bridge's 3.8 ms).
     pub(crate) ground_at: (Vec<DVec3>, DVec3),
+    /// The ground's surface under each of `sim.ground`'s planes (one, or one a particle),
+    /// so a landing tells the world what it landed on without asking the ground again.
+    pub(crate) ground_surface: Vec<Option<engine_world::SurfaceId>>,
     /// Steps in a row it has been still (see `systems::SLEEP_SPEED`); asleep past
     /// `systems::SLEEP_STEPS`, with the wind and topology it fell asleep in.
     pub(crate) calm: u32,
@@ -265,6 +268,7 @@ impl SoftBodySim {
             sleep_wind: Vec3::ZERO,
             sleep_topology: 0,
             ground_at: (Vec::new(), DVec3::ZERO),
+            ground_surface: Vec::new(),
         };
         body.update_bounds();
         body
