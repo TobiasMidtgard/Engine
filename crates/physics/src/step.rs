@@ -2800,6 +2800,7 @@ fn substep(
             .map_or(0.0, |c| c.as_secs_f64() * 1000.0);
         drop(piece);
         let piece = crate::report::Piece::start("substeps: after Rapier");
+        report_quarantine(r);
         if crate::report::wanted() {
             let c = &r.world.physics_pipeline.counters;
             crate::report::rapier_stages(p.rid, c);
@@ -2853,6 +2854,38 @@ fn substep(
         spins: touches.spins,
         parts: [t1 - t0, t2 - t1, t3 - t2, t4 - t3],
     }
+}
+
+/// Say which bodies Rapier switched off this step because their state went non-finite (NaN or
+/// infinite): they stay where they were and stop simulating, so a ragdoll or a crate frozen in
+/// the air is otherwise silent. The cause is the body's last input (a force, velocity, pose or
+/// joint frame the owner set), not Rapier.
+fn report_quarantine(r: &crate::sim::Region) {
+    let q = r.world.quarantine();
+    if q.bodies().is_empty() {
+        return;
+    }
+    let names: Vec<String> = q
+        .bodies()
+        .iter()
+        .take(8)
+        .filter_map(|h| r.world.bodies.get(*h))
+        .map(|rb| {
+            let at = r.global(rb.translation());
+            format!(
+                "{:?} at ({:.1}, {:.1}, {:.1})",
+                crate::convert::entity_of(rb.user_data),
+                at.x,
+                at.y,
+                at.z
+            )
+        })
+        .collect();
+    engine_core::log::warn!(
+        "physics: {} bodies went non-finite and were switched off: {}",
+        q.bodies().len(),
+        names.join(", ")
+    );
 }
 
 /// A region's substep job: the region, its plan and its pairs waiting to be confirmed.
