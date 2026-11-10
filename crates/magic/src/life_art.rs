@@ -112,8 +112,9 @@ fn light(lumens: f32, range: f32, fade_secs: f32) -> Value {
 }
 
 /// The looks healing is drawn with in vfx, as `vfx.define` takes them (the `vfx.describe`
-/// format): `spell.heal.*` for heal spells (a vfx without them borrows blight by colour, green
-/// bubbles and miasma) and `spell.radiance.impact`, the gold fire life lights on the dead.
+/// format): `spell.life.*` for heal spells (a lone heal weaves to the Life domain's look, `life`;
+/// a vfx without them borrows blight by its green, bubbles and miasma) and
+/// `spell.radiance.impact`, the gold fire life lights on the dead.
 ///
 /// * bolt: a white-gold core in a soft halo, a ribbon of light behind it, motes and glints
 ///   shed along its path that drift up;
@@ -125,7 +126,7 @@ fn light(lumens: f32, range: f32, fade_secs: f32) -> Value {
 /// * radiance: gold flames licking up and sparks.
 pub fn heal_looks() -> Vec<Value> {
     let bolt = json!({
-        "name": "spell.heal.bolt",
+        "name": "spell.life.bolt",
         "description": "A mending bolt (magic, Restoration): a white-gold core in a soft halo, \
             a ribbon of light behind it, motes and glints drifting up along its path.",
         "light": light(2500.0, 7.0, 0.2),
@@ -154,7 +155,7 @@ pub fn heal_looks() -> Vec<Value> {
         ]
     });
     let impact = json!({
-        "name": "spell.heal.impact",
+        "name": "spell.life.impact",
         "description": "Healing landing (magic, Restoration): a flash, a ring of light running \
             out over the ground, gold motes and stars thrown up that drift and go out.",
         "duration": 2.2,
@@ -186,7 +187,7 @@ pub fn heal_looks() -> Vec<Value> {
         ]
     });
     let field = json!({
-        "name": "spell.heal.field",
+        "name": "spell.life.field",
         "description": "Healing ground (magic, Restoration): a gold glow over the ground, 2 m \
             round at scale 1, with motes of light rising off it and glints.",
         "light": light(1500.0, 6.0, 0.5),
@@ -210,7 +211,7 @@ pub fn heal_looks() -> Vec<Value> {
         ]
     });
     let aura = json!({
-        "name": "spell.heal.aura",
+        "name": "spell.life.aura",
         "description": "A healing aura (magic, Restoration): gold motes circling up round a \
             body, and glints.",
         "light": light(1200.0, 4.0, 0.4),
@@ -231,7 +232,7 @@ pub fn heal_looks() -> Vec<Value> {
         ]
     });
     let charge = json!({
-        "name": "spell.heal.charge",
+        "name": "spell.life.charge",
         "description": "Healing gathering in a hand (magic, Restoration): motes of light drawn \
             in to a growing white-gold glow.",
         "light": light(1200.0, 4.0, 0.2),
@@ -250,7 +251,7 @@ pub fn heal_looks() -> Vec<Value> {
     // vfx pours `spell.<look>.jet` along a beam of that look when it has one: scale = reach / 8 m,
     // its up axis down the beam, half a second a cue.
     let jet = json!({
-        "name": "spell.heal.jet",
+        "name": "spell.life.jet",
         "description": "Healing hands and a wisp's thread (magic, Restoration): a stream of \
             white-gold light down the beam, motes shed along it that hang and drift up. Scale = \
             reach / 8 m.",
@@ -349,9 +350,11 @@ mod tests {
     fn the_heal_looks_are_gold_and_named_for_their_roles() {
         let looks = heal_looks();
         let names: Vec<&str> = looks.iter().filter_map(|l| l["name"].as_str()).collect();
+        // Under the look a heal spell weaves to.
+        let key = crate::combine::weave(&["heal".to_string()]).unwrap().key;
         for role in ["bolt", "impact", "field", "aura", "charge", "jet"] {
             assert!(
-                names.contains(&format!("spell.heal.{role}").as_str()),
+                names.contains(&format!("spell.{key}.{role}").as_str()),
                 "{names:?}"
             );
         }

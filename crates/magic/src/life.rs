@@ -517,7 +517,7 @@ fn revive(
     looks.push(LookCmd::Burst {
         at: f.new.at + DVec3::Y,
         up: Vec3::Y,
-        look: "heal".into(),
+        look: "life".into(),
         role: Role::Impact,
         scale: 1.6,
         color: LIFE,
