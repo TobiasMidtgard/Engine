@@ -296,6 +296,13 @@ pub mod trial_cut {
     /// is worked out for the layer in view only as well. Costs their vertices drawn twice
     /// and one texture read for each layer.
     pub const MESHES_HOLES_FIRST: u32 = 262144;
+    /// Opaque meshes are drawn in bands of distance, the nearest band first (within a
+    /// pipeline; `Item::sort_key` in mesh_feature.rs), so that what stands behind is drawn
+    /// later, fails the depth test and its material is not worked out: fewer layers pass
+    /// the test in the prepass (or in the meshes' own pass), at no cost on the GPU. Costs
+    /// the CPU more batches (a mesh in view in several bands is a batch in each) and binds.
+    /// Same picture.
+    pub const MESHES_NEAR_FIRST: u32 = 524288;
 }
 
 /// What the screen shows.

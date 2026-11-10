@@ -455,6 +455,30 @@ fn variants() -> Vec<Variant> {
             "the count with cut_meshes_holes_first on",
         ),
         v(
+            "cut_meshes_near_first",
+            r,
+            json!({"trial_cuts": 524288}),
+            "objects are drawn in bands of distance, nearest first, so those behind are turned away by the depth test and their material is not worked out (order only: nothing else changes on the GPU; more batches for the CPU)",
+        ),
+        v(
+            "cut_meshes_once_near_first",
+            r,
+            json!({"trial_cuts": 557056}),
+            "cut_meshes_once with the nearest-first order: fewer hidden layers without drawing the vertices twice",
+        ),
+        v(
+            "count_mesh_runs_near_first",
+            r,
+            json!({"trial_cuts": 524288, "debug_skip": 262144}),
+            "the count with cut_meshes_near_first on",
+        ),
+        v(
+            "count_mesh_runs_once_near_first",
+            r,
+            json!({"trial_cuts": 557056, "debug_skip": 262144}),
+            "the count with cut_meshes_once_near_first on",
+        ),
+        v(
             "count_mesh_runs_early_z",
             r,
             json!({"trial_cuts": 65536, "debug_skip": 262144}),

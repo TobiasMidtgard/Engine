@@ -359,7 +359,8 @@ const CUT_SCREEN_FOG: u32 = 2048u;
 const CUT_GROUND_ONCE: u32 = 16384u;
 // (32768: meshes work out their material once, mesh_feature.rs "once"; 65536: their scene
 // program after the depth test; 131072: their depth first in the pass of 32768; 262144:
-// alpha-tested ones in that depth step too. CPU side.)
+// alpha-tested ones in that depth step too; 524288: meshes in bands of distance, nearest
+// first. CPU side.)
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;

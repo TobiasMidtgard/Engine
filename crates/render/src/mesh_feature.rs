@@ -1228,16 +1228,30 @@ impl Item {
     ///
     /// Texture set ids, pages and mesh indices beyond 18, 6 and 24 bits share keys: such items
     /// may interleave and split batches, never draw wrong (batches compare whole keys).
-    fn sort_key(&self) -> u64 {
+    ///
+    /// `near_first` (`trial_cut::MESHES_NEAR_FIRST`): the opaque ones of a pipeline in 16
+    /// bands of distance first, the nearest band first, so that what stands behind is drawn
+    /// later, fails the depth test and its material is not worked out. A band reaches 1.7
+    /// times as far as the one before it (0.7 m to 3 km). Bands and not an order within the
+    /// batch, which the GPU's occlusion culling does not keep (`mesh_cull.wgsl` `emit`); a
+    /// mesh in view in several bands is a batch in each.
+    fn sort_key(&self, near_first: bool) -> u64 {
         if self.pipeline & PIPE_BLEND != 0 {
-            1 << 63 | (!self.dist2.to_bits()) as u64
-        } else {
-            (self.pipeline as u64) << 60
-                | (self.textures as u64 & 0x3_ffff) << 42
-                | (self.page as u64 & 0x3f) << 36
-                | (self.mesh as u64 & 0xff_ffff) << 12
-                | self.lod as u64
+            return 1 << 63 | (!self.dist2.to_bits()) as u64;
         }
+        let band = if near_first {
+            // floor(log2(distance²)), three steps to two bands.
+            let exponent = (self.dist2.to_bits() >> 23) as i64 - 127;
+            ((exponent + 1) * 2 / 3).clamp(0, 15) as u64
+        } else {
+            0
+        };
+        (self.pipeline as u64) << 60
+            | band << 56
+            | (self.textures as u64 & 0x3_ffff) << 38
+            | (self.page as u64 & 0x3f) << 32
+            | (self.mesh as u64 & 0xff_ffff) << 8
+            | self.lod as u64
     }
 }
 
@@ -4396,6 +4410,7 @@ impl RenderFeature for MeshFeature {
         let impostor_pixels = settings.impostor_pixels.max(0.0);
         let threads = gather_threads(self.scene.hot.len());
         steps.step("meshes: sort and batch");
+        let near_first = settings.trial_cuts & crate::settings::trial_cut::MESHES_NEAR_FIRST != 0;
         // Order: opaque (by pipeline, texture set, mesh), transparent (back to front). The
         // visible items' keys are sorted, not the items themselves.
         self.order.clear();
@@ -4404,7 +4419,7 @@ impl RenderFeature for MeshFeature {
                 .iter()
                 .enumerate()
                 .filter(|(_, i)| i.visible)
-                .map(|(n, i)| (Item::sort_key(i), n as u32)),
+                .map(|(n, i)| (Item::sort_key(i, near_first), n as u32)),
         );
         self.order.sort_unstable_by_key(|&(key, _)| key);
 
@@ -4455,7 +4470,7 @@ impl RenderFeature for MeshFeature {
                     lod: i.lod_from,
                     ..*i
                 };
-                (key.sort_key(), n)
+                (key.sort_key(near_first), n)
             })
             .collect();
         fading.sort_unstable_by_key(|&(key, _)| key);
