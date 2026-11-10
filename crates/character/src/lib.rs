@@ -375,7 +375,8 @@ fn start_builds(
         let (pack, regions) = (pack.clone(), regions.clone());
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let meshes = build::build(&pack, &regions, &a, opts);
+            let mut meshes = build::build(&pack, &regions, &a, opts);
+            meshes.release_cpu();
             let _ = tx.send((a, opts, meshes));
         });
         commands

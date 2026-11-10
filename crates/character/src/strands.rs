@@ -58,6 +58,9 @@ pub struct StrandSet {
     pub guides: Vec<Vec3>,
     /// Per hair, the guides it moves with. Empty without guides.
     pub follow: Vec<Follow>,
+    /// Hairs in the set after [`Self::release_points`] dropped `points` and `attrs` (0
+    /// before).
+    pub released: usize,
 }
 
 /// A [`StrandSet`] packed for the GPU ([`StrandSet::packed`]).
@@ -98,11 +101,23 @@ impl StrandSet {
             attrs: Vec::new(),
             guides: Vec::new(),
             follow: Vec::new(),
+            released: 0,
         }
     }
 
     pub fn strand_count(&self) -> usize {
+        if self.points.is_empty() {
+            return self.released;
+        }
         self.points.len() / self.points_per.max(1) as usize
+    }
+
+    /// Drop the full-precision points once the set is packed for the GPU (a head of long hair
+    /// keeps about 100 MB of them otherwise); the count, guides and follows stay.
+    pub fn release_points(&mut self) {
+        self.released = self.strand_count();
+        self.points = Vec::new();
+        self.attrs = Vec::new();
     }
 
     /// Guides of hair that moves (see [`Self::guides`]).

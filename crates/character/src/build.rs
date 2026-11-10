@@ -48,6 +48,16 @@ pub struct CharacterMeshes {
 }
 
 impl CharacterMeshes {
+    /// Keep only what drawing and moving the person needs: the hair's full-precision points
+    /// go once `packed_strands` holds them. Tools that read the hair call [`build`] without it.
+    pub fn release_cpu(&mut self) {
+        if self.packed_strands.len() == self.strands.len() {
+            for s in &mut self.strands {
+                s.release_points();
+            }
+        }
+    }
+
     /// Triangles drawn (skin, eyes, and two per hair segment).
     pub fn triangles(&self) -> usize {
         let hair: usize = self
