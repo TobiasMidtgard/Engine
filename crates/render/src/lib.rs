@@ -86,9 +86,11 @@ mod lens;
 pub mod material;
 pub mod material_library;
 pub mod mesh;
+mod mesh_counts;
 mod mesh_cull;
 pub mod mesh_feature;
 mod mesh_lod;
+mod mesh_once;
 mod mesh_pool;
 #[doc(hidden)]
 pub use mesh_pool::set_index_share as set_mesh_index_share;
@@ -582,6 +584,11 @@ mod tests {
             (
                 "lamp_tiles",
                 include_str!("shaders/lamp_tiles.wgsl").into(),
+                true,
+            ),
+            (
+                "mesh_once",
+                include_str!("shaders/mesh_once.wgsl").into(),
                 true,
             ),
             ("taa", include_str!("shaders/taa.wgsl").into(), true),

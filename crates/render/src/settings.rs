@@ -202,6 +202,13 @@ pub mod shade_skip {
     /// With `trial_cut::GROUND_ONCE`: the ground's pixels colored once a pixel are drawn
     /// magenta and the rest of the ground green (a picture of what the cut reaches).
     pub const SHOW_GROUND_ONCE: u32 = 65536;
+    /// With `trial_cut::MESHES_ONCE`: the pixels lit from the stored material are drawn
+    /// magenta (a picture of what the cut reaches; meshes left to the old way keep their look).
+    pub const SHOW_MESHES_ONCE: u32 = 131072;
+    /// Not a skip: count the meshes' vertex runs, triangles and fragment runs in the prepass
+    /// and the scene pass of the main view (mesh_counts.rs; `render.stats`, the meshes'
+    /// `mesh_runs`). Needs pipeline statistics queries.
+    pub const COUNT_MESH_RUNS: u32 = 262144;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the same picture, switchable
@@ -260,6 +267,15 @@ pub mod trial_cut {
     /// pixel while it is on), a triangle over the screen colors the pixels from that, and the
     /// scene pass's patches fail their depth test there before any shader runs.
     pub const GROUND_ONCE: u32 = 16384;
+    /// Meshes work out their material once: today the depth prepass works it out for the
+    /// normals and roughness, at every layer it draws, and the scene pass works it out again
+    /// at every pixel before lighting it. With this on (main view, mesh_feature.rs "once"),
+    /// the opaque meshes leave the shared prepass for a pass of their own right after it,
+    /// which also stores what lighting needs (36 bytes a pixel while it is on); the scene
+    /// pass draws none of them and a triangle over the screen lights each pixel once, not
+    /// once for every triangle that touches its 2x2 block. Impostors and virtual geometry
+    /// keep the old way.
+    pub const MESHES_ONCE: u32 = 32768;
 }
 
 /// What the screen shows.

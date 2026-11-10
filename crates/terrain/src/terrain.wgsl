@@ -3220,6 +3220,8 @@ struct GroundAttributes {
 fn fs_attributes(in: VertexOut) -> GroundAttributes {
     let z = in.clip.z;
     let slope = vec2<f32>(dpdx(z), dpdy(z)) / max(z, 1e-30);
+    let span = max(length(dpdx(in.rel)), length(dpdy(in.rel)));
+    let alt_step = fwidth(in.climate.w);
     // Only the fragment the prepass kept: the same vertices give the same depth to the bit
     // (two steps of slack for a GPU that rounds the shader's copy of it another way).
     let pixel = vec2<i32>(in.clip.xy);
@@ -3237,6 +3239,15 @@ fn fs_attributes(in: VertexOut) -> GroundAttributes {
     var ground = in.planet + 1u;
     if (in.night.w >= 0.0 && dot(normalize(in.up), frame.sun_dir.xyz) < 0.03
         && length(in.rel) > planet.params4.y) {
+        ground = 0u;
+    }
+    // Seen from high up the coastline wanders by the altitude's change across the pixel's own
+    // triangle (`ground_color`'s `coast_wander`), which a block's four pixels cannot give
+    // back where they lie on triangles of different slopes: the coast's pixels (within twice
+    // the widest wander of sea level) are left to `fs_main`, so the coast stays where it was.
+    let far = smoothstep(40.0, 400.0, span);
+    if (far > 0.0 && planet.params.w > 0.0
+        && abs(in.climate.w) < 1.6 * alt_step / max(span, 1e-3) * in.lod.x * far + 4.0) {
         ground = 0u;
     }
     out.paint = vec4<u32>(

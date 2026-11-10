@@ -407,6 +407,36 @@ fn variants() -> Vec<Variant> {
             "the ground's color once a pixel, not once for every triangle that touches the pixel's 2x2 block (a pass \"before scene\" writes what the vertices carry)",
         ),
         v(
+            "cut_meshes_once",
+            r,
+            json!({"trial_cuts": 32768}),
+            "objects (trees, buildings, rocks) work out their material in one pass, not in the depth pass and again in the color pass, and are lit once a pixel; their vertices are drawn once, not twice",
+        ),
+        v(
+            "show_meshes_once",
+            r,
+            json!({"trial_cuts": 32768, "debug_skip": 131072}),
+            "a picture, not a cut: the pixels of objects lit once from their stored material in magenta",
+        ),
+        v(
+            "count_mesh_runs",
+            r,
+            json!({"debug_skip": 262144}),
+            "a count, not a cut: how many times objects' vertex and pixel programs run in the prepass and the scene pass (exact, counted by the GPU; in the json as mesh_runs)",
+        ),
+        v(
+            "count_mesh_runs_once",
+            r,
+            json!({"trial_cuts": 32768, "debug_skip": 262144}),
+            "the same count with cut_meshes_once on",
+        ),
+        v(
+            "cut_once_all",
+            r,
+            json!({"trial_cuts": 49152}),
+            "cut_ground_once and cut_meshes_once together",
+        ),
+        v(
             "show_ground_once",
             r,
             json!({"trial_cuts": 16384, "debug_skip": 65536}),
@@ -735,6 +765,17 @@ fn triangles(bridge: &mut Bridge) -> Option<u64> {
     bridge.call("render.stats", json!({})).ok()?["stats"]["triangles"].as_u64()
 }
 
+/// The meshes' exact shader runs of the last frame read back (`shade_skip::COUNT_MESH_RUNS`).
+fn mesh_runs(bridge: &mut Bridge) -> Option<Value> {
+    let at = bridge.call("render.stats", json!({})).ok()?;
+    at["renderer"]["features"]
+        .as_array()?
+        .iter()
+        .map(|f| &f["state"]["mesh_runs"])
+        .find(|runs| runs.is_object())
+        .cloned()
+}
+
 fn round3(x: f64) -> f64 {
     (x * 1000.0).round() / 1000.0
 }
@@ -947,6 +988,11 @@ fn run(args: &Args) -> Result<(), String> {
             wait(&mut bridge, args.settle)?;
             let s = sample(&mut bridge, args.secs)?;
             let tris = triangles(&mut bridge);
+            let runs = if v.name.starts_with("count_mesh_runs") {
+                mesh_runs(&mut bridge)
+            } else {
+                None
+            };
             bridge.call("resource.set", json!({"name": v.resource, "value": back}))?;
             wait(&mut bridge, args.settle)?;
             let after = sample(&mut bridge, args.secs)?;
@@ -961,6 +1007,10 @@ fn run(args: &Args) -> Result<(), String> {
             entry["paired_baseline_gpu_ms"] = json!(round3(around.gpu_ms()));
             entry["saves_ms"] = json!(round3(around.gpu_ms() - s.gpu_ms()));
             entry["triangles"] = json!(tris);
+            if let Some(runs) = runs {
+                eprintln!("{stop}: {} {runs}", v.name);
+                entry["mesh_runs"] = runs;
+            }
             entry["patch"] = patch;
             stop_json.insert(v.name.into(), entry);
             baselines.push(after.gpu_ms());

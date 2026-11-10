@@ -2824,6 +2824,20 @@ impl Renderer {
                 pass.set_bind_group(0, &self.prepass_group, &[]);
             }
         }
+        // Prepasses of the features' own (the meshes' stored material, mesh_once.rs).
+        let own_targets = crate::features::PrepassTargets {
+            normal: &self.targets.prepass_normal.view,
+            motion: &self.targets.motion.view,
+            depth: &self.targets.depth.view,
+            size: (self.targets.width, self.targets.height),
+            group: &self.prepass_group,
+        };
+        if engine_core::profile::enabled() {
+            self.perf.pass(&mut cpu, &mut encoder, "prepass: stored");
+        }
+        for f in self.features.iter_mut() {
+            f.prepass_own(&mut encoder, &own_targets, false, &ctx);
+        }
         // Occlusion culling against that depth, then what it found visible after all.
         self.perf.pass(&mut cpu, &mut encoder, "occlusion culling");
         let mut late = false;
@@ -2865,6 +2879,10 @@ impl Renderer {
             for f in &self.features {
                 f.draw_prepass_late(&mut pass, &ctx);
                 pass.set_bind_group(0, &self.prepass_group, &[]);
+            }
+            drop(pass);
+            for f in self.features.iter_mut() {
+                f.prepass_own(&mut encoder, &own_targets, true, &ctx);
             }
         }
         encoder.copy_texture_to_texture(

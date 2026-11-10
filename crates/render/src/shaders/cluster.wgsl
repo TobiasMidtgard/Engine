@@ -75,3 +75,17 @@ fn vs_cluster_prepass(@builtin(vertex_index) vertex: u32, @builtin(instance_inde
     }
     return standard_prepass_vertex(cluster_vertex_in(c));
 }
+
+// The meshes' own prepass (`trial_cut::MESHES_ONCE`, mesh.wgsl `fs_once`).
+@vertex
+fn vs_cluster_once(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> OnceVertexOut {
+    let c = cluster_corner(vertex, instance);
+    if (!c.valid) {
+        var nothing: OnceVertexOut;
+        nothing.clip = CLUSTER_NOWHERE;
+        return nothing;
+    }
+    let in = cluster_vertex_in(c);
+    let p = standard_prepass_vertex(in);
+    return once_vertex(p, vertex_snow(in, p.rel));
+}

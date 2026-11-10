@@ -194,6 +194,7 @@ fn try_create(
         | wgpu::Features::FLOAT32_FILTERABLE
         | wgpu::Features::RG11B10UFLOAT_RENDERABLE
         | wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::PIPELINE_STATISTICS_QUERY
         | wgpu::Features::TEXTURE_COMPRESSION_BC
         | wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let required_features = adapter.features() & wanted;

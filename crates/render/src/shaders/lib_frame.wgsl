@@ -334,6 +334,8 @@ const SKIP_SCREEN_LIGHT_SUN: u32 = 16384u;
 // With `CUT_GROUND_ONCE`: the ground's pixels colored once a pixel are drawn magenta, the rest of
 // the ground green (32768 is the local triangle view's, engine-perf/triangle-view).
 const SKIP_SHOW_GROUND_ONCE: u32 = 65536u;
+// With `CUT_MESHES_ONCE`: the pixels lit from the stored material are drawn magenta.
+const SKIP_SHOW_MESHES_ONCE: u32 = 131072u;
 
 fn shade_skip(bit: u32) -> bool {
     return (u32(frame.shading.z) & bit) != 0u;
@@ -355,6 +357,7 @@ const CUT_TILED_LAMPS: u32 = 1024u;
 const CUT_SCREEN_FOG: u32 = 2048u;
 // (4096 and 8192: the ground's grid lines, CPU side.)
 const CUT_GROUND_ONCE: u32 = 16384u;
+// (32768: meshes work out their material once, mesh_feature.rs "once"; CPU side.)
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;

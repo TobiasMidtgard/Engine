@@ -593,6 +593,9 @@ pub struct ClusterRenderer {
     /// Scene and prepass pipelines, indexed by double-sided: created the first frame that
     /// draws clusters (most scenes never do, and each is a large shader to compile).
     scene: Option<ScenePipelines>,
+    /// The pipelines of the meshes' own prepass (`trial_cut::MESHES_ONCE`, mesh_once.rs),
+    /// single- and double-sided: made when first asked for ([`ensure_once`](Self::ensure_once)).
+    once: Option<[wgpu::RenderPipeline; 2]>,
     /// What they are created from.
     scene_shader: wgpu::ShaderModule,
     scene_layout: wgpu::PipelineLayout,
@@ -976,6 +979,7 @@ impl ClusterRenderer {
             hzb_from_depth,
             hzb_reduce,
             scene: None,
+            once: None,
             scene_shader,
             scene_layout,
             features,
@@ -1048,6 +1052,7 @@ impl ClusterRenderer {
     pub fn set_shader_features(&mut self, features: ShaderFeatures) {
         self.features = features;
         self.scene = None;
+        self.once = None;
         self.shadow_masked = None;
     }
 
@@ -1883,6 +1888,72 @@ impl ClusterRenderer {
         }
     }
 
+    /// Make the pipelines of the meshes' own prepass, which draw into `targets`
+    /// (`mesh_once::color_targets`). False while nothing is drawn as clusters.
+    pub fn ensure_once(
+        &mut self,
+        gpu: &GpuShared,
+        targets: &[Option<wgpu::ColorTargetState>],
+    ) -> bool {
+        if !self.active {
+            return false;
+        }
+        if self.once.is_none() {
+            let constants = self.features.mesh_constants();
+            let compilation = wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            };
+            let pipeline = |double: bool| {
+                gpu.device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("cluster once"),
+                        layout: Some(&self.scene_layout),
+                        vertex: wgpu::VertexState {
+                            module: &self.scene_shader,
+                            entry_point: Some("vs_cluster_once"),
+                            compilation_options: compilation.clone(),
+                            buffers: &[],
+                        },
+                        primitive: wgpu::PrimitiveState {
+                            cull_mode: if double { None } else { Some(wgpu::Face::Back) },
+                            ..Default::default()
+                        },
+                        depth_stencil: Some(gpu.depth_state(true)),
+                        multisample: Default::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module: &self.scene_shader,
+                            entry_point: Some("fs_once"),
+                            compilation_options: compilation.clone(),
+                            targets,
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+            };
+            self.once = Some([pipeline(false), pipeline(true)]);
+        }
+        true
+    }
+
+    /// Draw the camera's clusters into the meshes' own prepass (group 1 bound): those found
+    /// visible early, or with `late` those occlusion culling found visible late.
+    pub fn draw_once<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'_>,
+        textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
+        late: bool,
+    ) {
+        let Some(once) = &self.once else {
+            return;
+        };
+        if !late {
+            self.draw_camera(pass, once, textures, 0);
+        } else if self.late {
+            self.draw_camera(pass, once, textures, self.late_first);
+        }
+    }
+
     /// Draw the camera's clusters into the scene (opaque phase; group 1 bound).
     pub fn draw_scene<'a>(
         &'a self,
@@ -1935,6 +2006,11 @@ impl ClusterRenderer {
     /// Whether anything is drawn as clusters this frame.
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// Whether occlusion culling found clusters visible late this frame.
+    pub fn has_late(&self) -> bool {
+        self.active && self.late
     }
 
     pub fn stats(&self) -> ClusterStats {

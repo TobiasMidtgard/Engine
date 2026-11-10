@@ -1205,6 +1205,10 @@ const SKINNED_INSTANCE: u32 = 0x8000u;
 
 @vertex
 fn vs_prepass(in: VertexIn, @builtin(vertex_index) vertex: u32) -> PrepassVertexOut {
+    return prepass_vertex(in, vertex);
+}
+
+fn prepass_vertex(in: VertexIn, vertex: u32) -> PrepassVertexOut {
     var out = standard_prepass_vertex(in);
     if ((in.extra.y & SKINNED_INSTANCE) != 0u) {
         // Last frame's pose under last frame's transform: motion vectors follow the skin.
@@ -1271,4 +1275,105 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
         discard;
     }
     return prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
+}
+
+// ---------------------------------------------------------------- the material once a pixel
+// `trial_cut::MESHES_ONCE` (mesh_feature.rs "once"): opaque meshes drawn in a prepass of their
+// own, which writes what the shared prepass writes and stores the rest of the material too, so
+// the scene pass doesn't draw them again: mesh_once.wgsl lights each pixel from what is stored.
+// The material is worked out here only, not in the prepass and again in the scene pass.
+
+struct OnceVertexOut {
+    @builtin(position) @invariant clip: vec4<f32>,
+    @location(0) rel: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) @interpolate(flat) material: u32,
+    @location(5) motion_now: vec4<f32>,
+    @location(6) motion_prev: vec4<f32>,
+    @location(7) local: vec3<f32>,
+    @location(8) object_normal: vec3<f32>,
+    @location(9) @interpolate(flat) axis_x: vec3<f32>,
+    @location(10) @interpolate(flat) axis_y: vec3<f32>,
+    @location(11) @interpolate(flat) axis_z: vec3<f32>,
+    @location(12) @interpolate(flat) fade: f32,
+    // Snow a bone plant holds here (`vertex_snow`), as the scene pass's vertices carry it.
+    @location(13) snow: f32,
+};
+
+@vertex
+fn vs_once(in: VertexIn, @builtin(vertex_index) vertex: u32) -> OnceVertexOut {
+    let p = prepass_vertex(in, vertex);
+    return once_vertex(p, vertex_snow(in, p.rel));
+}
+
+// The prepass's vertex with the snow it holds (shared with the virtual geometry path,
+// cluster.wgsl).
+fn once_vertex(p: PrepassVertexOut, snow: f32) -> OnceVertexOut {
+    var out: OnceVertexOut;
+    out.clip = p.clip;
+    out.rel = p.rel;
+    out.normal = p.normal;
+    out.uv = p.uv;
+    out.color = p.color;
+    out.material = p.material;
+    out.motion_now = p.motion_now;
+    out.motion_prev = p.motion_prev;
+    out.local = p.local;
+    out.object_normal = p.object_normal;
+    out.axis_x = p.axis_x;
+    out.axis_y = p.axis_y;
+    out.axis_z = p.axis_z;
+    out.fade = p.fade;
+    out.snow = snow;
+    return out;
+}
+
+// The prepass's two targets, then the stored material (`FORMATS`, mesh_once.rs).
+struct OnceOutput {
+    @location(0) normal: vec4<f32>,
+    @location(1) motion: vec2<f32>,
+    // Albedo, occlusion.
+    @location(2) albedo: vec4<f32>,
+    // Emissive light (pre-exposed), parallax self-shadowing toward the sun.
+    @location(3) emissive: vec4<f32>,
+    // The smooth normal and the side in view, octahedral.
+    @location(4) normals: vec4<f32>,
+    // Metallic, subsurface, reflectance, alpha.
+    @location(5) surface: vec4<f32>,
+    // The depth drawn here, and the kind of surface: 1 lit, 2 a thin sheet, 3 unlit (0: none).
+    @location(6) depth: vec2<f32>,
+};
+
+@fragment
+fn fs_once(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceOutput {
+    if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
+        discard;
+    }
+    let mat = materials[in.material];
+    let flags = mat.flags.x;
+    vt_feedback_on = vt_feedback_pixel(in.clip.xy);
+    let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
+        mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, in.snow);
+    let m = evaluate_material(si, true);
+    if ((flags & 15u) == 1u && m.base.a < mat.params.w) {
+        discard;
+    }
+    let basic = prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
+    var out: OnceOutput;
+    out.normal = basic.normal;
+    out.motion = basic.motion;
+    out.albedo = vec4<f32>(m.albedo, m.occlusion);
+    out.emissive = vec4<f32>(pre_expose(m.emissive), m.sun);
+    out.normals = vec4<f32>(oct_encode(m.smooth_normal), oct_encode(m.face));
+    out.surface = vec4<f32>(m.metallic, m.subsurface, mat.params.z, m.base.a);
+    var kind = 1.0;
+    if ((flags & 16u) != 0u) {
+        kind = 3.0;
+    } else if (m.thin) {
+        kind = 2.0;
+    }
+    out.depth = vec2<f32>(in.clip.z, kind);
+    return out;
 }

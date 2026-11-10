@@ -584,6 +584,20 @@ pub struct FrameContext<'a> {
     pub cloud_shadows: Option<CloudShadowTarget<'a>>,
 }
 
+/// The shared depth prepass's targets, for [`RenderFeature::prepass_own`].
+pub struct PrepassTargets<'a> {
+    /// Normals and roughness ([`Formats::normal`]).
+    pub normal: &'a wgpu::TextureView,
+    /// Motion vectors ([`Formats::motion`]).
+    pub motion: &'a wgpu::TextureView,
+    /// The scene's depth (reverse-Z).
+    pub depth: &'a wgpu::TextureView,
+    /// Their size in pixels.
+    pub size: (u32, u32),
+    /// The prepass's group 0: the frame bindings, with stand-ins for what the prepass draws.
+    pub group: &'a wgpu::BindGroup,
+}
+
 /// A change to the world left by a shared prepare ([`PrepareOut::defer`]).
 type WorldChange = Box<dyn FnOnce(&mut World) + Send + Sync>;
 
@@ -816,6 +830,20 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// Draw into the depth prepass again (same targets and group 0, contents kept) when some
     /// feature's `after_prepass` returned true: what turned out visible only then.
     fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
+
+    /// Record a prepass of the feature's own over the shared prepass's targets, for geometry
+    /// that writes more than the shared prepass holds (the meshes' stored material,
+    /// mesh_once.rs). Called right after the shared prepass (`late` false: `after_prepass`
+    /// comes next and sees its depth) and again after the late prepass when there was one
+    /// (`late` true). The pass keeps what the targets hold and binds `targets.group` at 0.
+    fn prepass_own(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &PrepassTargets,
+        late: bool,
+        ctx: &FrameContext,
+    ) {
+    }
 
     /// Record work right before the scene pass, once everything shading reads is ready: the
     /// prepass depth (frame binding 12), ambient occlusion, reflections, bounce light and fog,

@@ -1436,6 +1436,16 @@ pub struct MeshFeature {
     pipelines: Vec<Option<wgpu::RenderPipeline>>,
     /// Depth prepass pipelines, indexed like `pipelines` (blend variants unused).
     prepass_pipelines: Vec<Option<wgpu::RenderPipeline>>,
+    /// The material worked out once a pixel (`trial_cut::MESHES_ONCE`, mesh_once.rs): made
+    /// when the cut is first on, dropped when it goes off.
+    once: Option<crate::mesh_once::MeshOnce>,
+    /// This view's opaque meshes are drawn that way this frame (`compute` decides): they skip
+    /// the shared prepass and the scene pass.
+    once_now: bool,
+    /// Exact counts of the meshes' shader work (`shade_skip::COUNT_MESH_RUNS`,
+    /// mesh_counts.rs), while they are asked for, and whether this view is counted.
+    counts: Option<crate::mesh_counts::MeshCounts>,
+    counting: bool,
     /// The optional shader parts the pipelines have (turned on as materials need them).
     shader_features: ShaderFeatures,
     shader: Option<wgpu::ShaderModule>,
@@ -1733,6 +1743,7 @@ impl MeshFeature {
         self.warmup = None;
         self.pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
         self.prepass_pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
+        self.once = None;
         self.shadow_masked_pipeline = None;
         if let Some(impostors) = &mut self.impostors {
             impostors.clear_pipelines();
@@ -1805,6 +1816,190 @@ impl MeshFeature {
         }
         let threads = std::thread::available_parallelism().map_or(2, |n| n.get() / 4);
         self.warmup = Some(Warmup::start("mesh pipelines", jobs, threads.clamp(1, 4)));
+    }
+
+    /// Count the meshes' draws that follow in `pass` as `query` (mesh_counts.rs), when this
+    /// view is counted and `wanted`. True when the caller must end the count after them.
+    fn count_begin(&self, pass: &mut wgpu::RenderPass<'_>, query: u32, wanted: bool) -> bool {
+        wanted && self.counting && self.counts.as_ref().is_some_and(|c| c.begin(pass, query))
+    }
+
+    /// The scene's draws of `phase` (`RenderFeature::draw`).
+    fn draw_phase(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>) {
+        let batches = match phase {
+            RenderPhase::Opaque => &self.opaque,
+            RenderPhase::Transparent => &self.transparent,
+            RenderPhase::Sky => return,
+        };
+        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
+            return;
+        };
+        let clusters = self
+            .clusters
+            .as_ref()
+            .filter(|c| phase == RenderPhase::Opaque && c.is_active());
+        let impostors = match phase {
+            RenderPhase::Opaque => self.impostor_view,
+            _ => (0, 0),
+        };
+        if batches.is_empty() && clusters.is_none() && impostors.1 == 0 {
+            return;
+        }
+        pass.set_bind_group(1, group, &[]);
+        let culled = self
+            .culling
+            .as_ref()
+            .filter(|_| phase == RenderPhase::Opaque)
+            .and_then(|c| c.draws(crate::mesh_cull::Phase::Both));
+        pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
+        if let Some(once) = self
+            .once
+            .as_ref()
+            .filter(|_| phase == RenderPhase::Opaque && self.once_now)
+        {
+            // Their own prepass stored their material: lit here, once a pixel.
+            once.light(pass);
+            pass.set_bind_group(1, group, &[]);
+        } else {
+            self.draw_batches(
+                pass,
+                batches,
+                |p| self.pipelines.get(p as usize).and_then(Option::as_ref),
+                |_| true,
+                culled.map(|c| (c.1, c.2)),
+            );
+        }
+        if culled.is_some() {
+            pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        }
+        if let Some(i) = &self.impostors {
+            i.draw(pass, impostors, false);
+        }
+        if let Some(clusters) = clusters.filter(|_| !self.once_now) {
+            clusters.draw_scene(pass, |set| self.texture_group(set));
+        }
+    }
+
+    /// The shared prepass's draws (`RenderFeature::draw_prepass`).
+    fn draw_prepass_early(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
+            return;
+        };
+        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
+        if self.opaque.is_empty() && clusters.is_none() && self.impostor_view.1 == 0 {
+            return;
+        }
+        pass.set_bind_group(1, group, &[]);
+        let culled = self
+            .culling
+            .as_ref()
+            .and_then(|c| c.draws(crate::mesh_cull::Phase::Early));
+        pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
+        // (With `once_now` the batches are drawn in `prepass_own`.)
+        if !self.once_now {
+            self.draw_batches(
+                pass,
+                &self.opaque,
+                |p| {
+                    self.prepass_pipelines
+                        .get(p as usize)
+                        .and_then(Option::as_ref)
+                },
+                |_| true,
+                culled.map(|c| (c.1, c.2)),
+            );
+        }
+        if culled.is_some() {
+            pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        }
+        if let Some(i) = &self.impostors {
+            i.draw(pass, self.impostor_view, true);
+        }
+        if let Some(clusters) = clusters.filter(|_| !self.once_now) {
+            clusters.draw_prepass(pass, |set| self.texture_group(set));
+        }
+    }
+
+    /// The late prepass's draws (`RenderFeature::draw_prepass_late`).
+    fn draw_prepass_rest(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(group) = &self.material_group else {
+            return;
+        };
+        // The opaque instances last frame's depth hid but this frame's doesn't.
+        if let Some((instances, args, offset)) = self
+            .culling
+            .as_ref()
+            .filter(|_| !self.once_now)
+            .and_then(|c| c.draws(crate::mesh_cull::Phase::Late))
+        {
+            pass.set_bind_group(1, group, &[]);
+            pass.set_vertex_buffer(1, instances.slice(..));
+            self.draw_batches(
+                pass,
+                &self.opaque,
+                |p| {
+                    self.prepass_pipelines
+                        .get(p as usize)
+                        .and_then(Option::as_ref)
+                },
+                |_| true,
+                Some((args, offset)),
+            );
+        }
+        let Some(clusters) = self
+            .clusters
+            .as_ref()
+            .filter(|c| c.is_active() && !self.once_now)
+        else {
+            return;
+        };
+        pass.set_bind_group(1, group, &[]);
+        clusters.draw_prepass_late(pass, |set| self.texture_group(set));
+    }
+
+    /// Whether this view's opaque meshes are drawn the `trial_cut::MESHES_ONCE` way this
+    /// frame (mesh_once.rs), with what that needs made: the main view with the cut on, no
+    /// debug view, and a device that can hold the pass's targets.
+    fn once_ready(&mut self, ctx: &FrameContext) -> bool {
+        if ctx.view.extra_view {
+            return false;
+        }
+        let on = ctx.settings.trial_cuts & crate::settings::trial_cut::MESHES_ONCE != 0
+            && ctx.settings.debug_view == crate::settings::DebugView::None
+            && crate::mesh_once::supported(ctx.gpu);
+        if !on {
+            self.once = None;
+            return false;
+        }
+        let targets = crate::mesh_once::color_targets(ctx.gpu);
+        let clusters = self
+            .clusters
+            .as_mut()
+            .is_some_and(|c| c.ensure_once(ctx.gpu, &targets));
+        if self.opaque.is_empty() && !clusters {
+            return false;
+        }
+        let mut used = [false; PIPELINE_VARIANTS as usize];
+        for b in self.opaque.iter() {
+            used[b.key.pipeline as usize] = true;
+        }
+        let missing = |once: &Option<crate::mesh_once::MeshOnce>, i: usize| {
+            once.as_ref().is_none_or(|o| o.pipelines[i].is_none())
+        };
+        if self.once.is_none() || (0..used.len()).any(|i| used[i] && missing(&self.once, i)) {
+            let Some(inputs) = self.mesh_inputs(ctx.gpu) else {
+                return false;
+            };
+            let once = self.once.get_or_insert_with(|| {
+                crate::mesh_once::MeshOnce::new(ctx.gpu, PIPELINE_VARIANTS as usize)
+            });
+            for (i, _) in used.iter().enumerate().filter(|(_, used)| **used) {
+                if once.pipelines[i].is_none() {
+                    once.pipelines[i] = Some(build_once_pipeline(&inputs, i as u8, &targets));
+                }
+            }
+        }
+        true
     }
 
     /// The pipeline for `key`: from the warm-up when it built it, else built now.
@@ -3044,6 +3239,59 @@ fn build_mesh_pipeline(
             fragment: Some(wgpu::FragmentState {
                 module: &inputs.shader,
                 entry_point: Some(fs),
+                compilation_options: compilation,
+                targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
+/// The pipeline for `variant`'s `PIPE_*` bits in the meshes' own prepass
+/// (`trial_cut::MESHES_ONCE`, mesh_once.rs): the prepass pipeline's state, with the vertex and
+/// fragment programs that also store the material, into `targets`.
+fn build_once_pipeline(
+    inputs: &MeshPipelineInputs,
+    variant: u8,
+    targets: &[Option<wgpu::ColorTargetState>],
+) -> wgpu::RenderPipeline {
+    let compilation = wgpu::PipelineCompilationOptions {
+        constants: &inputs.constants,
+        ..Default::default()
+    };
+    let buffers = [
+        Some(PoolVertex::layout()),
+        Some(MeshInstance::layout_with_motion()),
+    ];
+    inputs
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mesh once"),
+            layout: Some(&inputs.layout),
+            vertex: wgpu::VertexState {
+                module: &inputs.shader,
+                entry_point: Some("vs_once"),
+                compilation_options: compilation.clone(),
+                buffers: &buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: if variant & PIPE_DOUBLE != 0 {
+                    None
+                } else {
+                    Some(wgpu::Face::Back)
+                },
+                front_face: if variant & PIPE_MIRROR != 0 {
+                    wgpu::FrontFace::Cw
+                } else {
+                    wgpu::FrontFace::Ccw
+                },
+                ..Default::default()
+            },
+            depth_stencil: Some(inputs.depth[1].clone()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &inputs.shader,
+                entry_point: Some("fs_once"),
                 compilation_options: compilation,
                 targets,
             }),
@@ -4721,6 +4969,19 @@ impl RenderFeature for MeshFeature {
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        self.once_now = self.once_ready(ctx);
+        if !ctx.view.extra_view {
+            let count = ctx.settings.debug_skip & crate::settings::shade_skip::COUNT_MESH_RUNS != 0;
+            if !count {
+                self.counts = None;
+            } else if self.counts.is_none() {
+                self.counts = crate::mesh_counts::MeshCounts::new(ctx.gpu);
+            }
+            if let Some(counts) = &mut self.counts {
+                counts.begin_frame();
+            }
+        }
+        self.counting = !ctx.view.extra_view && self.counts.is_some();
         // The canopy map, when its crowns changed (the main view sets them).
         if !ctx.view.extra_view {
             ctx.gpu.canopy.encode(ctx.gpu, encoder);
@@ -4767,83 +5028,36 @@ impl RenderFeature for MeshFeature {
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        let batches = match phase {
-            RenderPhase::Opaque => &self.opaque,
-            RenderPhase::Transparent => &self.transparent,
-            RenderPhase::Sky => return,
-        };
-        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
-            return;
-        };
-        let clusters = self
-            .clusters
-            .as_ref()
-            .filter(|c| phase == RenderPhase::Opaque && c.is_active());
-        let impostors = match phase {
-            RenderPhase::Opaque => self.impostor_view,
-            _ => (0, 0),
-        };
-        if batches.is_empty() && clusters.is_none() && impostors.1 == 0 {
-            return;
-        }
-        pass.set_bind_group(1, group, &[]);
-        let culled = self
-            .culling
-            .as_ref()
-            .filter(|_| phase == RenderPhase::Opaque)
-            .and_then(|c| c.draws(crate::mesh_cull::Phase::Both));
-        pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
-        self.draw_batches(
-            pass,
-            batches,
-            |p| self.pipelines.get(p as usize).and_then(Option::as_ref),
-            |_| true,
-            culled.map(|c| (c.1, c.2)),
-        );
-        if culled.is_some() {
-            pass.set_vertex_buffer(1, instances.buffer.slice(..));
-        }
-        if let Some(i) = &self.impostors {
-            i.draw(pass, impostors, false);
-        }
-        if let Some(clusters) = clusters {
-            clusters.draw_scene(pass, |set| self.texture_group(set));
+        let counted =
+            phase == RenderPhase::Opaque && self.count_begin(pass, crate::mesh_counts::SCENE, true);
+        self.draw_phase(phase, pass);
+        if counted {
+            crate::mesh_counts::MeshCounts::end(pass);
         }
     }
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
-            return;
-        };
-        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
-        if self.opaque.is_empty() && clusters.is_none() && self.impostor_view.1 == 0 {
-            return;
+        // (With `once_now` the count is of the meshes' own prepass, `prepass_own`.)
+        let counted = self.count_begin(pass, crate::mesh_counts::PREPASS, !self.once_now);
+        self.draw_prepass_early(pass);
+        if counted {
+            crate::mesh_counts::MeshCounts::end(pass);
         }
-        pass.set_bind_group(1, group, &[]);
-        let culled = self
-            .culling
-            .as_ref()
-            .and_then(|c| c.draws(crate::mesh_cull::Phase::Early));
-        pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
-        self.draw_batches(
-            pass,
-            &self.opaque,
-            |p| {
-                self.prepass_pipelines
-                    .get(p as usize)
-                    .and_then(Option::as_ref)
-            },
-            |_| true,
-            culled.map(|c| (c.1, c.2)),
-        );
-        if culled.is_some() {
-            pass.set_vertex_buffer(1, instances.buffer.slice(..));
+    }
+
+    fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        let counted = self.count_begin(pass, crate::mesh_counts::LATE, !self.once_now);
+        self.draw_prepass_rest(pass);
+        if counted {
+            crate::mesh_counts::MeshCounts::end(pass);
         }
-        if let Some(i) = &self.impostors {
-            i.draw(pass, self.impostor_view, true);
-        }
-        if let Some(clusters) = clusters {
-            clusters.draw_prepass(pass, |set| self.texture_group(set));
+    }
+
+    fn overlay(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        if !ctx.view.extra_view
+            && let Some(counts) = &mut self.counts
+        {
+            counts.end_frame(encoder);
         }
     }
 
@@ -4864,35 +5078,69 @@ impl RenderFeature for MeshFeature {
         clusters || meshes
     }
 
-    fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        let Some(group) = &self.material_group else {
+    fn prepass_own(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &crate::features::PrepassTargets,
+        late: bool,
+        ctx: &FrameContext,
+    ) {
+        if !self.once_now {
             return;
+        }
+        // The opaque batches, as `draw_prepass` and `draw_prepass_late` draw them, into the
+        // shared prepass's targets and the stored material (mesh_once.rs).
+        let phase = if late {
+            crate::mesh_cull::Phase::Late
+        } else {
+            crate::mesh_cull::Phase::Early
         };
-        // The opaque instances last frame's depth hid but this frame's doesn't.
-        if let Some((instances, args, offset)) = self
+        let culls = self
             .culling
             .as_ref()
-            .and_then(|c| c.draws(crate::mesh_cull::Phase::Late))
+            .is_some_and(|c| c.draws(phase).is_some());
+        let clusters_late = self.clusters.as_ref().is_some_and(|c| c.has_late());
+        if (late && !culls && !clusters_late)
+            || self.material_group.is_none()
+            || self.instances.is_none()
         {
-            pass.set_bind_group(1, group, &[]);
-            pass.set_vertex_buffer(1, instances.slice(..));
-            self.draw_batches(
-                pass,
-                &self.opaque,
-                |p| {
-                    self.prepass_pipelines
-                        .get(p as usize)
-                        .and_then(Option::as_ref)
-                },
-                |_| true,
-                Some((args, offset)),
-            );
+            return;
         }
-        let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) else {
+        let mut pass = {
+            let Some(once) = &mut self.once else {
+                return;
+            };
+            once.pass(&ctx.gpu.device, encoder, targets, late)
+        };
+        let (Some(once), Some(group), Some(instances)) =
+            (&self.once, &self.material_group, &self.instances)
+        else {
             return;
         };
+        let culled = self.culling.as_ref().and_then(|c| c.draws(phase));
+        let query = if late {
+            crate::mesh_counts::LATE
+        } else {
+            crate::mesh_counts::PREPASS
+        };
+        let counted = self.count_begin(&mut pass, query, true);
         pass.set_bind_group(1, group, &[]);
-        clusters.draw_prepass_late(pass, |set| self.texture_group(set));
+        if !late || culled.is_some() {
+            pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
+            self.draw_batches(
+                &mut pass,
+                &self.opaque,
+                |p| once.pipelines.get(p as usize).and_then(Option::as_ref),
+                |_| true,
+                culled.map(|c| (c.1, c.2)),
+            );
+        }
+        if let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) {
+            clusters.draw_once(&mut pass, |set| self.texture_group(set), late);
+        }
+        if counted {
+            crate::mesh_counts::MeshCounts::end(&mut pass);
+        }
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
@@ -4967,6 +5215,9 @@ impl RenderFeature for MeshFeature {
             "impostors_in_view": self.impostor_view.1,
             "impostors_fading": self.impostors_fading,
             "lods_fading": self.lods_fading,
+            "once": self.once_now,
+            "mesh_runs": self.counts.as_ref().map(crate::mesh_counts::MeshCounts::describe),
+            "once_bytes": self.once.as_ref().map_or(0, crate::mesh_once::MeshOnce::bytes),
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
             "virtual_textures": self.vt.as_ref().map(VirtualTextureSystem::describe),
         })
