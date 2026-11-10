@@ -220,10 +220,11 @@ fn mean_cover(plain: &RgbImage, hair: &RgbImage, distance: f32, full: [f32; 3]) 
 
 #[test]
 fn far_hair_keeps_its_cover() {
-    let Some(plain) = render_at(false, 0.5, "strands_plain.png") else {
+    // Shot names of their own: the other test writes its shots at the same time.
+    let Some(plain) = render_at(false, 0.5, "strands_far_test_plain.png") else {
         return;
     };
-    let Some(near) = render_at(true, 0.5, "strands_curtain.png") else {
+    let Some(near) = render_at(true, 0.5, "strands_far_test_near.png") else {
         return;
     };
     let px_per_m = (H as f32 / 2.0) / (20f32.to_radians().tan() * 0.5);
@@ -236,7 +237,11 @@ fn far_hair_keeps_its_cover() {
     let full = [mid[0] as f32, mid[1] as f32, mid[2] as f32];
     let close = mean_cover(&plain, &near, 0.5, full);
     for distance in [2.0f32, 5.0] {
-        let Some(far_plain) = render_at(false, distance as f64, "strands_far_plain.png") else {
+        let Some(far_plain) = render_at(
+            false,
+            distance as f64,
+            &format!("strands_far_plain_{distance}.png"),
+        ) else {
             return;
         };
         let Some(far) = render_at(
