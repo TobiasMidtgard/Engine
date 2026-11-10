@@ -92,6 +92,11 @@ fn a_new_stream_settles_off_the_frame_thread() {
     app.update();
     let in_place = start.elapsed();
     assert!(app.world.resource::<WaterLoading>().is_ready());
+    // Measured a frame on, here and below: a stream's first step in the world fills the
+    // cells in its lakes (6% of this one's water), and the frame it arrives in runs that
+    // step or not, by which of the frame's two fixed steps picked it up. One frame on both
+    // have had it, and a step more or less is a fifth of a percent.
+    app.update();
     let settled = stream_volume(&app);
     assert!(settled > 1.0, "the stream runs: {settled} m³");
 
@@ -115,9 +120,10 @@ fn a_new_stream_settles_off_the_frame_thread() {
         assert!(waited.elapsed() < Duration::from_secs(120), "never ready");
         std::thread::sleep(Duration::from_millis(1));
     }
+    app.update();
     let volume = stream_volume(&app);
     assert!(
-        (volume - settled).abs() < settled * 0.05,
+        (volume - settled).abs() < settled * 0.01,
         "{volume} m³ against {settled} m³ made in place"
     );
     println!(
