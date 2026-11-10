@@ -257,6 +257,14 @@ pub struct RenderSettings {
     pub shadow_distance: f32,
     /// Shadow map resolution per cascade and of the far shadow map (applied at startup).
     pub shadow_map_size: u32,
+    /// Bits of depth in the sun's shadow maps, their static images and people's insets: 16
+    /// (the default) or 32 (float; applied at startup, any other value is 32). The two cast the
+    /// same shadows (tests/shadow_depth.rs). A shadow map's depth is linear
+    /// over its own slab, so 16 bits are 65536 steps of it, a tenth to a third of a texel's
+    /// width for the cascades, under the receiver's offset along its normal. At Ultra the maps
+    /// and static images are ten layers of 4096 x 4096: 640 MB at 32 bits, 320 MB at 16.
+    /// `ENGINE_SHADOW_DEPTH=16|32` overrides it for side-by-side runs.
+    pub shadow_depth_bits: u32,
     /// Far shadows: beyond `shadow_distance`, big casters (terrain, mountains, cliffs, large
     /// buildings) still cast sun shadows out to this distance from the camera, meters, from one
     /// coarse shadow map (`shadow_map_size`², so 8 km gives texels of about 8 m at 2048). Mountains
@@ -617,6 +625,7 @@ impl Default for RenderSettings {
             temporal_upscaling: true,
             shadow_distance: 350.0,
             shadow_map_size: 2048,
+            shadow_depth_bits: 16,
             far_shadow_distance: 8000.0,
             shadow_split_lambda: 0.8,
             shadow_cascade_reuse: 3,
@@ -837,6 +846,14 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
             s.texture_compression_on_cpu |= *on_cpu;
         }
         None => {}
+    }
+    // `ENGINE_SHADOW_DEPTH=16|32`: the shadow maps' depth bits, for side-by-side runs.
+    static SHADOW_DEPTH: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    if let Some(bits) = SHADOW_DEPTH.get_or_init(|| {
+        let text = std::env::var("ENGINE_SHADOW_DEPTH").ok()?;
+        text.trim().parse().ok().filter(|b| matches!(b, 16 | 32))
+    }) {
+        s.shadow_depth_bits = *bits;
     }
     // `ENGINE_TEXTURE_COMPRESSION_MS=<ms>`: the GPU time compression may take a frame, in play
     // and while loading (to fill the disk cache of compressed images in one short run).

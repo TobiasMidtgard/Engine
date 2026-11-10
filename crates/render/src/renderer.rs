@@ -921,7 +921,7 @@ impl Renderer {
             hdr: wgpu::TextureFormat::Rgba16Float,
             depth: wgpu::TextureFormat::Depth32Float,
             ldr: wgpu::TextureFormat::Rgba8UnormSrgb,
-            shadow: wgpu::TextureFormat::Depth32Float,
+            shadow: shadow_depth_format(settings),
             env: wgpu::TextureFormat::Rgba16Float,
             normal: wgpu::TextureFormat::Rgba16Float,
             motion: wgpu::TextureFormat::Rg16Float,
@@ -3302,6 +3302,14 @@ impl Renderer {
                 d.set("render.record_cpu_ms", self.thread_cpu.ms());
             }
             // wgpu's backend numbering: 0 none, 1 Vulkan, 2 Metal, 3 DX12, 4 OpenGL, 5 WebGPU.
+            // Bits of depth the shadow maps were made with (`shadow_depth_bits` at startup).
+            d.set(
+                "render.shadow_depth_bits",
+                match self.shared.formats.shadow {
+                    wgpu::TextureFormat::Depth16Unorm => 16.0,
+                    _ => 32.0,
+                },
+            );
             d.set(
                 "render.backend",
                 self.shared.adapter_info.backend as u8 as f64,
@@ -3701,6 +3709,16 @@ pub(crate) fn fullscreen_pass<'e>(
         })],
         ..Default::default()
     })
+}
+
+/// The depth format of the sun's shadow maps, their static images and people's insets
+/// (`RenderSettings::shadow_depth_bits`).
+fn shadow_depth_format(settings: &RenderSettings) -> wgpu::TextureFormat {
+    if settings.shadow_depth_bits == 16 {
+        wgpu::TextureFormat::Depth16Unorm
+    } else {
+        wgpu::TextureFormat::Depth32Float
+    }
 }
 
 fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -> ShadowResources {
