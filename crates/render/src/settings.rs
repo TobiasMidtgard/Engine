@@ -199,6 +199,9 @@ pub mod shade_skip {
     /// keep it (a picture of where the maps are used). With [`trial_cut::SCREEN_FOG`] on,
     /// they lose their fog and haze the same way.
     pub const SCREEN_LIGHT_SUN: u32 = 16384;
+    /// With `trial_cut::GROUND_ONCE`: the ground's pixels colored once a pixel are drawn
+    /// magenta and the rest of the ground green (a picture of what the cut reaches).
+    pub const SHOW_GROUND_ONCE: u32 = 65536;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the same picture, switchable
@@ -251,6 +254,12 @@ pub mod trial_cut {
     /// The same, and the triangles left may look half again as long across the view as they
     /// are wide (with `GROUND_LINES` alone, no longer than wide).
     pub const GROUND_LINES_WIDE: u32 = 8192;
+    /// The ground's color worked out once a pixel instead of once for every triangle that
+    /// touches the pixel's 2x2 block (terrain.wgsl "the ground once a pixel"): the patches are
+    /// drawn once more to write down what their vertices carry at each pixel (52 bytes a
+    /// pixel while it is on), a triangle over the screen colors the pixels from that, and the
+    /// scene pass's patches fail their depth test there before any shader runs.
+    pub const GROUND_ONCE: u32 = 16384;
 }
 
 /// What the screen shows.

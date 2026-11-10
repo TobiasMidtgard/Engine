@@ -331,6 +331,9 @@ const SKIP_SKY_MAP_TAPS: u32 = 8192u;
 // shading takes its light from the maps lose their sunlight and the rest keep it; with
 // `CUT_SCREEN_FOG`, they lose their fog and haze.
 const SKIP_SCREEN_LIGHT_SUN: u32 = 16384u;
+// With `CUT_GROUND_ONCE`: the ground's pixels colored once a pixel are drawn magenta, the rest of
+// the ground green (32768 is the local triangle view's, engine-perf/triangle-view).
+const SKIP_SHOW_GROUND_ONCE: u32 = 65536u;
 
 fn shade_skip(bit: u32) -> bool {
     return (u32(frame.shading.z) & bit) != 0u;
@@ -350,6 +353,8 @@ const CUT_SPECULAR_SKY_TAPS: u32 = 256u;
 const CUT_SCREEN_LIGHT: u32 = 512u;
 const CUT_TILED_LAMPS: u32 = 1024u;
 const CUT_SCREEN_FOG: u32 = 2048u;
+// (4096 and 8192: the ground's grid lines, CPU side.)
+const CUT_GROUND_ONCE: u32 = 16384u;
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;

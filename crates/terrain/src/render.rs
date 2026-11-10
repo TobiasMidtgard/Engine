@@ -249,6 +249,14 @@ struct Gpu {
     /// Depth, normals and motion for ambient occlusion, contact shadows and anti-aliasing.
     prepass_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    /// The ground once a pixel (`trial_cut::GROUND_ONCE`, terrain.wgsl): the patches drawn to
+    /// write down what their vertices carry at each pixel, the triangle over the screen that
+    /// colors the pixels from that, its targets' layout as group 2, and the targets while the
+    /// cut is on.
+    attributes_pipeline: wgpu::RenderPipeline,
+    once_pipeline: wgpu::RenderPipeline,
+    once_layout: wgpu::BindGroupLayout,
+    once: Option<OnceTargets>,
     /// Rivers' and lakes' surfaces over their beds (blended, after the opaque scene).
     water_pipeline: wgpu::RenderPipeline,
     /// Its group 2 (the scene's color and depth copies), by the copies it binds.
@@ -480,6 +488,65 @@ impl PlanetState {
     }
 }
 
+/// What the ground's vertices carry at each pixel of a view (`fs_attributes` in terrain.wgsl).
+struct OnceTargets {
+    size: (u32, u32),
+    views: [wgpu::TextureView; ONCE_FORMATS.len()],
+    group: wgpu::BindGroup,
+}
+
+/// Its targets, in the order of `GroundAttributes` and of group 2's bindings from 2 on.
+const ONCE_FORMATS: [wgpu::TextureFormat; 7] = [
+    wgpu::TextureFormat::Rgba16Float,
+    wgpu::TextureFormat::Rgba16Float,
+    wgpu::TextureFormat::Rgba16Float,
+    wgpu::TextureFormat::R32Float,
+    wgpu::TextureFormat::Rgba32Uint,
+    wgpu::TextureFormat::Rgba8Unorm,
+    wgpu::TextureFormat::Rgba8Unorm,
+];
+/// Bytes a pixel of the seven together, as wgpu counts them against
+/// `Limits::max_color_attachment_bytes_per_sample` (32 unless the GPU gives more).
+const ONCE_BYTES: u32 = 52;
+
+impl OnceTargets {
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: (u32, u32)) -> Self {
+        let views = ONCE_FORMATS.map(|format| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("terrain ground once"),
+                    size: wgpu::Extent3d {
+                        width: size.0.max(1),
+                        height: size.1.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        });
+        let entries: Vec<_> = views
+            .iter()
+            .enumerate()
+            .map(|(i, view)| wgpu::BindGroupEntry {
+                binding: 2 + i as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            })
+            .collect();
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terrain ground once"),
+            layout,
+            entries: &entries,
+        });
+        Self { size, views, group }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Draw {
     slot: u32,
@@ -594,6 +661,8 @@ pub struct TerrainFeature {
     /// takes a first instance in indirect draws): a few commands a pass instead of one per
     /// patch.
     multi_draw: bool,
+    /// The ground's once-a-pixel targets hold the view being drawn (set by `before_scene`).
+    once_now: bool,
     /// Where each [`DrawList`]'s arguments start in the indirect buffer.
     list_args: [u32; 7],
     args: Vec<DrawArgs>,
@@ -1791,6 +1860,102 @@ impl RenderFeature for TerrainFeature {
             multiview_mask: None,
             cache: None,
         });
+        // The ground once a pixel (`trial_cut::GROUND_ONCE`): the scene pass's vertices again,
+        // writing what they carry instead of a color, and no depth test but the shader's own
+        // against the prepass depth it reads.
+        let once_targets = ONCE_FORMATS.map(|format| {
+            Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        });
+        let attributes_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain ground attributes"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_attributes"),
+                compilation_options: Default::default(),
+                targets: &once_targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let once_entries: Vec<_> = ONCE_FORMATS
+            .iter()
+            .enumerate()
+            .map(|(i, format)| wgpu::BindGroupLayoutEntry {
+                binding: 2 + i as u32,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: if *format == wgpu::TextureFormat::Rgba32Uint {
+                        wgpu::TextureSampleType::Uint
+                    } else {
+                        wgpu::TextureSampleType::Float { filterable: false }
+                    },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            })
+            .collect();
+        let once_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("terrain ground once"),
+            entries: &once_entries,
+        });
+        let opl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain ground once"),
+            bind_group_layouts: &[Some(&gpu.frame_layout), Some(&layout), Some(&once_layout)],
+            immediate_size: 0,
+        });
+        // In the scene pass, before the patches: it writes the depth it moved a step nearer,
+        // which passes only where the prepass's depth still stands (anything drawn in front
+        // since, such as hair before the scene pass, keeps its pixels).
+        let once_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain ground once"),
+            layout: Some(&opl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_once"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                ..gpu.depth_state(false)
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_once"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("TERRAIN_OFF", off)],
+                    ..Default::default()
+                },
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.formats.hdr,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         // The water's surface over the patches that hold a river or a lake: the same vertices
         // raised to the water, drawn over the scene. Its color adds the light the water
         // reflects and scatters back; the scene behind is dimmed by what the water lets
@@ -1946,6 +2111,10 @@ impl RenderFeature for TerrainFeature {
             extra_view_pipeline,
             prepass_pipeline,
             shadow_pipeline,
+            attributes_pipeline,
+            once_pipeline,
+            once_layout,
+            once: None,
             water_pipeline,
             water_layout,
             water_groups: Vec::new(),
@@ -2728,6 +2897,17 @@ impl RenderFeature for TerrainFeature {
         let Some(group) = &gpu.group else {
             return;
         };
+        // The ground once a pixel, where `before_scene` wrote this view's attributes: the
+        // patches after it are shaded only where it left the depth alone.
+        if let (RenderPhase::Opaque, true, false, Some(once)) =
+            (phase, self.once_now, ctx.view.extra_view, &gpu.once)
+            && once.size == (ctx.view.width, ctx.view.height)
+        {
+            pass.set_pipeline(&gpu.once_pipeline);
+            pass.set_bind_group(1, group, &[]);
+            pass.set_bind_group(2, &once.group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         pass.set_pipeline(pipeline);
         pass.set_bind_group(1, group, &[]);
         if phase == RenderPhase::Transparent {
@@ -2737,6 +2917,66 @@ impl RenderFeature for TerrainFeature {
             pass.set_bind_group(2, water, &[]);
         }
         self.draw_indices(pass, gpu, list, draws, indices);
+    }
+
+    /// The ground once a pixel (`trial_cut::GROUND_ONCE`): what the patches' vertices carry
+    /// at each pixel the prepass kept, written for `fs_once` in the scene pass. The main view
+    /// only.
+    fn before_scene(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        _motion: &wgpu::TextureView,
+        ctx: &FrameContext,
+    ) {
+        self.once_now = false;
+        if ctx.view.extra_view {
+            return;
+        }
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let device = &ctx.gpu.device;
+        let on = ctx.settings.trial_cuts & engine_render::settings::trial_cut::GROUND_ONCE != 0
+            && device.limits().max_color_attachment_bytes_per_sample >= ONCE_BYTES;
+        if !on {
+            gpu.once = None;
+            return;
+        }
+        let size = (ctx.view.width, ctx.view.height);
+        if gpu.once.as_ref().is_none_or(|o| o.size != size) {
+            gpu.once = Some(OnceTargets::new(device, &gpu.once_layout, size));
+        }
+        let (Some(gpu), false) = (self.gpu.as_ref(), self.draws.is_empty()) else {
+            return;
+        };
+        let (Some(once), Some(group)) = (&gpu.once, &gpu.group) else {
+            return;
+        };
+        let attachments = once.views.each_ref().map(|view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("terrain ground attributes"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&gpu.attributes_pipeline);
+        pass.set_bind_group(0, ctx.frame_group, &[]);
+        pass.set_bind_group(1, group, &[]);
+        self.draw_list(&mut pass, gpu, DrawList::Scene, &self.draws);
+        drop(pass);
+        self.once_now = true;
     }
 
     fn needs_scene_copy(&self) -> bool {

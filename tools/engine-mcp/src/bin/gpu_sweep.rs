@@ -401,6 +401,18 @@ fn variants() -> Vec<Variant> {
             "the same, and the triangles left may look half again as long across the view as they are wide",
         ),
         v(
+            "cut_ground_once",
+            r,
+            json!({"trial_cuts": 16384}),
+            "the ground's color once a pixel, not once for every triangle that touches the pixel's 2x2 block (a pass \"before scene\" writes what the vertices carry)",
+        ),
+        v(
+            "show_ground_once",
+            r,
+            json!({"trial_cuts": 16384, "debug_skip": 65536}),
+            "a picture, not a cut: the ground colored once a pixel in magenta, the rest of the ground in green",
+        ),
+        v(
             "show_screen_light",
             r,
             json!({"trial_cuts": 512, "debug_skip": 16384}),

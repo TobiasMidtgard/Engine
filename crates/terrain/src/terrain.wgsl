@@ -1949,6 +1949,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (MIRROR_CLIP && under_mirror(in.rel)) {
         discard;
     }
+    if (trial_cut(CUT_GROUND_ONCE) && shade_skip(SKIP_SHOW_GROUND_ONCE)) {
+        return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    }
+    return ground_color(in);
+}
+
+// The ground's color at a pixel (pre-exposed HDR), from what its vertices carry there: the
+// scene pass's `fs_main` for every triangle that touches the pixel's 2x2 block, or `fs_once`
+// once a pixel.
+fn ground_color(in: VertexOut) -> vec4<f32> {
     if ((TERRAIN_OFF & 128u) != 0u || shade_skip(SKIP_TERRAIN)) {
         return vec4<f32>(0.1, 0.2, 0.05, 1.0);
     }
@@ -3161,6 +3171,170 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     color = apply_fog(color, in.rel);
     return vec4<f32>(color, 1.0);
+}
+
+
+// ---------------------------------------------------------------- the ground once a pixel
+// `RenderSettings::trial_cuts` bit `GROUND_ONCE` (lib_frame.wgsl `CUT_GROUND_ONCE`).
+//
+// Why: the scene pass runs `fs_main` once for every triangle that touches a pixel's 2x2 block,
+// 1.9 to 2.6 times a pixel on the ground at 1600x900 (engine-perf/triangle-view), and each run
+// reads 30 to 65 texture probes besides its light.
+//
+// How: before the scene pass the patches are drawn once more with `fs_attributes`, which only
+// writes down what the vertices carry at each pixel the prepass kept (seven targets, 52 bytes a
+// pixel). In the scene pass one triangle over the screen runs `fs_once` first: where all four
+// pixels of a 2x2 block are ground of one unbroken surface it builds the pixel's `VertexOut`
+// from the targets and the depth, colors it with `ground_color` as `fs_main` would, and moves
+// the depth one step nearer. The patches drawn after it fail their equal depth test there
+// before any shader runs. Blocks with an edge in them (another surface, the sky, a ridge in
+// front of farther ground) are left to `fs_main`: the differences between a block's pixels
+// stand for the screen derivatives the textures are filtered by, and across an edge they
+// would be wrong.
+//
+// Not here: a patch whose lamp page glows (its place in the page is per patch, 16 more bytes),
+// extra views (mirrors).
+
+@group(2) @binding(2) var once_a: texture_2d<f32>;      // normal (octahedral), moisture, temperature °C
+@group(2) @binding(3) var once_b: texture_2d<f32>;      // `VertexOut.lod`
+// Regional variety, local patches, and the depth's change to the next pixel across and down
+// on the pixel's own triangle (as a share of the depth).
+@group(2) @binding(4) var once_c: texture_2d<f32>;
+@group(2) @binding(5) var once_altitude: texture_2d<f32>;
+// Bytes: paint_a | paint_b | paint_c.xy, mare, ocean | painted, planet + 1 (0: not ground).
+@group(2) @binding(6) var once_paint: texture_2d<u32>;
+@group(2) @binding(7) var once_tint: texture_2d<f32>;   // sqrt(color), amount
+@group(2) @binding(8) var once_water: texture_2d<f32>;  // `VertexOut.water`
+
+struct GroundAttributes {
+    @location(0) a: vec4<f32>,
+    @location(1) b: vec4<f32>,
+    @location(2) c: vec4<f32>,
+    @location(3) altitude: vec4<f32>,
+    @location(4) paint: vec4<u32>,
+    @location(5) tint: vec4<f32>,
+    @location(6) water: vec4<f32>,
+};
+
+@fragment
+fn fs_attributes(in: VertexOut) -> GroundAttributes {
+    let z = in.clip.z;
+    let slope = vec2<f32>(dpdx(z), dpdy(z)) / max(z, 1e-30);
+    // Only the fragment the prepass kept: the same vertices give the same depth to the bit
+    // (two steps of slack for a GPU that rounds the shader's copy of it another way).
+    let pixel = vec2<i32>(in.clip.xy);
+    let kept = textureLoad(prepass_depth, pixel, 0);
+    if (abs(bitcast<i32>(kept) - bitcast<i32>(z)) > 2) {
+        discard;
+    }
+    var out: GroundAttributes;
+    out.a = vec4<f32>(oct_encode(normalize(in.normal)), in.climate.x, in.climate.y);
+    out.b = in.lod;
+    out.c = vec4<f32>(in.ocean_paint.zw, slope);
+    out.altitude = vec4<f32>(in.climate.w, 0.0, 0.0, 0.0);
+    // (A patch whose lamp page glows here is left to `fs_main`.)
+    let planet = planets[in.planet];
+    var ground = in.planet + 1u;
+    if (in.night.w >= 0.0 && dot(normalize(in.up), frame.sun_dir.xyz) < 0.03
+        && length(in.rel) > planet.params4.y) {
+        ground = 0u;
+    }
+    out.paint = vec4<u32>(
+        pack4x8unorm(in.paint_a),
+        pack4x8unorm(in.paint_b),
+        pack4x8unorm(vec4<f32>(in.paint_c, in.climate.z, in.ocean_paint.x)),
+        pack4x8unorm(vec4<f32>(in.ocean_paint.y, 0.0, 0.0, 0.0)) | (min(ground, 255u) << 8u),
+    );
+    out.tint = vec4<f32>(sqrt(max(in.tint.rgb, vec3<f32>(0.0))), in.tint.a);
+    out.water = vec4<f32>(in.water, 0.0);
+    return out;
+}
+
+// Whether the depth's step from one pixel to the next is one an unbroken surface makes: between
+// the steps the two pixels' own triangles make, give or take half the larger and a
+// ten-thousandth of the depth.
+fn once_step(z0: f32, z1: f32, g0: f32, g1: f32) -> bool {
+    let step = (z1 - z0) / max(z0, 1e-30);
+    let slack = 0.5 * max(abs(g0), abs(g1)) + 1e-4;
+    return step >= min(g0, g1) - slack && step <= max(g0, g1) + slack;
+}
+
+// Whether the 2x2 block at `block` (even coordinates: the blocks the GPU takes screen
+// derivatives in) is ground of one planet and one unbroken surface in all four pixels.
+fn once_block(block: vec2<i32>) -> bool {
+    let size = vec2<i32>(textureDimensions(once_paint));
+    if (any(block < vec2<i32>(0)) || any(block + 1 >= size)) {
+        return false;
+    }
+    var z: array<f32, 4>;
+    var g: array<vec2<f32>, 4>;
+    var ground = 0u;
+    for (var i = 0; i < 4; i++) {
+        let p = block + vec2<i32>(i & 1, i >> 1u);
+        let here = (textureLoad(once_paint, p, 0).w >> 8u) & 255u;
+        if (here == 0u || (i > 0 && here != ground)) {
+            return false;
+        }
+        ground = here;
+        z[i] = textureLoad(prepass_depth, p, 0);
+        g[i] = textureLoad(once_c, p, 0).zw;
+    }
+    return once_step(z[0], z[1], g[0].x, g[1].x) && once_step(z[2], z[3], g[2].x, g[3].x)
+        && once_step(z[0], z[2], g[0].y, g[2].y) && once_step(z[1], z[3], g[1].y, g[3].y);
+}
+
+// What the ground's vertices carry at a pixel `fs_attributes` wrote.
+fn once_vertex(at: vec4<f32>, pixel: vec2<i32>, z: f32) -> VertexOut {
+    let a = textureLoad(once_a, pixel, 0);
+    let c = textureLoad(once_c, pixel, 0);
+    let bits = textureLoad(once_paint, pixel, 0);
+    let third = unpack4x8unorm(bits.z);
+    let tint = textureLoad(once_tint, pixel, 0);
+    let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
+    var v: VertexOut;
+    v.clip = vec4<f32>(at.xy, z, at.w);
+    v.rel = (frame.inv_view * vec4<f32>(view_position(uv, z), 0.0)).xyz;
+    v.planet = ((bits.w >> 8u) & 255u) - 1u;
+    v.normal = oct_decode(a.xy);
+    v.up = planet_up(planets[v.planet], v.rel);
+    v.climate = vec4<f32>(a.zw, third.z, textureLoad(once_altitude, pixel, 0).r);
+    v.ocean_paint = vec4<f32>(third.w, unpack4x8unorm(bits.w).x, c.xy);
+    v.lod = textureLoad(once_b, pixel, 0);
+    v.tint = vec4<f32>(tint.rgb * tint.rgb, tint.a);
+    v.paint_a = unpack4x8unorm(bits.x);
+    v.paint_b = unpack4x8unorm(bits.y);
+    v.paint_c = third.xy;
+    v.water = textureLoad(once_water, pixel, 0).xyz;
+    v.night = vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    return v;
+}
+
+struct OnceOut {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+@vertex
+fn vs_once(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    return fullscreen_vertex(i, 0.0).position;
+}
+
+@fragment
+fn fs_once(@builtin(position) at: vec4<f32>) -> OnceOut {
+    let pixel = vec2<i32>(at.xy);
+    if (!once_block(pixel & vec2<i32>(-2))) {
+        discard;
+    }
+    let z = textureLoad(prepass_depth, pixel, 0);
+    var out: OnceOut;
+    // One step nearer (reverse Z): the patches' equal depth test fails here from now on.
+    out.depth = bitcast<f32>(bitcast<u32>(z) + 1u);
+    if (shade_skip(SKIP_SHOW_GROUND_ONCE)) {
+        out.color = vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        return out;
+    }
+    out.color = ground_color(once_vertex(at, pixel, z));
+    return out;
 }
 
 
