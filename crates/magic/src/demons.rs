@@ -30,7 +30,7 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{
-    MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, Shape, StandardMaterial, Vertex,
+    Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, Shape, StandardMaterial, Vertex,
 };
 use engine_world::WorldShift;
 use engine_world::physics::{
@@ -42,6 +42,7 @@ use crate::compile::{CastContext, Spell, compile};
 use crate::design::{CastType, SpellDesign, TargetFilter};
 use crate::effects::ForceDir;
 use crate::looks::{LookCmd, Role};
+use crate::pact_art::{self, VortexLayer};
 use crate::runtime::{
     CastInfo, HitQueue, MagicQueue, Missile, PendingHit, ground_below, release, roll,
 };
@@ -68,9 +69,19 @@ pub const GATE_MID: f32 = 1.6;
 pub const GATE_HEALTH: f32 = 450.0;
 /// Its light, lm.
 pub const GATE_LIGHT_LM: f32 = 7000.0;
-/// The membrane's glow and the rim fire's, nits.
-pub const MEMBRANE_GLOW: f32 = 900.0;
-pub const RIM_GLOW: f32 = 5000.0;
+/// The vortex's glow (its swirl; the arms and the eye's rim glow hotter), and the rim fire's,
+/// nits.
+pub const VORTEX_GLOW: f32 = 1100.0;
+pub const RIM_GLOW: f32 = 3200.0;
+/// How fast the vortex turns, rad/s: its swirl slowly and its arms faster, both the way that
+/// draws the spirals in towards the eye (which turns against them).
+pub const SWIRL_TURN: f32 = 0.3;
+pub const ARMS_TURN: f32 = 0.9;
+/// Hellstone's grain (and its cracks' tile), m, and the cracks' glow, nits.
+pub const HELLSTONE_TILE_M: f32 = 1.5;
+pub const CRACK_GLOW: f32 = 1600.0;
+/// Fires burn at a gate's feet (a torch fire lasts 8 s), lit again before they go out, s.
+pub const GATE_FIRE_EVERY: f32 = 6.5;
 
 /// An imp flies this high over the floor (bobbing), m.
 pub const IMP_HOVER_M: f32 = 2.1;
@@ -132,9 +143,12 @@ pub struct Hellgate {
     /// Hounds and imps it has sent.
     pub hounds: u32,
     pub imps: u32,
-    /// Its stones (climbing out of the floor) and its membrane's layers.
+    /// Its stones (climbing out of the floor) and its membrane: the holder that stretches it
+    /// to the gate's oval, then the vortex's layers (swirl, arms, eye) and the rim's fire.
     pub stones: Vec<(Entity, Vec3, Quat)>,
     pub membrane: Vec<Entity>,
+    /// When the fires at its feet were last lit, s of its age.
+    pub fires_lit: Option<f32>,
     /// Seconds since it started to close.
     pub closing: Option<f32>,
 }
@@ -160,21 +174,53 @@ pub struct MeteorRide {
     pub rock: Option<Entity>,
 }
 
-/// The mesh a wing is drawn with, built once.
+/// What a pact's pieces are drawn with, made once: an imp's wing, the disc a gate's vortex is
+/// painted on, the vortex's pictures and hellstone's cracks (`pact_art`).
 #[derive(Resource, Debug, Default)]
 pub struct DemonMeshes {
     wing: Option<Handle<Mesh>>,
+    disc: Option<Handle<Mesh>>,
+    vortex: Option<[Handle<Image>; 3]>,
+    cracks: Option<Handle<Image>>,
 }
 
 impl DemonMeshes {
     pub fn wing(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
         *self.wing.get_or_insert_with(|| meshes.add(wing_mesh()))
     }
+
+    pub fn disc(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        *self
+            .disc
+            .get_or_insert_with(|| meshes.add(pact_art::disc_mesh()))
+    }
+
+    pub fn vortex(&mut self, layer: VortexLayer, images: &mut Assets<Image>) -> Handle<Image> {
+        let all = self
+            .vortex
+            .get_or_insert_with(|| VortexLayer::ALL.map(|l| images.add(l.image())));
+        all[layer as usize]
+    }
+
+    pub fn cracks(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
+        *self
+            .cracks
+            .get_or_insert_with(|| images.add(pact_art::crack_image()))
+    }
 }
 
 /// An imp's wing, waiting for its mesh.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Wing;
+
+/// A layer of a gate's vortex, waiting for its disc and picture.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Vortex(pub VortexLayer);
+
+/// A piece of hellstone (a gate's stone or horn, a hound's body, a meteor's rock), waiting for
+/// its glowing cracks.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Hellstone;
 
 fn smooth(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -197,9 +243,39 @@ fn flat(d: DVec3) -> DVec3 {
     DVec3::new(d.x, 0.0, d.z)
 }
 
-/// The stone of a gate and of a hound: black basalt with fire glowing out of its cracks.
+/// The stone of a gate and of a hound: black basalt, its grain fine and anchored to the piece
+/// (hounds run), with fire glowing out of its cracks once they are drawn (`dress_demons`).
 pub fn hellstone() -> StandardMaterial {
-    crate::summon::body_material(Some(crate::schools::Element::Fire)).with_tint(0.09, 0.075, 0.07)
+    crate::summon::body_material(Some(crate::schools::Element::Fire))
+        .with_tint(0.07, 0.06, 0.055)
+        .with_texture_scale(HELLSTONE_TILE_M)
+        .with_triplanar()
+}
+
+/// Hellstone with its cracks glowing.
+pub fn cracked_hellstone(cracks: Handle<Image>) -> StandardMaterial {
+    hellstone()
+        .with_emissive([1.0, 1.0, 1.0], CRACK_GLOW)
+        .with_emissive_texture(cracks)
+}
+
+/// A vortex layer's material: its picture glowing, cut out where it is open.
+fn vortex_material(layer: VortexLayer, picture: Handle<Image>) -> StandardMaterial {
+    let nits = match layer {
+        VortexLayer::Swirl => VORTEX_GLOW,
+        VortexLayer::Arms => VORTEX_GLOW * 2.6,
+        VortexLayer::Eye => VORTEX_GLOW * 2.2,
+    };
+    let m = StandardMaterial::default()
+        .with_tint(0.03, 0.005, 0.004)
+        .with_roughness(0.9)
+        .with_base_color_texture(picture)
+        .with_emissive([1.0, 1.0, 1.0], nits)
+        .with_emissive_texture(picture);
+    match layer {
+        VortexLayer::Swirl => m,
+        _ => m.with_alpha_mask(0.5),
+    }
 }
 
 fn glow_material(color: [f32; 3], nits: f32) -> StandardMaterial {
@@ -279,26 +355,34 @@ pub fn spawn_hellgates(mut queue: ResMut<MagicQueue>, mut commands: Commands) {
         if let Some(f) = g.cast.faction {
             commands.entity(root).insert(f);
         }
-        // The rim: jagged stones round an upright oval, the biggest at its foot, horns at its
-        // crown and shoulders sweeping out and up.
+        // The rim: jagged shards of hellstone round an upright oval, jutting out, the biggest
+        // at its foot, horns at its crown and shoulders sweeping out and up.
         let stone = hellstone();
         let mut stones = Vec::new();
-        let n = 16;
+        let n = 18;
         for i in 0..n {
-            let a = i as f32 / n as f32 * TAU;
+            let a = (i as f32 + 0.3 * (roll(seed, 80 + i as u64) - 0.5)) / n as f32 * TAU;
             let (s, c) = a.sin_cos();
-            let at = Vec3::new(s * GATE_RX, GATE_MID + c * GATE_RY, 0.0) * k;
             let foot = (1.0 - c).max(0.0) * 0.5;
-            let w = (0.36 + 0.18 * foot + 0.12 * roll(seed, 20 + i as u64)) * k;
-            let size = Vec3::new(w, w * (1.2 + 0.4 * roll(seed, 40 + i as u64)), w * 0.9);
+            let w = (0.27 + 0.16 * foot + 0.1 * roll(seed, 20 + i as u64)) * k;
+            let size = Vec3::new(w, w * (1.7 + 0.8 * roll(seed, 40 + i as u64)), w * 0.8);
             let out = Vec3::new(s, c, 0.0);
-            let lean = Quat::from_rotation_arc(Vec3::Y, out)
+            // Shards lean a little off the ring's line, fore and aft and round it.
+            let tilt = Vec3::new(
+                c * 0.35 * (roll(seed, 100 + i as u64) - 0.5),
+                -s * 0.35 * (roll(seed, 100 + i as u64) - 0.5),
+                0.4 * (roll(seed, 120 + i as u64) - 0.5),
+            );
+            let lean = Quat::from_rotation_arc(Vec3::Y, (out + tilt).normalize())
                 * Quat::from_rotation_y(roll(seed, 60 + i as u64) * TAU);
+            // Mostly outside the ring: the vortex fills it.
+            let at = Vec3::new(s * GATE_RX, GATE_MID + c * GATE_RY, 0.0) * k + out * size.y * 0.2;
             let e = commands
                 .spawn((
                     Name::new("Hellgate stone"),
                     Transform::from_translation(at.as_dvec3()).with_rotation(lean),
                     shape(rock(size, seed.wrapping_add(i as u64 * 7919)), stone),
+                    Hellstone,
                     ChildOf(root),
                 ))
                 .id();
@@ -314,64 +398,74 @@ pub fn spawn_hellgates(mut queue: ResMut<MagicQueue>, mut commands: Commands) {
         .into_iter()
         .enumerate()
         {
-            let at = Vec3::new(x * GATE_RX * 1.08, GATE_MID + y * GATE_RY * 1.08, 0.0) * k;
-            let len = if i == 0 { 0.9 } else { 0.65 } * k;
+            let at = Vec3::new(x * GATE_RX * 1.12, GATE_MID + y * GATE_RY * 1.12, 0.0) * k;
+            let len = if i == 0 { 1.0 } else { 0.72 } * k;
             let lean = Quat::from_rotation_arc(Vec3::Y, out.normalize());
             let e = commands
                 .spawn((
                     Name::new("Hellgate horn"),
                     Transform::from_translation((at + lean * Vec3::Y * len * 0.5).as_dvec3())
                         .with_rotation(lean),
-                    shape(cone(0.12 * k, len), stone),
+                    shape(cone(0.13 * k, len), stone),
+                    Hellstone,
                     ChildOf(root),
                 ))
                 .id();
             stones.push((e, at + lean * Vec3::Y * len * 0.5, lean));
         }
-        // The membrane: a dark red disc, a brighter churning layer over it and a ring of fire
-        // where it meets the stones.
-        let disc = |r: f32| Shape::Cylinder {
-            radius: r,
-            height: 0.02,
-            segments: 40,
-        };
-        let face = Quat::from_rotation_x(PI * 0.5);
-        let membrane: Vec<Entity> = [
-            (
-                disc(1.0),
-                glow_material([0.55, 0.03, 0.02], MEMBRANE_GLOW),
-                0.0,
-            ),
-            (
-                disc(0.82),
-                glow_material([1.0, 0.16, 0.03], MEMBRANE_GLOW * 2.2),
-                0.03,
-            ),
-            (
-                Shape::Torus {
-                    radius: 1.0,
-                    tube: 0.07,
-                    segments: 48,
-                },
-                glow_material([1.0, 0.42, 0.08], RIM_GLOW),
-                0.05,
-            ),
-            (disc(0.3), glow_material([0.05, 0.0, 0.0], 0.0), 0.06),
-        ]
-        .into_iter()
-        .map(|(s, m, z)| {
+        // The membrane: a vortex of hellfire in the ring. The holder stretches round discs to
+        // the ring's oval (so the layers turn inside it); the gate faces -Z, so the nearer
+        // layers sit at smaller z: the swirl at the back, the bright arms turning the other way
+        // over it, the black eye at its heart, and a ring of fire where it meets the stones.
+        let holder = commands
+            .spawn((
+                Name::new("Hellgate membrane"),
+                Transform::from_translation(DVec3::new(0.0, (GATE_MID * k) as f64, 0.0))
+                    .with_scale(Vec3::splat(1e-3)),
+                ChildOf(root),
+            ))
+            .id();
+        let mut membrane = vec![holder];
+        for (layer, z) in [
+            (VortexLayer::Swirl, 0.05),
+            (VortexLayer::Arms, 0.02),
+            (VortexLayer::Eye, -0.02),
+        ] {
+            membrane.push(
+                commands
+                    .spawn((
+                        Name::new("Hellgate vortex"),
+                        Transform::from_translation(DVec3::new(0.0, 0.0, z)),
+                        // A stand-in until `dress_demons` paints it.
+                        MeshRenderer::new(
+                            MeshRef::Shape(Shape::Quad { size: [0.01, 0.01] }),
+                            MaterialRef::Inline(glow_material([0.4, 0.02, 0.01], 0.0)),
+                        )
+                        .without_shadows(),
+                        Vortex(layer),
+                        ChildOf(holder),
+                    ))
+                    .id(),
+            );
+        }
+        membrane.push(
             commands
                 .spawn((
-                    Name::new("Hellgate membrane"),
-                    Transform::from_translation(DVec3::new(0.0, (GATE_MID * k) as f64, z))
-                        .with_rotation(face)
-                        .with_scale(Vec3::ZERO),
-                    MeshRenderer::new(MeshRef::Shape(s), MaterialRef::Inline(m)).without_shadows(),
-                    ChildOf(root),
+                    Name::new("Hellgate rim fire"),
+                    Transform::from_rotation(Quat::from_rotation_x(PI * 0.5)),
+                    MeshRenderer::new(
+                        MeshRef::Shape(Shape::Torus {
+                            radius: 1.0,
+                            tube: 0.05,
+                            segments: 48,
+                        }),
+                        MaterialRef::Inline(glow_material([1.0, 0.2, 0.03], RIM_GLOW)),
+                    )
+                    .without_shadows(),
+                    ChildOf(holder),
                 ))
-                .id()
-        })
-        .collect();
+                .id(),
+        );
         // A solid frame bolts strike.
         commands.entity(root).insert((
             Collider {
@@ -399,6 +493,7 @@ pub fn spawn_hellgates(mut queue: ResMut<MagicQueue>, mut commands: Commands) {
                 imps: 0,
                 stones,
                 membrane,
+                fires_lit: None,
                 closing: None,
             },
         ));
@@ -520,33 +615,50 @@ pub fn run_hellgates(
                 tf.rotation = rot;
             }
         }
-        // The membrane opens, churns and glows; the light swells with it.
+        // The membrane opens out of a point and swirls: the holder stretches it to the oval and
+        // breathes, the swirl turns slowly one way, the arms faster the other, the eye pulses.
         let open = g.open();
-        let churn = g.age * 0.9;
+        let breathe = 1.0 + 0.025 * (g.age * 2.7).sin();
         for (i, &m) in g.membrane.iter().enumerate() {
-            if let Ok(mut tf) = pieces.get_mut(m) {
-                let breathe = 1.0 + 0.04 * (g.age * 3.1 + i as f32).sin();
-                let (sx, sy) = match i {
-                    // The core's dark eye pulses.
-                    3 => (
-                        0.55 + 0.25 * (g.age * 2.3).sin(),
-                        0.7 + 0.2 * (g.age * 1.7).cos(),
-                    ),
-                    _ => (1.0, 1.0),
-                };
-                tf.scale = Vec3::new(
-                    GATE_RX * k * open * breathe * sx,
-                    1.0,
-                    GATE_RY * k * open * breathe * sy,
-                );
-                let spin = if i == 1 {
-                    churn
-                } else {
-                    -churn * 0.4 * i as f32
-                };
-                tf.rotation = Quat::from_rotation_z(0.0)
-                    * Quat::from_rotation_x(PI * 0.5)
-                    * Quat::from_rotation_y(spin);
+            let Ok(mut tf) = pieces.get_mut(m) else {
+                continue;
+            };
+            match i {
+                0 => {
+                    let r = (k * open * breathe).max(1e-3);
+                    tf.scale = Vec3::new(GATE_RX * r, GATE_RY * r, 1.0);
+                }
+                1 => tf.rotation = Quat::from_rotation_z(g.age * SWIRL_TURN),
+                2 => {
+                    tf.rotation = Quat::from_rotation_z(g.age * ARMS_TURN);
+                    tf.scale = Vec3::splat(0.97);
+                }
+                3 => {
+                    let pulse = 0.3 + 0.035 * (g.age * 2.3).sin() + 0.015 * (g.age * 5.1).sin();
+                    tf.rotation = Quat::from_rotation_z(-g.age * ARMS_TURN * 0.5);
+                    tf.scale = Vec3::new(pulse, pulse, 1.0);
+                }
+                _ => {}
+            }
+        }
+        // Fires burn at its feet while it stands, lit again before they go out.
+        if open > 0.5
+            && g.closing.is_none()
+            && g.left() > 2.0
+            && g.fires_lit.is_none_or(|t| g.age - t >= GATE_FIRE_EVERY)
+        {
+            g.fires_lit = Some(g.age);
+            let right = Vec3::new(-g.facing.z, 0.0, g.facing.x);
+            for side in [-1.0f32, 1.0] {
+                let at = g.at
+                    + (right * side * GATE_RX * 0.85 * k + g.facing * 0.3 * k).as_dvec3()
+                    + DVec3::Y * 0.05;
+                queue.looks.push(LookCmd::Effect {
+                    name: "fire.torch",
+                    at,
+                    up: Vec3::Y,
+                    scale: 2.4 * k,
+                });
             }
         }
         light.intensity_lm = GATE_LIGHT_LM * open * (1.0 + 0.12 * (g.age * 7.0).sin());
@@ -618,6 +730,7 @@ pub fn ride_meteors(
                         Name::new("Demonic meteor"),
                         Transform::default(),
                         shape(rock(size, m.cast.seed as u64), hellstone()),
+                        Hellstone,
                         ChildOf(e),
                     ))
                     .id();
@@ -640,15 +753,39 @@ pub fn ride_meteors(
     }
 }
 
-/// Wings get their mesh once meshes can be made.
-pub fn dress_wings(
-    mut wings: Query<&mut MeshRenderer, Added<Wing>>,
+/// Pieces get their meshes and pictures once they can be made: imps' wings, the gates'
+/// vortex layers, hellstone's cracks.
+#[allow(clippy::type_complexity)]
+pub fn dress_demons(
+    mut pieces: Query<
+        (
+            &mut MeshRenderer,
+            Option<&Wing>,
+            Option<&Vortex>,
+            Option<&Hellstone>,
+        ),
+        Or<(Added<Wing>, Added<Vortex>, Added<Hellstone>)>,
+    >,
     mut dm: ResMut<DemonMeshes>,
     meshes: Option<ResMut<Assets<Mesh>>>,
+    images: Option<ResMut<Assets<Image>>>,
 ) {
     let Some(mut meshes) = meshes else { return };
-    for mut r in &mut wings {
-        r.mesh = MeshRef::Handle(dm.wing(&mut meshes));
+    let mut images = images;
+    for (mut r, wing, vortex, stone) in &mut pieces {
+        if wing.is_some() {
+            r.mesh = MeshRef::Handle(dm.wing(&mut meshes));
+        }
+        let Some(images) = images.as_deref_mut() else {
+            continue;
+        };
+        if let Some(&Vortex(layer)) = vortex {
+            let picture = dm.vortex(layer, images);
+            r.mesh = MeshRef::Handle(dm.disc(&mut meshes));
+            r.material = MaterialRef::Inline(vortex_material(layer, picture));
+        } else if stone.is_some() {
+            r.material = MaterialRef::Inline(cracked_hellstone(dm.cracks(images)));
+        }
     }
 }
 
@@ -697,7 +834,15 @@ pub const HOUND_FORE: [usize; 2] = [11, 14];
 /// Thigh, shin, hock, paw; left then right.
 pub const HOUND_HIND: [usize; 2] = [17, 21];
 pub const HOUND_TAIL: [usize; 3] = [25, 26, 27];
-pub const HOUND_PARTS: usize = 28;
+/// Spikes along its back, shoulders to rump.
+pub const HOUND_SPINE: [usize; 4] = [28, 29, 30, 31];
+pub const HOUND_PARTS: usize = 32;
+
+/// A hound's pieces of hellstone (all but its eyes, horns and spikes), which glow in their
+/// cracks.
+pub fn hound_stone(index: usize) -> bool {
+    !HOUND_EYE.contains(&index) && !HOUND_HORN.contains(&index) && !HOUND_SPINE.contains(&index)
+}
 
 /// The pieces chains bite on: an imp's hands and feet, a hound's four paws.
 pub fn limb_parts(kind: MinionKind) -> [usize; 4] {
@@ -800,13 +945,10 @@ const HIND_SHIN: f32 = 0.33;
 const HIND_HOCK: f32 = 0.2;
 const PAW_Y: f32 = 0.05;
 
-/// The pieces of a hound at size `k`.
+/// The pieces of a hound at size `k`: a heavy beast of hellstone, deep in the chest, thick in
+/// the neck and legs, a crest of spikes down its back.
 pub fn hound_parts(k: f32, seed: u64) -> Vec<(usize, MeshRenderer)> {
     let stone = hellstone();
-    let sinew = StandardMaterial::default()
-        .with_tint(0.07, 0.05, 0.045)
-        .with_roughness(0.55)
-        .with_emissive([1.0, 0.25, 0.05], 1.5);
     let dark = StandardMaterial::default()
         .with_tint(0.05, 0.045, 0.04)
         .with_roughness(0.32);
@@ -819,49 +961,36 @@ pub fn hound_parts(k: f32, seed: u64) -> Vec<(usize, MeshRenderer)> {
             ),
         )
     };
+    let limb = |i: usize, radius: f32, len: f32| (i, shape(capsule(radius * k, len * k), stone));
     let mut out = vec![
-        r(HOUND_CHEST, [0.44, 0.56, 0.5]),
-        r(HOUND_WAIST, [0.32, 0.44, 0.34]),
-        r(HOUND_HAUNCH, [0.4, 0.42, 0.42]),
-        r(HOUND_NECK, [0.26, 0.4, 0.28]),
-        r(HOUND_HEAD, [0.28, 0.3, 0.25]),
-        r(HOUND_MUZZLE, [0.16, 0.28, 0.13]),
-        r(HOUND_JAW, [0.14, 0.25, 0.07]),
+        r(HOUND_CHEST, [0.54, 0.64, 0.6]),
+        r(HOUND_WAIST, [0.4, 0.5, 0.42]),
+        r(HOUND_HAUNCH, [0.5, 0.5, 0.5]),
+        r(HOUND_NECK, [0.32, 0.44, 0.34]),
+        r(HOUND_HEAD, [0.34, 0.36, 0.3]),
+        r(HOUND_MUZZLE, [0.2, 0.32, 0.16]),
+        r(HOUND_JAW, [0.17, 0.28, 0.08]),
     ];
     for i in 0..2 {
         out.push((
             HOUND_EYE[i],
-            shape(sphere(0.03 * k), glow_material(EYE_GLOW, 1500.0)).without_shadows(),
+            shape(sphere(0.035 * k), glow_material(EYE_GLOW, 2500.0)).without_shadows(),
         ));
-        out.push((HOUND_HORN[i], shape(cone(0.04 * k, 0.24 * k), dark)));
-        out.push((
-            HOUND_FORE[i],
-            shape(capsule(0.065 * k, FORE_UPPER * k), sinew),
-        ));
-        out.push((
-            HOUND_FORE[i] + 1,
-            shape(capsule(0.05 * k, FORE_LOWER * k), sinew),
-        ));
-        out.push(r(HOUND_FORE[i] + 2, [0.12, 0.09, 0.17]));
-        out.push((
-            HOUND_HIND[i],
-            shape(capsule(0.085 * k, HIND_THIGH * k), sinew),
-        ));
-        out.push((
-            HOUND_HIND[i] + 1,
-            shape(capsule(0.055 * k, HIND_SHIN * k), sinew),
-        ));
-        out.push((
-            HOUND_HIND[i] + 2,
-            shape(capsule(0.042 * k, HIND_HOCK * k), sinew),
-        ));
-        out.push(r(HOUND_HIND[i] + 3, [0.12, 0.09, 0.17]));
+        out.push((HOUND_HORN[i], shape(cone(0.05 * k, 0.3 * k), dark)));
+        out.push(limb(HOUND_FORE[i], 0.1, FORE_UPPER));
+        out.push(limb(HOUND_FORE[i] + 1, 0.066, FORE_LOWER));
+        out.push(r(HOUND_FORE[i] + 2, [0.15, 0.1, 0.2]));
+        out.push(limb(HOUND_HIND[i], 0.13, HIND_THIGH));
+        out.push(limb(HOUND_HIND[i] + 1, 0.075, HIND_SHIN));
+        out.push(limb(HOUND_HIND[i] + 2, 0.055, HIND_HOCK));
+        out.push(r(HOUND_HIND[i] + 3, [0.15, 0.1, 0.2]));
     }
     for (j, &t) in HOUND_TAIL.iter().enumerate() {
-        out.push((
-            t,
-            shape(capsule((0.05 - 0.012 * j as f32) * k, 0.24 * k), sinew),
-        ));
+        out.push(limb(t, 0.06 - 0.014 * j as f32, 0.24));
+    }
+    for (j, &t) in HOUND_SPINE.iter().enumerate() {
+        let len = [0.24, 0.2, 0.15, 0.12][j];
+        out.push((t, shape(cone(0.055 * k, len * k), dark)));
     }
     out
 }
@@ -896,6 +1025,9 @@ pub fn build(
                 ChildOf(root),
             ))
             .id();
+        if kind == MinionKind::Hellhound && hound_stone(index) {
+            commands.entity(id).insert(Hellstone);
+        }
         if kind == MinionKind::Imp && IMP_WING.contains(&index) {
             commands.entity(id).insert(Wing);
             // The wing's bones: a dark line along its leading edge and each finger.
@@ -952,7 +1084,7 @@ pub fn build(
                         Vec3::new(0.0, 0.66 * k, 0.0),
                         Quat::from_rotation_x(PI * 0.5),
                         ColliderShape::Capsule {
-                            radius: 0.3 * k,
+                            radius: 0.34 * k,
                             half_height: 0.5 * k,
                         },
                     )]),
@@ -1709,15 +1841,27 @@ pub fn pose_hound(
     for (i, s) in [-1.0f32, 1.0].into_iter().enumerate() {
         out.push((
             HOUND_EYE[i],
-            head + look * (Vec3::new(0.085 * s, 0.05, -0.1) * k),
+            head + look * (Vec3::new(0.1 * s, 0.07, -0.18) * k),
             look,
             Vec3::ONE,
         ));
         let horn = look * Vec3::new(0.3 * s, 0.5, 0.8).normalize();
         out.push((
             HOUND_HORN[i],
-            head + look * (Vec3::new(0.08 * s, 0.1, 0.02) * k) + horn * 0.11 * k,
+            head + look * (Vec3::new(0.1 * s, 0.12, 0.02) * k) + horn * 0.14 * k,
             Quat::from_rotation_arc(Vec3::Y, horn),
+            Vec3::ONE,
+        ));
+    }
+    // A crest of spikes down its back, swept back.
+    for (j, &t) in HOUND_SPINE.iter().enumerate() {
+        let (z, y) = [(-0.42, 0.99), (-0.18, 0.97), (0.08, 0.9), (0.32, 0.95)][j];
+        let len = [0.24, 0.2, 0.15, 0.12][j];
+        let dir = body * Vec3::new(0.0, 1.0, 0.55).normalize();
+        out.push((
+            t,
+            at(Vec3::new(0.0, y, z)) + dir * len * 0.5 * k,
+            Quat::from_rotation_arc(Vec3::Y, dir),
             Vec3::ONE,
         ));
     }

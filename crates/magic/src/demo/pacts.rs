@@ -1,7 +1,7 @@
 //! `spells_pacts` (round-15-plan.md, "The hall stop"): pacts. Warlocks on the dead's side of the
 //! floor (lanes 3 to 5) against the students (lanes 0 to 2), as `spells_blades` sets two sides:
 //!
-//! * The students raise a stone golem and a frost elemental mid-floor (0.3 and 0.5 s).
+//! * The students raise a stone golem and a storm elemental mid-floor (0.3 and 0.5 s).
 //! * Lane 3 opens a Hellgate on the floor before its plinth (0.6 s), facing down the hall: a ring
 //!   of black horned stone 3 m tall round a churning red-black membrane. Two hellhounds leap out
 //!   of it (about 2.2 and 3.0 s), run at the students' creatures and pounce on them, then an imp
@@ -16,8 +16,10 @@
 //!   of the crater.
 //! * The students turn the fight: lane 1 calls a spirit blade (7.8 s) and raises a second golem
 //!   (9.4 s), lane 2 a phalanx over its head (9.0 and 13.8 s) and a second elemental (11 s), lane
-//!   1 drops frost bladefalls on the demons (11 and 15.8 s), and lane 0 throws frost bolts and
+//!   1 drops bladefalls on the demons (11 and 15.8 s), and lane 0 throws lightning bolts and
 //!   glintblades at the gate until it breaks (about 14 s). The last imps are hunted down by 20 s.
+//!   The students fight with storm, not frost: frost on the burning demons makes steam, whose
+//!   clouds would hide the fight; storm on fire makes plasma, which has none.
 //! * The meteors, the hook, the bonds and the binding spare the warlocks' own (Safeguard: they fly
 //!   past their imps). At the end of each period what is left of the pact falls in fire
 //!   (`demons::dismiss`); the masters on the plinths have 4000 health this stop, so none falls.
@@ -81,16 +83,21 @@ fn phalanx() -> SpellDesign {
     super::blades::phalanx()
 }
 
-/// Lane 1's frost bladefall, sparing the students' creatures.
+/// Lane 1's bladefall: glintblades raining on the demons, sparing the students' creatures.
 fn bladefall() -> SpellDesign {
-    super::blades::bladefall()
+    d(&["blade"], CastType::Rain)
+        .with(Modifier::Split { count: 2 })
+        .with(Modifier::Safeguard)
+        .named("Bladefall")
 }
 
-/// Lane 0's frost bolt at the gate.
-fn frost_bolt() -> SpellDesign {
-    d(&["frost"], CastType::Bolt)
+/// Lane 0's lightning bolt at the gate: over the students' own creatures on the way (its line
+/// from lane 0's plinth runs past the golems' spot) and through them.
+fn lightning_bolt() -> SpellDesign {
+    d(&["storm"], CastType::Bolt)
         .with(Modifier::Size { factor: 1.3 })
-        .named("Frost bolt")
+        .with(Modifier::Safeguard)
+        .named("Lightning bolt")
 }
 
 /// Lane 2's spirit blade, fighting beside the golem.
@@ -107,9 +114,9 @@ fn golem() -> SpellDesign {
 }
 
 fn elemental() -> SpellDesign {
-    d(&["frost"], CastType::Summon)
+    d(&["storm"], CastType::Summon)
         .with(Modifier::Duration { factor: 0.36 })
-        .named("Frost elemental")
+        .named("Storm elemental")
 }
 
 /// The students' second golem and elemental, risen as they turn the fight (9.4 to 11 s), gone
@@ -121,9 +128,9 @@ fn late_golem() -> SpellDesign {
 }
 
 fn late_elemental() -> SpellDesign {
-    d(&["frost"], CastType::Summon)
+    d(&["storm"], CastType::Summon)
         .with(Modifier::Duration { factor: 0.2 })
-        .named("Frost elemental")
+        .named("Storm elemental")
 }
 
 /// The program's lanes: every lane Ascended (no fizzles to spoil the show), students on lanes 0
@@ -142,16 +149,16 @@ pub(super) fn lanes() -> Vec<Lane> {
     };
     vec![
         // The golem stands mid-floor before the students' plinths; then lane 0 goes for the
-        // gate, with frost and then blades.
+        // gate, with lightning and then blades.
         of(vec![
             cast(0.1, golem(), AimAt::Floor(-0.4, 6.2)),
-            cast(9.6, frost_bolt(), AimAt::Gate),
-            cast(10.8, frost_bolt(), AimAt::Gate),
-            cast(12.0, frost_bolt(), AimAt::Gate),
+            cast(9.6, lightning_bolt(), AimAt::Gate),
+            cast(10.8, lightning_bolt(), AimAt::Gate),
+            cast(12.0, lightning_bolt(), AimAt::Gate),
             cast(13.2, super::blades::glintblades(), AimAt::Gate),
-            cast(14.4, frost_bolt(), AimAt::Gate),
+            cast(14.4, lightning_bolt(), AimAt::Gate),
             cast(15.6, super::blades::glintblades(), AimAt::Gate),
-            cast(16.8, frost_bolt(), AimAt::Gate),
+            cast(16.8, lightning_bolt(), AimAt::Gate),
             cast(18.0, super::blades::glintblades(), AimAt::Gate),
         ]),
         // The spirit blade comes as the students turn the fight.
@@ -243,6 +250,17 @@ mod tests {
             let s = compile(&s, ctx).unwrap();
             assert!(s.carrier.duration > 8.0 && 11.8 + s.carrier.duration < PERIOD);
         }
-        assert!(compile(&frost_bolt(), ctx).unwrap().payload.damage > 0.0);
+        assert!(compile(&lightning_bolt(), ctx).unwrap().payload.damage > 0.0);
+        let rain = compile(&bladefall(), ctx).unwrap();
+        assert_eq!(rain.cast, CastType::Rain);
+        // No frost among the students' spells: no steam to hide the fight.
+        for s in [elemental(), late_elemental(), lightning_bolt(), bladefall()] {
+            let s = compile(&s, ctx).unwrap();
+            assert!(
+                !s.weave.ingredients.iter().any(|k| k == "frost"),
+                "{}",
+                s.weave.name
+            );
+        }
     }
 }

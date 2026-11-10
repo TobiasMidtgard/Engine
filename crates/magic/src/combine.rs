@@ -542,8 +542,9 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
         // A pact's demons come in hellfire: fire's look, a deeper red (demons.rs).
         ("fire".to_string(), name, DEMON_COLOR)
     } else if ingredients.iter().any(|k| k == "chains") && elements.is_empty() {
-        // Chains are iron and embers: shadow's look in the embers' red (chains.rs).
-        ("shadow".to_string(), name, crate::chains::EMBER)
+        // Chains are iron and embers (chains.rs): the chain look (vfx draws a chain's crackle
+        // and lends its bursts the nearest element's, fire's, in the embers' red).
+        ("chain".to_string(), name, crate::chains::EMBER)
     } else if ingredients.iter().any(|k| k == "raise") && elements.is_empty() {
         // Raising the dead is dark: it looks like shadow, in the grave's violet, not like the
         // green of the Life domain its dials sit in (a bone blade's cut would puff green).

@@ -55,6 +55,7 @@ pub mod kinesis;
 pub mod looks;
 pub mod meet;
 pub mod minds;
+pub mod pact_art;
 pub mod player;
 pub mod runtime;
 pub mod schools;
@@ -167,7 +168,7 @@ impl Plugin for MagicPlugin {
                     tether::draw_tethers,
                     kinesis::draw_grips,
                     minds::draw_threads,
-                    demons::dress_wings,
+                    demons::dress_demons,
                 )
                     .chain(),
             )

@@ -38,7 +38,7 @@ use crate::summon::{Minion, MinionPart};
 // ------------------------------------------------------------------------------- numbers
 
 /// Spacing of a chain's links, m: a heavy chain, read from across the hall.
-pub const LINK_M: f32 = 0.12;
+pub const LINK_M: f32 = 0.17;
 /// Seconds a chain's head takes to fly from the floor (or the hand) to what it binds.
 pub const SHOOT_SECS: f32 = 0.24;
 /// Seconds a binding's chains take to pull taut once they bite.
@@ -56,8 +56,9 @@ pub const SIGIL_M: f32 = 0.95;
 pub const BOND_SHARE: f32 = 0.25;
 /// The chains' ember glow and the sigils' fire.
 pub const EMBER: [f32; 3] = [1.0, 0.22, 0.05];
-/// A link's glow, nits: a dull heat in the seams, so the iron reads dark.
-pub const LINK_GLOW: f32 = 60.0;
+/// A link's glow, nits: iron forged in hellfire, still glowing dull red, so the chains read
+/// against the daylit hall.
+pub const LINK_GLOW: f32 = 700.0;
 /// A sigil's glow, nits: a ring of fire on the floor in the daylit hall.
 pub const SIGIL_GLOW: f32 = 7_000.0;
 /// Verlet passes per step.
@@ -304,7 +305,7 @@ pub fn spawn_chain(commands: &mut Commands, mut chain: Chain) -> Entity {
                     MeshRenderer::new(
                         MeshRef::Shape(Shape::Torus {
                             radius: 1.0,
-                            tube: 0.24,
+                            tube: 0.3,
                             segments: 10,
                         }),
                         MaterialRef::Inline(material),
