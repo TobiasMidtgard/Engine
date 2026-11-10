@@ -42,9 +42,9 @@ pub const FLY_SECS: f32 = 0.75;
 pub const REAR_SECS: f32 = 1.0;
 /// Its middle's height over the floor standing, and flying, m (at size 1).
 pub const STAND_H: f32 = 1.55;
-pub const CRUISE_M: f32 = 5.4;
+pub const CRUISE_M: f32 = 4.4;
 /// Its circle over its foes, m, and its speed on the wing, m/s.
-pub const CIRCLE_M: f32 = 6.5;
+pub const CIRCLE_M: f32 = 5.5;
 pub const FLY_SPEED: f32 = 7.5;
 /// Its walk, m/s, and turn on the floor, rad/s.
 pub const WALK: f32 = 2.4;
@@ -343,9 +343,10 @@ impl Dragon {
     }
 }
 
-/// Its size from the summon's power: about 6.5 m from snout to tail at size 1.
+/// Its size from the summon's power: about 6.5 m from snout to tail at size 1, 8.5 m at an
+/// Ascended's (a dragon, not a horse).
 pub fn dragon_size(spell: &Spell, scale: f32) -> f32 {
-    (crate::summon::size_of(spell, scale) * 0.95).clamp(0.85, 1.35)
+    (crate::summon::size_of(spell, scale) * 1.3).clamp(1.0, 1.7)
 }
 
 /// Its bite, its tail's sweep, and its breath: grave frost in a cone (frost, in the weave's
@@ -707,6 +708,13 @@ pub fn build(commands: &mut Commands, root: Entity, k: f32, seed: u64, parts: &m
             }
             _ if BACK.contains(&i) => {
                 let j = i - BACK[0];
+                // The bodies of the vertebrae run on into each other: a spine, not beads.
+                kid(
+                    commands,
+                    id,
+                    along(Vec3::new(0.0, 0.0, -0.15), Vec3::new(0.0, 0.0, 0.15)),
+                    cap(0.07, 0.3, bone),
+                );
                 let len = 0.32 - 0.025 * j as f32;
                 spike(
                     commands,
@@ -730,6 +738,22 @@ pub fn build(commands: &mut Commands, root: Entity, k: f32, seed: u64, parts: &m
             }
             _ if NECK.contains(&i) => {
                 let f = 1.0 - 0.04 * (i - NECK[0]) as f32;
+                kid(
+                    commands,
+                    id,
+                    along(Vec3::new(0.0, 0.0, -0.15), Vec3::new(0.0, 0.0, 0.15)),
+                    cap(0.06 * f, 0.3, bone),
+                );
+                for s in [-1.0f32, 1.0] {
+                    spike(
+                        commands,
+                        id,
+                        Vec3::new(0.04 * s, 0.0, 0.0),
+                        Vec3::new(s, -0.2, 0.3),
+                        0.018 * f,
+                        0.11 * f,
+                    );
+                }
                 spike(
                     commands,
                     id,
@@ -742,6 +766,15 @@ pub fn build(commands: &mut Commands, root: Entity, k: f32, seed: u64, parts: &m
             _ if TAIL.contains(&i) => {
                 let j = i - TAIL[0];
                 let f = (1.0 - 0.075 * j as f32).max(0.3);
+                kid(
+                    commands,
+                    id,
+                    along(
+                        Vec3::new(0.0, 0.0, -0.5 * TAIL_SEG - 0.02),
+                        Vec3::new(0.0, 0.0, 0.5 * TAIL_SEG + 0.02),
+                    ),
+                    cap(0.055 * f, TAIL_SEG + 0.04, bone),
+                );
                 if j < 8 {
                     spike(
                         commands,
@@ -1418,6 +1451,16 @@ pub fn live_dragon(
                     let mouth_local = (skull + look * MOUTH) * k;
                     let mouth = m.pos + (rot * mouth_local).as_dvec3();
                     let fwd = (aim - mouth).as_vec3().normalize_or(Vec3::NEG_Y);
+                    // The jet itself, mouth to floor: gouts overlap into one stream of cold.
+                    let reach = mouth.distance(aim).min((BREATH_M * k.sqrt()) as f64);
+                    life.queue.looks.push(LookCmd::Beam {
+                        from: mouth,
+                        to: mouth + (fwd * reach as f32).as_dvec3(),
+                        look: "frost".into(),
+                        color: d.breath.weave.color,
+                        width: 0.42 * k,
+                        secs: BREATH_EVERY * 1.8,
+                    });
                     let info = minion_cast(m, e, &d.breath, 1.0);
                     release(
                         &info,

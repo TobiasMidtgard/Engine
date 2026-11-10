@@ -313,15 +313,16 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_bones",
         name: "Bones: a bone dragon, a prison of ribs, a ribcage wall, bone armour and bone spears",
-        // From down the floor, back and up, looking up the hall at the dais: the dragon's circle
-        // over the students' creatures fills the sky over the middle of the picture, the
-        // ribcage runs across the floor before them and the necromancers' plinths are on the
-        // left (the camera looks +z, so +x is left).
-        eye: [2.2, 4.4, -9.5],
-        target: [0.4, 3.0, 5.0],
+        // From over the middle of the floor at 5 m, looking up the hall at the dais: the
+        // dragon's circle over the students' creatures fills the sky over the picture (chosen
+        // offline from the stop's own positions: the dragon whole in view 95% of the period, half
+        // again as big as from further back), the ribcage runs across the floor before the
+        // necromancers' plinths on the left (the camera looks +z, so +x is left).
+        eye: [-1.0, 5.0, -6.0],
+        target: [-0.5, 3.6, 8.0],
         hour: 16.6,
         // The dragon whole and rearing over the caged golem, the ribcage rising.
-        warmup: 5.0,
+        warmup: 4.6,
     },
 ];
 

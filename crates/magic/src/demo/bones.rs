@@ -13,11 +13,12 @@
 //! * Lane 5 closes a Bone prison over the golem (2.4 s, and again at 13.6 s): eight ribs break
 //!   out of the floor round it and close over its head like a hand. Lane 0 shatters it with a
 //!   push bolt (5.4 s): a heavy blow from the students' side breaks a prison into tumbling shards.
-//! * Lane 5 raises a Bone wall across the floor (4.2 s): a ribcage 2.2 m high, pairs of ribs
-//!   arching over to a spine, that the students' creatures push through slowly.
-//! * Lane 3 throws Bone spears through the students' line (2.8 s on): a barbed spear that goes
-//!   through every body in its way and stands quivering in the floor where it lands. Lane 4
-//!   cages the fire elemental (11 s).
+//! * Lane 3 raises a Bone wall across the floor before the necromancers' plinths (3.6 s): a
+//!   ribcage 2.2 m high and 6 m long, pairs of ribs arching up to a spine, that the students'
+//!   creatures push through slowly.
+//! * Lanes 5 and 3 throw Bone spears through the students' line (5 s on): a barbed spear that
+//!   goes through every body in its way and stands quivering in the floor where it lands. Lane
+//!   4 cages the storm elemental (11 s).
 //! * The students answer with fire and storm: lane 1 throws fire bolts at the dragon (skeletal
 //!   dragons fear fire), lane 2 lightning bolts, lane 0 fire at the armoured necromancer (bone
 //!   armour turns weapons, not magic).
@@ -37,8 +38,9 @@ pub const PERIOD: f32 = 24.0;
 /// Where lane 4 raises its dragon (x, z): on the necromancers' side of the floor, before the
 /// students' creatures.
 pub const DRAGON: [f64; 2] = [3.2, 4.6];
-/// Where lane 5 raises its bone wall (x, z): mid-floor between the two sides.
-pub const RIBCAGE: [f64; 2] = [1.4, 2.4];
+/// Where lane 3 raises its bone wall (x, z): before the necromancers' plinths, across the
+/// floor (lane 3 casts it straight down its lane).
+pub const RIBCAGE: [f64; 2] = [3.4, 7.0];
 
 /// Lane 4's bone dragon, lasting the period.
 pub fn bone_dragon() -> SpellDesign {
@@ -47,24 +49,24 @@ pub fn bone_dragon() -> SpellDesign {
         .named("Bone dragon")
 }
 
-/// Lane 5's bone prison.
+/// Lane 5's bone prison (and lane 4's).
 pub fn prison() -> SpellDesign {
     d(&["bone"], CastType::Area)
         .with(Modifier::Safeguard)
         .named("Bone prison")
 }
 
-/// Lane 3's bone spear, past the necromancers' own dragon.
+/// Lanes 3 and 5's bone spear, past the necromancers' own dragon.
 pub fn spear() -> SpellDesign {
     d(&["bone"], CastType::Bolt)
         .with(Modifier::Safeguard)
         .named("Bone spear")
 }
 
-/// Lane 5's bone wall, standing most of the period.
+/// Lane 3's bone wall, 6 m long, standing most of the period.
 pub fn bone_wall() -> SpellDesign {
     d(&["bone"], CastType::Wall)
-        .with(Modifier::Size { factor: 1.2 })
+        .with(Modifier::Size { factor: 0.75 })
         .with(Modifier::Duration { factor: 1.6 })
         .with(Modifier::Safeguard)
         .named("Bone wall")
@@ -170,23 +172,25 @@ pub(super) fn lanes() -> Vec<Lane> {
             cast(12.6, lightning_bolt(), dragon),
             cast(15.4, lightning_bolt(), dragon),
         ]),
-        // Armour on, then spears through the students' line.
+        // Armour on, then the ribcage before the necromancers' plinths (straight down its lane,
+        // so it runs across the floor), then spears.
         of(vec![
             cast(0.3, bone_armour(), AimAt::Foe),
-            cast(2.8, spear(), AimAt::Kind(MinionKind::Elemental)),
-            cast(6.8, spear(), AimAt::Golem),
-            cast(10.4, spear(), AimAt::Kind(MinionKind::Elemental)),
+            cast(3.6, bone_wall(), AimAt::Floor(RIBCAGE[0], RIBCAGE[1])),
+            cast(8.0, spear(), AimAt::Kind(MinionKind::Elemental)),
             cast(14.6, spear(), AimAt::Golem),
-            cast(18.0, spear(), AimAt::Kind(MinionKind::Elemental)),
         ]),
         of(vec![
             cast(0.6, bone_dragon(), AimAt::Floor(DRAGON[0], DRAGON[1])),
             cast(11.0, prison(), AimAt::Kind(MinionKind::Elemental)),
         ]),
+        // The prisons, and spears from the far end of the dais across the students' line.
         of(vec![
             cast(2.4, prison(), AimAt::Golem),
-            cast(4.2, bone_wall(), AimAt::Floor(RIBCAGE[0], RIBCAGE[1])),
+            cast(5.0, spear(), AimAt::Kind(MinionKind::Elemental)),
+            cast(10.0, spear(), AimAt::Golem),
             cast(13.6, prison(), AimAt::Golem),
+            cast(18.0, spear(), AimAt::Kind(MinionKind::Elemental)),
         ]),
     ]
 }
@@ -217,7 +221,7 @@ mod tests {
         let w = compile(&bone_wall(), ctx).unwrap();
         assert!(w.payload.ribcage);
         assert!(
-            w.carrier.duration > 12.0 && 4.4 + w.carrier.duration < PERIOD,
+            w.carrier.duration > 12.0 && 3.8 + w.carrier.duration < PERIOD,
             "{}",
             w.carrier.duration
         );

@@ -513,13 +513,31 @@ pub(crate) fn grow_root(
     let hidden = Transform::from_scale(Vec3::ZERO);
     let n = pts.len().saturating_sub(1);
     let mut segs = Vec::with_capacity(n);
-    for _ in 0..n {
+    for i in 0..n {
+        // Bone comes up stained by the earth it broke out of: darker for its first metre or so,
+        // in a few steps (a handful of materials, not one per segment).
+        let mut wood = look.wood;
+        if look.bone {
+            let up = i as f32 * step;
+            let f = if up < 0.35 {
+                0.42
+            } else if up < 0.65 {
+                0.6
+            } else if up < 1.0 {
+                0.8
+            } else {
+                1.0
+            };
+            for c in &mut wood.base_color[..3] {
+                *c *= f;
+            }
+        }
         segs.push(
             commands
                 .spawn((
                     Name::new("Root segment"),
                     hidden,
-                    MeshRenderer::new(capsule(), MaterialRef::Inline(look.wood)),
+                    MeshRenderer::new(capsule(), MaterialRef::Inline(wood)),
                     WildPiece,
                     ChildOf(root),
                 ))

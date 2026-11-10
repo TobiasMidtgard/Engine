@@ -107,7 +107,8 @@ pub fn wall_rib(
     let p0 = at(half_w, -UNDER_M - 0.1, 0.0);
     let p1 = at(half_w * 1.22, height * 0.62, lean * 0.4);
     let p2 = at(half_w * 0.55, height * 1.14, lean * 0.8);
-    let p3 = at(-0.14, height * 1.02, lean);
+    // Its tip tucks in under the spine on its own side: pairs of ribs on a spine, not hoops.
+    let p3 = at(0.1, height * 0.96, lean);
     let n = 40;
     (0..=n)
         .map(|i| cubic(p0, p1, p2, p3, i as f32 / n as f32))
@@ -313,13 +314,16 @@ mod tests {
     }
 
     #[test]
-    fn a_wall_rib_arches_from_its_side_over_the_line() {
+    fn a_wall_rib_arches_from_its_side_up_under_the_spine() {
         let r = wall_rib(Vec3::X, Vec3::Z, 0.5, 1.0, 1.0, 2.2, 0.0);
         assert!(r[0].z > 0.9 && r[0].y < 0.0);
+        // Its tip tucks in under the spine on its own side.
         let last = *r.last().unwrap();
-        assert!(last.z < 0.0 && last.z > -0.3, "{last}");
+        assert!(last.z > 0.0 && last.z < 0.2, "{last}");
+        assert!(last.y > 2.0 && last.y < 2.2, "{last}");
         let top = r.iter().map(|p| p.y).fold(f32::MIN, f32::max);
-        assert!(top > 2.2 && top < 2.6, "{top}");
+        // Its crown is about the spine's height, the spine riding over the tips.
+        assert!(top > 2.05 && top < 2.3, "{top}");
         assert!(r.iter().all(|p| (p.x - 0.5).abs() < 1e-4));
     }
 

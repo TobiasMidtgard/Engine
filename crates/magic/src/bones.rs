@@ -100,13 +100,15 @@ fn rib_look() -> RootLook {
     }
 }
 
-/// A spine: a chain of knobbed vertebrae.
+/// A spine: a chain of knobbed vertebrae, darker and older than the ribs it carries, with a
+/// spike off every other one.
 fn spine_look() -> RootLook {
     RootLook {
+        wood: art::dark_bone().with_tint(0.62, 0.55, 0.44),
         spur_every: 2,
-        spur_length: (1.2, 1.8),
-        knob_every: 2,
-        knob: 1.15,
+        spur_length: (1.6, 2.6),
+        knob_every: 1,
+        knob: 1.45,
         ..rib_look()
     }
 }
@@ -410,7 +412,7 @@ pub fn spawn_bones(
                 origin,
                 &path,
                 RIB_SEG_M,
-                (0.075 + 0.02 * h(6)) * hs.sqrt(),
+                (0.095 + 0.025 * h(6)) * hs.sqrt(),
                 0.035 * i as f32,
                 None,
                 seed ^ i,
@@ -498,7 +500,7 @@ pub fn spawn_bones(
             center,
             &spine,
             RIB_SEG_M,
-            0.1,
+            0.16,
             0.0,
             None,
             seed,
@@ -531,7 +533,7 @@ pub fn spawn_bones(
                     center,
                     &path,
                     RIB_SEG_M,
-                    0.075 + 0.015 * h(4),
+                    0.095 + 0.02 * h(4),
                     delay,
                     None,
                     seed ^ id,
