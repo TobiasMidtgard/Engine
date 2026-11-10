@@ -15,6 +15,11 @@
 //! start, or after a jump), are built on the spot, side by side on all cores, so nothing
 //! stands on thin air; well above the ground ([`UNDERFOOT_CLEARANCE_M`]) nothing is.
 //!
+//! A tile nothing wants any more leaves the world, but its built shape is kept a while
+//! ([`SPARE_S`], up to [`MAX_SPARE_TILES`]): what left it often comes back (a fighter knocked
+//! down again, a camera turning round, a body rocking across a tile's edge), and then gets its
+//! ground back at once instead of stopping the frame to build it again.
+//!
 //! Heightfield layout: `heights[row * cols + col]`, rows along local Z from −size/2 to
 //! +size/2, columns along local X from −size/2 to +size/2, heights in meters above the tile
 //! origin.
@@ -52,6 +57,11 @@ pub struct TerrainColliders {
     /// Tiles built so far (diagnostics: a count that keeps climbing while nothing moves is
     /// tiles being thrown away and built again).
     built: u64,
+    /// The shape of every tile in the world, for when it goes spare.
+    shapes: HashMap<(Entity, NodeKey), TileShape>,
+    /// Tiles nothing wants now: out of the world, their shapes kept, with the seconds each
+    /// has gone unwanted.
+    spare: HashMap<(Entity, NodeKey), (f32, TileShape)>,
     /// Tiles built on the spot because the ground underfoot had none, after the first frame
     /// (diagnostics: a moving focus should find its tiles built ahead of it).
     waits: u64,
@@ -70,6 +80,12 @@ impl TerrainColliders {
         self.tiles.is_empty()
     }
 
+    /// Tiles nothing wants now, whose shapes are kept in case it comes back (they are not in
+    /// the world, nor counted in [`len`](Self::len)).
+    pub fn spare(&self) -> usize {
+        self.spare.len()
+    }
+
     /// No tile waiting or being built.
     pub fn is_settled(&self) -> bool {
         self.queue.is_empty() && self.building.is_empty()
@@ -84,6 +100,7 @@ fn tile_level(t: &TerrainRuntime, tile_m: f64) -> u8 {
 
 /// A tile's heightfield and where it lies in its terrain's own frame (so a tile built while
 /// the world shifted or the terrain moved is put in the right place).
+#[derive(Debug, Clone)]
 pub struct TileShape {
     /// Terrain-local origin (on the ground at the tile's center) and axes.
     origin: DVec3,
@@ -191,6 +208,13 @@ fn tile_shape(
 
 /// Most tiles kept under dynamic bodies away from every focus point, nearest first.
 pub const MAX_BODY_TILES: usize = 64;
+/// Most shapes kept of tiles nothing wants any more; over that the longest unwanted go.
+pub const MAX_SPARE_TILES: usize = 64;
+/// The shape of a tile nothing wants any more is kept this long, seconds: a tile is far
+/// dearer to build than its heights are to keep (17 KB). On the showcase lap 43 of 46 tiles
+/// built on the spot had been thrown away under five seconds before: the tile under a ragdoll
+/// that got up and was knocked down again, and tiles at the edge of a moving camera's block.
+const SPARE_S: f32 = 30.0;
 /// Most tiles built at once on worker threads.
 const MAX_BUILDING: usize = 3;
 /// A moving focus has its tiles built this many seconds ahead along its path, so it finds
@@ -205,6 +229,30 @@ const JUMP_SPEED: f64 = 3_000.0;
 /// rest, never on the spot. A camera flying at a couple of kilometers crossed a new tile
 /// every few frames and waited for each (27-56 ms a frame on the PC route).
 const UNDERFOOT_CLEARANCE_M: f64 = 150.0;
+
+/// The tile over `local` and the eight around it on the quadtree's own grid, the middle one
+/// first. (Across a cube face's edge: the tile over the point a tile's width that way; past a
+/// flat terrain's edge there is none.)
+fn block(map: &crate::cube::SurfaceMap, local: DVec3, level: u8) -> Vec<NodeKey> {
+    let Some(mid) = map.node_at(local, level) else {
+        return Vec::new();
+    };
+    let cell = 2.0 / (1u64 << level) as f64;
+    let mut out = Vec::with_capacity(9);
+    out.push(mid);
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let a = -1.0 + (mid.x as f64 + 0.5 + dx as f64) * cell;
+            let b = -1.0 + (mid.y as f64 + 0.5 + dy as f64) * cell;
+            if let Some(k) = map.node_at(map.position(mid.face, a, b, 0.0), level)
+                && !out.contains(&k)
+            {
+                out.push(k);
+            }
+        }
+    }
+    out
+}
 
 /// Keep collider tiles on every terrain that wants colliders: the 3 × 3 block around every
 /// focus point, and the tile under every dynamic body (awake or asleep, so a crate left
@@ -277,8 +325,6 @@ pub fn update_colliders(
             let Some((dir, up, base)) = t.source.map.locate(local) else {
                 continue;
             };
-            let side = up.any_orthonormal_vector();
-            let fwd = up.cross(side);
             // Its height above the ground (one coarse sample; ridges finer than 10 m don't
             // matter at the clearance).
             let clearance = (local - base).dot(up) - t.source.ground_height(base, up, dir, 10.0);
@@ -288,28 +334,29 @@ pub fn update_colliders(
             {
                 underfoot.push((e, k));
             }
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    let q = local + (side * dx as f64 + fwd * dz as f64) * size;
-                    if let Some(k) = t.source.map.node_at(q, level)
-                        && wanted_set.insert((e, k))
-                    {
-                        wanted.push((e, k));
-                    }
+            // In build order: the tile it is over, the tiles along its path (every half
+            // tile), then the rest of the block around it. (The block is on the tiles' own
+            // grid: nine points a tile apart along any other axes miss a neighbor, and which
+            // one changes as the focus moves.)
+            let block = block(&t.source.map, local, level);
+            let mut want = |k: NodeKey| {
+                if wanted_set.insert((e, k)) {
+                    wanted.push((e, k));
                 }
+            };
+            if let Some(&mid) = block.first() {
+                want(mid);
             }
-            // Then the tiles along its path, every half tile.
             let ahead = (v - up * v.dot(up)) * LOOK_AHEAD_S;
             let ahead = ahead.clamp_length_max(LOOK_AHEAD_MAX_M);
             let steps = (ahead.length() / (size * 0.5)).ceil() as usize;
             for s in 1..=steps {
                 let q = local + ahead * (s as f64 / steps as f64);
-                if let Some(k) = t.source.map.node_at(q, level)
-                    && wanted_set.insert((e, k))
-                {
-                    wanted.push((e, k));
+                if let Some(k) = t.source.map.node_at(q, level) {
+                    want(k);
                 }
             }
+            block.into_iter().skip(1).for_each(want);
         }
         let _tiles = tracing::info_span!("terrain colliders: body tiles").entered();
         // Each body's tile, its distance from the focus and whether it needs the tile at once,
@@ -362,7 +409,8 @@ pub fn update_colliders(
         if seen < t.edit_log.len() {
             let mut touched = Vec::new();
             for &(c, r) in &t.edit_log[seen..] {
-                for &(te, key) in state.tiles.keys() {
+                let known = state.tiles.keys().chain(state.building.keys());
+                for &(te, key) in known.chain(state.spare.keys()) {
                     if te != e {
                         continue;
                     }
@@ -373,6 +421,10 @@ pub fn update_colliders(
                         touched.push((te, key));
                     }
                 }
+            }
+            // (A spare shape an edit touched is the old ground: forgotten.)
+            for k in &touched {
+                state.spare.remove(k);
             }
             state.queue.extend(touched);
             state.seen_edits.insert(e, t.edit_log.len());
@@ -394,31 +446,69 @@ pub fn update_colliders(
             extra += 1;
         }
     }
-    // Remove tiles no longer wanted.
-    let stale: Vec<_> = state
-        .tiles
-        .keys()
-        .filter(|k| !wanted_set.contains(k))
-        .copied()
-        .collect();
-    for k in stale {
-        if let Some(entity) = state.tiles.remove(&k) {
-            commands.entity(entity).despawn();
+    // A tile nothing wants any more leaves the world and its shape goes spare; a spare one
+    // wanted again is put back as it was. Spare shapes are forgotten after `SPARE_S`, when
+    // their terrain is gone, and beyond `MAX_SPARE_TILES` (the longest unwanted first).
+    {
+        let s = &mut *state;
+        let stale: Vec<(Entity, NodeKey)> = s
+            .tiles
+            .keys()
+            .filter(|k| !wanted_set.contains(k))
+            .copied()
+            .collect();
+        for k in stale {
+            if let Some(entity) = s.tiles.remove(&k) {
+                commands.entity(entity).despawn();
+            }
+            // (Not one waiting for a rebuild after an edit: that is the old ground.)
+            if let Some(shape) = s.shapes.remove(&k)
+                && !s.queue.contains(&k)
+            {
+                s.spare.insert(k, (0.0, shape));
+            }
         }
-    }
-    // Edits first, then missing tiles in the order they are wanted.
-    state.queue.retain(|k| wanted_set.contains(k));
-    let mut queued: HashSet<(Entity, NodeKey)> = HashSet::new();
-    state.queue.retain(|k| queued.insert(*k));
-    for k in &wanted {
-        if !state.tiles.contains_key(k) && queued.insert(*k) {
-            state.queue.push(*k);
+        for k in &wanted {
+            if let Some((_, shape)) = s.spare.remove(k) {
+                spawn(&mut commands, &terrains, s, *k, shape);
+            }
+        }
+        s.spare.retain(|k, (unwanted, _)| {
+            *unwanted += dt as f32;
+            let has_terrain = terrains
+                .entries
+                .get(&k.0)
+                .is_some_and(|t| t.config.colliders);
+            *unwanted <= SPARE_S && has_terrain
+        });
+        if s.spare.len() > MAX_SPARE_TILES {
+            let mut by_age: Vec<(f32, (Entity, NodeKey))> =
+                s.spare.iter().map(|(k, (secs, _))| (*secs, *k)).collect();
+            by_age.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            for (_, k) in &by_age[..by_age.len() - MAX_SPARE_TILES] {
+                s.spare.remove(k);
+            }
+        }
+        // To build: edits first (tiles in place or on their way that an edit touched), then
+        // the missing tiles in the order they are wanted this frame, not the order they were
+        // first asked for (a tile on a fast focus's path goes before the block of a moment
+        // ago). A tile on its way is not asked for again.
+        let mut queued: HashSet<(Entity, NodeKey)> = HashSet::new();
+        s.queue.retain(|k| {
+            wanted_set.contains(k)
+                && (s.tiles.contains_key(k) || s.building.contains_key(k))
+                && queued.insert(*k)
+        });
+        for k in &wanted {
+            if !s.tiles.contains_key(k) && !s.building.contains_key(k) && queued.insert(*k) {
+                s.queue.push(*k);
+            }
         }
     }
     drop(_rest);
     drop(gather);
     let ids = SurfaceIds::new(&materials);
-    // Put finished tiles in place (or drop them, if no longer wanted).
+    // Put finished tiles in place (one no longer wanted goes spare).
     let done: Vec<_> = state
         .building
         .iter()
@@ -511,12 +601,14 @@ pub fn update_colliders(
     if let Some(d) = diagnostics {
         d.set("terrain.collider_bodies", body_count as f64);
         d.set("terrain.collider_tiles", state.tiles.len() as f64);
+        d.set("terrain.collider_spare", state.spare.len() as f64);
         d.set("terrain.collider_builds", state.built as f64);
         d.set("terrain.collider_waits", state.waits as f64);
     }
 }
 
 /// Put a built tile in place: a new tile entity, or the new shape on the tile it replaces.
+/// One nothing wants any more by now goes spare.
 fn place(
     commands: &mut Commands,
     terrains: &Terrains,
@@ -525,21 +617,39 @@ fn place(
     k: (Entity, NodeKey),
     shape: TileShape,
 ) {
-    let Some(t) = terrains.entries.get(&k.0) else {
-        return;
-    };
-    if !wanted.contains(&k) {
+    if !terrains.entries.contains_key(&k.0) {
         return;
     }
     state.built += 1;
+    if wanted.contains(&k) {
+        spawn(commands, terrains, state, k, shape);
+    } else {
+        state.spare.insert(k, (0.0, shape));
+    }
+}
+
+/// Put a tile's shape in the world: a new tile entity, or the new shape on the tile it
+/// replaces.
+fn spawn(
+    commands: &mut Commands,
+    terrains: &Terrains,
+    state: &mut TerrainColliders,
+    k: (Entity, NodeKey),
+    shape: TileShape,
+) {
+    let Some(t) = terrains.entries.get(&k.0) else {
+        return;
+    };
     let transform = shape.transform(t);
+    let collider = shape.collider.clone();
+    state.shapes.insert(k, shape);
     if let Some(old) = state.tiles.get(&k) {
-        commands.entity(*old).insert((transform, shape.collider));
+        commands.entity(*old).insert((transform, collider));
     } else {
         let id = commands
             .spawn((
                 transform,
-                shape.collider,
+                collider,
                 TerrainColliderTile {
                     terrain: k.0,
                     key: k.1,
@@ -694,7 +804,7 @@ mod tests {
         );
         // Kinematic bodies are moved by gameplay, not dropped: they get no tile of their own.
         assert!(!tile_under(&mut app, 0.0, -1_500.0));
-        // The focus flies 2 km off: the crate keeps its ground, the old block goes.
+        // The focus flies 2 km off: the crate keeps its ground, the old block is spare.
         app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(-2_000.0, 2.0, 0.0);
         settle(&mut app);
         assert!(
@@ -706,6 +816,118 @@ mod tests {
             "no ground at the new focus"
         );
         assert!(!tile_under(&mut app, 0.0, 0.0), "the old block stayed");
+        assert_eq!(app.world.resource::<TerrainColliders>().spare(), 9);
+    }
+
+    #[test]
+    fn a_tile_left_is_kept_a_while_and_found_again() {
+        let (mut app, focus) = app_with_planet();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.05 });
+        settle(&mut app);
+        let state = app.world.resource::<TerrainColliders>();
+        assert_eq!((state.len(), state.built), (9, 9), "each tile built once");
+        // 2 km off (a jump: the tile underfoot there is built on the spot) and back within
+        // seconds: the block left behind is out of the world, but nothing is built for the
+        // return.
+        let go = |app: &mut App, x: f64| {
+            app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(x, 2.0, 0.0);
+            settle(app);
+            let state = app.world.resource::<TerrainColliders>();
+            (state.built, state.waits, state.spare())
+        };
+        assert_eq!(go(&mut app, -2_000.0), (18, 1, 9));
+        assert!(!tile_under(&mut app, 0.0, 0.0), "the old block stayed");
+        assert_eq!(go(&mut app, 0.0), (18, 1, 9), "built again on the return");
+        assert!(tile_under(&mut app, 0.0, 0.0), "no ground on the return");
+        assert!(!tile_under(&mut app, -2_000.0, 0.0), "the far block stayed");
+        // Left for longer than tiles are kept, the far block goes.
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.25 });
+        let mut frames = 0;
+        while app.world.resource::<TerrainColliders>().spare() > 0 {
+            app.update();
+            frames += 1;
+            assert!(frames < 5_000, "the spare tiles never go");
+        }
+        let state = app.world.resource::<TerrainColliders>();
+        assert_eq!((state.len(), state.spare()), (9, 0));
+    }
+
+    #[test]
+    fn spare_tiles_are_capped_and_an_edited_one_goes() {
+        let (mut app, focus) = app_with_planet();
+        settle(&mut app);
+        let go = |app: &mut App, x: f64| {
+            app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(x, 2.0, 0.0);
+            settle(app);
+            let state = app.world.resource::<TerrainColliders>();
+            (state.len(), state.spare(), state.built)
+        };
+        // A walk of 3 km in steps of a tile and a half leaves far more tiles behind than are
+        // kept: the ones left longest ago are forgotten.
+        let mut built = 0;
+        for i in 1..=30 {
+            let (tiles, spare, n) = go(&mut app, i as f64 * 100.0);
+            assert_eq!(tiles, 9, "spare tiles are not in the world");
+            assert!(spare <= MAX_SPARE_TILES, "{spare} spare tiles");
+            built = n;
+        }
+        assert_eq!(
+            app.world.resource::<TerrainColliders>().spare(),
+            MAX_SPARE_TILES
+        );
+        // Back three steps: that block is spare, and nothing is built for it.
+        assert_eq!(go(&mut app, 2_700.0).2, built);
+        // On again, then a dig where it was: the spare shape there is the old ground now,
+        // so coming back builds that tile again (and only what the dig touched).
+        go(&mut app, 3_000.0);
+        let spare = app.world.resource::<TerrainColliders>().spare();
+        for t in app.world.resource_mut::<Terrains>().entries.values_mut() {
+            let at = t.to_local(DVec3::new(2_700.0, 0.0, 0.0));
+            t.edit_log.push((at, 1.0));
+        }
+        app.update();
+        let now = app.world.resource::<TerrainColliders>().spare();
+        assert!(
+            now < spare,
+            "{now} spare tiles after the edit, {spare} before"
+        );
+        let again = go(&mut app, 2_700.0).2 - built;
+        assert!(
+            (1..9).contains(&again),
+            "{again} tiles built after the edit"
+        );
+    }
+
+    #[test]
+    fn the_block_is_the_nine_tiles_on_the_grid() {
+        let pad = FlatPad::default();
+        let config = PlanetTerrain::earthlike(2).with_pad(pad);
+        let t = TerrainRuntime::new(&config, Default::default(), 1);
+        let map = &t.source.map;
+        let level = tile_level(&t, 64.0);
+        let size = map.node_size(level);
+        let dir = pad.direction();
+        let east = DVec3::Y.cross(dir).normalize();
+        for i in 0..40 {
+            let local = (dir + east * (0.002 + 0.000_013 * i as f64)).normalize() * map.radius;
+            let block = block(map, local, level);
+            assert_eq!(block.len(), 9);
+            assert_eq!(Some(block[0]), map.node_at(local, level));
+            // Whichever way it steps next, by over half a tile, it lands on one of them.
+            let (_, up, _) = map.locate(local).unwrap();
+            let side = up.any_orthonormal_vector();
+            let fwd = up.cross(side);
+            for j in 0..16 {
+                let a = j as f64 * std::f64::consts::TAU / 16.0;
+                let q = local + (side * a.cos() + fwd * a.sin()) * size * 0.6;
+                let k = map.node_at(q, level).unwrap();
+                assert!(block.contains(&k), "{k:?} is not in the block at step {i}");
+            }
+        }
     }
 
     #[test]

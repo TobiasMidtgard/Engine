@@ -574,7 +574,18 @@ fn finish(world: &mut World) {
     if frames < 4 {
         return;
     }
-    let zone_loads = zone_loads(stream_counts(world.resource::<Diagnostics>()));
+    let d = world.resource::<Diagnostics>();
+    let get = |k: &str| d.get(k).unwrap_or(0.0);
+    // (`engine_terrain::collider`: a tile built in a frame stopped that frame for it.)
+    let zone_loads = format!(
+        "{}\nground colliders: {:.0} tiles built, {:.0} of them inside a frame; {:.0} in the world, \
+         {:.0} shapes kept spare",
+        zone_loads(stream_counts(d)),
+        get("terrain.collider_builds"),
+        get("terrain.collider_waits"),
+        get("terrain.collider_tiles"),
+        get("terrain.collider_spare"),
+    );
     let r = world.resource::<Route>();
     write_csv(r);
     finish_report(r, &zone_loads);
