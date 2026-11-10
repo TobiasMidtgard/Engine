@@ -726,8 +726,9 @@ fn parallax_shadow(mat: Material, uv: vec2<f32>, h: f32, offset: vec2<f32>, d1: 
 
 // Read every texture through projection `p`, with parallax when the material has a height map.
 // `n` is the shaded geometric normal, `v` the direction to the camera, `footprint` the size of a
-// pixel on the surface (meters). `shadows` asks for the parallax self-shadow toward the sun.
-fn sample_projection(mat: Material, p: Projection, n: vec3<f32>, v: vec3<f32>, footprint: f32, shadows: bool) -> ProjectionSample {
+// pixel on the surface (meters). `shadows` asks for the parallax self-shadow toward the sun;
+// `base_only` for the base color alone (`evaluate_material_with`).
+fn sample_projection(mat: Material, p: Projection, n: vec3<f32>, v: vec3<f32>, footprint: f32, shadows: bool, base_only: bool) -> ProjectionSample {
     let flags = mat.flags.x;
     var uv = p.uv;
     var out: ProjectionSample;
@@ -768,6 +769,9 @@ fn sample_projection(mat: Material, p: Projection, n: vec3<f32>, v: vec3<f32>, f
         w = b.w;
     }
     out.tangent_normal = vec3<f32>(0.0, 0.0, 1.0);
+    if (base_only) {
+        return out;
+    }
     if ((flags & TEX_NORMAL) != 0u) {
         out.tangent_normal = tiled_normal(mat, tiles, w, p.d1, p.d2);
     }
@@ -848,6 +852,15 @@ fn material_is_thin(flags: u32) -> bool {
 }
 
 fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
+    return evaluate_material_with(si, shadows, false);
+}
+
+// `base_only`: nothing but `base` is worked out (the other fields are not to be read), by the
+// same steps the whole material takes, so its alpha is the whole material's alpha. For a depth
+// step that only needs to know where an alpha-tested material has its holes
+// (`fs_once_depth`): one texture read where the whole material takes its normal map, surface
+// maps, detail, weather and snow.
+fn evaluate_material_with(si: SurfaceIn, shadows: bool, base_only: bool) -> MaterialSample {
     let mat = materials[si.material];
     let flags = mat.flags.x;
     let mapping = (flags >> MAPPING_SHIFT) & 3u;
@@ -898,13 +911,13 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
             p.grad_u = g[0];
             p.grad_v = g[1];
             p.weight = 1.0;
-            let s = sample_projection(mat, p, n, v, footprint, shadows);
+            let s = sample_projection(mat, p, n, v, footprint, shadows, base_only);
             base = s.base;
             mr = s.metallic_roughness;
             emissive = s.emissive;
             occlusion = s.occlusion;
             sun = s.sun;
-            if ((flags & TEX_NORMAL) != 0u) {
+            if ((flags & TEX_NORMAL) != 0u && !base_only) {
                 variance = normal_variance(s.tangent_normal);
                 shaded = perturb_normal(n, dp1, dp2, duv1, duv2, normalize(s.tangent_normal) * normal_scale);
             }
@@ -930,13 +943,13 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
             for (var k = 0u; k < 3u; k++) {
                 if (w[k] <= 0.0) { continue; }
                 let p = triplanar_projection(k, side[k], q, q1, q2, axes, tiles_per_m, w[k]);
-                let s = sample_projection(mat, p, n, v, footprint, shadows);
+                let s = sample_projection(mat, p, n, v, footprint, shadows, base_only);
                 base += s.base * w[k];
                 mr += s.metallic_roughness * w[k];
                 emissive += s.emissive * w[k];
                 occlusion += s.occlusion * w[k];
                 sun += s.sun * w[k];
-                if ((flags & TEX_NORMAL) != 0u) {
+                if ((flags & TEX_NORMAL) != 0u && !base_only) {
                     variance += normal_variance(s.tangent_normal) * w[k];
                     gradient += surface_gradient(n, p.t, p.b, normalize(s.tangent_normal) * normal_scale) * w[k];
                 }
@@ -948,6 +961,9 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
 
     var out: MaterialSample;
     out.base = mat.base_color * si.color * base;
+    if (base_only) {
+        return out;
+    }
     let detail = surface_detail(mat, shaded, dpos, dp1, dp2, dd1, dd2);
     out.normal = detail.normal;
     out.albedo = detail_albedo(mat, out.base.rgb, dpos, detail.height);
@@ -1363,21 +1379,25 @@ struct OnceOutput {
 
 @fragment
 fn fs_once(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceOutput {
-    return once_fragment(in, front);
+    return once_fragment(in, front, true);
 }
 
 // `trial_cut::MESHES_DEPTH_FIRST`: the pass draws the meshes' depth first (`fs_once_depth`) and
 // then their material where the depth is equal, with the test before the program
 // (`fs_main_early` says why), so the material is worked out for the layer in view only, not
-// for every layer drawn.
+// for every layer drawn. The depth step alone decides where an alpha-tested material has its
+// holes: no alpha test here, or a pixel the two disagree on by rounding would keep its depth
+// and get no material.
 @fragment @early_depth_test(force)
 fn fs_once_early(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceOutput {
-    return once_fragment(in, front);
+    return once_fragment(in, front, false);
 }
 
 // Depth only (the pass's color targets are not written): what `fs_once` discards is discarded
 // here, so the depth laid down is the depth `fs_once` would have left. Only alpha-tested
-// materials need their material for that.
+// materials read anything for that, and only their base color (`evaluate_material_with`):
+// they come here with `trial_cut::MESHES_HOLES_FIRST`, so that leaves and other cut-outs,
+// too, get their whole material for the layer in view only.
 @fragment
 fn fs_once_depth(in: OnceVertexOut, @builtin(front_facing) front: bool) {
     if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
@@ -1387,14 +1407,15 @@ fn fs_once_depth(in: OnceVertexOut, @builtin(front_facing) front: bool) {
     if ((mat.flags.x & 15u) == 1u) {
         let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local,
             in.object_normal, mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, in.snow);
-        let m = evaluate_material(si, true);
+        let m = evaluate_material_with(si, false, true);
         if (m.base.a < mat.params.w) {
             discard;
         }
     }
 }
 
-fn once_fragment(in: OnceVertexOut, front: bool) -> OnceOutput {
+// `holes`: alpha-tested materials are tested here (not when a depth step has done it).
+fn once_fragment(in: OnceVertexOut, front: bool, holes: bool) -> OnceOutput {
     if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
         discard;
     }
@@ -1404,7 +1425,7 @@ fn once_fragment(in: OnceVertexOut, front: bool) -> OnceOutput {
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
         mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, in.snow);
     let m = evaluate_material(si, true);
-    if ((flags & 15u) == 1u && m.base.a < mat.params.w) {
+    if (holes && (flags & 15u) == 1u && m.base.a < mat.params.w) {
         discard;
     }
     let basic = prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);

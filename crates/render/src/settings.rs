@@ -286,8 +286,16 @@ pub mod trial_cut {
     /// With [`MESHES_ONCE`]: the meshes' own pass draws their depth first (a program that
     /// only discards what the material would) and then their material where the depth is
     /// equal, after the test, so the material is worked out for the layer in view only and
-    /// not for every layer drawn. Their vertices are drawn twice, as today.
+    /// not for every layer drawn. Their vertices are drawn twice, as today. Alpha-tested
+    /// materials (leaves) are left out of the depth step and drawn whole, as with
+    /// `MESHES_ONCE` alone: their depth takes their material.
     pub const MESHES_DEPTH_FIRST: u32 = 131072;
+    /// With [`MESHES_DEPTH_FIRST`]: alpha-tested materials go through the depth step too,
+    /// which reads only their base color to find their holes (`evaluate_material_with` in
+    /// mesh.wgsl), so their whole material (normal map, surface maps, detail, weather, snow)
+    /// is worked out for the layer in view only as well. Costs their vertices drawn twice
+    /// and one texture read for each layer.
+    pub const MESHES_HOLES_FIRST: u32 = 262144;
 }
 
 /// What the screen shows.

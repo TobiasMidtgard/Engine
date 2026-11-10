@@ -437,6 +437,24 @@ fn variants() -> Vec<Variant> {
             "cut_ground_once, cut_meshes_once and the depth first together",
         ),
         v(
+            "cut_meshes_holes_first",
+            r,
+            json!({"trial_cuts": 425984}),
+            "cut_meshes_depth_first with leaves and other cut-out materials in the depth step too: a single texture read finds their holes, and their whole material is worked out for the layer in view only",
+        ),
+        v(
+            "cut_once_holes_first_all",
+            r,
+            json!({"trial_cuts": 442368}),
+            "cut_ground_once, cut_meshes_once, the depth first and the holes first together",
+        ),
+        v(
+            "count_mesh_runs_holes_first",
+            r,
+            json!({"trial_cuts": 425984, "debug_skip": 262144}),
+            "the count with cut_meshes_holes_first on",
+        ),
+        v(
             "count_mesh_runs_early_z",
             r,
             json!({"trial_cuts": 65536, "debug_skip": 262144}),
@@ -1110,6 +1128,24 @@ fn run(args: &Args) -> Result<(), String> {
                 s["triangles"], s["draw_calls"], s["instances"], s["point_lights"]
             ));
             stop_json.insert("render_stats".into(), s.clone());
+            // What the meshes report (impostors baked and in view, batches, the pool, virtual
+            // geometry), to read "compute meshes" and the mesh rows against.
+            if let Some(meshes) = at["renderer"]["features"]
+                .as_array()
+                .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
+            {
+                let m = &meshes["state"];
+                md.push_str(&format!(
+                    "Meshes: {} opaque batches, {} impostors baked, {} in view, {} fading.
+
+",
+                    m["opaque_batches"],
+                    m["impostors"],
+                    m["impostors_in_view"],
+                    m["impostors_fading"]
+                ));
+                stop_json.insert("meshes".into(), m.clone());
+            }
         }
         md.push_str("| pass | ms |\n|---|---|\n");
         let mut passes: Vec<(&String, f64)> = base

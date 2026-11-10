@@ -1639,6 +1639,15 @@ const PIPE_BLEND: u8 = 2;
 /// Clockwise front faces, for instances whose transform mirrors them.
 const PIPE_MIRROR: u8 = 4;
 const PIPELINE_VARIANTS: u8 = 8;
+/// On an opaque batch's key while `trial_cut::MESHES_DEPTH_FIRST` is on: its material is
+/// alpha-tested, so it is drawn whole in the meshes' own pass and not depth first (its depth
+/// takes its material). Not a pipeline variant: [`variant_of`] drops it.
+const PIPE_MASKED: u8 = 8;
+
+/// The index of a batch key's pipeline among the `PIPELINE_VARIANTS`.
+fn variant_of(pipeline: u8) -> usize {
+    (pipeline & (PIPELINE_VARIANTS - 1)) as usize
+}
 /// Shadow pipelines: depth only / alpha masked.
 const SHADOW_DEPTH: u8 = 0;
 const SHADOW_MASKED: u8 = 1;
@@ -1707,8 +1716,8 @@ impl MeshFeature {
         let mut main = [false; PIPELINE_VARIANTS as usize];
         let mut prepass = [false; PIPELINE_VARIANTS as usize];
         for b in self.opaque.iter() {
-            main[b.key.pipeline as usize] = true;
-            prepass[b.key.pipeline as usize] = true;
+            main[variant_of(b.key.pipeline)] = true;
+            prepass[variant_of(b.key.pipeline)] = true;
         }
         for b in self.transparent.iter() {
             main[b.key.pipeline as usize] = true;
@@ -1876,10 +1885,10 @@ impl MeshFeature {
                 batches,
                 |p| {
                     self.early_pipelines
-                        .get(p as usize)
+                        .get(variant_of(p))
                         .and_then(Option::as_ref)
                         .filter(|_| early)
-                        .or_else(|| self.pipelines.get(p as usize).and_then(Option::as_ref))
+                        .or_else(|| self.pipelines.get(variant_of(p)).and_then(Option::as_ref))
                 },
                 |_| true,
                 culled.map(|c| (c.1, c.2)),
@@ -1922,7 +1931,7 @@ impl MeshFeature {
                 &self.opaque,
                 |p| {
                     self.prepass_pipelines
-                        .get(p as usize)
+                        .get(variant_of(p))
                         .and_then(Option::as_ref)
                 },
                 |_| true,
@@ -1959,7 +1968,7 @@ impl MeshFeature {
                 &self.opaque,
                 |p| {
                     self.prepass_pipelines
-                        .get(p as usize)
+                        .get(variant_of(p))
                         .and_then(Option::as_ref)
                 },
                 |_| true,
@@ -2003,38 +2012,39 @@ impl MeshFeature {
             return false;
         }
         self.depth_first_now = first;
-        let mut used = [false; PIPELINE_VARIANTS as usize];
+        // Per variant: used by batches drawn whole (all of them, or with the depth first the
+        // alpha-tested ones), and by batches drawn depth first.
+        let mut used = [(false, false); PIPELINE_VARIANTS as usize];
         for b in self.opaque.iter() {
-            used[b.key.pipeline as usize] = true;
+            let u = &mut used[variant_of(b.key.pipeline)];
+            if first && b.key.pipeline & PIPE_MASKED == 0 {
+                u.1 = true;
+            } else {
+                u.0 = true;
+            }
         }
         let missing = |once: &Option<crate::mesh_once::MeshOnce>, i: usize| {
             once.as_ref().is_none_or(|o| {
-                if first {
-                    o.depth[i].is_none() || o.at_depth[i].is_none()
-                } else {
-                    o.pipelines[i].is_none()
-                }
+                (used[i].0 && o.pipelines[i].is_none())
+                    || (used[i].1 && (o.depth[i].is_none() || o.at_depth[i].is_none()))
             })
         };
-        if self.once.is_none() || (0..used.len()).any(|i| used[i] && missing(&self.once, i)) {
+        if self.once.is_none() || (0..used.len()).any(|i| missing(&self.once, i)) {
             let Some(inputs) = self.mesh_inputs(ctx.gpu) else {
                 return false;
             };
             let once = self.once.get_or_insert_with(|| {
                 crate::mesh_once::MeshOnce::new(ctx.gpu, PIPELINE_VARIANTS as usize)
             });
-            for (i, _) in used.iter().enumerate().filter(|(_, used)| **used) {
+            for (i, &(whole, depth_first)) in used.iter().enumerate() {
                 let build = |draws| Some(build_once_pipeline(&inputs, i as u8, &targets, draws));
-                if !first {
-                    if once.pipelines[i].is_none() {
-                        once.pipelines[i] = build(Draws::Whole);
-                    }
-                    continue;
+                if whole && once.pipelines[i].is_none() {
+                    once.pipelines[i] = build(Draws::Whole);
                 }
-                if once.depth[i].is_none() {
+                if depth_first && once.depth[i].is_none() {
                     once.depth[i] = build(Draws::Depth);
                 }
-                if once.at_depth[i].is_none() {
+                if depth_first && once.at_depth[i].is_none() {
                     once.at_depth[i] = build(Draws::AtDepth);
                 }
             }
@@ -2061,7 +2071,7 @@ impl MeshFeature {
             .resize(PIPELINE_VARIANTS as usize, None);
         let mut inputs = None;
         for i in 0..self.opaque.len() {
-            let variant = self.opaque[i].key.pipeline;
+            let variant = variant_of(self.opaque[i].key.pipeline) as u8;
             if variant & PIPE_BLEND != 0 || self.early_pipelines[variant as usize].is_some() {
                 continue;
             }
@@ -4409,12 +4419,26 @@ impl RenderFeature for MeshFeature {
         // Opaque.
         let items = &self.items;
         let ordered = || self.order.iter().map(|&(_, n)| (n, &items[n as usize]));
+        // (With the depth drawn first in the meshes' own pass, alpha-tested batches are told
+        // apart: `PIPE_MASKED`. Not with `MESHES_HOLES_FIRST`, which sends them through the
+        // depth step like the rest.)
+        let both = crate::settings::trial_cut::MESHES_ONCE
+            | crate::settings::trial_cut::MESHES_DEPTH_FIRST;
+        let split_masked = settings.trial_cuts & both == both
+            && settings.trial_cuts & crate::settings::trial_cut::MESHES_HOLES_FIRST == 0;
+        let masked_bit = |item: &Item| {
+            if split_masked && item.masked {
+                PIPE_MASKED
+            } else {
+                0
+            }
+        };
         for (n, item) in
             ordered().filter(|(_, i)| i.pipeline & PIPE_BLEND == 0 && i.lod != IMPOSTOR_LOD)
         {
             self.layout.push(n);
             self.keys.push(BatchKey {
-                pipeline: item.pipeline,
+                pipeline: item.pipeline | masked_bit(item),
                 textures: item.textures,
                 mesh: item.mesh,
                 lod: item.lod,
@@ -4439,7 +4463,7 @@ impl RenderFeature for MeshFeature {
             let item = &items[n as usize];
             self.layout.push(n | AS_OLD_LEVEL);
             self.keys.push(BatchKey {
-                pipeline: item.pipeline,
+                pipeline: item.pipeline | masked_bit(item),
                 textures: item.textures,
                 mesh: item.mesh,
                 lod: item.lod_from,
@@ -5234,10 +5258,16 @@ impl RenderFeature for MeshFeature {
         };
         let mut counted = false;
         for &draws in steps {
-            let pipelines = match draws {
-                Draws::Whole => &once.pipelines,
-                Draws::Depth => &once.depth,
-                Draws::AtDepth => &once.at_depth,
+            // (Alpha-tested batches, marked while the depth goes first: left out of the depth
+            // step and drawn whole in the material's.)
+            let pipeline_for = |p: u8| {
+                let pipelines = match (draws, p & PIPE_MASKED != 0) {
+                    (Draws::Whole, _) | (Draws::AtDepth, true) => &once.pipelines,
+                    (Draws::Depth, true) => return None,
+                    (Draws::Depth, false) => &once.depth,
+                    (Draws::AtDepth, false) => &once.at_depth,
+                };
+                pipelines.get(variant_of(p)).and_then(Option::as_ref)
             };
             if draws != Draws::Depth {
                 counted = self.count_begin(&mut pass, query, true);
@@ -5247,7 +5277,7 @@ impl RenderFeature for MeshFeature {
                 self.draw_batches(
                     &mut pass,
                     &self.opaque,
-                    |p| pipelines.get(p as usize).and_then(Option::as_ref),
+                    pipeline_for,
                     |_| true,
                     culled.map(|c| (c.1, c.2)),
                 );
