@@ -362,6 +362,10 @@ const CUT_GROUND_ONCE: u32 = 16384u;
 // alpha-tested ones in that depth step too; 524288: meshes in bands of distance, nearest
 // first. CPU side.)
 const CUT_TERRAIN_ROCK_SINGLE: u32 = 1048576u;
+// With `CUT_SCREEN_LIGHT`: a thin sheet (leaf, petal, cloth) reads the sun's shadows itself,
+// from its face's sunlit side as without the pass. The pass only has the shading normal,
+// which foliage bends away from the face, so it reads them from another side.
+const CUT_THIN_OWN_SUN: u32 = 2097152u;
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;
@@ -1607,14 +1611,16 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let lit = screen_light(rel);
     // People's capsules: their shadow just above the point and the sky they hide.
     var capsules = vec2<f32>(1.0, lit.people_sky);
-    if (!lit.on) { capsules = capsule_occlusion(rel, n); }
+    // (A thin sheet's sun from the pass, or read here: `CUT_THIN_OWN_SUN`.)
+    let sun_from_pass = lit.on && !(thin && trial_cut(CUT_THIN_OWN_SUN));
+    if (!sun_from_pass) { capsules = capsule_occlusion(rel, n); }
     let sun_light = sun_above * in_fog.x;
     let sides = thin_surface_sides(face, l);
     if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
         let lit_side = select(-face, face, sides.x > 0.0);
         var shadow = lit.sun * sun_visibility;
-        if (lit.on) {
+        if (sun_from_pass) {
             shadow *= lit.distant;
         } else {
             shadow = min(shadow_factor(rel, lit_side), capsules.x) * sun_visibility;
@@ -1633,7 +1639,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
                     * f_schlick(f0, saturate(dot(l, h)));
                 highlight = spec * sides.x;
                 reflected += highlight;
-                if (lit.on) {
+                if (sun_from_pass) {
                     contact = mix(1.0, lit.contact, sides.x);
                 } else {
                     contact = mix(1.0, contact_shadow(rel, face), sides.x);

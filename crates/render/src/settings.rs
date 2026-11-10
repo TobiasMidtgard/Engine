@@ -315,6 +315,12 @@ pub mod trial_cut {
     /// them the rock there reads smoother (plaza pair, 10 Nov). Kept apart from
     /// [`TERRAIN_COPY_SINGLE`] so the PC can say what the difference would buy.
     pub const TERRAIN_ROCK_SINGLE: u32 = 1048576;
+    /// With [`SCREEN_LIGHT`]: a thin sheet (leaf, petal, cloth) reads the sun's shadows
+    /// itself, from its face's sunlit side, as it does without the pass. The pass has only
+    /// the shading normal, which foliage bends away from the face, so its shadow lookups for
+    /// leaves start from another side: single pixels on leaves come out lighter or darker
+    /// (3.8% of the forest's, 10 Nov). Costs the pass's saving on those pixels.
+    pub const THIN_OWN_SUN: u32 = 2097152;
 }
 
 /// What the screen shows.

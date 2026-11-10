@@ -383,6 +383,12 @@ fn variants() -> Vec<Variant> {
             "shadows, sky cover and probe light once per pixel in a screen pass, not in every shader run",
         ),
         v(
+            "cut_screen_light_thin",
+            r,
+            json!({"trial_cuts": 2_097_664}),
+            "the screen light pass, with leaves and other thin sheets reading the sun's shadows themselves (their exact picture; the pass alone moves single pixels on leaves)",
+        ),
+        v(
             "cut_tiled_lamps",
             r,
             json!({"trial_cuts": 1024}),
@@ -553,8 +559,16 @@ fn variants() -> Vec<Variant> {
             // picture: the deep-shadow shortcut (64: dappled light's outer rim trimmed), a
             // reflection's halved cover taps (256: the plaza fountain's water 4 of 255
             // brighter) and rock's single lookup (1048576).
-            json!({"trial_cuts": 1_040_059, "shadow_refresh_secs": 0.25}),
+            // With 2097152: thin sheets read the sun's shadows themselves under the pass.
+            json!({"trial_cuts": 3_137_211, "shadow_refresh_secs": 0.25}),
             "every same-picture cut in RenderSettings at once (lighting but for the deep-shadow shortcut and the reflection taps, ground textures but for rock's single lookup, ground lines, ground and objects once a pixel, depth first, holes first, nearest first, far shadow refresh): the frame if all of them pass",
+        ),
+        v(
+            "cut_all_no_screen_pass",
+            r,
+            // `cut_all` without 512, 2048 and 2097152.
+            json!({"trial_cuts": 1_037_499, "shadow_refresh_secs": 0.25}),
+            "cut_all without the screen pass (light and fog once per pixel): with ground and objects already shaded once a pixel, does the pass still pay?",
         ),
         v(
             "cut_shadow_refresh",
