@@ -157,6 +157,13 @@ pub fn all() -> Vec<(&'static str, String)> {
             ),
         ),
         (
+            "isle_left",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><path d="M44 11 L14 32 L44 53 Z" fill="url(#sp)"/></g>"##,
+            ),
+        ),
+        (
             "isle_load",
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="M32 6 L60 54 L4 54 Z" fill="#2f6e28" stroke="#1c3a14" stroke-width="4" stroke-linejoin="round"/></svg>"##.to_string(),
         ),

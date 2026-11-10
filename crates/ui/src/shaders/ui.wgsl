@@ -210,6 +210,18 @@ fn ui_material(m: vec4<f32>, lp: vec2<f32>, e: f32, size: vec2<f32>) -> vec3<f32
         let cloud = fbm_s2(p / 90.0, seed, 4u);
         let vein = 1.0 - smoothstep(0.0, 0.05, abs(fbm_s2(p / 160.0 + cloud * 0.4, seed + 2u, 4u)));
         mul = vec3(1.0 + cloud * 0.18 + vein * 0.35);
+    } else if (kind == 8u) {
+        // Holographic glass: scanlines every 3 px, a faint 14 px grid, a cool glare across the
+        // top left, lit edges and a slow haze.
+        let line = 0.5 + 0.5 * sin(lp.y * 3.14159 / (1.5 * sc));
+        let scan = mix(0.8, 1.0, smoothstep(0.15, 0.85, line));
+        let g = fract(lp / (14.0 * sc));
+        let gl = max(1.0 - smoothstep(0.0, 0.05, min(g.x, 1.0 - g.x)), 1.0 - smoothstep(0.0, 0.05, min(g.y, 1.0 - g.y)));
+        let t = lp / max(size, vec2(1.0));
+        let glare = smoothstep(0.75, 0.0, t.x * 0.6 + t.y) * 0.9;
+        let rim = 1.0 - smoothstep(0.0, 14.0 * sc, e);
+        let haze = fbm_s2(p / 180.0, seed, 3u);
+        mul = vec3(scan * (1.0 + gl * 0.16 + glare * 0.9 + rim * 0.9 + haze * 0.12)) * vec3(0.92, 1.03, 1.1);
     }
     return mix(vec3(1.0), mul, st);
 }

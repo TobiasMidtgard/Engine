@@ -4,7 +4,7 @@
 //!
 //! Shots: hud, wheel, dialogue, dialogue_choices, dialogue_log, shop, shop_sell, inventory, inventory_drag,
 //! journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, loading, loading_ready, map_galaxy, map_system, map_globe, map_surface, map_rings, pause, confirm, settings, settings_gameplay, settings_video, settings_audio,
-//! settings_controls, theme_cyan (all by default).
+//! settings_controls, theme_cyan (all by default). `--kit=glass` renders them in the glass kit.
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
 use engine_core::math::{DVec3, Vec2};
@@ -122,7 +122,13 @@ fn main() {
     );
     let w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1920);
     let h: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1080);
-    let only: Vec<String> = args.iter().skip(3).cloned().collect();
+    let only: Vec<String> = args
+        .iter()
+        .skip(3)
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .collect();
+    let glass = args.iter().any(|a| a == "--kit=glass");
     let want = |s: &str| only.is_empty() || only.iter().any(|o| o == s);
     std::fs::create_dir_all(&dir).expect("output dir");
 
@@ -132,6 +138,9 @@ fn main() {
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("no GPU: {}", d.0);
         return;
+    }
+    if glass {
+        engine_ui::kit::glass::install(&mut app.world.resource_mut::<engine_ui::Theme>());
     }
     send(
         &mut app,

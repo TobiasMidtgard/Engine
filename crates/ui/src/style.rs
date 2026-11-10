@@ -687,6 +687,9 @@ pub enum MaterialKind {
     Linen,
     /// Marble or slate: soft clouds and thin veins.
     Stone,
+    /// Holographic smoked glass: fine scanlines, a faint grid, a cool glare across the top
+    /// left and lit edges.
+    Glass,
 }
 
 impl MaterialKind {
@@ -700,6 +703,7 @@ impl MaterialKind {
             MaterialKind::Lacquer => 5.0,
             MaterialKind::Linen => 6.0,
             MaterialKind::Stone => 7.0,
+            MaterialKind::Glass => 8.0,
         }
     }
 }

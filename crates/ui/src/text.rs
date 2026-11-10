@@ -33,7 +33,10 @@ pub const DISPLAY_CAPS_FONT: &str = "Harbour Serif SC";
 /// A warm humanist sans for body text in period themes (Alegreya Sans, OFL).
 pub const HUMANIST_FONT: &str = "Alegreya Sans";
 
-const EXTRA_FONTS: [&[u8]; 7] = [
+/// A squared, technical sans for sci-fi titles, readouts and buttons (Chakra Petch, OFL).
+pub const TECH_FONT: &str = "Chakra Petch";
+
+const EXTRA_FONTS: [&[u8]; 10] = [
     include_bytes!("../assets/fonts/HarbourSerif-Bold.ttf"),
     include_bytes!("../assets/fonts/HarbourSerif-Black.ttf"),
     include_bytes!("../assets/fonts/HarbourSerifSC-Bold.ttf"),
@@ -41,13 +44,16 @@ const EXTRA_FONTS: [&[u8]; 7] = [
     include_bytes!("../assets/fonts/AlegreyaSans-Medium.ttf"),
     include_bytes!("../assets/fonts/AlegreyaSans-Bold.ttf"),
     include_bytes!("../assets/fonts/AlegreyaSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/ChakraPetch-Medium.ttf"),
+    include_bytes!("../assets/fonts/ChakraPetch-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/ChakraPetch-Bold.ttf"),
 ];
 
 /// Fonts and the glyph rasterizer.
 ///
 /// Built-in: Inter (regular, italic, semibold, bold; Latin, Greek, Cyrillic), the display
 /// serif [`DISPLAY_FONT`] (bold, black) and its small caps, and [`HUMANIST_FONT`] (regular,
-/// medium, bold, italic). Add fonts with
+/// medium, bold, italic) and [`TECH_FONT`] (medium, semibold, bold). Add fonts with
 /// [`Fonts::add_font`] (for other scripts or a game's own typeface); set
 /// `UiSettings::system_fonts` to also use the fonts installed on the machine as fallback.
 #[derive(Resource)]

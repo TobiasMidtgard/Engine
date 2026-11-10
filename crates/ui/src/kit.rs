@@ -5,6 +5,9 @@
 //! 19th-century harbour and industry look for strategy and city-building games (the
 //! Archipelago HUD), built only from the engine's own primitives: materials, bevels, inner
 //! shadows, layered drop shadows, corner shapes, frames and eased transitions.
+//!
+//! [`glass`]: chamfered smoked-glass plates with scanlines, neon cyan hairlines and glows and a
+//! squared technical face, made by restyling the built-in screens' classes.
 
 pub mod brass {
     use crate::color::Color;
@@ -541,5 +544,163 @@ pub mod brass {
                     .class("brass_fill")
                     .with_style(|s| s.width(crate::style::pct(frac.clamp(0.0, 1.0) * 100.0))),
             )
+    }
+}
+
+/// Smoked holographic glass: chamfered plates with scanlines and a cool glare, neon cyan
+/// hairlines and glows, a squared technical face for titles and buttons, and a band of light
+/// across whatever is selected. A near-future look for sci-fi games (the showcase), made by
+/// restyling the built-in screens' own classes, so every screen changes at once.
+pub mod glass {
+    use crate::color::Color;
+    use crate::style::{
+        Bevel, CornerShape, Corners, Fill, Material, MaterialKind, Shadow, StylePatch,
+    };
+    use crate::text::TECH_FONT;
+    use crate::theme::{Palette, Theme};
+
+    fn s() -> StylePatch {
+        StylePatch::default()
+    }
+
+    /// Cyan on smoked teal-black, magenta for secondary readouts.
+    pub fn palette() -> Palette {
+        Palette {
+            panel_top: Color::hexa(0x0f2432e8),
+            panel_bottom: Color::hexa(0x050d16f2),
+            line: Color::hexa(0x5fe1ff40),
+            surface: Color::hexa(0x0e2433dc),
+            surface_hover: Color::hexa(0x173a50e8),
+            well: Color::hexa(0x02070dcc),
+            text: Color::hex(0xe4fbff),
+            text_dim: Color::hex(0x8fb8c8),
+            text_faint: Color::hex(0x56798a),
+            accent: Color::hex(0x5fe1ff),
+            accent_light: Color::hex(0xbff4ff),
+            accent_dark: Color::hex(0x1d86a8),
+            info: Color::hex(0xff5fb4),
+            good: Color::hex(0x5cf2a0),
+            bad: Color::hex(0xff4f6a),
+            warn: Color::hex(0xffc04f),
+            ..Palette::default()
+        }
+    }
+
+    fn cyan(a: f32) -> Color {
+        Color::hex(0x5fe1ff).with_alpha(a)
+    }
+
+    /// The glass of a big panel: chamfered, scanlined, a hairline inside the rim, a faint
+    /// cyan glow and a deep shadow.
+    fn plate(cut: f32, strength: f32) -> StylePatch {
+        s().corner_shape(CornerShape::Chamfer)
+            .radius(Corners::all(cut))
+            .material(Material::new(MaterialKind::Glass).strength(strength))
+            .border_color(cyan(0.5))
+            .bevel(Bevel::raised(1.0, 0.18, 0.25).with_line(cyan(0.22), 1.0, cut * 0.4 + 3.0))
+            .shadow(Shadow::glow(cyan(0.16), 22.0))
+            .shadow2(Shadow::new(Color::hexa(0x000000a0), 40.0, 14.0))
+    }
+
+    fn small(cut: f32) -> StylePatch {
+        s().corner_shape(CornerShape::Chamfer)
+            .radius(Corners::all(cut))
+            .material(Material::new(MaterialKind::Glass).strength(0.55).seed(3.0))
+    }
+
+    fn tech() -> StylePatch {
+        s().font_family(TECH_FONT)
+    }
+
+    /// The glass theme: the built-in classes from [`palette`], then restyled.
+    pub fn theme() -> Theme {
+        let mut t = Theme::from_palette(palette());
+        let p = t.palette.clone();
+        let mut patch = |name: &str, f: &dyn Fn(&mut crate::theme::ClassStyle)| {
+            if let Some(c) = t.classes.get_mut(name) {
+                f(c);
+            }
+        };
+        for name in ["panel", "glass", "dialogue_box"] {
+            patch(name, &|c| c.base.merge(&plate(16.0, 1.0)));
+        }
+        patch("hud_panel", &|c| c.base.merge(&plate(10.0, 0.8)));
+        patch("toast", &|c| c.base.merge(&plate(10.0, 0.8)));
+        patch("tooltip", &|c| {
+            c.base
+                .merge(&plate(10.0, 0.7).merged(&s().shadow2(Shadow::new(
+                    Color::hexa(0x000000c0),
+                    26.0,
+                    8.0,
+                ))))
+        });
+        for name in ["card", "list_item", "menu_item", "setting_row"] {
+            patch(name, &|c| {
+                c.base.merge(&small(8.0));
+                c.selected.merge(&s().sheen(1.0).border_color(cyan(0.9)));
+            });
+        }
+        patch("slot", &|c| {
+            c.base
+                .merge(&small(9.0).merged(&s().inset_shadow(Shadow::new(
+                    Color::hexa(0x000000a0),
+                    12.0,
+                    0.0,
+                ))));
+            c.selected.merge(&s().sheen(1.0));
+        });
+        patch("button", &|c| {
+            c.base
+                .merge(&small(7.0).merged(&tech().border_color(cyan(0.45))));
+            c.hover.merge(&s().shadow(Shadow::glow(cyan(0.35), 14.0)));
+        });
+        patch("primary", &|c| {
+            c.base.merge(
+                &s().background(Fill::vertical(p.accent_light, p.accent))
+                    .color(Color::hex(0x03141c))
+                    .shadow(Shadow::glow(cyan(0.45), 18.0))
+                    .sheen(0.6),
+            )
+        });
+        patch("danger", &|c| {
+            c.base.merge(&s().border_color(p.bad.with_alpha(0.8)))
+        });
+        patch("tab", &|c| {
+            c.base.merge(&small(6.0).merged(&tech()));
+            c.selected
+                .merge(&s().sheen(1.0).shadow(Shadow::glow(cyan(0.3), 12.0)));
+        });
+        for name in ["chip", "kbd", "badge", "icon_button", "header_icon"] {
+            patch(name, &|c| c.base.merge(&small(5.0)));
+        }
+        for name in ["bar_track", "bar_fill"] {
+            patch(name, &|c| {
+                c.base.merge(
+                    &s().corner_shape(CornerShape::Chamfer)
+                        .radius(Corners::all(3.0)),
+                )
+            });
+        }
+        for name in [
+            "title",
+            "heading",
+            "caption",
+            "label_caps",
+            "stat_value",
+            "slot_count",
+        ] {
+            patch(name, &|c| c.base.merge(&tech()));
+        }
+        t
+    }
+
+    /// Restyle `theme` with the glass look (its palette and the built-in classes; classes
+    /// a game added itself are kept).
+    pub fn install(theme: &mut Theme) {
+        let g = self::theme();
+        theme.palette = g.palette;
+        for (k, v) in g.classes {
+            theme.classes.insert(k, v);
+        }
     }
 }

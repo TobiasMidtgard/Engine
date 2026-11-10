@@ -66,7 +66,7 @@ Panels can look like objects, not flat rectangles (research and the reference ga
 - `Style.corner_shape`: `Round`, `Chamfer`, `Scoop` or `Notch`; fill, border, shadows and
   bevel follow the shape (SDFs in `ui.wgsl`).
 - `Style.material`: a procedural surface over the fill (`Paper`, `Wood`, `Leather`, `Metal`,
-  `Lacquer`, `Linen`, `Stone`) with strength, grain size and seed.
+  `Lacquer`, `Linen`, `Stone`, `Glass`) with strength, grain size and seed.
 - `Style.bevel` (raised or sunken rim lit from the top left, engraved hairline),
   `Style.inset_shadow` (wells, pressed buttons), `Style.shadow2` (a second, wide drop shadow).
 - `Style.frame`: a nine-slice frame cut from any icon (SVG or picture). `assets/frames` ships
@@ -84,6 +84,10 @@ Panels can look like objects, not flat rectangles (research and the reference ga
   frames, parchment cards and tooltips, cartouche, tiles, enamel medallions and badges, number
   wells, meters, dividers, labels, brass buttons). `kit::brass::install(&mut theme)` adds it.
   Archipelago's HUD (top bar, build bar, building card, map table, ledger) is built from it.
+- `kit::glass`: a near-future kit (chamfered smoked glass with scanlines, neon cyan hairlines
+  and glows, Chakra Petch for titles and buttons, sheen on selections) that restyles the
+  built-in screens' own classes, so `kit::glass::install(&mut theme)` changes every screen at
+  once. `cargo run -p engine_ui --example gallery -- <dir> 1600 900 inventory shop --kit=glass`.
 
 `cargo run -p engine_ui --example kit -- <dir> [width] [height] [backdrop.png]` renders a
 strategy HUD made from the kit (`kit_brass.png`) in a few seconds, without a 3D scene.
@@ -91,7 +95,7 @@ strategy HUD made from the kit (`kit_brass.png`) in a few seconds, without a 3D 
 Fonts are OFL-1.1, with their licenses next to them in `assets/fonts`: Inter (The Inter
 Project Authors), Alegreya Sans (The Alegreya Sans Project Authors) and Harbour Serif, a Latin
 subset of Playfair Display (The Playfair Display Project Authors), renamed as the OFL requires because
-"Playfair Display" is a Reserved Font Name.
+"Playfair Display" is a Reserved Font Name, and Chakra Petch (The Chakra Petch Project Authors).
 
 ## Quests
 

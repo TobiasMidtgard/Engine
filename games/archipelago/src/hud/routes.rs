@@ -132,7 +132,7 @@ fn stop_chip(name: &str, load: &[Good], unload: &[Good]) -> El {
 }
 
 /// One route as a tile: its ink, name, ships, and stops in order.
-fn route_tile(world: &mut World, i: usize, selected: bool) -> Option<El> {
+fn route_tile(world: &mut World, i: usize, selected: bool, animate: bool) -> Option<El> {
     let r = world.get_resource::<Routes>()?.0.get(i)?.clone();
     let mut crafts: Vec<(&'static str, usize)> = Vec::new();
     let mut cargo: Vec<(Good, u32)> = Vec::new();
@@ -203,15 +203,20 @@ fn route_tile(world: &mut World, i: usize, selected: bool) -> Option<El> {
             .on_click(format!("isle.route:{i}"))
             .selected(selected)
             .with_style(move |s| {
-                s.direction(Direction::Column)
+                let s = s
+                    .direction(Direction::Column)
                     .gap(6.0)
                     .padding([10.0, 14.0, 12.0, 14.0])
-                    .width(500.0)
-                    .enter(
+                    .width(500.0);
+                if animate {
+                    s.enter(
                         engine_ui::style::Enter::rise(0.32, 18.0)
                             .delay(0.05 * i as f32)
                             .ease(engine_ui::style::Ease::Back),
                     )
+                } else {
+                    s
+                }
             })
             .child(
                 El::new()
@@ -251,17 +256,245 @@ fn route_tile(world: &mut World, i: usize, selected: bool) -> Option<El> {
                             .pick_ignore(),
                     ),
             )
-            .child(chain),
+            .child(chain)
+            .child_opt(selected.then(|| editor(world, i, &r))),
     )
+}
+
+/// A good to switch on or off at a stop.
+fn good_toggle(g: Good, on: bool, action: String, tint: Color) -> El {
+    El::new()
+        .on_click(action)
+        .tooltip(g.name(), if on { "Click to stop" } else { "Click to add" })
+        .with_style(move |s| {
+            s.size(24.0, 24.0)
+                .padding(2.0)
+                .radius(4.0)
+                .background(if on {
+                    Fill::Solid(tint.with_alpha(0.28))
+                } else {
+                    Fill::None
+                })
+                .border(1.0, if on { tint } else { Color::TRANSPARENT })
+                .opacity(if on { 1.0 } else { 0.32 })
+                .pick(Pick::Block)
+        })
+        .child(El::icon(g.icon()).with_style(|s| s.size(20.0, 20.0).pick(Pick::Ignore)))
+}
+
+fn mini(icon: &str, action: String, tip: &str) -> El {
+    brass::medallion(icon, 26.0, &action).tooltip("", tip)
+}
+
+fn small_label(text: &str) -> El {
+    El::text(text)
+        .class("ink_label")
+        .text_style(|t| t.nowrap())
+        .with_style(|s| s.width(46.0))
+        .pick_ignore()
+}
+
+/// The picked route's editor: goods per stop, stop order, more stops, ships, closing it.
+fn editor(world: &mut World, i: usize, r: &crate::fleet::Route) -> El {
+    let good_ink = Colors::good_ink();
+    let bad_ink = Colors::bad_ink();
+    let mut col = El::new()
+        .class("col")
+        .with_style(|s| s.gap(8.0).margin([6.0, 0.0, 0.0, 0.0]))
+        .child(brass::divider(300.0));
+    let n = r.stops.len();
+    for (k, st) in r.stops.iter().enumerate() {
+        let name = building(world, st.at)
+            .map(|b| island::islands()[b.island].name)
+            .unwrap_or("?");
+        let row = |which: &str, list: &[Good], tint: Color| {
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(1.0))
+                .child(small_label(which))
+                .children(Good::ALL.into_iter().map(|g| {
+                    good_toggle(
+                        g,
+                        list.contains(&g),
+                        format!("isle.route.stop.{which}:{i}:{k}:{}", g.name()),
+                        tint,
+                    )
+                }))
+        };
+        col = col.child(
+            El::new()
+                .class("col")
+                .with_style(|s| s.gap(2.0))
+                .child(
+                    El::new()
+                        .class("row")
+                        .with_style(|s| s.gap(6.0).align_items(Align::Center))
+                        .child(
+                            El::text(format!("{}. {name}", k + 1))
+                                .class("ink")
+                                .text_style(|t| t.bold().nowrap())
+                                .with_style(|s| s.grow(1.0))
+                                .pick_ignore(),
+                        )
+                        .child_opt((k > 0).then(|| {
+                            mini(
+                                "isle_left",
+                                format!("isle.route.stop.move:{i}:{k}:{}", k - 1),
+                                "Call here earlier",
+                            )
+                        }))
+                        .child_opt((k + 1 < n).then(|| {
+                            mini(
+                                "isle_speed_1",
+                                format!("isle.route.stop.move:{i}:{k}:{}", k + 1),
+                                "Call here later",
+                            )
+                        }))
+                        .child(mini(
+                            "isle_close",
+                            format!("isle.route.stop.remove:{i}:{k}"),
+                            "Leave this stop out",
+                        )),
+                )
+                .child(row("load", &st.load, good_ink))
+                .child(row("unload", &st.unload, bad_ink)),
+        );
+    }
+    // Harbours (or masts) not yet on the route.
+    let want = if r.air {
+        crate::defs::Kind::AirshipMast
+    } else {
+        crate::defs::Kind::Harbour
+    };
+    let mut free: Vec<(u32, &'static str)> = {
+        let mut q = world.query::<&Building>();
+        q.iter(world)
+            .filter(|b| b.kind == want && !r.stops.iter().any(|s| s.at == b.id))
+            .map(|b| (b.id, island::islands()[b.island].name))
+            .collect()
+    };
+    free.sort();
+    col = col.child(
+        El::new()
+            .class("row")
+            .with_style(|s| s.gap(6.0).wrap(true))
+            .child(
+                El::text(if r.air { "Add a mast" } else { "Add a harbour" })
+                    .class("ink_label")
+                    .text_style(|t| t.nowrap())
+                    .pick_ignore(),
+            )
+            .children(free.iter().map(|(id, name)| {
+                El::button(format!("+ {name}"), format!("isle.route.stop.add:{i}:{id}"))
+                    .class("brass_button_dark")
+            }))
+            .child_opt(free.is_empty().then(|| {
+                El::text("every one is on it")
+                    .class("ink")
+                    .text_style(|t| t.italic().size(13.0))
+                    .pick_ignore()
+            })),
+    );
+    // Ships on it, and idle ones of the right kind.
+    let (mine, idle): (Vec<Named>, Vec<Named>) = {
+        let mut q = world.query::<(Entity, &Vessel)>();
+        let mut mine = Vec::new();
+        let mut idle = Vec::new();
+        for (e, v) in q.iter(world) {
+            let air = v.craft == crate::vessels::Craft::Airship;
+            if v.route == Some(i) {
+                mine.push((e.to_bits(), v.name.clone()));
+            } else if v.route.is_none()
+                && air == r.air
+                && matches!(v.roam, crate::fleet::Roam::Idle { .. })
+            {
+                idle.push((e.to_bits(), v.name.clone()));
+            }
+        }
+        (mine, idle)
+    };
+    col = col.child(
+        El::new()
+            .class("row")
+            .with_style(|s| s.gap(6.0).wrap(true))
+            .child(
+                El::text("Ships")
+                    .class("ink_label")
+                    .text_style(|t| t.nowrap())
+                    .pick_ignore(),
+            )
+            .children(mine.iter().map(|(bits, name)| {
+                El::button(format!("{name} ×"), format!("isle.route.unassign:{bits}"))
+                    .class("brass_button")
+                    .tooltip(
+                        name.as_str(),
+                        "Take this ship off the route: it waits at its next harbour.",
+                    )
+            }))
+            .children(idle.iter().map(|(bits, name)| {
+                El::button(format!("+ {name}"), format!("isle.route.assign:{i}:{bits}"))
+                    .class("brass_button_dark")
+                    .tooltip(
+                        name.as_str(),
+                        "Waiting in harbour. Click to put it on this route.",
+                    )
+            })),
+    );
+    col.child(
+        El::new()
+            .class("row")
+            .with_style(|s| s.justify(Justify::End))
+            .child(
+                El::button("Close this route", format!("isle.route.close:{i}"))
+                    .class("brass_button_dark"),
+            ),
+    )
+}
+
+const LIST: &str = "isle.routes.list";
+
+/// A vessel's entity bits and name.
+type Named = (u64, String);
+
+fn tiles(world: &mut World, n: usize, sel: Option<usize>, animate: bool) -> Vec<El> {
+    (0..n)
+        .filter_map(|i| route_tile(world, i, sel == Some(i), animate))
+        .collect()
+}
+
+/// Redraw the routes after a change (or a new pick): lines and tiles, without the entrance.
+pub fn refresh(world: &mut World) {
+    if !world.resource::<RouteBook>().open {
+        return;
+    }
+    let lines = trace(world);
+    let n = world.get_resource::<Routes>().map_or(0, |r| r.0.len());
+    let sel = {
+        let mut b = world.resource_mut::<RouteBook>();
+        b.lines = lines;
+        if b.selected.is_some_and(|s| s >= n) {
+            b.selected = None;
+        }
+        b.selected
+    };
+    let els = tiles(world, n, sel, false);
+    if let Some(e) = engine_ui::input::find_id(world, LIST) {
+        let _ = engine_ui::el::replace_children(world, e, &els);
+    }
+}
+
+/// A route was just opened: pick it.
+pub fn pick_last(world: &mut World) {
+    let n = world.get_resource::<Routes>().map_or(0, |r| r.0.len());
+    world.resource_mut::<RouteBook>().selected = n.checked_sub(1);
+    refresh(world);
 }
 
 /// The book: route tiles on the plate, the chart on a parchment page.
 fn el(world: &mut World) -> El {
     let n = world.get_resource::<Routes>().map_or(0, |r| r.0.len());
     let sel = world.resource::<RouteBook>().selected;
-    let tiles: Vec<El> = (0..n)
-        .filter_map(|i| route_tile(world, i, sel == Some(i)))
-        .collect();
+    let tiles = tiles(world, n, sel, true);
     let header = El::new()
         .class("row")
         .with_style(|s| s.gap(18.0).align_items(Align::Center))
@@ -275,18 +508,21 @@ fn el(world: &mut World) -> El {
         .child(brass::divider(70.0))
         .child(El::new().with_style(|s| s.grow(1.0)))
         .child(
-            El::text(format!("{n} routes · click one to follow it on the chart"))
+            El::text("click a route to follow and change it")
                 .class("brass_label")
                 .text_style(|t| t.nowrap())
                 .pick_ignore(),
         )
+        .child(El::button("New sea route", "isle.route.open:sea").class("brass_button"))
+        .child(El::button("New air route", "isle.route.open:air").class("brass_button"))
         .child(
             brass::medallion("isle_close", 36.0, "isle.routes")
                 .tooltip("", "Close [color=#c9b07a](T or Esc)[/color]"),
         );
     let list = El::new()
-        .class("col")
-        .with_style(|s| s.gap(14.0).padding([4.0, 6.0]))
+        .class("scroll")
+        .id(LIST)
+        .with_style(|s| s.gap(14.0).padding([4.0, 6.0]).max_height(640.0))
         .children(tiles);
     let page = brass::parchment()
         .with_style(|s| s.padding(14.0).direction(Direction::Column))
@@ -349,21 +585,13 @@ pub fn toggle(world: &mut World) {
     }
 }
 
-/// Pick a route out on the chart (again to let go).
+/// Pick a route out on the chart and open its editor (again to let go).
 pub fn select(world: &mut World, i: usize) {
-    let sel = {
+    {
         let mut b = world.resource_mut::<RouteBook>();
         b.selected = if b.selected == Some(i) { None } else { Some(i) };
-        b.selected
-    };
-    let n = world.get_resource::<Routes>().map_or(0, |r| r.0.len());
-    for k in 0..n {
-        if let Some(e) = engine_ui::input::find_id(world, &format!("isle.route:{k}"))
-            && let Some(mut it) = world.get_mut::<engine_ui::node::Interaction>(e)
-        {
-            it.selected = sel == Some(k);
-        }
     }
+    refresh(world);
 }
 
 fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {

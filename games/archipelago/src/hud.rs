@@ -655,6 +655,14 @@ pub fn read_actions(world: &mut World) {
             map::clicked(world, entity);
         } else if a == "isle.home" {
             map::home(world);
+        } else if a.starts_with("isle.route.") {
+            let opened = a.starts_with("isle.route.open");
+            crate::tools::action(world, &a);
+            if opened {
+                routes::pick_last(world);
+            } else {
+                routes::refresh(world);
+            }
         } else {
             crate::tools::action(world, &a);
         }
