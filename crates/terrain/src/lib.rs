@@ -892,8 +892,12 @@ fn deform_from_contacts(
         .read()
         .filter(|c| range.is_active(&env.focus, c.position))
     {
-        let ground = env.ground(c.position);
-        let surface = c.surface.or(ground.map(|g| g.surface)).unwrap_or_default();
+        // (A contact that names its surface saves asking the ground for it, which costs as
+        // much as everything else here together.)
+        let surface = c
+            .surface
+            .or_else(|| env.ground(c.position).map(|g| g.surface))
+            .unwrap_or_default();
         let mat = env.material(surface);
         let layers = surface_layers.sample(c.position);
         let mut snow = layers.snow_m;
@@ -976,7 +980,7 @@ fn wear_from_contacts(
         } else {
             let surface = c
                 .surface
-                .or(env.ground(c.position).map(|g| g.surface))
+                .or_else(|| env.ground(c.position).map(|g| g.surface))
                 .unwrap_or_default();
             WornGround::of(env.material(surface))
         };
@@ -1906,6 +1910,76 @@ mod tests {
         assert!(d > 0.02, "mud print depth {d}");
     }
 
+    /// A walker with a head start stands where that walk ends from its first step, and the
+    /// prints of it reach the ground a few a step (all at once, the footprint lab's held the
+    /// frame its zone streamed in for a quarter of a second).
+    #[test]
+    fn a_head_start_reaches_the_ground_a_few_prints_a_step() {
+        let mut app = app_with_planet();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.update();
+        // Mud all round its loop: every print presses in (and the walker names the mud it
+        // found, so the prints and the paths ask the terrain nothing more).
+        let mud = app.world.resource::<SurfaceMaterials>().id("mud");
+        app.world.write_message(TerrainEdit {
+            center: DVec3::ZERO,
+            shape: EditShape::Sphere { radius: 14.0 },
+            op: EditOp::Paint,
+            surface: mud,
+            source: None,
+        });
+        app.update_n(2);
+        let walker = app
+            .world
+            .spawn((
+                Transform::default(),
+                demo::DemoWalker {
+                    kind: demo::WalkerKind::Rover,
+                    center: DVec3::new(0.0, 0.0, 0.0),
+                    radius_x: 8.0,
+                    radius_z: 8.0,
+                    speed: 3.0,
+                    step_m: 0.25,
+                    load_kg: 1600.0,
+                    prewalk_s: 20.0,
+                    wait_steps: 0,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let stamps = |app: &App| app.world.resource::<DeformationMap>().stamps;
+        let walker_of = |app: &App| app.world.get::<demo::DemoWalker>(walker).unwrap().clone();
+        let before = stamps(&app);
+        let (mut most, mut updates) = (0, 0);
+        loop {
+            let was = stamps(&app);
+            app.update();
+            updates += 1;
+            most = most.max(stamps(&app) - was);
+            let w = walker_of(&app);
+            if updates == 2 {
+                // 60 m of the loop are behind it already, with most of their prints to come.
+                assert!(w.started && w.trail.is_some());
+                assert!((59.9..61.0).contains(&w.travelled_m), "{}", w.travelled_m);
+            }
+            if w.started && w.trail.is_none() {
+                break;
+            }
+            assert!(updates < 600, "the head start never came to an end");
+        }
+        // 240 steps of four wheels: 960 prints, at most 48 a fixed step (and the rover's own
+        // step now and then; a frame may hold two fixed steps).
+        let laid = stamps(&app) - before;
+        assert!((960..1_000).contains(&laid), "{laid} prints");
+        let per_step = demo::TRAIL_CONTACTS_PER_STEP as u64 + 4;
+        assert!(most <= 2 * per_step, "{most} prints in one frame");
+        assert!((15..60).contains(&updates), "{updates} frames");
+    }
+
     #[test]
     fn a_crowd_wears_a_path_across_the_meadow() {
         let mut app = app_with_planet();
@@ -1927,7 +2001,19 @@ mod tests {
             );
         }
         app.world.flush();
-        app.update_n(12);
+        // Ten minutes of walking behind each of them reach the ground a few prints a step.
+        let mut updates = 0;
+        while updates < 12
+            || app
+                .world
+                .query::<&demo::DemoWalker>()
+                .iter(&app.world)
+                .any(|w| w.trail.is_some())
+        {
+            app.update();
+            updates += 1;
+            assert!(updates < 4_000, "the head starts never came to an end");
+        }
         let wear_at = |app: &mut App, p: DVec3| {
             let v = engine_core::registry::call_api(
                 &mut app.world,

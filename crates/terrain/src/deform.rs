@@ -67,6 +67,13 @@ pub const TILE: u32 = 32;
 /// Prints remembered so they come back when the grid moves over them again.
 pub const HISTORY: usize = 40_000;
 
+/// Cells of remembered prints pressed again in one frame after the grid moved over them (a
+/// footprint goes over about 200, a lying body 3,000, a felled trunk 30,000). Where a crowd had walked, a move brought
+/// back thousands of prints at once and held the frame for up to 125 ms; they come into view
+/// at the window's edge, a quarter of it or more from the focus, where a few frames' wait
+/// does not show.
+pub const REPRESS_CELLS: usize = 16_000;
+
 /// Prints the shader draws sharper than the grid (a ring the cells point into).
 pub const SLOTS: usize = 16_384;
 
@@ -152,6 +159,9 @@ pub struct DeformationMap {
     pub slots_dirty: Option<(usize, usize)>,
     /// Where wheels last pressed (whose, world x/z), to join their prints into ruts.
     rolling: Vec<(Option<Entity>, DVec2)>,
+    /// Remembered prints the window moved over, still to be pressed again (oldest first; see
+    /// [`REPRESS_CELLS`]).
+    waiting: VecDeque<StampRecord>,
 }
 
 impl DeformationMap {
@@ -179,7 +189,13 @@ impl DeformationMap {
             next_slot: 0,
             slots_dirty: None,
             rolling: Vec::new(),
+            waiting: VecDeque::new(),
         }
+    }
+
+    /// Remembered prints inside the window that are not pressed again yet.
+    pub fn waiting(&self) -> usize {
+        self.waiting.len()
     }
 
     /// World width covered, meters.
@@ -356,7 +372,7 @@ impl DeformationMap {
 
     /// Re-center on `focus` when it has moved more than a quarter of the extent, keeping the
     /// prints that stay inside and re-pressing remembered prints that come into view (aged by
-    /// `now`: grass has sprung back, sand has softened).
+    /// `now`: grass has sprung back, sand has softened), [`REPRESS_CELLS`] a call.
     pub fn follow(&mut self, focus: DVec3, now: f64, grass_recover_s: f32, sand_half_life_s: f32) {
         // Farthest a print reaches from its middle, meters (a lying body's rim).
         const REACH_M: f64 = 2.0;
@@ -365,33 +381,39 @@ impl DeformationMap {
             self.origin + DVec2::splat(self.extent() - REACH_M),
         );
         if let Some(cleared) = self.shift_to(focus) {
-            let history = std::mem::take(&mut self.history);
             let (lo, hi) = (self.origin, self.origin + DVec2::splat(self.extent()));
-            for r in &history {
+            let inside = |p: DVec3, (lo, hi): (DVec2, DVec2)| {
+                p.x > lo.x && p.z > lo.y && p.x < hi.x && p.z < hi.y
+            };
+            // Prints wholly inside the old window are still there (and may have recovered
+            // since: pressing them again would undo that), or still wait from an earlier
+            // move. The others in the new window wait from now, in the order they were made.
+            let mut waiting = std::mem::take(&mut self.waiting);
+            waiting.retain(|r| {
                 let p = r.contact.position;
-                if p.x < lo.x || p.z < lo.y || p.x > hi.x || p.z > hi.y {
-                    continue;
-                }
-                // Prints wholly inside the old window are still there (and may have recovered
-                // since: pressing them again would undo that).
-                let inside_old =
-                    p.x > kept.0.x && p.z > kept.0.y && p.x < kept.1.x && p.z < kept.1.y;
-                if !cleared && inside_old {
-                    continue;
-                }
-                let age = (now - r.time).max(0.0) as f32;
-                let flatten = (r.flatten - age / grass_recover_s.max(0.1)).max(0.0);
-                let depth = match r.kind {
-                    CellKind::Granular => r.depth * 0.5f32.powf(age / sand_half_life_s.max(1.0)),
-                    _ => r.depth,
-                };
-                if depth > 1e-4 || flatten > 0.0 {
-                    let stamps = self.stamps;
-                    self.stamp(&r.contact, r.kind, depth, r.rim, flatten);
-                    self.stamps = stamps;
-                }
+                !cleared && inside(p, kept) && inside(p, (lo, hi))
+            });
+            waiting.extend(self.history.iter().filter(|r| {
+                let p = r.contact.position;
+                inside(p, (lo, hi)) && (cleared || !inside(p, kept))
+            }));
+            self.waiting = waiting;
+        }
+        let mut cells = 0;
+        while cells < REPRESS_CELLS
+            && let Some(r) = self.waiting.pop_front()
+        {
+            let age = (now - r.time).max(0.0) as f32;
+            let flatten = (r.flatten - age / grass_recover_s.max(0.1)).max(0.0);
+            let depth = match r.kind {
+                CellKind::Granular => r.depth * 0.5f32.powf(age / sand_half_life_s.max(1.0)),
+                _ => r.depth,
+            };
+            if depth > 1e-4 || flatten > 0.0 {
+                let stamps = self.stamps;
+                cells += self.stamp(&r.contact, r.kind, depth, r.rim, flatten);
+                self.stamps = stamps;
             }
-            self.history = history;
         }
     }
 
@@ -404,7 +426,7 @@ impl DeformationMap {
             // they are: only where the window is changes.
             let t = DVec2::new(s.translation.x, s.translation.z);
             self.origin += t;
-            for r in &mut self.history {
+            for r in self.history.iter_mut().chain(&mut self.waiting) {
                 r.contact.follow(s);
             }
             for p in &mut self.slots {
@@ -416,6 +438,7 @@ impl DeformationMap {
         } else {
             self.clear(0, 0, self.size, self.size);
             self.history.clear();
+            self.waiting.clear();
             self.rolling.clear();
             self.generation += 1;
         }
@@ -431,23 +454,51 @@ impl DeformationMap {
         let hi = (c + rc).ceil().min(DVec2::splat(self.size as f64));
         if lo.x < hi.x && lo.y < hi.y {
             let (x0, y0, x1, y1) = (lo.x as u32, lo.y as u32, hi.x as u32, hi.y as u32);
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let p = DVec2::new(x as f64 + 0.5, y as f64 + 0.5);
-                    if p.distance(c) <= rc {
-                        let i = self.index(x, y);
-                        self.depth[i] = 0.0;
-                        self.flatten[i] = 0.0;
-                        self.kind[i] = CellKind::None;
-                        self.prints[i] = [0; 2];
+            let (tiles, n, base) = (self.tiles_per_side(), self.size, self.base);
+            // Only the tiles that hold something, and only those are sent to the GPU again:
+            // an edit as wide as the window (the ground laid flat under a zone) went over all
+            // four million cells and marked every tile as holding prints, so each later move
+            // of the window cleared its strips cell by cell (3 to 30 ms).
+            for [sx0, sy0, sx1, sy1] in self.storage_rects(x0, y0, x1, y1) {
+                for ty in sy0 / TILE..sy1.div_ceil(TILE) {
+                    for tx in sx0 / TILE..sx1.div_ceil(TILE) {
+                        let t = (ty * tiles + tx) as usize;
+                        if !self.touched[t] {
+                            continue;
+                        }
+                        let (cx0, cy0) = ((tx * TILE).max(sx0), (ty * TILE).max(sy0));
+                        let (cx1, cy1) = (((tx + 1) * TILE).min(sx1), ((ty + 1) * TILE).min(sy1));
+                        let mut changed = false;
+                        for sy in cy0..cy1 {
+                            // (Storage cell to window cell.)
+                            let y = (sy + n - base[1]) % n;
+                            for sx in cx0..cx1 {
+                                let x = (sx + n - base[0]) % n;
+                                let p = DVec2::new(x as f64 + 0.5, y as f64 + 0.5);
+                                if p.distance(c) <= rc {
+                                    let i = (sy * n + sx) as usize;
+                                    changed |= self.depth[i] != 0.0
+                                        || self.flatten[i] != 0.0
+                                        || self.kind[i] != CellKind::None
+                                        || self.prints[i] != [0; 2];
+                                    self.depth[i] = 0.0;
+                                    self.flatten[i] = 0.0;
+                                    self.kind[i] = CellKind::None;
+                                    self.prints[i] = [0; 2];
+                                }
+                            }
+                        }
+                        self.dirty[t] |= changed;
                     }
                 }
             }
-            self.mark(x0, y0, x1, y1);
         }
         let at = DVec2::new(center.x, center.z);
-        self.history
-            .retain(|h| DVec2::new(h.contact.position.x, h.contact.position.z).distance(at) > r);
+        let away = |h: &StampRecord| {
+            DVec2::new(h.contact.position.x, h.contact.position.z).distance(at) > r
+        };
+        self.history.retain(away);
+        self.waiting.retain(away);
     }
 
     /// Move the window over `focus` if needed: `None` if it stayed, else whether it jumped so
@@ -493,8 +544,30 @@ impl DeformationMap {
     }
 
     /// Press a print into the grid. `depth` meters, `rim` share of the depth pushed up around
-    /// it, `flatten` 0..1 grass bending, `shape` the print's outline.
-    pub fn stamp(&mut self, c: &GroundContact, kind: CellKind, depth: f32, rim: f32, flatten: f32) {
+    /// it, `flatten` 0..1 grass bending, `shape` the print's outline. Returns the cells it
+    /// went over.
+    pub fn stamp(
+        &mut self,
+        c: &GroundContact,
+        kind: CellKind,
+        depth: f32,
+        rim: f32,
+        flatten: f32,
+    ) -> usize {
+        self.stamp_cells(c, kind, depth, rim, flatten, true)
+    }
+
+    /// [`stamp`](Self::stamp), over the cells of the print's own rectangle (`tight`) or over
+    /// the whole square round it (what the tests check the first against).
+    fn stamp_cells(
+        &mut self,
+        c: &GroundContact,
+        kind: CellKind,
+        depth: f32,
+        rim: f32,
+        flatten: f32,
+        tight: bool,
+    ) -> usize {
         let (w, l) = contact_size(c);
         // A rolling wheel touches the ground all the way from its last print: stretch this one
         // back to it, so the rut is unbroken however far it rolled between frames.
@@ -508,7 +581,7 @@ impl DeformationMap {
         let x1 = (hi.x.ceil().max(0.0) as u32).min(self.size);
         let y1 = (hi.y.ceil().max(0.0) as u32).min(self.size);
         if x0 >= x1 || y0 >= y1 {
-            return;
+            return 0;
         }
         // Print frame: `fwd` along the long axis (yaw 0 = −Z, like `Transform::forward`).
         let fwd = Vec2::new(-c.yaw.sin(), -c.yaw.cos());
@@ -538,8 +611,56 @@ impl DeformationMap {
         // How far (in the shape's units) a cell's center can be from the farthest point of
         // the cell.
         let margin = self.cell * 0.71 * 2.5 / (w.min(l) * 0.5);
+        // Only the cells the print can reach: nothing happens where the shape's distance is
+        // over `RIM_END + margin`, and that distance is never more than 0.1 under |u| or |v|.
+        // A long print lying across the grid (a rut, a fallen trunk, a lying body) covers a
+        // small part of the square round it, and a footprint half of it.
+        let k = if tight {
+            RIM_END + margin + 0.1
+        } else {
+            f32::INFINITY
+        };
+        let (ru, rv) = ((k * w * 0.5) as f64, (k * l * 0.5) as f64);
+        let (side_d, fwd_d) = (side.as_dvec2(), fwd.as_dvec2());
+        let (cell, origin) = (self.cell as f64, self.origin);
+        let mut cells = 0;
+        // The cells gone over in the tile row at hand, to mark its tiles changed.
+        let mut band: Option<(u32, u32, u32)> = None;
         for y in y0..y1 {
-            for x in x0..x1 {
+            let dz = origin.y + (y as f64 + 0.5) * cell - c.position.z;
+            // The dx with |dx a + dz b| <= r: one of the print's two axes.
+            let span = |a: f64, b: f64, r: f64| {
+                if a.abs() < 1e-9 || r.is_infinite() {
+                    ((dz * b).abs() <= r).then_some((f64::NEG_INFINITY, f64::INFINITY))
+                } else {
+                    let (mid, half) = (-dz * b / a, r / a.abs());
+                    Some((mid - half, mid + half))
+                }
+            };
+            let row = match (span(side_d.x, side_d.y, ru), span(fwd_d.x, fwd_d.y, rv)) {
+                (Some(a), Some(b)) => {
+                    // (A cell more on either side, for the rounding.)
+                    let at = |dx: f64| (c.position.x + dx - origin.x) / cell - 0.5;
+                    let xa = (at(a.0.max(b.0)).floor() - 1.0).max(x0 as f64) as u32;
+                    let xb = (at(a.1.min(b.1)).ceil() + 2.0).clamp(0.0, x1 as f64) as u32;
+                    (xa, xb.max(xa))
+                }
+                _ => (x0, x0),
+            };
+            if row.0 < row.1 {
+                cells += (row.1 - row.0) as usize;
+                band = Some(match band {
+                    Some((from, a, b)) => (from, a.min(row.0), b.max(row.1)),
+                    None => (y, row.0, row.1),
+                });
+            }
+            if let Some((from, a, b)) = band
+                && ((y + 1) % TILE == 0 || y + 1 == y1)
+            {
+                self.mark(a, from, b, y + 1);
+                band = None;
+            }
+            for x in row.0..row.1 {
                 let world = self.origin + (DVec2::new(x as f64, y as f64) + 0.5) * self.cell as f64;
                 let rel = (world - DVec2::new(c.position.x, c.position.z)).as_vec2();
                 let u = rel.dot(side) / (w * 0.5);
@@ -580,7 +701,6 @@ impl DeformationMap {
                 }
             }
         }
-        self.mark(x0, y0, x1, y1);
         self.stamps += 1;
         if let Some(s) = slot {
             self.slots[s].center_depth = self.sample(c.position).0;
@@ -589,6 +709,7 @@ impl DeformationMap {
                 Some((a, b)) => (a.min(s), b.max(s + 1)),
             });
         }
+        cells
     }
 
     /// For a wheel or track: this contact stretched back along its way to the same wheel's
@@ -944,6 +1065,33 @@ mod tests {
         assert_eq!(map.history.len(), 1);
     }
 
+    /// An edit as wide as the grid (the ground laid flat under a zone) wipes the prints it
+    /// covers and leaves the rest of the grid alone: nothing more to send to the GPU, to
+    /// recover, or to clear when the window moves on.
+    #[test]
+    fn a_wide_edit_touches_only_the_tiles_with_prints() {
+        let mut map = DeformationMap::new(0.04, 512);
+        // (Moved once, so the window's cells are not where they are stored.)
+        map.follow(DVec3::new(7.0, 0.0, -6.0), 0.0, 20.0, 240.0);
+        let c = contact(9.0, -4.0, ContactKind::Foot);
+        map.record(&c, CellKind::Plastic, 0.05, 0.3, 0.0, 0.0);
+        let marked = |v: &[bool]| v.iter().filter(|m| **m).count();
+        let with_print = marked(&map.touched);
+        assert!((1..=4).contains(&with_print), "{with_print} tiles");
+        map.take_dirty();
+        map.erase(DVec3::new(5.0, 0.0, -5.0), 60.0);
+        assert_eq!(peak(&map, 9.0, -4.0), 0.0);
+        assert!(map.prints.iter().all(|p| *p == [0; 2]));
+        assert_eq!(
+            (marked(&map.touched), marked(&map.dirty)),
+            (with_print, with_print)
+        );
+        // A second edit there finds nothing to change and sends nothing.
+        map.take_dirty();
+        map.erase(DVec3::new(5.0, 0.0, -5.0), 60.0);
+        assert!(!map.is_dirty());
+    }
+
     /// Slots (+1) pointed at by the cell under a world point.
     fn ids_at(map: &DeformationMap, x: f64, z: f64) -> [u16; 2] {
         let g = (DVec2::new(x, z) - map.origin) / map.cell as f64;
@@ -1040,6 +1188,222 @@ mod tests {
         assert_eq!(peak(&map, 3.0, 0.0), 0.0);
         map.follow(DVec3::new(0.0, 0.0, 0.0), 2.0, 20.0, 240.0);
         assert!(peak(&map, 3.0, 0.0) > 0.03);
+    }
+
+    /// A print goes over the cells of its own rectangle, not the square round it, and leaves
+    /// the grid exactly as going over the whole square would.
+    #[test]
+    fn a_print_goes_over_its_own_cells_only() {
+        let mut tight = DeformationMap::new(0.04, 512);
+        let mut square = DeformationMap::new(0.04, 512);
+        let kinds = [
+            ContactKind::Foot,
+            ContactKind::Paw,
+            ContactKind::Hoof,
+            ContactKind::Wheel,
+            ContactKind::Track,
+            ContactKind::Body,
+        ];
+        let (mut n, mut went, mut would) = (0, 0, 0);
+        for kind in kinds {
+            for size in [[0.0, 0.0], [0.3, 4.0], [2.0, 0.4], [0.05, 0.06]] {
+                for yaw in [0.0f32, 0.3, 0.785, 1.2, 1.571, 2.5, -2.0] {
+                    // Over the middle, and over the window's edge and corner.
+                    let at = [(0.3, -0.2), (9.9, 2.0), (-10.1, -10.2), (3.0, 10.3)][n % 4];
+                    let mut c = contact(at.0 + n as f64 * 0.013, at.1, kind);
+                    (c.size, c.yaw) = (size, yaw);
+                    // (Each wheel print apart from the last: not joined into a rut.)
+                    c.entity = None;
+                    let (cell_kind, flatten) = if n % 3 == 0 {
+                        (CellKind::Grass, 0.7)
+                    } else {
+                        (CellKind::Plastic, 0.0)
+                    };
+                    went += tight.stamp_cells(&c, cell_kind, 0.05, 0.3, flatten, true);
+                    would += square.stamp_cells(&c, cell_kind, 0.05, 0.3, flatten, false);
+                    n += 1;
+                    assert!(
+                        tight.depth == square.depth
+                            && tight.flatten == square.flatten
+                            && tight.kind == square.kind
+                            && tight.prints == square.prints,
+                        "{kind:?} of {size:?} m at yaw {yaw} came out differently"
+                    );
+                }
+            }
+        }
+        assert!(went * 2 < would, "{went} cells gone over of {would}");
+        // What the GPU is sent covers every changed cell.
+        let mut sent = vec![0.0f32; tight.depth.len()];
+        for [x0, y0, x1, y1] in tight.take_dirty() {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * tight.size + x) as usize;
+                    sent[i] = tight.depth[i];
+                }
+            }
+        }
+        assert!(sent == tight.depth, "a changed cell was not marked");
+    }
+
+    /// Where a crowd walked, the prints come back over several calls, and end as they would
+    /// have pressed all at once.
+    #[test]
+    fn a_crowds_prints_come_back_a_few_frames_at_a_time() {
+        let crowd: Vec<GroundContact> = (0..900)
+            .map(|i| {
+                let (row, col) = ((i / 30) as f64, (i % 30) as f64);
+                let mut c = contact(col * 0.31 - 4.0, 0.0, ContactKind::Foot);
+                c.position.z = row * 0.37 - 5.0;
+                c.yaw = i as f32 * 0.7;
+                c
+            })
+            .collect();
+        let mut map = DeformationMap::new(0.04, 512);
+        for c in &crowd {
+            map.record(c, CellKind::Plastic, 0.05, 0.3, 0.0, 0.0);
+        }
+        // Away (nothing of the old window is kept), and back to a place beside the crowd.
+        map.follow(DVec3::new(500.0, 0.0, 0.0), 1.0, 20.0, 240.0);
+        assert_eq!((map.waiting(), peak(&map, -4.0, -5.0)), (0, 0.0));
+        let near = DVec3::new(2.0, 0.0, 1.0);
+        map.follow(near, 2.0, 20.0, 240.0);
+        let first = map.waiting();
+        assert!(
+            (500..900).contains(&first),
+            "{first} of 900 prints wait after the first call"
+        );
+        let mut calls = 1;
+        while map.waiting() > 0 {
+            let before = map.waiting();
+            map.follow(near, 2.0, 20.0, 240.0);
+            assert!(map.waiting() < before, "a call pressed nothing");
+            calls += 1;
+        }
+        assert!((4..40).contains(&calls), "{calls} calls");
+        // The same prints pressed in one go on a grid that went the same way (pressed, not
+        // remembered, before it left: the sharp-print slots then count alike).
+        let mut at_once = DeformationMap::new(0.04, 512);
+        for c in &crowd {
+            at_once.stamp(c, CellKind::Plastic, 0.05, 0.3, 0.0);
+        }
+        at_once.follow(DVec3::new(500.0, 0.0, 0.0), 1.0, 20.0, 240.0);
+        at_once.follow(near, 2.0, 20.0, 240.0);
+        assert_eq!((at_once.origin, at_once.base), (map.origin, map.base));
+        for c in &crowd {
+            at_once.stamp(c, CellKind::Plastic, 0.05, 0.3, 0.0);
+        }
+        assert!(map.depth == at_once.depth && map.prints == at_once.prints);
+        assert!(peak(&map, -4.0, -5.0) > 0.03);
+    }
+
+    /// Prints that wait are still prints: an edit under them forgets them, the world's move
+    /// carries them, and a second move of the window neither loses nor doubles them.
+    #[test]
+    fn waiting_prints_are_erased_moved_and_kept_like_the_rest() {
+        let mut map = DeformationMap::new(0.04, 512);
+        for i in 0..900 {
+            let mut c = contact((i % 30) as f64 * 0.31 - 4.0, 0.0, ContactKind::Foot);
+            c.position.z = (i / 30) as f64 * 0.37 - 5.0;
+            map.record(&c, CellKind::Plastic, 0.05, 0.3, 0.0, 0.0);
+        }
+        map.follow(DVec3::new(500.0, 0.0, 0.0), 1.0, 20.0, 240.0);
+        map.follow(DVec3::new(2.0, 0.0, 1.0), 2.0, 20.0, 240.0);
+        let waiting = map.waiting();
+        assert!(waiting > 500);
+        // An edit over the far end of the crowd (the last rows, which wait the longest).
+        map.erase(DVec3::new(0.0, 0.0, 5.0), 1.5);
+        let after_edit = map.waiting();
+        assert!(after_edit < waiting, "{after_edit} of {waiting}");
+        // The world re-anchors: the waiting prints land where the ground went.
+        map.follow_shift(&WorldShift::translate(DVec3::new(1_000.0, 0.0, 0.0)));
+        // The window moves on a little before they are all in: none is lost, and none is
+        // pressed twice (each pressing takes one of the sharp-print slots).
+        let generation = map.generation;
+        map.follow(DVec3::new(1_002.0, 0.0, -5.0), 2.0, 20.0, 240.0);
+        assert!(map.generation > generation && map.waiting() > 0);
+        while map.waiting() > 0 {
+            map.follow(DVec3::new(1_002.0, 0.0, -5.0), 2.0, 20.0, 240.0);
+        }
+        assert!(peak(&map, 1_000.0 - 4.0, -5.0) > 0.03);
+        assert!(
+            peak(&map, 1_000.0 + 4.0, 3.0) > 0.03,
+            "a waiting print was lost"
+        );
+        assert_eq!(
+            peak(&map, 1_000.0, 5.0),
+            0.0,
+            "the edited ground has a print"
+        );
+        let pressed = map.slots.len() - 900;
+        assert!(
+            pressed <= map.history.len(),
+            "{pressed} prints pressed of {} remembered",
+            map.history.len()
+        );
+        // A turn of the world forgets them with the rest.
+        map.follow(DVec3::new(1_500.0, 0.0, 0.0), 3.0, 20.0, 240.0);
+        map.follow(DVec3::new(1_002.0, 0.0, 1.0), 4.0, 20.0, 240.0);
+        assert!(map.waiting() > 0);
+        map.follow_shift(&WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_x(0.3),
+            ..WorldShift::IDENTITY
+        });
+        assert_eq!(map.waiting(), 0);
+    }
+
+    /// How long moving the window takes, on cells never written before and on cells written
+    /// before (run with `--release --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn time_moving_the_window() {
+        let mut map = DeformationMap::new(0.04, 2048);
+        let mut at = DVec3::ZERO;
+        for round in 0..12 {
+            // A crowd's prints all over the window, then a move of a quarter of it.
+            let started = std::time::Instant::now();
+            for i in 0..3_000 {
+                let mut c = contact(at.x + (i % 60) as f64 * 1.3 - 39.0, 0.0, ContactKind::Foot);
+                c.position.z = at.z + (i / 60) as f64 * 1.6 - 39.0;
+                map.stamp(&c, CellKind::Plastic, 0.05, 0.3, 0.0);
+            }
+            let pressed = started.elapsed().as_secs_f64() * 1e3;
+            at += DVec3::new(21.0, 0.0, 21.0);
+            let started = std::time::Instant::now();
+            map.follow(at, 0.0, 20.0, 240.0);
+            println!(
+                "round {round}: 3,000 prints {pressed:.2} ms, move {:.2} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
+    }
+
+    /// How long pressing remembered prints takes (run with `--release --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn time_pressing_prints() {
+        for (kind, name) in [
+            (ContactKind::Foot, "foot"),
+            (ContactKind::Wheel, "wheel"),
+            (ContactKind::Body, "body"),
+        ] {
+            let mut map = DeformationMap::new(0.04, 2048);
+            let started = std::time::Instant::now();
+            let (mut cells, n) = (0, 2_000);
+            for i in 0..n {
+                let mut c = contact((i % 50) as f64 * 0.6 - 15.0, 0.0, kind);
+                c.position.z = (i / 50) as f64 * 0.6 - 12.0;
+                c.yaw = i as f32 * 0.7;
+                cells += map.stamp(&c, CellKind::Plastic, 0.05, 0.3, 0.0);
+            }
+            let us = started.elapsed().as_secs_f64() * 1e6;
+            println!(
+                "{name}: {:.1} us a print, {} cells a print, {:.1} ns a cell",
+                us / n as f64,
+                cells / n,
+                us * 1e3 / cells as f64
+            );
+        }
     }
 
     /// The window wraps around in its arrays: walking far keeps the prints in view where they

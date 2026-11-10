@@ -57,7 +57,9 @@ pub struct DemoWalker {
     pub load_kg: f32,
     /// Height of the body origin above the ground, meters.
     pub body_height: f32,
-    /// Seconds to walk instantly on the first update (so trails exist from the start).
+    /// Seconds of walking it has behind it when it starts (so trails exist from the start):
+    /// it begins where that walk ends, and the prints of it are laid over the next steps
+    /// ([`TRAIL_CONTACTS_PER_STEP`]).
     pub prewalk_s: f32,
     /// Angle along the loop, radians.
     pub phase: f64,
@@ -69,6 +71,31 @@ pub struct DemoWalker {
     /// Fixed steps to wait (once a terrain exists) before the pre-walk, so the painted strips
     /// are in place.
     pub wait_steps: u32,
+    /// The part of the head start whose prints are not on the ground yet.
+    pub trail: Option<Trail>,
+}
+
+/// Contacts all walkers' head starts together may write in one fixed step. Each one asks the
+/// ground for its height: the footprint lab's 1,534 in a single step held a frame for 60 to
+/// 125 ms where its zone streamed in (and the prints and paths asked again, as long each).
+pub const TRAIL_CONTACTS_PER_STEP: u32 = 48;
+
+/// A head start still to leave on the ground: where its prints have got to, and how far they
+/// go on from there.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Trail {
+    phase: f64,
+    since_step: f32,
+    left: bool,
+    to_go_m: f32,
+}
+
+/// Where along its loop, and where in its step, a walker (or the prints behind it) is.
+#[derive(Debug, Clone, Copy)]
+struct Gait {
+    phase: f64,
+    since_step: f32,
+    left: bool,
 }
 
 impl Default for DemoWalker {
@@ -89,6 +116,7 @@ impl Default for DemoWalker {
             started: false,
             travelled_m: 0.0,
             wait_steps: 6,
+            trail: None,
         }
     }
 }
@@ -119,15 +147,56 @@ impl DemoWalker {
         (-d.x).atan2(-d.z) as f32
     }
 
-    /// Contacts for one step at `phase` (positions on the ground plane, y filled later).
-    fn step_contacts(&mut self, phase: f64) -> Vec<(DVec3, f32, ContactKind, [f32; 2], f32)> {
+    fn gait(&self) -> Gait {
+        Gait {
+            phase: self.phase,
+            since_step: self.since_step,
+            left: self.left,
+        }
+    }
+
+    /// Walk `at` on by up to `distance` meters, stopping after `max_steps` steps, and call
+    /// `on_step` at every step on the way (sub-steps, so each leaves its print). Returns the
+    /// meters walked.
+    fn advance(
+        &self,
+        at: &mut Gait,
+        distance: f32,
+        max_steps: u32,
+        mut on_step: impl FnMut(&Self, &Gait),
+    ) -> f32 {
+        let perimeter = std::f64::consts::PI
+            * (3.0 * (self.radius_x + self.radius_z)
+                - ((3.0 * self.radius_x + self.radius_z) * (self.radius_x + 3.0 * self.radius_z))
+                    .sqrt());
+        let mut remaining = distance;
+        let mut steps = 0;
+        while remaining > 0.0 && steps < max_steps {
+            let until_step = (self.step_m - at.since_step).max(0.0);
+            let d = remaining.min(until_step.max(1e-3));
+            at.phase += d as f64 / perimeter * std::f64::consts::TAU;
+            at.since_step += d;
+            remaining -= d;
+            if at.since_step >= self.step_m {
+                at.since_step = 0.0;
+                at.left = !at.left;
+                steps += 1;
+                on_step(self, at);
+            }
+        }
+        distance - remaining.max(0.0)
+    }
+
+    /// Contacts for the step `at` has just taken (positions on the ground plane, y filled
+    /// later).
+    fn step_contacts(&self, at: &Gait) -> Vec<(DVec3, f32, ContactKind, [f32; 2], f32)> {
+        let phase = at.phase;
         let p = self.position(phase);
         let yaw = self.yaw(phase);
         let fwd = DVec3::new(-(yaw.sin() as f64), 0.0, -(yaw.cos() as f64));
         let side = DVec3::new(-fwd.z, 0.0, fwd.x);
         let mut out = Vec::new();
-        self.left = !self.left;
-        let s = if self.left { 1.0 } else { -1.0 };
+        let s = if at.left { 1.0 } else { -1.0 };
         match self.kind {
             WalkerKind::Person => {
                 out.push((
@@ -199,52 +268,87 @@ pub fn walk(
     if terrains.entries.is_empty() {
         return;
     }
+    // The prints of one step, on the ground; returns how many.
+    let mut press = |w: &DemoWalker, at: &Gait| {
+        let mut n = 0;
+        for (p, yaw, kind, size, load) in w.step_contacts(at) {
+            let g = ground.sample(p + DVec3::Y * 2.0);
+            let y = g.map(|g| g.height).unwrap_or(p.y);
+            contacts.write(GroundContact {
+                position: DVec3::new(p.x, y, p.z),
+                normal: g.map(|g| g.normal).unwrap_or(Vec3::Y),
+                size,
+                yaw,
+                load_kg: load,
+                speed: w.speed,
+                kind,
+                // (Known from the sample, so the prints and the paths need not ask again.)
+                surface: g.map(|g| g.surface),
+                entity: None,
+            });
+            n += 1;
+        }
+        n
+    };
     for (mut w, mut tf) in &mut q {
-        let perimeter = std::f64::consts::PI
-            * (3.0 * (w.radius_x + w.radius_z)
-                - ((3.0 * w.radius_x + w.radius_z) * (w.radius_x + 3.0 * w.radius_z)).sqrt());
-        let mut dt = time.delta_secs();
         if w.wait_steps > 0 {
             w.wait_steps -= 1;
             continue;
         }
+        let mut at = w.gait();
         if !w.started {
             w.started = true;
-            dt += w.prewalk_s;
-        }
-        let mut remaining = w.speed * dt;
-        // Walk in sub-steps so every step on the way leaves its print.
-        while remaining > 0.0 {
-            let until_step = (w.step_m - w.since_step).max(0.0);
-            let d = remaining.min(until_step.max(1e-3));
-            w.phase += d as f64 / perimeter * std::f64::consts::TAU;
-            w.since_step += d;
-            w.travelled_m += d as f64;
-            remaining -= d;
-            if w.since_step >= w.step_m {
-                w.since_step = 0.0;
-                let phase = w.phase;
-                for (p, yaw, kind, size, load) in w.step_contacts(phase) {
-                    let g = ground.sample(p + DVec3::Y * 2.0);
-                    let y = g.map(|g| g.height).unwrap_or(p.y);
-                    contacts.write(GroundContact {
-                        position: DVec3::new(p.x, y, p.z),
-                        normal: g.map(|g| g.normal).unwrap_or(Vec3::Y),
-                        size,
-                        yaw,
-                        load_kg: load,
-                        speed: w.speed,
-                        kind,
-                        surface: None,
-                        entity: None,
-                    });
-                }
+            // The head start: it begins where that walk ends, and the prints follow below.
+            let head = w.speed * w.prewalk_s;
+            if head > 0.0 {
+                w.trail = Some(Trail {
+                    phase: at.phase,
+                    since_step: at.since_step,
+                    left: at.left,
+                    to_go_m: head,
+                });
+                let walked = w.advance(&mut at, head, u32::MAX, |_, _| {});
+                w.travelled_m += walked as f64;
             }
         }
+        let walked = w.advance(&mut at, w.speed * time.delta_secs(), u32::MAX, |w, at| {
+            press(w, at);
+        });
+        w.travelled_m += walked as f64;
+        (w.phase, w.since_step, w.left) = (at.phase, at.since_step, at.left);
         let p = w.position(w.phase);
         let y = ground.height(p + DVec3::Y * 2.0).unwrap_or(p.y);
         tf.translation = DVec3::new(p.x, y + w.body_height as f64, p.z);
         tf.rotation = Quat::from_rotation_y(w.yaw(w.phase));
+    }
+    // Head starts: the walkers that still have prints to leave behind them take a step each
+    // in turn, oldest prints first, until this fixed step's share is written.
+    let mut budget = TRAIL_CONTACTS_PER_STEP;
+    while budget > 0 {
+        let mut any = false;
+        for (mut w, _) in &mut q {
+            let Some(mut trail) = w.trail else {
+                continue;
+            };
+            if budget == 0 {
+                break;
+            }
+            any = true;
+            let mut at = Gait {
+                phase: trail.phase,
+                since_step: trail.since_step,
+                left: trail.left,
+            };
+            let walked = w.advance(&mut at, trail.to_go_m, 1, |w, at| {
+                budget = budget.saturating_sub(press(w, at).max(1));
+            });
+            trail.to_go_m -= walked;
+            (trail.phase, trail.since_step, trail.left) = (at.phase, at.since_step, at.left);
+            w.trail = (trail.to_go_m > 0.0).then_some(trail);
+        }
+        if !any {
+            break;
+        }
     }
 }
 
