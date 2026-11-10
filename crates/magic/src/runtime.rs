@@ -194,6 +194,8 @@ pub struct ChainArc {
     pub next_in: f32,
     /// Hops made by a reaction never set off further reactions.
     pub from_reaction: bool,
+    /// The body it was aimed at: its first hop goes there when it is in reach.
+    pub first: Option<Entity>,
 }
 
 /// A rain of drops over an area.
@@ -290,6 +292,12 @@ pub struct MagicQueue {
     pub blades: Vec<crate::blades::NewBlades>,
     /// Imbues to put on their casters' weapons and creatures (blades.rs).
     pub imbues: Vec<CastInfo>,
+    /// Bodies for chains to bind, hooks that bit, bonds' hops (chains.rs).
+    pub binds: Vec<crate::chains::NewBind>,
+    pub hooks: Vec<crate::chains::NewHook>,
+    pub bond_hops: Vec<crate::chains::BondHop>,
+    /// Hellgates to open and demons' meteors that landed (demons.rs).
+    pub hellgates: Vec<crate::demons::NewHellgate>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -754,6 +762,17 @@ pub fn release(
             return;
         }
     }
+    // A pact's hellgate opens where the caster points (demons.rs).
+    if spell.payload.demons > 0 && spell.cast == CastType::Summon {
+        let spot = crate::summon::place(body, aim_point, c.range);
+        queue.hellgates.push(crate::demons::NewHellgate {
+            cast: info.clone(),
+            at: ground_below(queries, spot, &exclude),
+            facing: flat,
+            meteor: false,
+        });
+        return;
+    }
     // A summon stands where the caster points, within its range: a golem, an elemental or a
     // wisp, by its weave (summon.rs). A weave that makes no creature casts as an area.
     if spell.cast == CastType::Summon
@@ -993,6 +1012,7 @@ pub fn release(
                 jumps_left: c.chain.max(1) + 1,
                 next_in: c.delay,
                 from_reaction: false,
+                first: target,
             }));
         }
         CastType::Rain => {
@@ -1677,6 +1697,7 @@ pub fn fly_missiles(
                     jumps_left: c.chain,
                     next_in: 0.1,
                     from_reaction: false,
+                    first: None,
                 }));
             }
             spend(&mut m, e, &mut queue);
@@ -2208,19 +2229,29 @@ pub fn tick_chains(
         } else {
             spell.carrier.chain_radius
         };
-        // Prefer the shocked and the bleeding (blood lightning), then the nearest.
+        // Fatal bonds bind foes' fates, never the warlock's own.
+        let bonds = spell.payload.bond_secs > 0.0;
+        // The first hop goes to the aimed body when it is in reach; then prefer the shocked and
+        // the bleeding (blood lightning), then the nearest.
+        let aimed = ch.first.filter(|_| ch.hit.is_empty());
         let next = creatures
             .iter()
             .filter(|(o, _, oc, v, _)| {
                 Some(*o) != ch.cast.caster
                     && !ch.hit.contains(o)
                     && !v.is_some_and(|v| v.down())
-                    && !(spell.safeguard && ch.cast.friend(*o, oc.caster, oc.faction, factions))
+                    && !((spell.safeguard || bonds)
+                        && ch.cast.friend(*o, oc.caster, oc.faction, factions))
             })
             .filter_map(|(o, gt, _, _, aff)| {
                 let d = (gt.translation() + DVec3::Y - ch.at).length() as f32;
                 let primed = aff.is_some_and(|a| a.primed_for_chain());
-                (d <= reach).then_some((o, d - if primed { 4.0 } else { 0.0 }, gt.translation()))
+                let first = if aimed == Some(o) { 1.0e4 } else { 0.0 };
+                (d <= reach).then_some((
+                    o,
+                    d - if primed { 4.0 } else { 0.0 } - first,
+                    gt.translation(),
+                ))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         let Some((o, _, p)) = next else {
@@ -2250,6 +2281,13 @@ pub fn tick_chains(
             reacts: !ch.from_reaction,
             expire: false,
         });
+        // Fatal bonds: every body it hops to is chained to the one before (chains.rs).
+        if spell.payload.bond_secs > 0.0 {
+            queue.bond_hops.push(crate::chains::BondHop {
+                cast: ch.cast.clone(),
+                to: o,
+            });
+        }
         ch.cast.scale *= if ch.hit.is_empty() { 1.0 } else { 0.8 };
         ch.hit.push(o);
         ch.at = to;
@@ -2573,6 +2611,14 @@ pub fn flush(
                         drawn: None,
                         broke: false,
                     });
+                }
+                // A hook pays out its chain behind it (chains.rs); a demonic meteor is a rock
+                // of black iron and fire (demons.rs).
+                if m.cast.spell.payload.hook && !m.forked {
+                    ec.insert(crate::chains::HookRide::default());
+                }
+                if m.cast.spell.payload.demons > 0 {
+                    ec.insert(crate::demons::MeteorRide::default());
                 }
                 looks.push(LookCmd::Attach {
                     entity: id,

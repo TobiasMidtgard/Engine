@@ -11,8 +11,9 @@
 //!   flank, cutting from a new angle each time; the dead strike back and can shatter them. Then
 //!   it drops a frost Bladefall down the line of the dead (4.4 s): twenty pale swords fall point
 //!   first one after another across the floor and stand in it.
-//! * Lane 0, far out on the left of the line, throws fans of three Glintblades at the golem (6.6
-//!   and 8.2 s), each breaking into shards where it strikes.
+//! * Lane 0, at the far end of the students' line (off the right of the picture: the camera looks
+//!   +z, so -x is right), throws fans of three Glintblades at the golem (3.6 to 8.2 s), each
+//!   breaking into shards where it strikes.
 //! * Lane 2 raises a phalanx for each wave (2.4, 7, 12.2 and 16.4 s). Four more skeletons climb
 //!   out (9.4 to 10.6 s) and are imbued with fire again; lane 2 takes a Bound blade in its hand
 //!   (10.4 s), lane 1 drops another bladefall on them (12.6 s) and lane 0 throws glintblades at
@@ -130,7 +131,8 @@ pub(super) fn lanes() -> Vec<Lane> {
         casts,
     };
     vec![
-        // Lane 0 stands far out on the left of the line: its glintblades fly into the picture.
+        // Lane 0 stands at the far end of the line, off the right of the picture: its
+        // glintblades fly into it.
         of(vec![
             cast(3.6, glintblades(), AimAt::Golem),
             cast(5.0, glintblades(), AimAt::Golem),

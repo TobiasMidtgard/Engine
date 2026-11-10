@@ -364,7 +364,11 @@ pub fn skeleton_stance(
             st.fists[0] = st.fists[0].lerp(Vec3::new(-0.1, -0.25, -0.3), out);
             st.pitch = LEAN;
         }
-        Act::Ready | Act::Punch { .. } | Act::Slam { .. } => {}
+        Act::Ready
+        | Act::Punch { .. }
+        | Act::Slam { .. }
+        | Act::Pounce { .. }
+        | Act::Bite { .. } => {}
     }
     st
 }

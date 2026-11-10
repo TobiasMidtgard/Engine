@@ -1435,7 +1435,9 @@ pub fn strike_imbued(
             || minion.is_some_and(|m| {
                 matches!(
                     m.kind,
-                    crate::summon::MinionKind::Golem | crate::summon::MinionKind::Skeleton
+                    crate::summon::MinionKind::Golem
+                        | crate::summon::MinionKind::Skeleton
+                        | crate::summon::MinionKind::Hellhound
                 )
             });
         let spell_made = by_spell.contains(&(Some(src), Some(ev.target)));

@@ -25,6 +25,7 @@
 //! | `spells_cataclysm` | Cataclysm: a burning meteor on a dummy among crates (its ring, the fall, the blast, a burning crater that cools), a Master's swarm of five, and fault lines that run down a lane throwing its dummies, then burst again ([`cataclysm`], [`crate::cataclysm`]) |
 //! | `spells_minds` | minds: necromancers raise a golem and skeletons; students answer with three decoys the skeletons cut into glass, a mirror image on the dais, a terror wave that sends the dead running, a frenzy that turns them on each other, and a command that turns the golem on its own side ([`minds`], [`crate::minds`]) |
 //! | `spells_blades` | spellblades: necromancers imbue their golem and skeletons with fire (blades and fists burn, every cut sets fire); students answer with a phalanx of five swords over a head that loose themselves at the dead, two spirit blades that fence with skeletons, fans of glintblades at the golem, frost bladefalls down the line of the dead, and a bound blade in the hand ([`blades`], [`crate::blades`]) |
+//! | `spells_pacts` | pacts: warlocks open a hellgate on the floor that hellhounds leap out of and imps fly from, bind the students' golem in chains out of a burning sigil, drag their elemental in on a chain hook, bind their creatures' fates together and throw demonic meteors that burst into imps; the students answer with a phalanx, frost bladefalls and frost bolts and glintblades that break the gate ([`pacts`], [`crate::chains`], [`crate::demons`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -38,6 +39,7 @@ pub mod craft;
 pub mod duel;
 pub mod kinesis;
 pub mod minds;
+pub mod pacts;
 pub mod player;
 pub mod portal;
 pub mod shield;
@@ -279,6 +281,19 @@ pub const VIEWS: &[DemoView] = &[
         // The phalanx loosing at the first of the dead, the spirit blades at them.
         warmup: 6.4,
     },
+    DemoView {
+        key: "spells_pacts",
+        name: "Pacts: a hellgate with hounds and imps, binding chains, a chain hook and demonic meteors",
+        // From the floor down the hall at a little over head height, looking up at the dais:
+        // the gate before lane 3's plinth faces the camera on the left of the picture with its
+        // hounds leaping out of it, the students' golem and elemental mid-floor to its right
+        // (the students' plinths are on the right: the camera looks +z, so -x is right).
+        eye: [1.3, 2.4, -2.6],
+        target: [0.7, 1.6, 6.5],
+        hour: 16.6,
+        // The golem bound in chains with the hounds at it, the first imps over the floor.
+        warmup: 5.6,
+    },
 ];
 
 /// What the hall is running.
@@ -306,10 +321,11 @@ pub enum Program {
     Cataclysm,
     Minds,
     Blades,
+    Pacts,
 }
 
 impl Program {
-    pub const ALL: [Program; 20] = [
+    pub const ALL: [Program; 21] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -330,6 +346,7 @@ impl Program {
         Program::Cataclysm,
         Program::Minds,
         Program::Blades,
+        Program::Pacts,
     ];
 
     pub fn key(self) -> &'static str {
@@ -354,6 +371,7 @@ impl Program {
             Program::Cataclysm => "spells_cataclysm",
             Program::Minds => "spells_minds",
             Program::Blades => "spells_blades",
+            Program::Pacts => "spells_pacts",
         }
     }
 
@@ -396,6 +414,8 @@ impl Program {
             Program::Minds => minds::PERIOD,
             // The dead last 21.6 s; the restart clears the blades still standing.
             Program::Blades => blades::PERIOD,
+            // The students' creatures last 21.6 s; what is left of the pact falls at the end.
+            Program::Pacts => pacts::PERIOD,
         }
     }
 
@@ -423,6 +443,10 @@ enum AimAt {
     Mage(usize),
     /// The nearest golem of another side, else the lane's far dummy.
     Golem,
+    /// The nearest creature of that kind on another side, else the nearest foe.
+    Kind(crate::summon::MinionKind),
+    /// The nearest hellgate of another side, else the nearest foe.
+    Gate,
     /// A point (x, y, z) from the hall's center.
     At(f64, f64, f64),
 }
@@ -954,6 +978,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
         Program::Cataclysm => cataclysm::lanes(),
         Program::Minds => minds::lanes(),
         Program::Blades => blades::lanes(),
+        Program::Pacts => pacts::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -1020,7 +1045,7 @@ pub const WARD_BARRAGE_END: f32 = 13.0;
 fn two_sides(program: Program) -> bool {
     matches!(
         program,
-        Program::Dead | Program::Ward | Program::Minds | Program::Blades
+        Program::Dead | Program::Ward | Program::Minds | Program::Blades | Program::Pacts
     )
 }
 
@@ -1160,6 +1185,8 @@ fn setup_program(
         commands.queue(crate::cataclysm::clear);
         commands.queue(crate::minds::clear);
         commands.queue(crate::blades::clear);
+        commands.queue(crate::chains::clear);
+        commands.queue(crate::demons::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -1216,7 +1243,7 @@ fn setup_program(
             };
             if program == Program::Duel {
                 commands.entity(e).insert(duel::student(&mut c, m.lane));
-            } else if program == Program::Blades {
+            } else if matches!(program, Program::Blades | Program::Pacts) {
                 // Three waves of burning dead reach the plinths: the masters on them stand the
                 // whole period (a body that falls goes limp off its plinth, and its lane's
                 // blades never come).
@@ -1292,6 +1319,7 @@ fn setup_program(
                 | Program::Shield
                 | Program::Minds
                 | Program::Blades
+                | Program::Pacts
         ) {
             t.home - DVec3::Y * 40.0
         } else {
@@ -1461,10 +1489,11 @@ fn run_hall(
     mages: Query<(Entity, &HallMage, &MagicCaster)>,
     targets: Query<(Entity, &HallTarget, Has<ProgramProp>)>,
     cams: Query<(&Camera, &GlobalTransform)>,
-    (mage_at, creatures, thralls): (
+    (mage_at, creatures, thralls, gates): (
         Query<&GlobalTransform, With<HallMage>>,
         Query<(Entity, &Minion, &GlobalTransform)>,
         Query<(Entity, &Thrall, &GlobalTransform)>,
+        Query<(Entity, &crate::demons::Hellgate, &crate::caster::Vitality)>,
     ),
     mut casts: MessageWriter<CastRequest>,
     mut commands: Commands,
@@ -1514,9 +1543,14 @@ fn run_hall(
             | Program::Cataclysm
             | Program::Minds
             | Program::Blades
+            | Program::Pacts
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
+    }
+    // The pact ends with the period: its gate closes and its demons fall in fire.
+    if hall.program == Program::Pacts && hall.cycle != cycle {
+        commands.queue(crate::demons::dismiss);
     }
     let plan = lanes(hall.program, cycle);
     for (e, m, caster) in &mages {
@@ -1553,32 +1587,66 @@ fn run_hall(
                         hall.origin
                             + DVec3::new(LANES.get(lane).copied().unwrap_or(0.0), FLOOR, MAGE_Z),
                     )),
-                AimAt::Golem | AimAt::Foe => {
+                AimAt::Golem | AimAt::Foe | AimAt::Kind(_) | AimAt::Gate => {
                     let me = mage_at
                         .get(e)
                         .map(|g| g.translation())
                         .unwrap_or(hall.origin);
-                    creatures
-                        .iter()
-                        // Not one still climbing out of the floor (it is under it).
-                        .filter(|(_, mn, _)| {
-                            mn.cast.side != caster.side
-                                && !matches!(mn.act, crate::summon::Act::Rise { .. })
-                                && (c.aim != AimAt::Golem
-                                    || mn.kind == crate::summon::MinionKind::Golem)
-                        })
-                        .map(|(c, _, g)| (c, g.translation()))
-                        .chain(
-                            thralls
-                                .iter()
-                                .filter(|(_, t, _)| t.cast.side != caster.side)
-                                .map(|(c, _, g)| (c, g.translation())),
-                        )
-                        .min_by(|a, b| a.1.distance(me).total_cmp(&b.1.distance(me)))
-                        .map(|(c, _)| Aim::Entity(c))
-                        .unwrap_or(Aim::Point(
-                            hall.origin + DVec3::new(LANES[m.lane], FLOOR, DUMMY_Z),
-                        ))
+                    let near = |a: &(Entity, DVec3), b: &(Entity, DVec3)| {
+                        a.1.distance(me).total_cmp(&b.1.distance(me))
+                    };
+                    // The nearest creature of another side (of a kind), not one still climbing
+                    // out of the floor (it is under it).
+                    let foe = |kind: Option<crate::summon::MinionKind>| {
+                        creatures
+                            .iter()
+                            .filter(move |(_, mn, _)| {
+                                mn.cast.side != caster.side
+                                    && !matches!(mn.act, crate::summon::Act::Rise { .. })
+                                    && kind.is_none_or(|k| mn.kind == k)
+                            })
+                            .map(|(c, _, g)| (c, g.translation()))
+                    };
+                    let thrall_foes = || {
+                        thralls
+                            .iter()
+                            .filter(|(_, t, _)| t.cast.side != caster.side)
+                            .map(|(c, _, g)| (c, g.translation()))
+                    };
+                    // Through the middle of the nearest open gate of another side.
+                    let gate = || {
+                        gates
+                            .iter()
+                            .filter(|(_, g, v)| {
+                                g.cast.side != caster.side && g.closing.is_none() && !v.down()
+                            })
+                            .map(|(ge, g, _)| (ge, g.at + DVec3::Y * (1.5 * g.size) as f64))
+                            .min_by(near)
+                    };
+                    let far = Aim::Point(hall.origin + DVec3::new(LANES[m.lane], FLOOR, DUMMY_Z));
+                    match c.aim {
+                        AimAt::Gate => gate()
+                            .map(|(_, at)| Aim::Point(at))
+                            .or_else(|| {
+                                foe(None)
+                                    .chain(thrall_foes())
+                                    .min_by(near)
+                                    .map(|f| Aim::Entity(f.0))
+                            })
+                            .unwrap_or(far),
+                        AimAt::Kind(k) => foe(Some(k))
+                            .min_by(near)
+                            .or_else(|| foe(None).chain(thrall_foes()).min_by(near))
+                            .map(|f| Aim::Entity(f.0))
+                            .unwrap_or(far),
+                        _ => {
+                            foe((c.aim == AimAt::Golem).then_some(crate::summon::MinionKind::Golem))
+                                .chain(thrall_foes())
+                                .min_by(near)
+                                .map(|f| Aim::Entity(f.0))
+                                .unwrap_or(far)
+                        }
+                    }
                 }
             };
             let spell = match &c.design {

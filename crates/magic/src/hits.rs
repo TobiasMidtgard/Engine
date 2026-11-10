@@ -172,10 +172,10 @@ pub fn apply_hits(
             .map(|(g, c, b, comb, ch, f)| (g.map(|g| g.translation()), c, b, comb, ch, f))
             .unwrap_or((None, None, None, false, false, None));
         // Who a spell may touch: filters and safeguard.
-        if let Some(t) = target
-            && creature
-        {
-            let friend = h.cast.friend(t, t_caster, t_faction, factions.as_deref());
+        let friend = target.is_some_and(|t| {
+            creature && h.cast.friend(t, t_caster, t_faction, factions.as_deref())
+        });
+        if target.is_some() && creature {
             let skip = match spell.filter {
                 TargetFilter::Enemies => friend,
                 TargetFilter::Allies => !friend,
@@ -307,6 +307,25 @@ pub fn apply_hits(
                         .extend(crate::stone::grip_stones(feet, t, secs + 1.0, seed));
                 }
                 aff.rooted = aff.rooted.max(secs);
+            }
+            // Chains burst out of the floor and bind it (chains.rs): held while they hold. A
+            // body already bound is held longer, not bound again.
+            // Pact chains bind foes, never the warlock's own (an area of them lands on both).
+            if p.bind_secs > 0.0 && !h.cast.reaction && !friend {
+                let secs = p.bind_secs * scale.clamp(0.5, 1.5);
+                queue.binds.push(crate::chains::NewBind {
+                    cast: h.cast.clone(),
+                    target: t,
+                    secs,
+                });
+                aff.bound = aff.bound.max(secs);
+            }
+            // A hook bites: it drags the body in (chains.rs).
+            if p.hook && h.impact && !h.multi && !friend {
+                queue.hooks.push(crate::chains::NewHook {
+                    cast: h.cast.clone(),
+                    target: t,
+                });
             }
             if p.fear_secs > 0.0 && base_damage <= 0.0 {
                 aff.dread = aff.dread.max(p.fear_secs);
@@ -520,6 +539,21 @@ pub fn apply_hits(
                         .get(under.entity)
                         .is_ok_and(|c| !matches!(c.shape, ColliderShape::Heightfield { .. }))
                 });
+        // A demonic meteor bursts into imps where it lands (demons.rs).
+        if h.impact
+            && p.demons > 0
+            && matches!(spell.cast, CastType::Bolt | CastType::Lob)
+            && h.cast.depth == 0
+        {
+            let filter = target.map_or_else(QueryFilter::default, QueryFilter::excluding);
+            let back = Vec3::new(-h.dir.x, 0.0, -h.dir.z).normalize_or(Vec3::Z);
+            queue.hellgates.push(crate::demons::NewHellgate {
+                cast: h.cast.clone(),
+                at: crate::runtime::ground_below(&queries, h.point + DVec3::Y * 0.3, &filter),
+                facing: back,
+                meteor: true,
+            });
+        }
         if h.impact {
             let blast_r = if matches!(spell.cast, CastType::Area) {
                 spell.carrier.radius
@@ -762,6 +796,7 @@ pub fn apply_hits(
                     jumps_left: r.reaction.chains,
                     next_in: 0.1,
                     from_reaction: true,
+                    first: None,
                 }));
             }
         }

@@ -538,6 +538,12 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
         } else {
             (key, name, color)
         }
+    } else if ingredients.iter().any(|k| k == "demon") && elements.is_empty() {
+        // A pact's demons come in hellfire: fire's look, a deeper red (demons.rs).
+        ("fire".to_string(), name, DEMON_COLOR)
+    } else if ingredients.iter().any(|k| k == "chains") && elements.is_empty() {
+        // Chains are iron and embers: shadow's look in the embers' red (chains.rs).
+        ("shadow".to_string(), name, crate::chains::EMBER)
     } else if ingredients.iter().any(|k| k == "raise") && elements.is_empty() {
         // Raising the dead is dark: it looks like shadow, in the grave's violet, not like the
         // green of the Life domain its dials sit in (a bone blade's cut would puff green).
@@ -567,6 +573,8 @@ pub const STONE_COLOR: [f32; 3] = [0.42, 0.38, 0.33];
 
 /// The raised dead's color: the violet of the grave light in their eyes, linear RGB.
 pub const RAISE_COLOR: [f32; 3] = [0.62, 0.3, 1.0];
+/// Hellfire: a pact's demons' red.
+pub const DEMON_COLOR: [f32; 3] = [1.0, 0.24, 0.05];
 
 /// The look key of an effect without an element: its strongest domain.
 fn look_of_dials(dials: &Dials) -> String {

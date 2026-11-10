@@ -6,7 +6,7 @@
 //! |---|---|
 //! | [`dials`] | the seven domains and fourteen poles every effect is made of |
 //! | [`schools`] | elements, statuses, classes and subclasses, mastery tiers, power |
-//! | [`effects`] | the 26 effects |
+//! | [`effects`] | the 32 effects |
 //! | [`design`] | `SpellDesign`: effects + cast type + modifiers + stages, as JSON |
 //! | [`combine`] | the combination table and the systemic fallback |
 //! | [`compile`] | from a design and a caster to the numbers a spell flies with |
@@ -24,6 +24,8 @@
 //! | [`undead`] | raise dead: thralls from fallen bodies, skeleton warriors and mages from the ground |
 //! | [`minds`] | mirror images and decoys, command and wrath, fear that sends creatures running |
 //! | [`blades`] | conjured blades (glintblade, phalanx, bladefall, spirit blade, bound blade) and imbued weapons |
+//! | [`chains`] | pact chains: bindings out of the floor, hooks that drag, bonds that share pain |
+//! | [`demons`] | a pact's demons: hellgates, demonic meteors, imps and hellhounds |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
 //! | [`crafter`] | the Spellcrafter: an altar where you build a spell in four steps, see its cost, watch it fly at a dummy and put it on a key |
@@ -38,10 +40,12 @@ pub mod api;
 pub mod blades;
 pub mod caster;
 pub mod cataclysm;
+pub mod chains;
 pub mod combine;
 pub mod compile;
 pub mod crafter;
 pub mod demo;
+pub mod demons;
 pub mod design;
 pub mod dials;
 pub mod effects;
@@ -163,6 +167,7 @@ impl Plugin for MagicPlugin {
                     tether::draw_tethers,
                     kinesis::draw_grips,
                     minds::draw_threads,
+                    demons::dress_wings,
                 )
                     .chain(),
             )
@@ -195,8 +200,21 @@ impl Plugin for MagicPlugin {
                     kinesis::guard_rings,
                     meet::meet_spells,
                     undead::raise_dead,
+                    (
+                        demons::spawn_hellgates,
+                        demons::run_hellgates,
+                        demons::ride_meteors,
+                    )
+                        .chain(),
                     summon::run_minions,
                     undead::run_thralls,
+                    (
+                        chains::spawn_pacts,
+                        chains::run_pacts,
+                        chains::share_bonds,
+                        chains::pay_bonds,
+                    )
+                        .chain(),
                 )
                     .chain()
                     .in_set(MagicSet::Carriers),
@@ -235,6 +253,8 @@ impl Plugin for MagicPlugin {
                     summon::follow_world_shift,
                     cataclysm::follow_world_shift,
                     blades::follow_world_shift,
+                    chains::follow_world_shift,
+                    demons::follow_world_shift,
                 )
                     .in_set(WorldShiftSet::Apply)
                     .before(runtime::sync_transforms),
@@ -247,6 +267,8 @@ impl Plugin for MagicPlugin {
         cataclysm::register(app);
         minds::register(app);
         blades::register(app);
+        chains::register(app);
+        demons::register(app);
         demo::build(app);
     }
 }

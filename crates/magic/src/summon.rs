@@ -59,6 +59,10 @@ pub enum MinionKind {
     /// A skeleton that keeps its distance and shoots bolts of its element (Diablo IV's
     /// skeletal mage).
     SkeletalMage,
+    /// A pact's winged little devil that throws firebolts (demons.rs).
+    Imp,
+    /// A pact's hound of burning stone that pounces and bites (demons.rs).
+    Hellhound,
 }
 
 impl MinionKind {
@@ -69,6 +73,16 @@ impl MinionKind {
 
     pub fn skeletal(self) -> bool {
         matches!(self, Self::Skeleton | Self::SkeletalMage)
+    }
+
+    /// A pact's demon (demons.rs).
+    pub fn demon(self) -> bool {
+        matches!(self, Self::Imp | Self::Hellhound)
+    }
+
+    /// Goes about on the floor: walkers and hounds.
+    pub fn grounded(self) -> bool {
+        self.walks() || self == Self::Hellhound
     }
 }
 
@@ -96,6 +110,9 @@ pub fn kind_of(spell: &Spell) -> Option<MinionKind> {
 /// How many of a kind a caster keeps: one of each, two from Master up (Skyrim's Twin Souls);
 /// skeletons by the handful, more with skill, as Diablo II's Raise Skeleton keeps 1 to 8.
 pub fn limit(kind: MinionKind, mastery: Mastery) -> usize {
+    if kind.demon() {
+        return crate::demons::limit(kind, mastery);
+    }
     if kind.skeletal() {
         match mastery {
             Mastery::Novice => 1,
@@ -273,8 +290,18 @@ pub enum Act {
     Slash {
         t: f32,
     },
-    /// Gathering a bolt (elementals, skeletal mages).
+    /// Gathering a bolt (elementals, skeletal mages, imps).
     Shoot {
+        t: f32,
+    },
+    /// A hound's leap from one spot of the floor to another (demons.rs).
+    Pounce {
+        t: f32,
+        from: DVec3,
+        to: DVec3,
+    },
+    /// A hound's bite: jaws open, snap shut, draw back.
+    Bite {
         t: f32,
     },
 }
@@ -344,6 +371,10 @@ pub struct Minion {
     pub parts: Vec<Entity>,
     /// Which side of its summoner it keeps (+1 right, -1 left).
     pub flank: f32,
+    /// A demon's wingbeat or stride, 0..1.
+    pub phase: f32,
+    /// Seconds until a hound may pounce again; an imp's follow-through after a throw.
+    pub leap_in: f32,
 }
 
 /// The pieces of a minion that strike (its [`MinionPart::index`]es): a golem's fists, a
@@ -354,6 +385,8 @@ pub fn weapon_parts(kind: MinionKind) -> &'static [usize] {
         MinionKind::Golem => &[ARM[0] + 2, ARM[1] + 2],
         MinionKind::Skeleton | MinionKind::SkeletalMage => &[crate::undead::HELD],
         MinionKind::Elemental | MinionKind::Wisp => &[0],
+        MinionKind::Imp => &[crate::demons::IMP_FIRE],
+        MinionKind::Hellhound => &[crate::demons::HOUND_JAW],
     }
 }
 
@@ -494,7 +527,11 @@ pub fn stance(act: Act, feet: [Vec3; 2], stepping: Option<(usize, f32)>, dip: f3
                 *f = f.lerp(over, raise).lerp(down, smash);
             }
         }
-        Act::Ready | Act::Shoot { .. } | Act::Slash { .. } => {}
+        Act::Ready
+        | Act::Shoot { .. }
+        | Act::Slash { .. }
+        | Act::Pounce { .. }
+        | Act::Bite { .. } => {}
     }
     st
 }
@@ -619,6 +656,9 @@ pub fn step_feet(
 /// The attack a minion makes: a golem's punch (and slam), an elemental's bolt of its weave, a
 /// wisp's heal. Never on its own side.
 pub fn attacks(kind: MinionKind, spell: &Spell, k: f32) -> (Arc<Spell>, Option<Arc<Spell>>) {
+    if kind.demon() {
+        return (crate::demons::attacks(kind, spell, k), None);
+    }
     let blow = |dir: ForceDir, impulse: f32, damage: f32| {
         let mut s = spell.clone();
         s.cast = CastType::Touch;
@@ -643,6 +683,7 @@ pub fn attacks(kind: MinionKind, spell: &Spell, k: f32) -> (Arc<Spell>, Option<A
         // A bone blade's cut: quick, light, a little push. One skeleton is weak (Diablo IV's
         // minions take about 30% of their master's strength); a pack is not.
         MinionKind::Skeleton => (blow(ForceDir::Away, 90.0, 0.3), None),
+        MinionKind::Imp | MinionKind::Hellhound => unreachable!("demons are made above"),
         MinionKind::Elemental | MinionKind::SkeletalMage => {
             let keys: Vec<&str> = spell.weave.elements.iter().map(|e| e.key()).collect();
             let bolt = compile(
@@ -747,7 +788,13 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     let seed = m.cast.seed as u64;
     let color = glow_color(&spell);
     let element = spell.element();
-    let life = spell.carrier.duration.max(1.0);
+    // A demon out of a meteor (a missile, with no time of its own) lasts the pact's time.
+    let life = if m.kind.demon() {
+        spell.carrier.duration.max(spell.payload.demon_secs)
+    } else {
+        spell.carrier.duration
+    }
+    .max(1.0);
     let bone = spell.payload.raise > 0.0;
     let (pos, health) = match m.kind {
         // A bone golem is lighter than a stone one (round-6-plan.md: 300).
@@ -757,6 +804,9 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         // Weak alone (Diablo II's skeletons die to a few blows), strong in numbers.
         MinionKind::Skeleton => (m.at, 60.0 * k),
         MinionKind::SkeletalMage => (m.at, 45.0 * k),
+        // Out of a crater or a gate, flying.
+        MinionKind::Imp => (m.at + DVec3::Y * 1.2, crate::demons::IMP_HEALTH * k),
+        MinionKind::Hellhound => (m.at, crate::demons::HOUND_HEALTH * k),
     };
     // A walker climbs out of the floor: it starts below it.
     let start = if m.kind.walks() {
@@ -772,6 +822,8 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         MinionKind::Wisp => "Summoned wisp",
         MinionKind::Skeleton => "Skeleton warrior",
         MinionKind::SkeletalMage => "Skeletal mage",
+        MinionKind::Imp => "Imp",
+        MinionKind::Hellhound => "Hellhound",
     };
     let root = commands
         .spawn((
@@ -904,6 +956,9 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
                 radius: 0.1,
             });
         }
+        MinionKind::Imp | MinionKind::Hellhound => {
+            crate::demons::build(commands, root, m.kind, k, seed, &spell, &mut parts, looks);
+        }
         MinionKind::Wisp => {
             part(commands, 0, Vec3::ZERO, glow(0.22, color, 120.0));
             for i in 0..3 {
@@ -924,6 +979,8 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         up: Vec3::Y,
         look: if bone || m.kind.skeletal() {
             "raise".into()
+        } else if m.kind.demon() {
+            "fire".into()
         } else if m.kind == MinionKind::Golem {
             "stone".into()
         } else {
@@ -955,6 +1012,14 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         cooldown: 0.0,
         act: if m.kind.walks() {
             Act::Rise { t: 0.0 }
+        } else if m.kind == MinionKind::Hellhound {
+            // It leaps out of its gate onto the floor before it.
+            let f = Vec3::new(m.facing.x, 0.0, m.facing.z).normalize_or(Vec3::NEG_Z);
+            Act::Pounce {
+                t: 0.0,
+                from: m.at + DVec3::Y * 0.7 + (f * 0.2).as_dvec3(),
+                to: m.at + (f * crate::demons::GATE_LEAP_M * k).as_dvec3(),
+            }
         } else {
             Act::Ready
         },
@@ -964,6 +1029,8 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         spin: roll(seed, 3) * TAU,
         parts,
         flank: if roll(seed, 5) < 0.5 { -1.0 } else { 1.0 },
+        phase: roll(seed, 6),
+        leap_in: 0.0,
     });
     root
 }
@@ -1059,20 +1126,21 @@ pub fn run_minions(
         }
     }
     let g = gravity.at(DVec3::ZERO).length();
-    // The ground under a minion is the floor, never another minion or the loose rocks and
-    // bones of a fallen one: a step onto a neighbour's collider would climb it, and a step
+    // The ground under a minion is the floor, never another minion, a body or the loose rocks
+    // and bones of a fallen one: a step onto a neighbour's collider would climb it, and a step
     // onto a tumbling rock would stand on it and shove it into the air.
     let ground = QueryFilter {
         exclude: minions
             .iter()
             .map(|(e, ..)| e)
+            .chain(bodies.iter().map(|b| b.0))
             .chain(rubble.iter())
             .collect(),
         ..Default::default()
     };
     let crowd: Vec<(Entity, DVec3, f32)> = minions
         .iter()
-        .filter(|(_, m, ..)| m.kind.walks() && !matches!(m.act, Act::Rise { .. }))
+        .filter(|(_, m, ..)| m.kind.grounded() && !matches!(m.act, Act::Rise { .. }))
         .map(|(e, m, ..)| (e, m.pos, body_radius(m.kind, m.size)))
         .collect();
     for (e, mut m, mut tf, vit, local, statuses, afflictions, _, imbued) in &mut minions {
@@ -1104,7 +1172,7 @@ pub fn run_minions(
         let held = statuses.is_some_and(|s| s.rooted || s.frozen);
         // Terrified: it drops its foe and runs from the terror (minds.rs).
         let fleeing = afflictions
-            .filter(|a| a.dread > 0.0 && m.kind.walks())
+            .filter(|a| a.dread > 0.0 && (m.kind.walks() || m.kind.demon()))
             .and_then(|a| a.dread_from);
         let owner = m
             .cast
@@ -1140,7 +1208,7 @@ pub fn run_minions(
                 _ => {
                     // Creatures fight creatures first (minions engage minions); a caster or a
                     // dummy only when no enemy creature is in reach.
-                    let reach = if m.kind.walks() { AGGRO_M } else { SHOOT_M };
+                    let reach = if m.kind.grounded() { AGGRO_M } else { SHOOT_M };
                     seen.filter(|s| !s.friend && s.hurt >= 0.0 && near(s.at, reach) && leash(s.at))
                         .min_by(|a, b| {
                             (!a.creature, a.at.distance(m.pos))
@@ -1356,7 +1424,7 @@ pub fn run_minions(
                             m.cooldown = crate::undead::MAGE_EVERY - GATHER_SECS;
                         }
                     }
-                    Act::Ready => {}
+                    Act::Ready | Act::Pounce { .. } | Act::Bite { .. } => {}
                 }
                 // Where to go: to the foe, else beside its summoner.
                 let mut speed = 0.0;
@@ -1657,6 +1725,27 @@ pub fn run_minions(
                 tf.rotation = Quat::from_rotation_y(m.yaw);
                 pose_shell(&m, gather, &mut parts);
             }
+            MinionKind::Imp | MinionKind::Hellhound => {
+                let mut life = crate::demons::Life {
+                    e,
+                    dt,
+                    g,
+                    queries: &queries,
+                    exclude,
+                    target,
+                    owner,
+                    held,
+                    fleeing,
+                    crowd: &crowd,
+                    hits: &mut hits,
+                    queue: &mut queue,
+                };
+                if m.kind == MinionKind::Imp {
+                    crate::demons::live_imp(&mut m, &mut tf, &mut life, &mut parts);
+                } else {
+                    crate::demons::live_hound(&mut m, &mut tf, &mut life, &mut parts);
+                }
+            }
             MinionKind::Wisp => {
                 // Circle above the hurt ally's shoulder (or the summoner) and heal.
                 let host = target.map(|t| t.1).or(owner.map(|o| o.0));
@@ -1733,7 +1822,7 @@ fn flat(d: DVec3) -> DVec3 {
     DVec3::new(d.x, 0.0, d.z)
 }
 
-fn flat_distance(a: DVec3, b: DVec3) -> f64 {
+pub fn flat_distance(a: DVec3, b: DVec3) -> f64 {
     let d = a - b;
     DVec3::new(d.x, 0.0, d.z).length()
 }
@@ -1746,6 +1835,42 @@ pub fn reach_of(k: f32) -> f32 {
 /// How much room a walker keeps from another walker, m.
 pub fn body_radius(kind: MinionKind, k: f32) -> f32 {
     if kind.skeletal() { 0.34 * k } else { 0.75 * k }
+}
+
+/// The pieces chains bite on (chains.rs): its wrists then its ankles, left then right (a
+/// golem's fists and feet, a skeleton's hands and feet); a floating creature's heart.
+pub fn limb_parts(kind: MinionKind) -> [usize; 4] {
+    match kind {
+        MinionKind::Golem => [ARM[0] + 2, ARM[1] + 2, LEG[0] + 2, LEG[1] + 2],
+        MinionKind::Skeleton | MinionKind::SkeletalMage => {
+            use crate::undead::{ARM as A, LEG as L};
+            [A[0] + 2, A[1] + 2, L[0] + 2, L[1] + 2]
+        }
+        MinionKind::Elemental | MinionKind::Wisp => [0; 4],
+        MinionKind::Imp | MinionKind::Hellhound => crate::demons::limb_parts(kind),
+    }
+}
+
+/// How tall a minion stands, m (a floating one: its shell's height, about its middle).
+pub fn body_height(kind: MinionKind, k: f32) -> f32 {
+    match kind {
+        MinionKind::Golem => 2.6 * k,
+        MinionKind::Skeleton | MinionKind::SkeletalMage => 1.75 * k,
+        MinionKind::Elemental => SHELL_M * k,
+        MinionKind::Wisp => 0.6,
+        MinionKind::Imp => 0.9 * k,
+        MinionKind::Hellhound => 1.0 * k,
+    }
+}
+
+/// Where a minion's chest is above its feet (a floating one: its middle), m.
+pub fn chest_height(kind: MinionKind, k: f32) -> f32 {
+    match kind {
+        MinionKind::Golem => 1.75 * k,
+        MinionKind::Skeleton | MinionKind::SkeletalMage => 1.25 * k,
+        MinionKind::Elemental | MinionKind::Wisp | MinionKind::Imp => 0.0,
+        MinionKind::Hellhound => 0.7 * k,
+    }
 }
 
 /// An elemental's shards ring its core on tilted orbits, faster while it gathers a bolt; a
@@ -1806,6 +1931,7 @@ fn fall(
             * match m.kind {
                 MinionKind::Golem => 1.5 * m.size,
                 MinionKind::Skeleton | MinionKind::SkeletalMage => 1.0 * m.size,
+                MinionKind::Hellhound => 0.7 * m.size,
                 _ => 0.0,
             } as f64;
     for &p in &m.parts {
@@ -1854,6 +1980,27 @@ fn fall(
         ));
     }
     let bone = skeletal || spell.payload.raise > 0.0;
+    if m.kind.demon() {
+        // A demon burns away: a gout of fire, ash and embers, and nothing left.
+        for (look, scale) in [("fire", 1.0), ("ash", 1.2)] {
+            queue.looks.push(LookCmd::Burst {
+                at: center,
+                up: Vec3::Y,
+                look: look.into(),
+                role: Role::Impact,
+                scale: scale * m.size * if m.kind == MinionKind::Imp { 0.6 } else { 1.0 },
+                color: crate::demons::HELLFIRE,
+            });
+        }
+        queue.looks.push(LookCmd::Effect {
+            name: "embers",
+            at: center,
+            up: Vec3::Y,
+            scale: m.size,
+        });
+        commands.entity(e).despawn();
+        return;
+    }
     queue.looks.push(LookCmd::Burst {
         // Particles' bone splinters fly from about 0.7 m over the floor point they are given.
         at: if bone { tf.translation } else { center },

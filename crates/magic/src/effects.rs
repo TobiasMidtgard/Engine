@@ -70,6 +70,9 @@ pub enum EffectKind {
     /// flying glintblade, a phalanx over the head, a bladefall, a spirit blade that fights
     /// beside its caster or a blade in the hand.
     Blade,
+    /// A pact's demons (Pactbinding, demons.rs): the cast type makes it a hellgate they pour
+    /// out of, or a demonic meteor they leap out of.
+    Demon,
 }
 
 /// One entry of the effect catalog.
@@ -116,6 +119,7 @@ impl EffectDef {
             EffectKind::Command => Dials::pole(Pole::Reveal, 0.8) + Dials::pole(Pole::Pull, 0.4),
             EffectKind::Wrath => Dials::pole(Pole::Veil, 0.6) + Dials::pole(Pole::Heat, 0.4),
             EffectKind::Blade => Dials::pole(Pole::Push, 0.8) + Dials::pole(Pole::Form, 0.5),
+            EffectKind::Demon => Dials::pole(Pole::Heat, 0.6) + Dials::pole(Pole::Form, 0.6),
         }
     }
 
@@ -142,6 +146,7 @@ impl EffectDef {
                 | EffectKind::Command
                 | EffectKind::Wrath
                 | EffectKind::Blade
+                | EffectKind::Demon
                 | EffectKind::Force { .. }
                 | EffectKind::TimeScale { factor: ..1.0 }
         )
@@ -355,7 +360,8 @@ pub const EFFECTS: &[EffectDef] = &[
             dir: ForceDir::Down,
             strength: 1.6,
         },
-        "Chains that drag the victim down and pin them.",
+        "Iron chains: out of the floor they bind and pin, on a bolt they hook and drag, hopping \
+         from foe to foe they bind their fates together.",
     ),
     def(
         "slow",
@@ -370,6 +376,14 @@ pub const EFFECTS: &[EffectDef] = &[
         Subclass::Pactbinding,
         EffectKind::Blink { dark: true },
         "Step from one shadow to another.",
+    ),
+    def(
+        "demon",
+        "Summon demon",
+        Subclass::Pactbinding,
+        EffectKind::Demon,
+        "A pact's demons: a hellgate that hounds and imps pour out of, or a meteor that bursts \
+         into imps.",
     ),
     // Illusion.
     def(

@@ -148,6 +148,17 @@ pub struct Payload {
     /// Seconds an Imbue rides on its caster's weapon and its creatures' (blades.rs): each
     /// melee hit lands the spell on what it struck. 0: not an imbue.
     pub imbue_secs: f32,
+    /// Seconds chains hold a body they bind (chains.rs; 0: they don't bind).
+    pub bind_secs: f32,
+    /// A hook on a bolt that drags what it bites to the caster (chains.rs).
+    pub hook: bool,
+    /// Seconds a chain's bonds hold the bodies it hops to together (chains.rs; 0: none).
+    pub bond_secs: f32,
+    /// Demons it calls (demons.rs; 0: none): the imps that leap out of a demonic meteor, or the
+    /// hounds a hellgate sends first.
+    pub demons: u32,
+    /// Seconds a hellgate stands and its demons last.
+    pub demon_secs: f32,
     /// A light it leaves, lumens.
     pub light_lm: f32,
     /// Flame temperature for igniting fuel, °C (0: doesn't ignite).
@@ -321,6 +332,12 @@ fn compile_inner(
         .ingredients
         .iter()
         .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Blade)));
+    // Pact chains (chains.rs) and demons (demons.rs).
+    let chained = w.ingredients.iter().any(|k| k == "chains");
+    let demon = w
+        .ingredients
+        .iter()
+        .any(|k| crate::effects::effect(k).is_some_and(|d| matches!(d.kind, EffectKind::Demon)));
     let mods = &design.modifiers;
     let factor = |f: &dyn Fn(&Modifier) -> Option<f32>| -> f32 {
         mods.iter().filter_map(f).product::<f32>().max(0.05)
@@ -514,6 +531,9 @@ fn compile_inner(
         } else if blade && cast != CastType::Imbue {
             // A conjured blade cuts, element or not, shared between a volley's blades.
             ctx.power.damage() * 0.8 * cast.strength() * strength * spread
+        } else if demon && matches!(cast, CastType::Bolt | CastType::Lob) && !harm {
+            // A demonic meteor burns where it lands, fire or not.
+            ctx.power.damage() * 0.9 * cast.strength() * strength * spread
         } else {
             0.0
         };
@@ -540,6 +560,13 @@ fn compile_inner(
             (d, i)
         }
     });
+    // A hook of chains on a bolt drags what it bites back to the caster.
+    let hook = chained && matches!(cast, CastType::Bolt | CastType::Lob);
+    let force = if hook {
+        force.map(|(_, i)| (ForceDir::Toward, i * 1.6))
+    } else {
+        force
+    };
     let has = |f: &dyn Fn(&EffectKind) -> bool| defs.iter().any(|d| f(&d.kind));
     let time = defs.iter().find_map(|d| match d.kind {
         EffectKind::TimeScale { factor } => Some((factor, 6.0 * duration_k)),
@@ -568,6 +595,8 @@ fn compile_inner(
         damage,
         damage_kind: if blade && w.elements.is_empty() {
             DamageKind::Slash
+        } else if demon && w.elements.is_empty() {
+            DamageKind::Fire
         } else {
             damage_kind(&w)
         },
@@ -733,6 +762,46 @@ fn compile_inner(
         },
         imbue_secs: if cast == CastType::Imbue {
             (30.0 * duration_k).clamp(5.0, 120.0)
+        } else {
+            0.0
+        },
+        // Chains out of the floor hold 3 s (a little more with power), more with Duration.
+        bind_secs: if chained
+            && matches!(
+                cast,
+                CastType::Area
+                    | CastType::Rain
+                    | CastType::Rune
+                    | CastType::Wave
+                    | CastType::Wall
+                    | CastType::Cone
+                    | CastType::Touch
+                    | CastType::Summon
+            ) {
+            (3.0 * duration_k * (0.85 + 0.15 * size)).clamp(1.5, 12.0)
+        } else {
+            0.0
+        },
+        hook,
+        // Fatal Bonds hold their bodies 12 s.
+        bond_secs: if chained && cast == CastType::Chain {
+            (12.0 * duration_k).clamp(3.0, 40.0)
+        } else {
+            0.0
+        },
+        // Three imps out of a meteor (Hand of Gul'dan's); a hellgate's two hounds, one more
+        // per Split, before its imps.
+        demons: if !demon {
+            0
+        } else {
+            match cast {
+                CastType::Bolt | CastType::Lob => 3,
+                CastType::Summon => 1 + split.clamp(1, 4),
+                _ => 0,
+            }
+        },
+        demon_secs: if demon {
+            (20.0 * duration_k).clamp(4.0, 90.0)
         } else {
             0.0
         },

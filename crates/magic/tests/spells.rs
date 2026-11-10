@@ -4569,3 +4569,577 @@ fn the_blades_hall_burns_the_dead_and_answers_with_blades() {
         "{shoves:?}"
     );
 }
+
+// ------------------------------------------------------------------------------- pacts
+
+/// The stand-in physics sees a hellgate as a big sphere round its middle.
+fn bodies_for_gates(mut commands: Commands, q: Query<Entity, Added<demons::Hellgate>>) {
+    for e in &q {
+        commands.entity(e).insert(Body(1.3));
+    }
+}
+
+fn pact_app() -> App {
+    let mut a = minds_app();
+    a.world
+        .init_resource::<engine_assets::Assets<engine_render::Mesh>>();
+    a.add_systems(FixedUpdate, bodies_for_gates.in_set(SimSet::Physics));
+    a
+}
+
+fn chains_now(app: &mut App) -> Vec<(Entity, chains::Chain)> {
+    let mut q = app.world.query::<(Entity, &chains::Chain)>();
+    let mut v: Vec<_> = q.iter(&app.world).map(|(e, c)| (e, c.clone())).collect();
+    v.sort_by_key(|c| c.0);
+    v
+}
+
+fn of_kind(app: &mut App, kind: summon::MinionKind) -> Vec<(Entity, summon::Minion)> {
+    minions(app)
+        .into_iter()
+        .filter(|m| m.1.kind == kind)
+        .collect()
+}
+
+#[test]
+fn chains_burst_from_the_floor_and_bind_a_golem_until_they_let_go() {
+    let mut app = pact_app();
+    let (me, warlock) = two_casters(&mut app, 4.0, -14.0);
+    run(&mut app, 0.1);
+    let golem = SpellDesign::new(&["stone"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.3 })
+        .named("Stone golem");
+    cast(&mut app, me, golem, Aim::Point(DVec3::new(0.0, 0.0, 0.0)));
+    run(&mut app, 2.5);
+    let (g, _) = minions(&mut app)[0].clone();
+    let bind = SpellDesign::new(&["chains"], CastType::Area).named("Binding chains");
+    cast(&mut app, warlock, bind, Aim::Entity(g));
+    run(&mut app, 1.2);
+    // A binding holds it with four chains out of a sigil on the floor.
+    let mut q = app.world.query::<&chains::Binding>();
+    let binds: Vec<chains::Binding> = q.iter(&app.world).cloned().collect();
+    assert_eq!(binds.len(), 1, "one binding");
+    assert_eq!(binds[0].target, g);
+    assert_eq!(binds[0].chains.len(), 4);
+    assert!(binds[0].secs >= 1.5);
+    assert!(app.world.get::<Statuses>(g).is_some_and(|s| s.rooted));
+    let held_at = app.world.get::<summon::Minion>(g).unwrap().pos;
+    let found = chains_now(&mut app);
+    assert_eq!(found.len(), 4);
+    for (_, c) in &found {
+        // Each comes out of the floor about a metre from the golem and holds a fist or a foot.
+        assert!(c.a_at.y.abs() < 0.05, "{}", c.a_at);
+        let from =
+            DVec3::new(c.a_at.x, 0.0, c.a_at.z).distance(DVec3::new(held_at.x, 0.0, held_at.z));
+        assert!(from > 0.6 && from < 2.0, "{from}");
+        assert!(c.points.last().unwrap().distance(c.b_at) < 0.01);
+        assert!(c.links.len() >= 4);
+    }
+    // Two hold its fists, up off the floor; the links are drawn on the line.
+    let high = found.iter().filter(|c| c.1.b_at.y > 0.6).count();
+    assert!(high >= 2, "{high}");
+    let (_, c) = &found[0];
+    let link = app
+        .world
+        .get::<Transform>(c.links[c.links.len() / 2])
+        .unwrap();
+    assert!(link.scale.length() > 0.05);
+    // While bound it doesn't move, though a foe stands in reach.
+    run(&mut app, 1.0);
+    let now = app.world.get::<summon::Minion>(g).unwrap().pos;
+    assert!(now.distance(held_at) < 0.05, "{held_at} {now}");
+    // Then the chains let go, fall and are gone, and the golem walks again.
+    run(&mut app, 4.0);
+    assert!(chains_now(&mut app).is_empty());
+    let mut q = app.world.query::<&chains::Binding>();
+    assert_eq!(q.iter(&app.world).count(), 0);
+    assert!(app.world.get::<Statuses>(g).is_some_and(|s| !s.rooted));
+}
+
+#[test]
+fn a_chain_hook_bites_a_golem_and_drags_it_to_its_caster() {
+    let mut app = pact_app();
+    let (me, warlock) = two_casters(&mut app, -3.0, 20.0);
+    run(&mut app, 0.1);
+    let golem = SpellDesign::new(&["stone"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.3 })
+        .named("Stone golem");
+    cast(&mut app, me, golem, Aim::Point(DVec3::new(0.0, 0.0, 0.0)));
+    run(&mut app, 2.5);
+    let (g, m) = minions(&mut app)[0].clone();
+    let before = m.pos;
+    let hook = SpellDesign::new(&["chains"], CastType::Bolt).named("Chain hook");
+    cast(&mut app, warlock, hook, Aim::Entity(g));
+    // While it flies the chain pays out behind it from the hand.
+    let mut paying = false;
+    let mut caught = false;
+    for _ in 0..80 {
+        app.update();
+        let mut q = app.world.query::<&chains::Hook>();
+        for h in q.iter(&app.world) {
+            paying |= h.caught.is_none();
+            caught |= h.caught == Some(g);
+        }
+    }
+    assert!(paying, "no chain behind the bolt");
+    assert!(caught, "the hook never bit");
+    run(&mut app, 0.6);
+    let after = app.world.get::<summon::Minion>(g).unwrap().pos;
+    assert!(after.z - before.z > 6.0, "dragged: {before} {after}");
+    // It comes to a stop before its caster, not on it.
+    assert!(after.distance(DVec3::new(0.0, 0.0, 20.0)) > 1.4, "{after}");
+    run(&mut app, 1.5);
+    let mut q = app.world.query::<&chains::Hook>();
+    assert_eq!(q.iter(&app.world).count(), 0);
+    assert!(chains_now(&mut app).is_empty());
+}
+
+#[test]
+fn fatal_bonds_chain_bodies_together_and_share_their_pain() {
+    let mut app = pact_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 8.0), Mastery::Master);
+    let ds: Vec<Entity> = [-2.0, 0.0, 2.0]
+        .iter()
+        .map(|&x| dummy(&mut app, DVec3::new(x, 0.0, 0.0)))
+        .collect();
+    run(&mut app, 0.1);
+    let bonds = SpellDesign::new(&["chains"], CastType::Chain).named("Fatal bonds");
+    cast(&mut app, me, bonds, Aim::Entity(ds[1]));
+    run(&mut app, 1.0);
+    let mut q = app.world.query::<(Entity, &chains::Bond)>();
+    let found: Vec<(Entity, chains::Bond)> =
+        q.iter(&app.world).map(|(e, b)| (e, b.clone())).collect();
+    assert_eq!(found.len(), 1, "one bond");
+    let (be, bond) = found[0].clone();
+    assert_eq!(bond.members.len(), 3, "{:?}", bond.members);
+    assert_eq!(bond.chains.len(), 2);
+    assert_eq!(chains_now(&mut app).len(), 2);
+    // A fire bolt on one: the others take a quarter of it.
+    app.world.resource_mut::<Seen>().damage.clear();
+    let bolt = SpellDesign::new(&["fire"], CastType::Bolt).named("Firebolt");
+    cast(&mut app, me, bolt, Aim::Entity(ds[0]));
+    run(&mut app, 1.0);
+    let seen = app.world.resource::<Seen>();
+    let blow = seen
+        .damage
+        .iter()
+        .find(|d| d.target == ds[0] && d.source == Some(me))
+        .expect("the bolt struck")
+        .amount;
+    for &o in &ds[1..] {
+        let shared: f32 = seen
+            .damage
+            .iter()
+            .filter(|d| d.target == o && d.source == Some(be))
+            .map(|d| d.amount)
+            .sum();
+        assert!(
+            (shared - blow * chains::BOND_SHARE).abs() < blow * 0.02 + 0.01,
+            "{shared} of {blow}"
+        );
+    }
+    // Shared pain isn't shared again.
+    assert!(seen.damage.iter().filter(|d| d.source == Some(be)).count() == 2);
+}
+
+#[test]
+fn a_hellgate_opens_sends_hounds_then_imps_and_closes_when_broken() {
+    let mut app = pact_app();
+    let (me, warlock) = two_casters(&mut app, 4.0, -12.0);
+    app.world.get_mut::<Vitality>(me).unwrap().max = 4000.0;
+    app.world.get_mut::<Vitality>(me).unwrap().health = 4000.0;
+    run(&mut app, 0.1);
+    let gate = SpellDesign::new(&["demon"], CastType::Summon).named("Hellgate");
+    cast(
+        &mut app,
+        warlock,
+        gate,
+        Aim::Point(DVec3::new(0.0, 0.0, -5.0)),
+    );
+    run(&mut app, 0.5);
+    let mut q = app.world.query::<(Entity, &demons::Hellgate)>();
+    let (ge, g) = q
+        .iter(&app.world)
+        .map(|(e, g)| (e, g.clone()))
+        .next()
+        .expect("a gate opened");
+    assert!(g.at.distance(DVec3::new(0.0, 0.0, -5.0)) < 0.5);
+    // It faces its caster's foe.
+    assert!(g.facing.z > 0.9, "{}", g.facing);
+    assert!(app.world.get::<Vitality>(ge).is_some());
+    run(&mut app, 1.0);
+    assert!(
+        app.world.get::<demons::Hellgate>(ge).unwrap().open() > 0.95,
+        "open after a second"
+    );
+    // Two hounds leap out first, onto the floor in front of it; then they spring at the
+    // student.
+    let mut pounced = false;
+    let mut watch = |app: &mut App, secs: f32| {
+        for _ in 0..(secs * 60.0) as usize {
+            app.update();
+            pounced |= of_kind(app, summon::MinionKind::Hellhound)
+                .iter()
+                .any(|h| matches!(h.1.act, summon::Act::Pounce { .. }) && h.1.attacks > 0);
+        }
+    };
+    watch(&mut app, 1.6);
+    let hounds = of_kind(&mut app, summon::MinionKind::Hellhound);
+    assert_eq!(hounds.len(), 2);
+    assert!(of_kind(&mut app, summon::MinionKind::Imp).is_empty());
+    for (h, m) in &hounds {
+        assert_eq!(m.parts.len(), demons::HOUND_PARTS);
+        assert_eq!(app.world.get::<MagicCaster>(*h).unwrap().side, 2);
+        assert!(m.pos.z > -4.0, "in front of the gate: {}", m.pos);
+    }
+    // Then imps, every few seconds.
+    watch(&mut app, 3.0);
+    let imps = of_kind(&mut app, summon::MinionKind::Imp);
+    assert!(!imps.is_empty(), "no imp came");
+    assert_eq!(imps[0].1.parts.len(), demons::IMP_PARTS);
+    // The hounds pounced on the student and bite it, standing on the floor before it.
+    watch(&mut app, 4.0);
+    assert!(pounced, "no hound pounced");
+    for (_, m) in of_kind(&mut app, summon::MinionKind::Hellhound) {
+        assert!(
+            m.pos.y.abs() < 0.05,
+            "a hound stands on something: {}",
+            m.pos
+        );
+        let gap = summon::flat_distance(m.pos, DVec3::new(0.0, 0.0, 4.0));
+        assert!(gap > 0.6 && gap < 2.2, "{gap}");
+    }
+    let ids: Vec<Entity> = hounds.iter().map(|h| h.0).collect();
+    let seen = app.world.resource::<Seen>();
+    let bites: Vec<&DamageEvent> = seen
+        .damage
+        .iter()
+        .filter(|d| d.source.is_some_and(|s| ids.contains(&s)))
+        .collect();
+    assert!(!bites.is_empty(), "no bite landed");
+    assert!(
+        bites.iter().all(|b| b.target == me),
+        "{:?}",
+        bites.iter().map(|b| (b.target, b.kind)).collect::<Vec<_>>()
+    );
+    // Teeth, and the fire in them.
+    assert!(bites.iter().any(|b| b.kind == DamageKind::Pierce));
+    // The imps' firebolts reach it too.
+    let imp_ids: Vec<Entity> = of_kind(&mut app, summon::MinionKind::Imp)
+        .iter()
+        .map(|m| m.0)
+        .collect();
+    let seen = app.world.resource::<Seen>();
+    assert!(
+        seen.hits
+            .iter()
+            .any(|h| h.target == Some(me) && h.caster.is_some_and(|c| imp_ids.contains(&c))),
+        "no firebolt from an imp struck"
+    );
+    // Broken, it closes and is gone; its demons stay.
+    app.world.get_mut::<Vitality>(ge).unwrap().health = 0.0;
+    run(&mut app, 1.0);
+    assert!(app.world.get_entity(ge).is_err());
+    assert!(!of_kind(&mut app, summon::MinionKind::Hellhound).is_empty());
+}
+
+#[test]
+fn a_demonic_meteor_bursts_into_three_imps_that_fly_up() {
+    let mut app = pact_app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 10.0), Mastery::Expert);
+    run(&mut app, 0.1);
+    let meteor = SpellDesign::new(&["demon"], CastType::Bolt).named("Demonic meteor");
+    cast(&mut app, me, meteor, Aim::Point(DVec3::new(0.0, 0.0, 0.0)));
+    let mut rock = false;
+    let mut imps = Vec::new();
+    for _ in 0..120 {
+        app.update();
+        let mut q = app.world.query::<&demons::MeteorRide>();
+        rock |= q.iter(&app.world).any(|r| r.rock.is_some());
+        imps = of_kind(&mut app, summon::MinionKind::Imp);
+        if !imps.is_empty() {
+            break;
+        }
+    }
+    assert!(rock, "no rock rode the bolt");
+    // Three leap out of the crater where it struck.
+    assert_eq!(imps.len(), 3);
+    for (_, m) in &imps {
+        assert!(m.pos.distance(DVec3::new(0.0, 1.2, 0.0)) < 2.0, "{}", m.pos);
+    }
+    run(&mut app, 2.0);
+    let imps = of_kind(&mut app, summon::MinionKind::Imp);
+    assert_eq!(imps.len(), 3, "they last the pact's time");
+    for (_, m) in imps {
+        assert!(m.pos.y > 1.4, "it flies: {}", m.pos);
+    }
+}
+
+#[test]
+fn the_pacts_hall_opens_a_gate_binds_hooks_and_the_students_break_it() {
+    let mut app = blade_app();
+    app.add_systems(FixedUpdate, bodies_for_gates.in_set(SimSet::Physics));
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Pacts;
+        hall.restart = true;
+    }
+    let view = demo::VIEWS
+        .iter()
+        .find(|v| v.key == "spells_pacts")
+        .unwrap();
+    let eye = DVec3::from(view.eye);
+    let fwd = (DVec3::from(view.target) - eye).normalize();
+    let right = fwd.cross(DVec3::Y).normalize();
+    let up = right.cross(fwd);
+    let tan_y = (55f64.to_radians() / 2.0).tan();
+    let in_view = |p: DVec3| {
+        let d = p - eye;
+        let z = d.dot(fwd);
+        z > 0.5
+            && (d.dot(right) / (z * tan_y * 16.0 / 9.0)).abs() < 0.9
+            && (d.dot(up) / (z * tan_y)).abs() < 0.9
+    };
+    let (mut looked, mut missed) = (0usize, 0usize);
+    let mut kinds: std::collections::HashMap<Entity, summon::MinionKind> = Default::default();
+    let mut gate_seen: Option<(Entity, f32, DVec3)> = None;
+    let mut gate_gone = None;
+    let mut bound: Vec<(f32, Entity)> = Vec::new();
+    let mut hooked: Vec<(f32, Entity)> = Vec::new();
+    let mut most_bonded = 0;
+    let mut most_chains = 0;
+    let mut lowest = f32::MAX;
+    let mut fell: Vec<Entity> = Vec::new();
+    let mut pounces = 0;
+    let steps = (demo::pacts::PERIOD * 60.0) as usize;
+    for i in 0..steps {
+        app.update();
+        let t = i as f32 / 60.0;
+        let mut q = app.world.query::<(Entity, &demons::Hellgate, &Vitality)>();
+        let gates: Vec<(Entity, demons::Hellgate, f32)> = q
+            .iter(&app.world)
+            .map(|(e, g, v)| (e, g.clone(), v.health))
+            .collect();
+        for (e, g, hp) in &gates {
+            if gate_seen.is_none() {
+                println!("{t:.2}: gate at {:.1} facing {:.2}", g.at, g.facing);
+                gate_seen = Some((*e, t, g.at));
+                assert!(
+                    in_view(g.at + DVec3::Y * 1.5),
+                    "the gate is out of the picture"
+                );
+            }
+            if i % 60 == 0 {
+                println!(
+                    "  {t:.0}s gate health {hp:.0} hounds {} imps {}",
+                    g.hounds, g.imps
+                );
+            }
+        }
+        if let Some((ge, ..)) = gate_seen
+            && gate_gone.is_none()
+            && app.world.get_entity(ge).is_err()
+        {
+            println!("{t:.2}: the gate is gone");
+            gate_gone = Some(t);
+        }
+        let mut q = app.world.query::<&chains::Binding>();
+        for b in q.iter(&app.world) {
+            if !bound.iter().any(|(_, e)| *e == b.target)
+                || bound
+                    .last()
+                    .is_some_and(|l| t - l.0 > 4.0 && l.1 == b.target)
+            {
+                println!("{t:.2}: bound {:?} {:?}", b.target, kinds.get(&b.target));
+                bound.push((t, b.target));
+            }
+        }
+        let mut q = app.world.query::<&chains::Hook>();
+        for h in q.iter(&app.world) {
+            if let Some(c) = h.caught
+                && !hooked.iter().any(|(at, e)| *e == c && t - at < 2.0)
+            {
+                println!("{t:.2}: hooked {c:?} {:?}", kinds.get(&c));
+                hooked.push((t, c));
+            }
+        }
+        let mut q = app.world.query::<&chains::Bond>();
+        for b in q.iter(&app.world) {
+            if b.members.len() > most_bonded {
+                println!(
+                    "{t:.2}: bonded {:?}",
+                    b.members
+                        .iter()
+                        .map(|m| (m, kinds.get(m)))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        most_bonded = q
+            .iter(&app.world)
+            .fold(most_bonded, |m, b| m.max(b.members.len()));
+        most_chains = most_chains.max(chains_now(&mut app).len());
+        if i % 30 == 0 {
+            let mut q = app.world.query::<(&demo::art::HallMage, &Vitality)>();
+            lowest = q.iter(&app.world).fold(lowest, |m, (_, v)| m.min(v.health));
+        }
+        let now = minions(&mut app);
+        for (e, m) in &now {
+            if matches!(m.act, summon::Act::Pounce { t, .. } if t < 0.02) && m.attacks > 0 {
+                println!("{t:.2}: {e:?} pounces from {:.1}", m.pos);
+                pounces += 1;
+            }
+        }
+        for (e, k) in &kinds {
+            if !now.iter().any(|m| m.0 == *e) && !fell.contains(e) {
+                println!("{t:.2}: {e:?} {k:?} falls");
+                fell.push(*e);
+            }
+        }
+        for (e, m) in now {
+            if kinds.insert(e, m.kind).is_none() {
+                println!("{t:.2}: {e:?} {:?} comes at {:.1}", m.kind, m.pos);
+            }
+            if i % 15 == 0 && t > 1.5 && t < 17.0 && m.age < m.life {
+                looked += 1;
+                if !in_view(m.pos + DVec3::Y * 0.6) {
+                    missed += 1;
+                    println!(
+                        "  {t:.2} out of the picture: {e:?} {:?} at {:.1}",
+                        m.kind, m.pos
+                    );
+                }
+            }
+            if i % 60 == 0 {
+                println!(
+                    "  {t:.0}s {e:?} {:?} at ({:.1}, {:.1}, {:.1}) target {:?} act {:?}",
+                    m.kind, m.pos.x, m.pos.y, m.pos.z, m.target, m.act
+                );
+            }
+        }
+    }
+    let count = |k: summon::MinionKind| kinds.values().filter(|v| **v == k).count();
+    let seen = app.world.resource::<Seen>();
+    let demons_ids: Vec<Entity> = kinds
+        .iter()
+        .filter(|(_, k)| k.demon())
+        .map(|(e, _)| *e)
+        .collect();
+    let demon_blows = seen
+        .damage
+        .iter()
+        .filter(|d| d.source.is_some_and(|s| demons_ids.contains(&s)))
+        .count();
+    let on_gate = gate_seen.map_or(0, |(ge, ..)| {
+        seen.damage.iter().filter(|d| d.target == ge).count()
+    });
+    let mut by: std::collections::BTreeMap<String, f32> = Default::default();
+    for h in seen.hits.iter().filter(|h| h.damage > 0.0) {
+        let tk = h
+            .target
+            .and_then(|t| kinds.get(&t))
+            .map(|k| format!("{k:?}"))
+            .unwrap_or("-".into());
+        let ck = h
+            .caster
+            .and_then(|c| kinds.get(&c))
+            .map(|k| format!("{k:?}"))
+            .unwrap_or(format!("{:?}", h.caster));
+        *by.entry(format!("{tk} <- {} ({ck})", h.spell.name))
+            .or_default() += h.damage;
+    }
+    for (k, v) in &by {
+        println!("  {k}: {v:.0}");
+    }
+    let mut taken: std::collections::BTreeMap<String, f32> = Default::default();
+    for d in &seen.damage {
+        let Some(tk) = kinds.get(&d.target) else {
+            continue;
+        };
+        let src = d
+            .source
+            .map(|s| {
+                kinds
+                    .get(&s)
+                    .map(|k| format!("{k:?}"))
+                    .unwrap_or(format!("{s:?}"))
+            })
+            .unwrap_or("-".into());
+        *taken
+            .entry(format!("{tk:?} {:?} <- {src} {:?}", d.target, d.kind))
+            .or_default() += d.amount;
+    }
+    for (k, v) in &taken {
+        println!("  dmg {k}: {v:.0}");
+    }
+    println!("out of the picture {missed} of {looked} looks");
+    println!(
+        "hounds {}, imps {}, gate gone {gate_gone:?}, blows on the gate {on_gate}, bound {bound:?}, \
+         hooked {hooked:?}, most bonded {most_bonded}, most chains {most_chains}, demon blows \
+         {demon_blows}, lowest master {lowest}",
+        count(summon::MinionKind::Hellhound),
+        count(summon::MinionKind::Imp),
+    );
+    assert!(gate_seen.is_some(), "no gate opened");
+    assert_eq!(count(summon::MinionKind::Hellhound), 2);
+    assert!(
+        count(summon::MinionKind::Imp) >= 6,
+        "the gate's imps and two meteors' worth"
+    );
+    assert!(
+        gate_gone.is_some_and(|t| t < 19.0),
+        "the students broke the gate: {gate_gone:?}"
+    );
+    assert!(bound.len() >= 2, "{bound:?}");
+    // The chains hold the students' creatures, never the warlocks' own demons.
+    assert!(
+        bound.iter().all(|b| matches!(
+            kinds.get(&b.1),
+            Some(summon::MinionKind::Golem | summon::MinionKind::Elemental)
+        )),
+        "{bound:?}"
+    );
+    assert!(
+        bound
+            .iter()
+            .filter(|b| kinds.get(&b.1) == Some(&summon::MinionKind::Golem))
+            .count()
+            >= 2
+    );
+    assert!(
+        hooked
+            .iter()
+            .any(|h| kinds.get(&h.1) == Some(&summon::MinionKind::Elemental)),
+        "{hooked:?}"
+    );
+    assert!(most_bonded >= 3, "{most_bonded}");
+    assert!(demon_blows >= 10, "{demon_blows}");
+    assert!(pounces >= 1, "no hound pounced");
+    assert!(
+        missed * 10 < looked,
+        "the fight left the picture {missed} of {looked} looks"
+    );
+    assert!(
+        lowest > 1000.0,
+        "a master on a plinth nearly fell: {lowest}"
+    );
+    // At the end of the period what is left of the pact has fallen.
+    let left: Vec<Entity> = minions(&mut app)
+        .iter()
+        .filter(|m| m.1.kind.demon())
+        .map(|m| m.0)
+        .collect();
+    run(&mut app, 1.5);
+    let now = minions(&mut app);
+    assert!(
+        left.iter().all(|e| !now.iter().any(|m| m.0 == *e)),
+        "{left:?} of {:?}",
+        now.iter().map(|m| (m.0, m.1.kind)).collect::<Vec<_>>()
+    );
+}
