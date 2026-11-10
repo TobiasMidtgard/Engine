@@ -107,7 +107,11 @@ pub fn export_fur_coats(
         let Some(handle) = renderer.mesh else {
             continue;
         };
-        if from.is_some_and(|f| f.0 == handle) || renderer.material.fur_length <= 0.0 {
+        // Not before its first pose is published: the coat's bones are the pose's.
+        if from.is_some_and(|f| f.0 == handle)
+            || renderer.material.fur_length <= 0.0
+            || pose.bones.is_empty()
+        {
             continue;
         }
         let Some(mesh) = meshes.get(handle) else {
