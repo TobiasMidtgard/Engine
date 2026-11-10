@@ -62,7 +62,7 @@ use crate::material::{
     ANTI_TILING_FLAG, AlphaMode, GpuMaterial, StandardMaterial, TEXTURE_FLAG_BASE, TEXTURE_FLAGS,
 };
 use crate::material_library::{MaterialPreset, MaterialTextures};
-use crate::mesh::{Mesh, Vertex};
+use crate::mesh::{Mesh, PoolVertex};
 use crate::mesh_pool::{MeshPool, PoolMesh};
 use crate::mesh_scene::{self, Cold, Hot, LOD_UNSET, MeshScene, SlotChange};
 use crate::plant_wind::{PlantWindMeshes, PlantWindSpecies, PlantWindTable};
@@ -2974,7 +2974,7 @@ fn build_mesh_pipeline(
         ..Default::default()
     };
     let buffers = [
-        Some(Vertex::layout()),
+        Some(PoolVertex::layout()),
         Some(MeshInstance::layout_with_motion()),
     ];
     let double = variant & PIPE_DOUBLE != 0;
@@ -3041,7 +3041,7 @@ fn build_shadow_masked_pipeline(inputs: &ShadowPipelineInputs) -> wgpu::RenderPi
         ..Default::default()
     };
     let buffers = [
-        Some(Vertex::layout()),
+        Some(PoolVertex::layout()),
         Some(MeshInstance::layout_with_motion()),
     ];
     inputs
@@ -3201,7 +3201,7 @@ impl RenderFeature for MeshFeature {
             immediate_size: 0,
         });
         let buffers = [
-            Some(Vertex::layout()),
+            Some(PoolVertex::layout()),
             Some(MeshInstance::layout_with_motion()),
         ];
         let shadow_shader = gpu.shader("mesh shadow", &mesh_shadow_source(feedback_writes), false);

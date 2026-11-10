@@ -8,7 +8,7 @@ fn cluster_shadow_in(c: ClusterCorner) -> VertexIn {
     let inst = cluster_instances[c.instance];
     var v: VertexIn;
     v.position = c.position;
-    v.normal = c.normal;
+    v.normal = vec4<f32>(c.normal, 0.0);
     v.uv = c.uv;
     v.color = c.color;
     v.m0 = inst.m0;

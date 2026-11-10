@@ -12,20 +12,21 @@
 //! A page's index buffer starts at an eighth of its vertex buffer ([`FIRST_INDEX_SHARE`]) and
 //! grows by a quarter whenever a mesh or a level of detail needs more, by a copy on the GPU
 //! into a larger buffer. How many index bytes a vertex byte needs differs too much between
-//! meshes to size it once: at 48 bytes a vertex a smooth closed mesh needs half as many index
-//! bytes, a flat-shaded one a twelfth, and levels of detail arrive later. Buffers as large as
+//! meshes to size it once: a smooth closed mesh needs two thirds as many index bytes as vertex
+//! bytes, a flat-shaded one a ninth, and levels of detail arrive later. Buffers as large as
 //! the vertex buffers were 888 MB at the showcase's peak for about 250 MB of indices, and ones
 //! sized from the meshes seen so far were still 158 MB for 43 MB at its plaza.
 
 use std::collections::BTreeMap;
 
-use crate::mesh::Vertex;
+use crate::mesh::{PoolVertex, Vertex};
 
 /// Bytes of each buffer of the first page.
 const FIRST_PAGE_BYTES: u64 = 8 << 20;
 /// Bytes of each buffer of the largest pages (also capped by the device's buffer size limit).
 const MAX_PAGE_BYTES: u64 = 128 << 20;
-const VERTEX_BYTES: u64 = std::mem::size_of::<Vertex>() as u64;
+/// Bytes of a vertex in a page ([`PoolVertex`]: a [`Vertex`] packed into 36 bytes).
+pub(crate) const VERTEX_BYTES: u64 = std::mem::size_of::<PoolVertex>() as u64;
 /// Index bytes for each vertex byte of a new page.
 const FIRST_INDEX_SHARE: f64 = 0.125;
 /// An index buffer that is full grows by this much of its size (at least [`MIN_GROWTH_BYTES`]
@@ -245,6 +246,8 @@ pub(crate) struct MeshPool {
     pub lods_refused: u32,
     /// Times an index buffer grew.
     pub index_growths: u32,
+    /// The mesh being uploaded, packed (kept for its allocation).
+    packed: Vec<PoolVertex>,
 }
 
 impl MeshPool {
@@ -288,10 +291,12 @@ impl MeshPool {
             }
         };
         let p = self.pages[page].as_ref()?;
+        self.packed.clear();
+        self.packed.extend(vertices.iter().map(PoolVertex::from));
         queue.write_buffer(
             &p.vertex,
             base_vertex as u64 * VERTEX_BYTES,
-            bytemuck::cast_slice(vertices),
+            bytemuck::cast_slice(&self.packed),
         );
         queue.write_buffer(
             &p.index,

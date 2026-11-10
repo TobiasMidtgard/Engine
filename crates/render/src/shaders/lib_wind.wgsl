@@ -137,6 +137,13 @@ fn plant_lean(sp: u32, air: PlantAir, dir: vec3<f32>, height: f32, hash: f32) ->
     return flat / len * (trunk.z * height * drag);
 }
 
+// A bone plant vertex's packed color alpha, whole: the mesh pool keeps colors as half floats,
+// which hold whole numbers up to 2048, and the 2048s above that in 32767ths in its normal's
+// spare lane (`PoolVertex`, mesh.rs; 0 where the color is a full float, as on the cluster path).
+fn plant_packed(lane: f32, alpha: f32) -> f32 {
+    return alpha + round(lane * 32767.0) * 2048.0;
+}
+
 // A bone plant's vertex in the wind (mesh space): `pos`, `normal` at rest, `packed` its color
 // alpha, `entry` its instance's table entry, `dir` the wind's direction in mesh space.
 fn plant_wind(pos: vec3<f32>, normal: vec3<f32>, packed: f32, entry: u32, dir: vec3<f32>, air: PlantAir) -> Winded {

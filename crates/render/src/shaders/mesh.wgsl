@@ -56,7 +56,8 @@ const SLOT_HEIGHT: u32 = 5u;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
+    // w: the 2048s of a bone plant's color alpha (`plant_packed`, lib_wind.wgsl).
+    @location(1) normal: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
     // Instance: model matrix rows (camera-relative), normal matrix columns, extra data.
@@ -138,7 +139,7 @@ fn vertex_local(in: VertexIn) -> vec3<f32> {
 
 // Normal of the scaled object-space surface (`vertex_local`).
 fn vertex_object_normal(in: VertexIn) -> vec3<f32> {
-    return normalize(in.normal / max(vertex_scale(in), vec3<f32>(1e-6)));
+    return normalize(in.normal.xyz / max(vertex_scale(in), vec3<f32>(1e-6)));
 }
 
 // World direction of an object axis (column `i` of the model matrix, normalized).
@@ -177,7 +178,7 @@ fn vertex_plant(in: VertexIn, entry: u32, base: vec3<f32>, prev: bool) -> Winded
             base.xz + frame.gust_offset.zw, true, 3u, 1.0);
     }
     let dir = plant_wind_dir(in.n0.xyz, in.n1.xyz, in.n2.xyz, air.wind);
-    return plant_wind(in.position, in.normal, in.color.a, entry, dir, air);
+    return plant_wind(in.position, in.normal.xyz, plant_packed(in.normal.w, in.color.a), entry, dir, air);
 }
 
 // A `MeshInstances` row's tint (`InstanceRow::packed_tint`, in the normal matrix's second
@@ -207,7 +208,7 @@ fn vertex_placed(in: VertexIn) -> Placed {
             vec4<f32>(in.color.rgb * gain * instance_tint(in), 1.0), bend);
     }
     let color = vertex_surface_color(in);
-    return Placed(base + vertex_wind(in, base), normalize(normals * in.normal),
+    return Placed(base + vertex_wind(in, base), normalize(normals * in.normal.xyz),
         vec4<f32>(color.rgb * instance_tint(in), color.a), vec3<f32>(0.0));
 }
 

@@ -51,6 +51,122 @@ impl Vertex {
     }
 }
 
+/// A [`Vertex`] as the mesh pool keeps it on the GPU: 36 bytes instead of 48. The normal is
+/// three signed 16-bit fractions and the color four half floats; a vertex shader reads both as
+/// floats, exactly as from a buffer of `Vertex` (a normal comes out within 0.002 degrees of
+/// the one put in, a color within a two-thousandth, and colors above 1 keep their value).
+///
+/// A color alpha that is a whole number too long for a half float (a bone plant's packed
+/// vertex, [`crate::pack_plant_vertex`]: 24 bits) is split: its 2048s go in the normal's
+/// fourth lane and the rest (1..=2048, so still at least 1 to a shader that only asks whether
+/// it is 0) stays the alpha. `plant_packed` in lib_wind.wgsl puts the two back together
+/// exactly.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub(crate) struct PoolVertex {
+    pub position: [f32; 3],
+    /// x, y, z as fractions of 32767, then the 2048s of a long whole color alpha (0 for
+    /// most).
+    pub normal: [i16; 4],
+    pub uv: [f32; 2],
+    /// Half floats.
+    pub color: [u16; 4],
+}
+
+impl PoolVertex {
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        0 => Float32x3,
+        1 => Snorm16x4,
+        2 => Float32x2,
+        3 => Float16x4,
+    ];
+
+    /// The same shader locations as [`Vertex::layout`].
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<PoolVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+impl From<&Vertex> for PoolVertex {
+    fn from(v: &Vertex) -> Self {
+        let n = v
+            .normal
+            .map(|c| (c.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+        // Most meshes are white all over.
+        const ONE: u16 = 0x3c00;
+        let color = if v.color == [1.0; 4] {
+            [ONE; 4]
+        } else {
+            v.color.map(half)
+        };
+        // A half float holds whole numbers up to 2048.
+        let alpha = v.color[3];
+        let mut color = color;
+        let mut thousands = 0;
+        if alpha > ALPHA_STEP && alpha.fract() == 0.0 && alpha <= ALPHA_STEP * 32768.0 {
+            let whole = ((alpha - 1.0) / ALPHA_STEP).floor();
+            thousands = whole as i16;
+            color[3] = half(alpha - whole * ALPHA_STEP);
+        }
+        Self {
+            position: v.position,
+            normal: [n[0], n[1], n[2], thousands],
+            uv: v.uv,
+            color,
+        }
+    }
+}
+
+/// What one step of [`PoolVertex::normal`]'s fourth lane adds to the color alpha (`plant_packed`,
+/// lib_wind.wgsl).
+const ALPHA_STEP: f32 = 2048.0;
+
+/// `v` as a half float, rounded to the nearest; what is too large becomes the largest half
+/// (65504) and not-a-number zero.
+fn half(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let abs = bits & 0x7fff_ffff;
+    if abs > 0x7f80_0000 {
+        return 0;
+    }
+    // 65520 and up would round to infinity.
+    if abs >= 0x477f_f000 {
+        return sign | 0x7bff;
+    }
+    let exponent = abs >> 23;
+    let mantissa = abs & 0x7f_ffff;
+    // Under 2^-14: a subnormal half, in steps of 2^-24, or zero.
+    if exponent < 113 {
+        if exponent < 102 {
+            return sign;
+        }
+        let shift = 126 - exponent;
+        let m = mantissa | 0x80_0000;
+        return sign | ((m >> shift) + ((m >> (shift - 1)) & 1)) as u16;
+    }
+    // A carry from rounding goes into the exponent, as it should.
+    sign | ((((exponent - 112) << 10) | (mantissa >> 13)) + ((mantissa >> 12) & 1)) as u16
+}
+
+/// The value of a half float.
+#[cfg(test)]
+fn half_value(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = i32::from((h >> 10) & 31);
+    let mantissa = f32::from(h & 0x3ff);
+    sign * match exponent {
+        0 => mantissa * 2.0f32.powi(-24),
+        31 if mantissa == 0.0 => f32::INFINITY,
+        31 => f32::NAN,
+        e => (1024.0 + mantissa) * 2.0f32.powi(e - 25),
+    }
+}
+
 /// Triangle mesh (indexed, counter-clockwise front faces).
 #[derive(Debug, Clone, Default)]
 pub struct Mesh {
@@ -619,6 +735,74 @@ pub fn torus(radius: f32, tube: f32, segments: u32) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pool_vertex_is_36_bytes_and_keeps_what_a_shader_reads() {
+        assert_eq!(std::mem::size_of::<PoolVertex>(), 36);
+        // Half floats (IEEE 754 binary16).
+        for (value, bits) in [
+            (0.0, 0x0000),
+            (1.0, 0x3c00),
+            (-2.0, 0xc000),
+            (0.5, 0x3800),
+            (1.0 / 3.0, 0x3555),
+            (65504.0, 0x7bff),
+            (1.0e9, 0x7bff),
+            (f32::INFINITY, 0x7bff),
+            (-f32::INFINITY, 0xfbff),
+            (2.0f32.powi(-14), 0x0400),
+            (2.0f32.powi(-24), 0x0001),
+            (2.0f32.powi(-26), 0x0000),
+            // Rounds up into the next power of two.
+            (1.9999, 0x4000),
+        ] {
+            assert_eq!(half(value), bits, "{value}");
+        }
+        assert_eq!(half(f32::NAN), 0);
+        let v = Vertex {
+            position: [1.5, -2.0, 3.25],
+            normal: [0.0, -1.0, 0.5],
+            uv: [0.25, 7.5],
+            color: [1.0, 0.25, 4.0, 0.0],
+        };
+        let p = PoolVertex::from(&v);
+        assert_eq!((p.position, p.uv), (v.position, v.uv));
+        assert_eq!(p.normal, [0, -32767, 16384, 0]);
+        assert_eq!(p.color, [0x3c00, 0x3400, 0x4400, 0]);
+        assert_eq!(
+            PoolVertex::from(&Vertex::new(Vec3::X, Vec3::Y, Vec2::ZERO)).color,
+            [0x3c00; 4]
+        );
+        for bits in [0u16, 1, 0x3c00, 0x3555, 0x7bff, 0xc000, 0x0400, 0x03ff] {
+            assert_eq!(half(half_value(bits)), bits, "{bits:#x}");
+        }
+        // A bone plant's packed alpha comes back whole from the two lanes, as lib_wind.wgsl's
+        // `plant_packed` adds them (a signed 16-bit fraction reads as itself / 32767).
+        let mut state = 0x2545_f491u32;
+        let mut packed = vec![0.0f32, 5.0, 2047.0, 2049.0, 4097.0, 16_777_215.0];
+        packed.extend((0..2000).map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            crate::pack_plant_vertex(
+                (state >> 8) as u16 & 0x3fff,
+                (state & 31) as f32 / 31.0,
+                ((state >> 24) & 15) as f32 / 15.0,
+                state >> 31 == 1,
+            )
+        }));
+        for alpha in packed {
+            let mut v = Vertex::new(Vec3::X, Vec3::Y, Vec2::ZERO);
+            v.color[3] = alpha;
+            let p = PoolVertex::from(&v);
+            let lane = (f32::from(p.normal[3]) / 32767.0).max(-1.0);
+            let low = half_value(p.color[3]);
+            assert_eq!(low + (lane * 32767.0).round() * 2048.0, alpha);
+            assert_eq!(low >= 1.0, alpha >= 1.0, "{alpha}");
+        }
+        // Other alphas are their half floats alone.
+        let mut v = Vertex::new(Vec3::X, Vec3::Y, Vec2::ZERO);
+        v.color[3] = 0.3;
+        assert_eq!(PoolVertex::from(&v).normal[3], 0);
+    }
 
     fn check_winding(m: &Mesh) {
         // Every triangle's geometric normal should agree with its vertex normals.

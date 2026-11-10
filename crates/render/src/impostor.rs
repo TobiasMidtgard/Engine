@@ -31,7 +31,7 @@ use block_compression::{BC7Settings, CompressionVariant};
 
 use crate::features::GpuShared;
 use crate::image_cache::copy_blocks;
-use crate::mesh::Vertex;
+use crate::mesh::PoolVertex;
 use crate::mesh_feature::MeshInstance;
 use crate::warmup::{Build, Taken, Warmup};
 
@@ -938,7 +938,7 @@ fn bake_pipeline(inputs: &PipelineInputs) -> wgpu::RenderPipeline {
                 entry_point: Some("vs_impostor_bake"),
                 compilation_options: compilation.clone(),
                 buffers: &[
-                    Some(Vertex::layout()),
+                    Some(PoolVertex::layout()),
                     Some(MeshInstance::layout_with_motion()),
                 ],
             },

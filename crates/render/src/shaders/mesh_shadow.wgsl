@@ -37,7 +37,8 @@ struct Material {
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
+    // w: the 2048s of a bone plant's color alpha (`plant_packed`, lib_wind.wgsl).
+    @location(1) normal: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
     @location(4) m0: vec4<f32>,
@@ -76,7 +77,7 @@ fn shadow_clip(in: VertexIn) -> vec4<f32> {
     if (entry != 0u) {
         let air = shadow_plant_air(in, rel);
         let dir = plant_wind_dir(in.n0.xyz, in.n1.xyz, in.n2.xyz, air.wind);
-        let w = plant_wind(in.position, in.normal, in.color.a, entry, dir, air);
+        let w = plant_wind(in.position, in.normal.xyz, plant_packed(in.normal.w, in.color.a), entry, dir, air);
         let q = vec4<f32>(w.pos, 1.0);
         rel = vec3<f32>(dot(in.m0, q), dot(in.m1, q), dot(in.m2, q));
         let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));

@@ -30,7 +30,7 @@ use engine_core::prelude::*;
 
 use crate::components::{NoMeshLod, NoVirtualGeometry};
 use crate::features::GpuShared;
-use crate::mesh::{Mesh, Vertex};
+use crate::mesh::Mesh;
 use crate::mesh_pool::{MeshPool, PoolMesh};
 
 /// Skin a mesh on the GPU. Put it on an entity with a [`crate::MeshRenderer`] whose mesh is the
@@ -328,7 +328,7 @@ impl Skins {
             if vertex_buffer.size() > max_binding {
                 continue;
             }
-            let bytes = pool_mesh.vertex_count as u64 * std::mem::size_of::<Vertex>() as u64;
+            let bytes = pool_mesh.vertex_count as u64 * crate::mesh_pool::VERTEX_BYTES;
             if state.copied != Some((pool_mesh, version)) {
                 // A new upload holds the bind pose: keep it as the rest copy, then pose it.
                 if state.rest.size() < bytes {
@@ -336,7 +336,7 @@ impl Skins {
                 }
                 encoder.copy_buffer_to_buffer(
                     vertex_buffer,
-                    pool_mesh.base_vertex as u64 * std::mem::size_of::<Vertex>() as u64,
+                    pool_mesh.base_vertex as u64 * crate::mesh_pool::VERTEX_BYTES,
                     &state.rest,
                     0,
                     bytes,
@@ -423,7 +423,7 @@ impl Skins {
                 state.fresh = true;
                 state.due = true;
                 state.group = None;
-                next += state.rest.size() as u32 / std::mem::size_of::<Vertex>() as u32;
+                next += state.rest.size() as u32 / crate::mesh_pool::VERTEX_BYTES as u32;
             }
             if next > self.motion_capacity {
                 self.motion = None;
@@ -527,7 +527,7 @@ impl Skin {
             }),
             rest: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("gpu skinning rest vertices"),
-                size: (mesh.vertices.len().max(1) * std::mem::size_of::<Vertex>()) as u64,
+                size: (mesh.vertices.len().max(1) * crate::mesh_pool::VERTEX_BYTES as usize) as u64,
                 usage: storage | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -590,13 +590,14 @@ struct Bone {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-// The rest vertices: 12 floats each (position, normal, uv, color), as `Vertex`.
-@group(0) @binding(1) var<storage, read> rest: array<f32>;
+// The rest vertices as the mesh pool keeps them (`PoolVertex`): 9 words each, the position as
+// three floats, then the normal as three signed 16-bit fractions in two words, uv and color.
+@group(0) @binding(1) var<storage, read> rest: array<u32>;
 @group(0) @binding(2) var<storage, read> joints: array<vec2<u32>>;
 @group(0) @binding(3) var<storage, read> weights: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> bones: array<Bone>;
 // The mesh pool page's vertices: the posed position and normal go over the mesh's range.
-@group(0) @binding(5) var<storage, read_write> pool: array<f32>;
+@group(0) @binding(5) var<storage, read_write> pool: array<u32>;
 // Each vertex's posed position last frame (`Skins::motion`), for the prepass's motion vectors.
 @group(0) @binding(6) var<storage, read_write> motion: array<vec4<f32>>;
 
@@ -619,9 +620,13 @@ fn cs_skin(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= params.count {
         return;
     }
-    let r = i * 12u;
-    let p = vec3<f32>(rest[r], rest[r + 1u], rest[r + 2u]);
-    let n = vec3<f32>(rest[r + 3u], rest[r + 4u], rest[r + 5u]);
+    let r = i * 9u;
+    let p = vec3<f32>(
+        bitcast<f32>(rest[r]),
+        bitcast<f32>(rest[r + 1u]),
+        bitcast<f32>(rest[r + 2u]),
+    );
+    let n = vec3<f32>(unpack2x16snorm(rest[r + 3u]), unpack2x16snorm(rest[r + 4u]).x);
     let jp = joints[i];
     let js = array<u32, 4>(jp.x & 0xffffu, jp.x >> 16u, jp.y & 0xffffu, jp.y >> 16u);
     let w = weights[i];
@@ -663,16 +668,20 @@ fn cs_skin(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     out_n = normalize(select(n, out_n, dot(out_n, out_n) > 1e-12));
-    let o = (params.base_vertex + i) * 12u;
+    let o = (params.base_vertex + i) * 9u;
     // Where the pool posed it last frame (where it is now, on a mesh's first frame).
-    let was = vec3<f32>(pool[o], pool[o + 1u], pool[o + 2u]);
+    let was = vec3<f32>(
+        bitcast<f32>(pool[o]),
+        bitcast<f32>(pool[o + 1u]),
+        bitcast<f32>(pool[o + 2u]),
+    );
     motion[params.motion + i] = vec4<f32>(select(was, out_p, params.fresh != 0u), 1.0);
-    pool[o] = out_p.x;
-    pool[o + 1u] = out_p.y;
-    pool[o + 2u] = out_p.z;
-    pool[o + 3u] = out_n.x;
-    pool[o + 4u] = out_n.y;
-    pool[o + 5u] = out_n.z;
+    pool[o] = bitcast<u32>(out_p.x);
+    pool[o + 1u] = bitcast<u32>(out_p.y);
+    pool[o + 2u] = bitcast<u32>(out_p.z);
+    pool[o + 3u] = pack2x16snorm(out_n.xy);
+    // The upper half is not the normal's (`PoolVertex::normal`): it stays.
+    pool[o + 4u] = (pack2x16snorm(vec2<f32>(out_n.z, 0.0)) & 0xffffu) | (rest[r + 4u] & 0xffff0000u);
 }
 "#;
 
