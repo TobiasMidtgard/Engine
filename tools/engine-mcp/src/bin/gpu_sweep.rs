@@ -389,6 +389,18 @@ fn variants() -> Vec<Variant> {
             "fog and haze once per pixel in the screen pass, not in every shader run",
         ),
         v(
+            "cut_ground_lines",
+            r,
+            json!({"trial_cuts": 4096}),
+            "ground seen edge on drawn without every second or fourth row of triangles across the view",
+        ),
+        v(
+            "cut_ground_lines_wide",
+            r,
+            json!({"trial_cuts": 8192}),
+            "the same, and the triangles left may look half again as long across the view as they are wide",
+        ),
+        v(
             "show_screen_light",
             r,
             json!({"trial_cuts": 512, "debug_skip": 16384}),

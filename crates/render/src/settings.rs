@@ -243,6 +243,14 @@ pub mod trial_cut {
     /// the screen light pass (the froxels, the height fog beyond them, the aerial table) and
     /// loaded by `surface_fog`, instead of in every run of every pixel's shader.
     pub const SCREEN_FOG: u32 = 2048;
+    /// Ground seen edge on is drawn without every second or fourth row of its triangles across
+    /// the view (`engine_terrain`: `TerrainSettings::skip_lines_px`): there they are a few
+    /// pixels wide and one or two tall, and every pixel's shader runs once for each that
+    /// touches its 2x2 block.
+    pub const GROUND_LINES: u32 = 4096;
+    /// The same, and the triangles left may look half again as long across the view as they
+    /// are wide (with `GROUND_LINES` alone, no longer than wide).
+    pub const GROUND_LINES_WIDE: u32 = 8192;
 }
 
 /// What the screen shows.

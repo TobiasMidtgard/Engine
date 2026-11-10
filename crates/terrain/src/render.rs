@@ -17,7 +17,8 @@ use engine_render::settings::RenderSettings;
 use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 
 use crate::chunk::{
-    ChunkSource, QUADS, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chunk_indices,
+    ChunkSource, QUADS, SKIP_LISTS, SkipCost, TerrainVertex, VERTS_PER_CHUNK, build_chunk,
+    chunk_indices_skipping,
 };
 use crate::cube::NodeKey;
 use crate::deform::{DeformationMap, SLOTS};
@@ -256,7 +257,9 @@ struct Gpu {
     water_group_now: usize,
     layout: wgpu::BindGroupLayout,
     index: wgpu::Buffer,
-    index_count: u32,
+    /// First index and count of each of [`SKIP_LISTS`] in `index` (the first is the whole
+    /// grid's).
+    index_lists: [(u32, u32); SKIP_LISTS.len()],
     instances: GrowBuffer,
     /// Indirect arguments of every draw list, in [`DrawList`] order (multi-draw only).
     draw_args: Option<GrowBuffer>,
@@ -405,6 +408,7 @@ struct ChunkGpu {
     spacing: f64,
     /// A river's or lake's surface shows over the patch.
     water: bool,
+    skip: SkipCost,
 }
 
 struct PlanetState {
@@ -480,6 +484,8 @@ impl PlanetState {
 struct Draw {
     slot: u32,
     instance: u32,
+    /// Which of [`SKIP_LISTS`] it is drawn with.
+    list: u8,
 }
 
 /// `draw_indexed_indirect` arguments (wgpu's `DrawIndexedIndirectArgs` layout).
@@ -1884,7 +1890,13 @@ impl RenderFeature for TerrainFeature {
             multiview_mask: None,
             cache: None,
         });
-        let indices = chunk_indices();
+        let mut indices = Vec::new();
+        let index_lists = SKIP_LISTS.map(|(step_a, step_b)| {
+            let list = chunk_indices_skipping(step_a, step_b);
+            let first = indices.len() as u32;
+            indices.extend_from_slice(&list);
+            (first, list.len() as u32)
+        });
         let index = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("terrain indices"),
             size: (indices.len() * 2).next_multiple_of(4) as u64,
@@ -1940,7 +1952,7 @@ impl RenderFeature for TerrainFeature {
             water_group_now: 0,
             layout,
             index,
-            index_count: indices.len() as u32,
+            index_lists,
             instances: GrowBuffer::new(
                 device,
                 "terrain instances",
@@ -2430,6 +2442,22 @@ impl RenderFeature for TerrainFeature {
                     (0.0, 0.0)
                 }
             };
+            // Fewer grid lines where the ground is seen edge on (`trial_cut::GROUND_LINES`).
+            use engine_render::settings::trial_cut::{GROUND_LINES, GROUND_LINES_WIDE};
+            let lines = render_settings.trial_cuts & (GROUND_LINES | GROUND_LINES_WIDE);
+            let (skip_px, px_per_rad) = if view.fov_y > 0.0 && lines != 0 {
+                (
+                    settings.skip_lines_px,
+                    view.height as f64 / view.fov_y as f64,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            let skip_aspect = if lines & GROUND_LINES_WIDE != 0 {
+                1.5
+            } else {
+                1.0
+            };
             for key in &sel.draw {
                 let Some(c) = state.chunks.get(key) else {
                     continue;
@@ -2450,14 +2478,30 @@ impl RenderFeature for TerrainFeature {
                     lod: [c.spacing as f32, key.level as f32, morph.0, morph.1],
                     night,
                 });
+                // (The cascades draw the same list as the view: a surface under its own
+                // shadow's other shape would shade itself.)
+                let list = if skip_px > 0.0 {
+                    c.skip.list(
+                        c.center,
+                        c.radius,
+                        cam_local,
+                        px_per_rad,
+                        skip_px,
+                        skip_aspect,
+                    ) as u8
+                } else {
+                    0
+                };
                 self.draws.push(Draw {
                     slot: c.slot,
                     instance,
+                    list,
                 });
                 if c.water && !mirror {
                     self.water_draws.push(Draw {
                         slot: c.slot,
                         instance,
+                        list: 0,
                     });
                 }
                 if casts {
@@ -2467,6 +2511,7 @@ impl RenderFeature for TerrainFeature {
                             self.shadow_draws[i].push(Draw {
                                 slot: c.slot,
                                 instance,
+                                list,
                             });
                         }
                     }
@@ -2488,6 +2533,7 @@ impl RenderFeature for TerrainFeature {
                 self.far_shadow_draws.push(Draw {
                     slot: c.slot,
                     instance,
+                    list: 0,
                 });
             }
 
@@ -2616,13 +2662,14 @@ impl RenderFeature for TerrainFeature {
             self.rebuild_group(gpu_shared);
         }
 
-        let tris_per_patch = (self.gpu.as_ref().map(|g| g.index_count).unwrap_or(0) / 3) as u64;
+        let index_lists = self.gpu.as_ref().map(|g| g.index_lists).unwrap_or_default();
+        let triangles = |d: &Draw| (index_lists[d.list as usize].1 / 3) as u64;
         self.stats = FeatureStats {
             draw_calls: (self.draws.len()
                 + self.shadow_draws.iter().map(Vec::len).sum::<usize>()
                 + self.far_shadow_draws.len()) as u32,
             instances: self.draws.len() as u32,
-            triangles: self.draws.len() as u64 * tris_per_patch,
+            triangles: self.draws.iter().map(triangles).sum(),
             culled: 0,
         };
         out.set("terrain.patches_drawn", self.draws.len() as f64);
@@ -2689,7 +2736,7 @@ impl RenderFeature for TerrainFeature {
             };
             pass.set_bind_group(2, water, &[]);
         }
-        self.draw_indices(pass, gpu, list, draws, indices.unwrap_or(gpu.index_count));
+        self.draw_indices(pass, gpu, list, draws, indices);
     }
 
     fn needs_scene_copy(&self) -> bool {
@@ -2793,6 +2840,10 @@ impl RenderFeature for TerrainFeature {
         serde_json::json!({
             "terrains": self.planets.len(),
             "patches_drawn": self.draws.len(),
+            // By list of grid lines (`SKIP_LISTS`: whole, a every 2nd, 4th, b every 2nd, 4th).
+            "patches_by_lines": (0..SKIP_LISTS.len())
+                .map(|l| self.draws.iter().filter(|d| d.list as usize == l).count())
+                .collect::<Vec<_>>(),
             "far_shadow_patches": self.far_shadow_draws.len(),
             "patches_resident": self.pool.used(),
             "patches_built_last_frame": self.built_last_frame,
@@ -2810,17 +2861,18 @@ impl TerrainFeature {
         list: DrawList,
         draws: &[Draw],
     ) {
-        self.draw_indices(pass, gpu, list, draws, gpu.index_count);
+        self.draw_indices(pass, gpu, list, draws, None);
     }
 
-    /// Draw the patches with the first `count` indices (the grid, then the skirts).
+    /// Draw the patches, each with its list of indices (the grid, then the skirts), or with
+    /// the first `count` of the whole grid's.
     fn draw_indices(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         gpu: &Gpu,
         list: DrawList,
         draws: &[Draw],
-        count: u32,
+        count: Option<u32>,
     ) {
         pass.set_index_buffer(gpu.index.slice(..), wgpu::IndexFormat::Uint16);
         pass.set_vertex_buffer(1, gpu.instances.buffer.slice(..));
@@ -2843,7 +2895,11 @@ impl TerrainFeature {
                 None => {
                     for d in &draws[i..i + run] {
                         let base = ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32;
-                        pass.draw_indexed(0..count, base, d.instance..d.instance + 1);
+                        let (first, n) = match count {
+                            Some(count) => (0, count),
+                            None => gpu.index_lists[d.list as usize],
+                        };
+                        pass.draw_indexed(first..first + n, base, d.instance..d.instance + 1);
                     }
                 }
             }
@@ -2867,24 +2923,31 @@ impl TerrainFeature {
         }
         let water = (QUADS * QUADS * 6) as u32;
         let lists = [
-            (DrawList::Scene, &self.draws, gpu.index_count),
-            (DrawList::Water, &self.water_draws, water),
+            (DrawList::Scene, &self.draws, None),
+            (DrawList::Water, &self.water_draws, Some(water)),
         ]
         .into_iter()
-        .chain((0..4).map(|i| (DrawList::Shadow(i), &self.shadow_draws[i], gpu.index_count)))
+        .chain((0..4).map(|i| (DrawList::Shadow(i), &self.shadow_draws[i], None)))
         .chain(std::iter::once((
             DrawList::FarShadow,
             &self.far_shadow_draws,
-            gpu.index_count,
+            None,
         )));
+        let index_lists = gpu.index_lists;
         for (list, draws, count) in lists {
             self.list_args[list.index()] = self.args.len() as u32;
-            self.args.extend(draws.iter().map(|d| DrawArgs {
-                index_count: count,
-                instance_count: 1,
-                first_index: 0,
-                base_vertex: ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32,
-                first_instance: d.instance,
+            self.args.extend(draws.iter().map(|d| {
+                let (first_index, index_count) = match count {
+                    Some(count) => (0, count),
+                    None => index_lists[d.list as usize],
+                };
+                DrawArgs {
+                    index_count,
+                    instance_count: 1,
+                    first_index,
+                    base_vertex: ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32,
+                    first_instance: d.instance,
+                }
             }));
         }
         if self.args.is_empty() {
@@ -3273,6 +3336,7 @@ fn upload(
             radius: m.radius,
             spacing: m.spacing,
             water: m.water,
+            skip: m.skip,
         },
     );
     true

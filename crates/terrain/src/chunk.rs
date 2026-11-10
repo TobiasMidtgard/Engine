@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::math::DVec3;
+use engine_core::math::{DVec3, Vec3};
 
 use crate::cube::{NodeKey, SurfaceMap};
 use crate::edits::EditLayer;
@@ -202,6 +202,112 @@ pub struct ChunkMesh {
     pub spacing: f64,
     /// A river's or lake's surface shows over some of the patch (it is drawn with the water).
     pub water: bool,
+    /// What drawing the patch without some of its grid lines would cost.
+    pub skip: SkipCost,
+}
+
+/// What a patch loses drawn with only every second or fourth grid line along an axis
+/// ([`chunk_indices_skipping`]): how far its surface moves, and its mean cell edges, which tell
+/// how much shorter one axis looks than the other from where the camera is.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SkipCost {
+    /// The farthest a dropped vertex lies from the line between its kept neighbors, meters:
+    /// `[along a, along b][every second line, every fourth]`.
+    pub error: [[f32; 2]; 2],
+    /// The mean cell edge along a and along b, terrain-local meters.
+    pub edge: [Vec3; 2],
+}
+
+/// The lists a patch can be drawn with: its grid lines' steps along a and b. One axis at a
+/// time: both together are the coarser patch, which the split distance decides.
+pub const SKIP_LISTS: [(usize, usize); 5] = [(1, 1), (2, 1), (4, 1), (1, 2), (1, 4)];
+
+impl SkipCost {
+    /// Measured on a patch's grid vertices (row-major, [`GRID`] a side).
+    pub fn measure(position: impl Fn(usize, usize) -> Vec3) -> Self {
+        let mut error = [[0.0f32; 2]; 2];
+        for (axis, errors) in error.iter_mut().enumerate() {
+            // (line, place along it) to (i, j).
+            let at = |line: usize, t: usize| {
+                if axis == 0 {
+                    position(t, line)
+                } else {
+                    position(line, t)
+                }
+            };
+            for (e, step) in errors.iter_mut().zip([2, 4]) {
+                for line in 0..GRID {
+                    for t0 in (0..QUADS).step_by(step) {
+                        let (from, to) = (at(line, t0), at(line, t0 + step));
+                        for k in 1..step {
+                            let kept = from.lerp(to, k as f32 / step as f32);
+                            *e = e.max((at(line, t0 + k) - kept).length());
+                        }
+                    }
+                }
+            }
+        }
+        let q = QUADS;
+        let scale = 0.5 / q as f32;
+        Self {
+            error,
+            edge: [
+                (position(q, 0) - position(0, 0) + position(q, q) - position(0, q)) * scale,
+                (position(0, q) - position(0, 0) + position(q, q) - position(q, 0)) * scale,
+            ],
+        }
+    }
+
+    /// The list with the fewest lines the patch can be drawn with from `camera` (index into
+    /// [`SKIP_LISTS`]; `center`, `radius` and `camera` terrain-local), on a screen of
+    /// `px_per_rad` pixels a radian. Lines across an axis go where that axis looks so much
+    /// shorter than the other, all over the patch, that the cells left are still no longer
+    /// along it than `aspect` times their length along the other (ground seen edge on: its
+    /// triangles are a few pixels wide and one or two tall), and where no vertex dropped
+    /// lies more than `tolerance_px` from the surface drawn without it.
+    pub fn list(
+        &self,
+        center: DVec3,
+        radius: f64,
+        camera: DVec3,
+        px_per_rad: f64,
+        tolerance_px: f64,
+        aspect: f32,
+    ) -> usize {
+        let to = (center - camera).as_vec3();
+        let near = to.length() as f64 - radius;
+        if near <= 0.0 || tolerance_px <= 0.0 || px_per_rad <= 0.0 {
+            return 0;
+        }
+        let tolerance = (tolerance_px * near / px_per_rad) as f32;
+        // How many times longer a cell looks along a than along b: the least and the most
+        // over the patch (its middle and corners).
+        let [a, b] = self.edge;
+        let half = 0.5 * QUADS as f32;
+        let (mut least, mut most) = (f32::MAX, 0.0f32);
+        for (u, v) in [
+            (0.0, 0.0),
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (1.0, 1.0),
+        ] {
+            let d = (to + (a * u + b * v) * half).normalize_or_zero();
+            let seen = |e: Vec3| (e - d * e.dot(d)).length();
+            let ratio = seen(a) / seen(b).max(1e-9);
+            least = least.min(ratio);
+            most = most.max(ratio);
+        }
+        for (n, step) in [(1, 4.0), (0, 2.0)] {
+            if step <= least * aspect && self.error[1][n] <= tolerance {
+                return 3 + n;
+            }
+            if step * most <= aspect && self.error[0][n] <= tolerance {
+                return 1 + n;
+            }
+        }
+        0
+    }
 }
 
 /// Height drawn for a sample: the sea surface hides the sea floor when the terrain draws it.
@@ -592,6 +698,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
         radius2 = radius2.max((p - center).length_squared());
     }
 
+    let skip = SkipCost::measure(|i, j| Vec3::from(vertices[j * GRID + i].position));
     ChunkMesh {
         key,
         origin,
@@ -602,6 +709,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
         radius: radius2.sqrt(),
         spacing,
         water,
+        skip,
     }
 }
 
@@ -631,14 +739,23 @@ pub(crate) fn patches(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
 
 /// Shared index buffer for every patch: the grid, then the four skirts.
 pub fn chunk_indices() -> Vec<u16> {
-    let mut idx = Vec::with_capacity(QUADS * QUADS * 6 + 4 * QUADS * 6);
+    chunk_indices_skipping(1, 1)
+}
+
+/// The same with only every `step_a`th grid line along a and every `step_b`th along b (1, 2 or
+/// 4): the vertices of a patch 1 / step as fine along that axis, which are the ones its parent
+/// (or the parent's parent) has there. The skirts follow the border that is left.
+pub fn chunk_indices_skipping(step_a: usize, step_b: usize) -> Vec<u16> {
+    let (qa, qb) = (QUADS / step_a, QUADS / step_b);
+    let mut idx = Vec::with_capacity(qa * qb * 6 + 2 * (qa + qb) * 6);
     let g = GRID as u16;
-    for j in 0..QUADS as u16 {
-        for i in 0..QUADS as u16 {
-            let a = j * g + i;
-            let b = a + 1;
-            let c = a + g;
-            let d = c + 1;
+    let (sa, sb) = (step_a as u16, step_b as u16);
+    for j in 0..qb as u16 {
+        for i in 0..qa as u16 {
+            let a = j * sb * g + i * sa;
+            let b = a + sa;
+            let c = a + sb * g;
+            let d = c + sa;
             // Alternate the diagonal for a less directional pattern.
             if (i + j) % 2 == 0 {
                 idx.extend_from_slice(&[a, b, d, a, d, c]);
@@ -650,17 +767,17 @@ pub fn chunk_indices() -> Vec<u16> {
     let base = (GRID * GRID) as u16;
     let side = |k: u16| base + k * g;
     // Border vertex t of each side: grid index = start + t * stride.
-    // (start, stride, skirt base, winding flip)
-    let rows: [(u16, u16, u16, bool); 4] = [
-        (0, 1, side(0), true),            // bottom: faces -b
-        ((g - 1) * g, 1, side(1), false), // top: faces +b
-        (0, g, side(2), false),           // left: faces -a
-        (g - 1, g, side(3), true),        // right: faces +a
+    // (start, stride, skirt base, winding flip, step)
+    let rows: [(u16, u16, u16, bool, u16); 4] = [
+        (0, 1, side(0), true, sa),            // bottom: faces -b
+        ((g - 1) * g, 1, side(1), false, sa), // top: faces +b
+        (0, g, side(2), false, sb),           // left: faces -a
+        (g - 1, g, side(3), true, sb),        // right: faces +a
     ];
-    for &(start, stride, skirt, flip) in rows.iter() {
-        for t in 0..QUADS as u16 {
-            let (a, b) = (start + t * stride, start + (t + 1) * stride);
-            let (sa, sb) = (skirt + t, skirt + t + 1);
+    for &(start, stride, skirt, flip, step) in rows.iter() {
+        for t in (0..QUADS as u16).step_by(step as usize) {
+            let (a, b) = (start + t * stride, start + (t + step) * stride);
+            let (sa, sb) = (skirt + t, skirt + t + step);
             if flip {
                 idx.extend_from_slice(&[a, sa, b, b, sa, sb]);
             } else {
@@ -844,5 +961,126 @@ mod tests {
         let tri = &idx[..3];
         let n = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
         assert!(n.dot(p(tri[0])) > 0.0);
+    }
+
+    /// Every list of fewer grid lines covers the whole patch once, facing outward, with the
+    /// skirts hanging from the border vertices it kept.
+    #[test]
+    fn skipped_lines_cover_the_patch() {
+        let src = source();
+        let key = NodeKey {
+            face: 0,
+            level: 5,
+            x: 3,
+            y: 9,
+        };
+        let c = build_chunk(&src, key);
+        let p = |i: u16| DVec3::from(c.vertices[i as usize].position.map(f64::from)) + c.origin;
+        {
+            for (step_a, step_b) in SKIP_LISTS {
+                let idx = chunk_indices_skipping(step_a, step_b);
+                let grid = QUADS / step_a * (QUADS / step_b) * 6;
+                assert_eq!(idx.len(), grid + 2 * (QUADS / step_a + QUADS / step_b) * 6);
+                assert!(idx.iter().all(|&i| (i as usize) < VERTS_PER_CHUNK));
+                // In grid cells: twice the area of each triangle, summed.
+                let mut area = 0;
+                for tri in idx[..grid].chunks(3) {
+                    let at = |v: u16| ((v as usize % GRID) as i32, (v as usize / GRID) as i32);
+                    let (a, b, c) = (at(tri[0]), at(tri[1]), at(tri[2]));
+                    assert!(
+                        [a, b, c]
+                            .iter()
+                            .all(|v| (v.0 as usize).is_multiple_of(step_a)
+                                && (v.1 as usize).is_multiple_of(step_b))
+                    );
+                    let twice = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+                    assert!(twice > 0, "steps {step_a}, {step_b}: a triangle faces down");
+                    area += twice;
+                    let n = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
+                    assert!(n.dot(p(tri[0])) > 0.0);
+                }
+                assert_eq!(area as usize, 2 * QUADS * QUADS);
+                for tri in idx[grid..].chunks(3) {
+                    for &v in tri {
+                        let v = v as usize;
+                        let (side, t) = if v < GRID * GRID {
+                            let (i, j) = (v % GRID, v / GRID);
+                            assert!(i.is_multiple_of(step_a) && j.is_multiple_of(step_b));
+                            continue;
+                        } else {
+                            ((v - GRID * GRID) / GRID, (v - GRID * GRID) % GRID)
+                        };
+                        let step = if side < 2 { step_a } else { step_b };
+                        assert_eq!(t % step, 0, "skirt of side {side}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A flat tilted sheet loses nothing without its lines; a ridge along b every second
+    /// column does, by its height, when the columns go (lines along a keep it).
+    #[test]
+    fn skip_cost_measures_what_the_lines_carry() {
+        let flat = SkipCost::measure(|i, j| Vec3::new(i as f32 * 2.0, i as f32 * 0.5, j as f32));
+        assert!(flat.error.iter().flatten().all(|&e| e < 1e-4));
+        assert!((flat.edge[0] - Vec3::new(2.0, 0.5, 0.0)).length() < 1e-4);
+        assert!((flat.edge[1] - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-4);
+        let ridged = SkipCost::measure(|i, j| Vec3::new(i as f32, (i % 2) as f32 * 0.3, j as f32));
+        assert!((ridged.error[0][0] - 0.3).abs() < 1e-4);
+        assert!((ridged.error[0][1] - 0.3).abs() < 1e-4);
+        assert!(ridged.error[1].iter().all(|&e| e < 1e-4));
+        let built = build_chunk(&source(), NodeKey::root(0)).skip;
+        assert!(built.error[0][1] >= built.error[0][0] && built.error[0][0] > 0.0);
+    }
+
+    /// Flat ground under the camera keeps its lines; far off and seen edge on it loses the
+    /// ones across the view, more of them the flatter the look; a bump taller than the
+    /// tolerance keeps them.
+    #[test]
+    fn lines_go_where_the_ground_is_seen_edge_on() {
+        // A level patch of 1 m cells, a along x and b along z, centered on the origin.
+        let mut cost = SkipCost {
+            error: [[0.0; 2]; 2],
+            edge: [Vec3::X, Vec3::Z],
+        };
+        let radius = 23.0;
+        let list = |cost: &SkipCost, camera: DVec3| {
+            cost.list(DVec3::ZERO, radius, camera, 800.0, 1.0, 1.0)
+        };
+        assert_eq!(list(&cost, DVec3::new(0.0, 100.0, 0.0)), 0, "from above");
+        assert_eq!(list(&cost, DVec3::new(0.0, 2.0, 5.0)), 0, "standing on it");
+        // Looking along z from 300 m, 60 m up: b looks about a fifth of a's length.
+        assert_eq!(
+            SKIP_LISTS[list(&cost, DVec3::new(0.0, 60.0, 300.0))],
+            (1, 4)
+        );
+        // From 120 m up: under half.
+        assert_eq!(
+            SKIP_LISTS[list(&cost, DVec3::new(0.0, 120.0, 300.0))],
+            (1, 2)
+        );
+        // Looking along x instead: a's lines go.
+        assert_eq!(
+            SKIP_LISTS[list(&cost, DVec3::new(300.0, 60.0, 0.0))],
+            (4, 1)
+        );
+        // Along the diagonal neither axis is the short one.
+        assert_eq!(list(&cost, DVec3::new(300.0, 60.0, 300.0)), 0);
+        // A pixel is about 0.35 m there: a half-meter bump on every fourth line stays.
+        cost.error[1] = [0.1, 0.5];
+        assert_eq!(
+            SKIP_LISTS[list(&cost, DVec3::new(0.0, 60.0, 300.0))],
+            (1, 2)
+        );
+        cost.error[1] = [0.5, 0.5];
+        assert_eq!(list(&cost, DVec3::new(0.0, 60.0, 300.0)), 0);
+        // From 100 m up b looks about a third of a's length: every second line goes, and
+        // every fourth once the cells left may look half again as long as they are wide.
+        cost.error[1] = [0.0, 0.0];
+        let camera = DVec3::new(0.0, 100.0, 300.0);
+        assert_eq!(SKIP_LISTS[list(&cost, camera)], (1, 2));
+        let wide = cost.list(DVec3::ZERO, radius, camera, 800.0, 1.0, 1.5);
+        assert_eq!(SKIP_LISTS[wide], (1, 4));
     }
 }

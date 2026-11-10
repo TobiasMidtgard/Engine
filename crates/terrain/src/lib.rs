@@ -348,6 +348,10 @@ pub struct TerrainSettings {
     /// "Reducing Shading on GPUs using Quad-Fragment Merging", SIGGRAPH 2010). Scales with the
     /// view's resolution: about ×1.4 detail at 900 lines, ×2.2 at 1440. 0 = no limit.
     pub min_quad_px: f64,
+    /// With `engine_render::settings::trial_cut::GROUND_LINES` (or `_WIDE`): a patch seen edge
+    /// on is drawn without every second or fourth grid line across the view where no vertex
+    /// dropped lies farther than this from the surface drawn without it, pixels.
+    pub skip_lines_px: f64,
     /// How much the air's haze and fog lower the detail of land seen through them: the split
     /// distance is multiplied by 1 / (1 + k × (1 − transmittance)²), so land the haze hides
     /// completely splits at a quarter of the distance with k = 3. As Cesium's fog does (35%
@@ -391,6 +395,7 @@ impl Default for TerrainSettings {
             split_factor: 3.2,
             patch_budget: 700,
             min_quad_px: 6.0,
+            skip_lines_px: 1.0,
             haze_detail: 3.0,
             max_patches: 6144,
             collider_tile_m: 64.0,
