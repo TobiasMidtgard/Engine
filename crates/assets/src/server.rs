@@ -1036,6 +1036,9 @@ pub struct AssetPlugin {
     pub root: Option<PathBuf>,
 }
 
+// Derivable only when debug assertions are off (`hot_reload` is then false), so clippy flags
+// it in release-like builds.
+#[allow(clippy::derivable_impls)]
 impl Default for AssetPlugin {
     fn default() -> Self {
         Self {
