@@ -13,7 +13,8 @@
 //! * [`AnimationParams`] `strike_speed` and `windup_speed` (1 when unset) scale the strike's
 //!   tempo, for skill (a rookie's slow telegraph, a master's fast one); an
 //!   [`AnimationTrigger`](engine_world::animation::AnimationTrigger) `feint` pulls a strike
-//!   back while it winds up. `MoveIntent::crouch` sets `crouch`.
+//!   back while it winds up. `MoveIntent::crouch` sets `crouch`. `evasive` 1 lets it slip
+//!   and roll under the strikes it reads (0 at first).
 //! * Strikes that land send `DamageEvent`s; [`Statuses`] `shielding` follows the guard and
 //!   `staggered` an opening after a deflect, where the body has `Statuses`.
 //! * [`AttackWindow`] says each frame which phase the strike being played is in (wind-up,
@@ -189,6 +190,10 @@ fn arm(world: &mut World, entity: Entity, loadout: Loadout, old: &[Entity]) {
             ..Default::default()
         });
     }
+    // Slips and rolls under strikes it reads, when gameplay sets `evasive` (off until then).
+    if !e.contains::<crate::combat::Evader>() {
+        e.insert(crate::combat::Evader::default());
+    }
     let mut attacker = Attacker::new(arms.set, target);
     // The requester moves the entity; a strike's step is published, not taken.
     attacker.warp = false;
@@ -201,6 +206,9 @@ fn arm(world: &mut World, entity: Entity, loadout: Loadout, old: &[Entity]) {
         },
     ));
     let mut params = e.get::<AnimationParams>().cloned().unwrap_or_default();
+    if !params.values.contains_key("evasive") {
+        params.set("evasive", 0.0);
+    }
     for layer in LAYERS {
         params.set(layer, if Some(layer) == arms.stance { 1.0 } else { 0.0 });
     }
