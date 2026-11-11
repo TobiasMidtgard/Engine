@@ -651,6 +651,7 @@ pub(crate) fn pose_stand_ins(
         let helmed = looks.is_some_and(|l| HELMED.contains(&l.headgear.as_str()));
         let tabarded = looks.is_some_and(|l| l.outfit.accent_on == "tabard");
         let helmet = placed(Part::Head);
+        let tending = brain.is_some_and(|b| b.kneeling());
         for child in children.iter() {
             let Ok((part, mut t, mut r)) = parts.get_mut(child) else {
                 continue;
@@ -664,7 +665,9 @@ pub(crate) fn pose_stand_ins(
             // are put away.)
             let hand = humanoid::in_hand(part.part).filter(|_| !ranged);
             let carried = match (posed_elsewhere, worn, hand) {
-                (true, Some(frames), Some(k)) if p.pos.distance(frames[3 + k].own) < 0.3 => {
+                (true, Some(frames), Some(k))
+                    if !tending && p.pos.distance(frames[3 + k].own) < 0.3 =>
+                {
                     (p.pos, p.rot) = frames[3 + k].carry(p.pos, p.rot);
                     true
                 }
@@ -712,7 +715,12 @@ pub(crate) fn pose_stand_ins(
             }
             // What it holds stays: on a body the animation module poses, only what it carries
             // there (its own props are hidden, `hide_props`).
-            let set_down = posed_elsewhere && !carried && hand.is_some();
+            // Kneeling by a mate, the drawn hands go to its chest: the weapon shows once it
+            // lies on the ground beside the knee, not on its way down in the stand-in's hand.
+            let set_down = posed_elsewhere
+                && !carried
+                && hand.is_some()
+                && !(tending && hand == Some(1) && p.pos.y > LAID_HEIGHT);
             let held =
                 humanoid::held(part.part) && (!posed_elsewhere || carried || set_down || flash);
             let visible = p.visible && !(drawn_elsewhere && !held && kept.is_none());
@@ -731,6 +739,10 @@ pub(crate) fn pose_stand_ins(
         }
     }
 }
+
+/// Below this height (m, in the body's frame) a weapon set down to revive a mate lies on the
+/// ground.
+const LAID_HEIGHT: f32 = 0.15;
 
 /// Rings and lines on the ground showing where NPCs are going and why.
 #[allow(clippy::type_complexity)]
