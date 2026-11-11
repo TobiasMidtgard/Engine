@@ -371,22 +371,24 @@ pub mod trial_cut {
 /// Bits of [`RenderSettings::trial_cuts_more`]: cuts past the 24 of [`trial_cut`].
 pub mod trial_cut_more {
     /// Those that are how the frame is drawn (see [`super::trial_cut::DEFAULT`]).
-    pub const DEFAULT: u32 = AERIAL_STEPWISE;
+    pub const DEFAULT: u32 = AERIAL_STEPWISE | GROUND_STILL;
     /// The haze table (aerial.rs) carries the atmosphere on from depth slice to depth slice,
     /// one step across each slice, where it marched every slice's whole ray from the camera
     /// in 8 steps: 64 atmosphere steps a column, not 512. Both are estimates of the same
     /// light; the stepwise one is the finer of the two near the camera and about as fine far
     /// off, so distant haze can shift by a rounding of the march.
     pub const AERIAL_STEPWISE: u32 = 1;
-    /// The ground stays in the far shadow map's still image (the terrain's `FarStill`): it
-    /// was drawn into the far map again every frame, as many triangles as the cascades take
-    /// together. Now it is drawn when the image is (the camera left the map's margin, the sun
-    /// turned, a building changed), and on the other frames only the patches the image
-    /// doesn't hold are drawn on top: those the far map's walk chose at another level since,
-    /// and those that arrived. The image keeps what it held of those places, a level finer
-    /// or coarser, under them; the far map's texels are meters wide and its bias covers a
-    /// level's difference. An edited patch draws the image again.
-    pub const FAR_GROUND_STILL: u32 = 2;
+    /// The ground stays in the shadow maps' still images (the terrain's `GroundStill`): it
+    /// was drawn into all four cascades and the far map again every frame, about twice the
+    /// view's own triangles. Now it is drawn into a map when the map's image is (the camera
+    /// left the map's margin, the sun turned, a building changed): the ground of the map's
+    /// whole square, whatever the camera looks at. On the other frames only the patches the
+    /// image doesn't hold are drawn on top: those the view chose at another level since, and
+    /// those that arrived. The image keeps what it held of those places, a level finer or
+    /// coarser, under them (the maps' bias covers a level's difference). An edited patch
+    /// draws the image again. Off, or while a terrain that casts into a map moves: the
+    /// ground is drawn into it every frame.
+    pub const GROUND_STILL: u32 = 2;
 }
 
 /// What the screen shows.

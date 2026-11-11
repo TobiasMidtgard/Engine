@@ -421,49 +421,72 @@ struct ChunkGpu {
     skip: SkipCost,
 }
 
-/// The ground patches a far shadow map's still image holds, each with its upload stamp.
-type FarStillPatches = HashMap<(Entity, NodeKey), u32>;
+/// The ground patches a shadow map's still image holds, each with its upload stamp.
+type StillPatches = HashMap<(Entity, NodeKey), u32>;
 
-/// The far shadow map's ground in the map's still image (`trial_cut_more::FAR_GROUND_STILL`).
-/// On the frames the image is drawn the far map's patches go into it; on the others only the
-/// patches it doesn't hold are drawn on top (the camera went on and the walk chose other
-/// levels, or patches arrived). What the image holds of a place at another level stays under
-/// them: the far map's texels are meters wide and its bias covers a level's difference. An
-/// edited patch built again asks for the image to be drawn again (the old ground must leave
-/// it), and so does a top layer grown to half the patches, at most every
-/// [`FAR_STILL_HOLD`]. While a terrain with ground in the far map moves, the ground is drawn
-/// every frame as before (the other planets move every frame and cast nothing here).
+/// The ground in a shadow map's still image (`trial_cut_more::GROUND_STILL`), one for each
+/// cascade and one for the far map. On the frames the image is drawn the ground of the map's
+/// whole square goes into it (a walk of its own: the cascades' is the view's without the
+/// frustum, the far map's a level coarser); on the others only the patches it doesn't hold
+/// are drawn on top (the camera went on and the view chose other levels, or patches
+/// arrived). What the image holds of a place at another level stays under them: a patch
+/// splits and merges at its parent's shape, and the image is drawn again before the camera
+/// has gone 8% of the map's radius (`engine_render::shadows::STATIC_MARGIN`), which keeps
+/// the shapes within about a texel of each other. An edited patch built again asks for the
+/// image to be drawn again (the old ground must leave it), and so does a top layer grown to
+/// half the patches, at most every [`STILL_HOLD`]. An image drawn while the ground was still
+/// loading holds parents standing in for their patches, far from their own shape: it is
+/// drawn again once the ground is there, and every [`STILL_LOADING`] until then. While a
+/// terrain with ground in the map moves, the ground is drawn every frame (the other planets
+/// move every frame and cast nothing here).
 #[derive(Default)]
-struct FarStill {
-    /// The switch is on and no terrain with patches in the far map moved since last frame.
+struct GroundStill {
+    /// The switch is on and no terrain with patches in the map moved since last frame.
     wanted: bool,
     /// The image is drawn this frame, with the ground in it.
     into_image: bool,
     /// What the image holds of the ground (each patch's upload stamp) and when it was drawn.
     /// `None`: no ground, all of it is drawn on top every frame.
-    image: Option<(FarStillPatches, std::time::Instant)>,
+    image: Option<(StillPatches, std::time::Instant)>,
     /// The image should be drawn again (`shadow_static_changed`).
     ask: bool,
-    /// The terrains' places last frame, and the terrains with patches in the far map then.
+    /// The terrains' places last frame, and the terrains with patches in the map then.
     poses: HashMap<Entity, u64>,
     casters: HashSet<Entity>,
-    /// This frame: the far map's patches, those of them drawn on top, an edited one seen.
+    /// This frame: the map's patches, those of them drawn on top, an edited one seen.
     all: usize,
     top: usize,
     edited: bool,
+    /// This frame the map's walk lacks patches (parents stand in), and the image was drawn
+    /// on such a frame.
+    lacking: bool,
+    provisional: bool,
 }
 
-/// The far shadow map's still image holds the ground at least this long before an edit or a
-/// grown top layer draws it again.
-const FAR_STILL_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
+/// A shadow map's still image holds the ground at least this long before an edit or a grown
+/// top layer draws it again.
+const STILL_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
+/// An image drawn while the ground was loading is drawn again this often until it is there.
+const STILL_LOADING: std::time::Duration = std::time::Duration::from_secs(1);
+/// The far map's place among the feature's [`GroundStill`]s (after the cascades').
+const FAR_STILL: usize = engine_render::shadows::MAX_CASCADES;
 
-impl FarStill {
-    /// Starts a main view's frame at `now`: `on` (the switch, with a far map), the terrains'
-    /// places, and whether the map's still image is drawn this frame.
+/// Which [`GroundStill`] holds shadow map `map`'s ground.
+fn still_of(map: usize) -> Option<usize> {
+    match map {
+        engine_render::shadows::FAR_SHADOW_MAP => Some(FAR_STILL),
+        c if c < FAR_STILL => Some(c),
+        _ => None,
+    }
+}
+
+impl GroundStill {
+    /// Starts a main view's frame at `now`: `on` (the switch, with the map in use), the
+    /// terrains' places, and whether the map's still image is drawn this frame.
     fn begin(
         &mut self,
         on: bool,
-        poses: HashMap<Entity, u64>,
+        poses: &HashMap<Entity, u64>,
         redraw: bool,
         now: std::time::Instant,
     ) {
@@ -472,17 +495,22 @@ impl FarStill {
             .iter()
             .any(|e| poses.get(e) != self.poses.get(e));
         self.wanted = on && !moved;
-        self.poses = poses;
+        self.poses.clone_from(poses);
         self.casters.clear();
         self.into_image = self.wanted && redraw;
         if redraw {
             self.image = self.wanted.then(|| (HashMap::new(), now));
         }
-        (self.all, self.top, self.edited) = (0, 0, false);
+        (self.all, self.top, self.edited, self.lacking) = (0, 0, false, false);
     }
 
-    /// A patch of the far map's walk this frame (`stamp`: its upload): whether it is drawn,
-    /// into the image on the frames the image is drawn and on top of it on the others.
+    /// The map's walk lacks patches this frame: parents are drawn in their place.
+    fn lacks(&mut self) {
+        self.lacking = true;
+    }
+
+    /// A patch for the map this frame (`stamp`: its upload): whether it is drawn, into the
+    /// image on the frames the image is drawn and on top of it on the others.
     fn patch(&mut self, id: (Entity, NodeKey), stamp: u32) -> bool {
         self.all += 1;
         self.casters.insert(id.0);
@@ -503,10 +531,15 @@ impl FarStill {
 
     /// Ends the frame: whether to ask for the image.
     fn end(&mut self, now: std::time::Instant) {
+        if self.into_image {
+            self.provisional = self.lacking;
+        }
         self.ask = match (self.wanted, &self.image) {
             (true, Some((_, at))) => {
-                (self.edited || self.top * 2 > self.all)
-                    && now.duration_since(*at) >= FAR_STILL_HOLD
+                let held = now.duration_since(*at);
+                let stale =
+                    self.edited || self.top * 2 > self.all || (self.provisional && !self.lacking);
+                (stale && held >= STILL_HOLD) || (self.provisional && held >= STILL_LOADING)
             }
             // Into the image, or out of it.
             (true, None) | (false, Some(_)) => true,
@@ -760,9 +793,9 @@ pub struct TerrainFeature {
     shadow_draws: [Vec<Draw>; 4],
     /// Patches drawn into the far shadow map (big shadows beyond the cascades).
     far_shadow_draws: Vec<Draw>,
-    /// The far shadow map's ground kept in the map's still image
-    /// (`trial_cut_more::FAR_GROUND_STILL`).
-    far_still: FarStill,
+    /// The ground kept in the shadow maps' still images (`trial_cut_more::GROUND_STILL`): the
+    /// cascades', then the far map's ([`FAR_STILL`]).
+    stills: [GroundStill; FAR_STILL + 1],
     /// Draw each list's runs of patches on one vertex page with one
     /// `multi_draw_indexed_indirect` (`RenderSettings::multi_draw_indirect`, where the GPU
     /// takes a first instance in indirect draws): a few commands a pass instead of one per
@@ -2472,8 +2505,8 @@ impl RenderFeature for TerrainFeature {
         built_total += uploads;
         steps.mark("uploads");
 
-        // The far shadow map's ground in the map's still image (`FarStill`): off while a
-        // terrain that casts into it moves (the terrains' places).
+        // The ground in the shadow maps' still images (`GroundStill`): off while a terrain
+        // that casts into a map moves (the terrains' places).
         if !mirror {
             let poses = entities.iter().map(|e| {
                 use std::hash::{Hash, Hasher};
@@ -2488,19 +2521,28 @@ impl RenderFeature for TerrainFeature {
                 place.for_each(|v| v.to_bits().hash(&mut h));
                 (*e, h.finish())
             });
-            let poses = poses.collect();
+            let poses: HashMap<Entity, u64> = poses.collect();
             let on = render_settings.trial_cuts_more
-                & engine_render::settings::trial_cut_more::FAR_GROUND_STILL
+                & engine_render::settings::trial_cut_more::GROUND_STILL
                 != 0
-                && view.sun_shadows
-                && view.far_shadow.enabled;
-            self.far_still.begin(
-                on,
-                poses,
-                view.far_shadow.static_redraw,
-                std::time::Instant::now(),
-            );
+                && view.sun_shadows;
+            let now = std::time::Instant::now();
+            for (i, still) in self.stills.iter_mut().enumerate() {
+                let (used, redraw) = if i == FAR_STILL {
+                    (view.far_shadow.enabled, view.far_shadow.static_redraw)
+                } else {
+                    (
+                        i < view.cascades.count as usize,
+                        view.cascades.static_redraw[i],
+                    )
+                };
+                still.begin(on && used, &poses, redraw, now);
+            }
         }
+        // (The cascades whose images hold the ground, for the walk of their squares.)
+        let cascades = (view.cascades.count as usize).min(FAR_STILL);
+        let still_wanted: [bool; FAR_STILL] =
+            std::array::from_fn(|i| !mirror && i < cascades && self.stills[i].wanted);
         for (pi, e) in entities.iter().enumerate() {
             let t = &terrains.entries[e];
             let src = t.source.clone();
@@ -2709,6 +2751,47 @@ impl RenderFeature for TerrainFeature {
                 for &(dist, k) in &far_sel.missing {
                     wants.push((urgency(dist, k) + 2.0, k, false));
                 }
+                if !far_sel.missing.is_empty() {
+                    self.stills[FAR_STILL].lacks();
+                }
+            }
+            // The cascades' still images: the view's walk again over their whole squares,
+            // whatever the camera looks at. That takes in the ground toward the sun as far as
+            // it can cast into a square, mountains kilometers off included: the old way drew
+            // those into a cascade only while they were in view, so a valley late in the day
+            // fell into their shade when the camera turned toward the sun and out of it again
+            // when it turned away. Now it lies in their shade whichever way the camera looks. Its patches go into a cascade's image on the
+            // frames that is drawn; every frame it asks the workers for what it lacks (after
+            // the view's own), so the ground behind the camera is built by then.
+            let square_sel = (t.config.cast_shadows
+                && view.sun_shadows
+                && still_wanted.contains(&true))
+            .then(|| {
+                let in_squares = |c: DVec3, r: f64| {
+                    let rel = (pos + rot * c - origin).as_vec3();
+                    (0..cascades).any(|i| {
+                        still_wanted[i] && view.cascades.sphere_in_square(i, rel, r as f32)
+                    })
+                };
+                state.lod.walk(&SelectInput {
+                    camera: cam_local,
+                    split_factor: split,
+                    merge_factor: None,
+                    visible: &in_squares,
+                    min_size: 0.0,
+                    detail: haze_detail,
+                })
+            });
+            steps.mark("patches: cascade squares");
+            if let Some(square_sel) = &square_sel {
+                for &(dist, k) in &square_sel.missing {
+                    wants.push((urgency(dist, k) + 1.5, k, false));
+                }
+                if !square_sel.missing.is_empty() {
+                    for still in &mut self.stills[..cascades] {
+                        still.lacks();
+                    }
+                }
             }
             if !mirror {
                 // Each patch once, at its most urgent; at most a few hundred (after a jump the
@@ -2832,8 +2915,16 @@ impl RenderFeature for TerrainFeature {
                 }
                 if casts {
                     let center = (pos + rot * c.center - view.origin).as_vec3();
-                    for i in 0..(view.cascades.count as usize).min(4) {
-                        if view.cascades.sphere_in_cascade(i, center, c.radius as f32) {
+                    for i in 0..cascades {
+                        // (`GroundStill`: on the frames a cascade's still image is drawn, the
+                        // ground of its square goes into it, below; on the others the view's
+                        // patches the image doesn't hold are drawn on top.)
+                        if !mirror && self.stills[i].into_image {
+                            continue;
+                        }
+                        if view.cascades.sphere_in_cascade(i, center, c.radius as f32)
+                            && (mirror || self.stills[i].patch((*e, *key), c.stamp))
+                        {
                             self.shadow_draws[i].push(Draw {
                                 slot: c.slot,
                                 instance,
@@ -2843,11 +2934,42 @@ impl RenderFeature for TerrainFeature {
                     }
                 }
             }
+            for key in square_sel.iter().flat_map(|s| &s.draw) {
+                let Some(c) = state.chunks.get(key) else {
+                    continue;
+                };
+                let center = (pos + rot * c.center - view.origin).as_vec3();
+                let mut instance = None;
+                for i in 0..cascades {
+                    if !self.stills[i].into_image
+                        || !view.cascades.sphere_in_square(i, center, c.radius as f32)
+                    {
+                        continue;
+                    }
+                    self.stills[i].patch((*e, *key), c.stamp);
+                    let instance = *instance.get_or_insert_with(|| {
+                        let morph = morph(key.level);
+                        let rel = (pos + rot * c.origin - view.origin).as_vec3();
+                        instances.push(ChunkInstance {
+                            origin: rel.to_array(),
+                            planet: pi as u32,
+                            lod: [c.spacing as f32, key.level as f32, morph.0, morph.1],
+                            night: NO_PAGE,
+                        });
+                        instances.len() as u32 - 1
+                    });
+                    self.shadow_draws[i].push(Draw {
+                        slot: c.slot,
+                        instance,
+                        list: 0,
+                    });
+                }
+            }
             for key in far_sel.iter().flat_map(|s| &s.draw) {
                 let Some(c) = state.chunks.get(key) else {
                     continue;
                 };
-                if !self.far_still.patch((*e, *key), c.stamp) {
+                if !self.stills[FAR_STILL].patch((*e, *key), c.stamp) {
                     continue;
                 }
                 let morph = morph(key.level);
@@ -2993,7 +3115,10 @@ impl RenderFeature for TerrainFeature {
         }
 
         if !mirror {
-            self.far_still.end(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            for still in &mut self.stills {
+                still.end(now);
+            }
         }
         let index_lists = self.gpu.as_ref().map(|g| g.index_lists).unwrap_or_default();
         let triangles = |d: &Draw| (index_lists[d.list as usize].1 / 3) as u64;
@@ -3227,41 +3352,27 @@ impl RenderFeature for TerrainFeature {
         self.draw_list(pass, gpu, DrawList::Scene, &self.draws);
     }
 
+    // (`GroundStill`: on the frames a map's still image is drawn, the ground is in it.)
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        if cascade >= 4 || self.shadow_draws[cascade].is_empty() {
-            return;
+        if cascade < FAR_STILL && !self.stills[cascade].into_image {
+            self.draw_shadow_ground(pass, cascade);
         }
-        let Some(gpu) = &self.gpu else {
-            return;
-        };
-        let Some(group) = &gpu.group else {
-            return;
-        };
-        pass.set_pipeline(&gpu.shadow_pipeline);
-        pass.set_bind_group(1, group, &[]);
-        self.draw_list(
-            pass,
-            gpu,
-            DrawList::Shadow(cascade),
-            &self.shadow_draws[cascade],
-        );
     }
 
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        // (`FarStill`: on the frames the far map's still image is drawn, the ground is in it.)
-        if !self.far_still.into_image {
-            self.draw_far_ground(pass);
+        if !self.stills[FAR_STILL].into_image {
+            self.draw_shadow_ground(pass, FAR_STILL);
         }
     }
 
     fn draw_shadow_static(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, _ctx: &FrameContext) {
-        if map == engine_render::shadows::FAR_SHADOW_MAP && self.far_still.into_image {
-            self.draw_far_ground(pass);
+        if let Some(i) = still_of(map).filter(|&i| self.stills[i].into_image) {
+            self.draw_shadow_ground(pass, i);
         }
     }
 
     fn shadow_static_changed(&self, map: usize) -> bool {
-        map == engine_render::shadows::FAR_SHADOW_MAP && self.far_still.ask
+        still_of(map).is_some_and(|i| self.stills[i].ask)
     }
 
     fn stats(&self) -> FeatureStats {
@@ -3277,7 +3388,17 @@ impl RenderFeature for TerrainFeature {
                 .map(|l| self.draws.iter().filter(|d| d.list as usize == l).count())
                 .collect::<Vec<_>>(),
             "far_shadow_patches": self.far_shadow_draws.len(),
-            "far_shadow_patches_still": self.far_still.image.as_ref().map_or(0, |i| i.0.len()),
+            // What each shadow map's still image holds of the ground (the cascades', then the
+            // far map's), and the patches drawn on top of each this frame.
+            "shadow_patches_still": self.stills.iter()
+                .map(|s| s.image.as_ref().map_or(0, |i| i.0.len()))
+                .collect::<Vec<_>>(),
+            "shadow_patches_on_top": self.shadow_draws.iter()
+                .chain([&self.far_shadow_draws])
+                .zip(&self.stills)
+                .map(|(d, s)| if s.into_image { 0 } else { d.len() })
+                .collect::<Vec<_>>(),
+            "far_shadow_patches_still": self.stills[FAR_STILL].image.as_ref().map_or(0, |i| i.0.len()),
             "patches_resident": self.pool.used(),
             "patches_built_last_frame": self.built_last_frame,
             "patches_building": self.planets.values().map(|p| p.building.len()).sum::<usize>(),
@@ -3287,9 +3408,15 @@ impl RenderFeature for TerrainFeature {
 }
 
 impl TerrainFeature {
-    /// The far shadow map's patches, into the map or its still image.
-    fn draw_far_ground(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.far_shadow_draws.is_empty() {
+    /// A shadow map's patches (`still`: a cascade, or [`FAR_STILL`]), into the map or its
+    /// still image.
+    fn draw_shadow_ground(&self, pass: &mut wgpu::RenderPass<'_>, still: usize) {
+        let (list, draws) = if still == FAR_STILL {
+            (DrawList::FarShadow, &self.far_shadow_draws)
+        } else {
+            (DrawList::Shadow(still), &self.shadow_draws[still])
+        };
+        if draws.is_empty() {
             return;
         }
         let Some(gpu) = &self.gpu else {
@@ -3300,7 +3427,7 @@ impl TerrainFeature {
         };
         pass.set_pipeline(&gpu.shadow_pipeline);
         pass.set_bind_group(1, group, &[]);
-        self.draw_list(pass, gpu, DrawList::FarShadow, &self.far_shadow_draws);
+        self.draw_list(pass, gpu, list, draws);
     }
 
     fn draw_list(
@@ -3814,9 +3941,53 @@ mod tests {
     use engine_render::features::{compose_shader, validate_wgsl};
 
     #[test]
+    fn an_image_drawn_while_the_ground_loads_is_drawn_again_when_it_is_there() {
+        let t0 = std::time::Instant::now();
+        let key = (
+            Entity::from_raw_u32(1).expect("an entity"),
+            NodeKey {
+                face: 0,
+                level: 3,
+                x: 0,
+                y: 0,
+            },
+        );
+        let poses = HashMap::from([(key.0, 7u64)]);
+        let mut f = GroundStill::default();
+        // Drawn while patches are lacking: a parent stands in.
+        f.begin(true, &poses, true, t0);
+        f.lacks();
+        assert!(f.into_image && f.patch(key, 1));
+        f.end(t0);
+        assert!(!f.ask);
+        // Still loading: held, then drawn again after a while.
+        f.begin(true, &poses, false, t0);
+        f.lacks();
+        assert!(!f.patch(key, 1));
+        f.end(t0 + STILL_HOLD);
+        assert!(!f.ask);
+        f.begin(true, &poses, false, t0);
+        f.lacks();
+        f.end(t0 + STILL_LOADING);
+        assert!(f.ask);
+        // The ground is there: drawn again as soon as the image has been held.
+        f.begin(true, &poses, false, t0);
+        f.end(t0 + STILL_HOLD);
+        assert!(f.ask);
+        f.begin(true, &poses, true, t0 + STILL_HOLD);
+        assert!(f.patch(key, 1));
+        f.end(t0 + STILL_HOLD);
+        // Whole: nothing more to ask, however long it is held.
+        f.begin(true, &poses, false, t0);
+        assert!(!f.patch(key, 1));
+        f.end(t0 + STILL_LOADING * 10);
+        assert!(!f.ask);
+    }
+
+    #[test]
     fn far_ground_stays_in_the_image_and_only_new_patches_are_drawn_on_top() {
         let t0 = std::time::Instant::now();
-        let later = t0 + FAR_STILL_HOLD;
+        let later = t0 + STILL_HOLD;
         let key = |x: u32| {
             (
                 Entity::from_raw_u32(1).expect("an entity"),
@@ -3835,44 +4006,44 @@ mod tests {
             let moon = Entity::from_raw_u32(2).expect("an entity");
             HashMap::from([(key(0).0, place), (moon, frame)])
         };
-        let mut f = FarStill::default();
+        let mut f = GroundStill::default();
         // Off: every patch drawn on top, nothing asked.
-        f.begin(false, at(7), true, t0);
+        f.begin(false, &at(7), true, t0);
         assert!(f.patch(key(0), 1) && !f.into_image);
         f.end(t0);
         assert!(!f.ask);
         // On: asks for the image, all on top until the image holds the ground.
-        f.begin(true, at(7), false, t0);
+        f.begin(true, &at(7), false, t0);
         assert!(f.patch(key(0), 1) && !f.into_image);
         f.end(t0);
         assert!(f.ask);
-        f.begin(true, at(7), true, t0);
+        f.begin(true, &at(7), true, t0);
         assert!(f.into_image && f.patch(key(0), 1) && f.patch(key(1), 1) && f.patch(key(2), 1));
         f.end(t0);
         assert!(!f.ask);
         // The next frames draw what the image holds no more, and a new patch on top.
-        f.begin(true, at(7), false, later);
+        f.begin(true, &at(7), false, later);
         assert!(!f.into_image && !f.patch(key(0), 1) && !f.patch(key(1), 1) && f.patch(key(3), 1));
         f.end(later);
         assert!(!f.ask && f.top == 1);
         // An edited patch is drawn on top and the image asked for, once the hold is over.
-        f.begin(true, at(7), false, t0);
+        f.begin(true, &at(7), false, t0);
         assert!(f.patch(key(0), 2) && !f.patch(key(1), 1) && !f.patch(key(2), 1));
         f.end(t0);
         assert!(!f.ask);
         f.end(later);
         assert!(f.ask);
         // A top layer of more than half the patches asks too.
-        f.begin(true, at(7), false, later);
+        f.begin(true, &at(7), false, later);
         assert!(!f.patch(key(0), 1) && f.patch(key(4), 1) && f.patch(key(5), 1));
         f.end(later);
         assert!(f.ask);
         // A terrain moved: all on top at once, and the ground asked out of the image.
-        f.begin(true, at(8), false, later);
+        f.begin(true, &at(8), false, later);
         assert!(f.patch(key(0), 1) && f.patch(key(1), 1));
         f.end(later);
         assert!(f.ask && !f.wanted);
-        f.begin(true, at(9), true, later);
+        f.begin(true, &at(9), true, later);
         assert!(f.image.is_none() && f.patch(key(0), 1));
         f.end(later);
         assert!(!f.ask);
