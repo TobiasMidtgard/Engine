@@ -21,6 +21,12 @@
 //! only by what the switch does. `--shots-only` takes the pictures without the readings (a
 //! software GPU's times say nothing).
 //!
+//! The cuts of `RenderSettings::trial_cuts` are on by default. `--old-way` takes them all off
+//! for the sweep, so the baseline is the frame as it was before them, each `cut_*` row reads
+//! what that cut saves by itself and `cut_all` what the default frame saves. Without it the
+//! baseline is the default frame: `old_way` is the whole before and after, the cuts that are
+//! on change nothing, and those that are off (the trades) are added.
+//!
 //! `--skip a,b` leaves those switches out (one the game cannot take on a machine). The files are
 //! written after every stop, so a sweep that dies keeps the stops it finished.
 //!
@@ -50,8 +56,16 @@ struct Variant {
 
 impl Variant {
     /// The patch to send, given the resource as it stands: `patch` plus the `times` keys.
+    /// The cuts' bits (`trial_cuts`, `trial_cuts_more`) are added to those already on, so a
+    /// row means the same against the default frame and against the old way (`--old-way`).
     fn patch_for(&self, current: &Value) -> Value {
         let mut out = self.patch.as_object().cloned().unwrap_or_default();
+        for key in ["trial_cuts", "trial_cuts_more"] {
+            let on = current.get(key).and_then(Value::as_u64).unwrap_or(0);
+            if let Some(bits) = out.get(key).and_then(Value::as_u64) {
+                out.insert(key.to_string(), json!(on | bits));
+            }
+        }
         for (key, factor) in self.times {
             let Some(now) = current.get(*key).and_then(Value::as_f64) else {
                 continue;
@@ -617,6 +631,16 @@ fn variants() -> Vec<Variant> {
             json!({"trial_cuts": 3_137_211, "trial_cuts_more": 1, "shadow_refresh_secs": 0.25}),
             "every same-picture cut in RenderSettings at once (lighting but for the deep-shadow shortcut and the reflection taps, ground textures but for rock's single lookup, ground lines, ground and objects once a pixel, depth first, holes first, nearest first, far shadow refresh): the frame if all of them pass",
         ),
+        x(
+            "old_way",
+            r,
+            &[
+                ("trial_cuts", 0.0),
+                ("trial_cuts_more", 0.0),
+                ("shadow_refresh_secs", 0.0),
+            ],
+            "the frame as it was drawn before 11 Nov 2026 (no cut on): against the default frame, the whole before and after",
+        ),
         v(
             "cut_all_no_screen_pass",
             r,
@@ -996,6 +1020,8 @@ struct Args {
     variant_shots: Vec<String>,
     /// Take the pictures without the readings.
     shots_only: bool,
+    /// Read everything against the frame as it was before the cuts became the default.
+    old_way: bool,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -1013,6 +1039,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shots: false,
         variant_shots: Vec::new(),
         shots_only: false,
+        old_way: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -1046,6 +1073,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--label" => a.label = value("--label")?,
             "--no-goto" => a.goto = false,
             "--shots-only" => a.shots_only = true,
+            "--old-way" => a.old_way = true,
             "--shots" => a.shots = true,
             "--variant-shots" => {
                 a.shots = true;
@@ -1098,9 +1126,25 @@ fn run(args: &Args) -> Result<(), String> {
     let renderer = bridge
         .call("render.stats", json!({}))
         .unwrap_or(Value::Null);
+    // `--old-way`: the baseline is the frame without any cut, so a cut's row reads what that
+    // cut saves by itself and `cut_all` what the default frame saves. Put back at the end.
+    let old = json!({"trial_cuts": 0, "trial_cuts_more": 0, "shadow_refresh_secs": 0.0});
+    let default_way = if args.old_way {
+        let now = bridge.call("resource.get", json!({"name": "RenderSettings"}))?;
+        bridge.call(
+            "resource.set",
+            json!({"name": "RenderSettings", "value": old}),
+        )?;
+        Some(restore_of(&now, &old))
+    } else {
+        None
+    };
     let mut results = Map::new();
     let mut md = String::new();
     md.push_str(&format!("# GPU sweep: {}\n\n", args.label));
+    if args.old_way {
+        md.push_str("Baseline: the old way (no cut on).\n\n");
+    }
     let stats = &renderer["stats"];
     md.push_str(&format!(
         "GPU: {} | size: {}x{} | {} s a reading after {} s to settle\n\n",
@@ -1367,7 +1411,7 @@ fn run(args: &Args) -> Result<(), String> {
         md.push('\n');
         results.insert(stop.clone(), Value::Object(stop_json));
         // After every stop, so a sweep that dies at a later one keeps what it measured.
-        let json = json!({"label": args.label.clone(), "renderer": renderer.clone(), "stops": results.clone()});
+        let json = json!({"label": args.label.clone(), "old_way": args.old_way, "renderer": renderer.clone(), "stops": results.clone()});
         std::fs::write(format!("{}.md", args.out), &md).map_err(|e| e.to_string())?;
         std::fs::write(
             format!("{}.json", args.out),
@@ -1379,6 +1423,12 @@ fn run(args: &Args) -> Result<(), String> {
             args.out,
             results.len()
         );
+    }
+    if let Some(back) = default_way {
+        bridge.call(
+            "resource.set",
+            json!({"name": "RenderSettings", "value": back}),
+        )?;
     }
     Ok(())
 }

@@ -218,9 +218,33 @@ pub mod shade_skip {
     pub const SHADOW_COPIES: u32 = 1048576;
 }
 
-/// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the same picture, switchable
-/// while they are measured (lib_frame.wgsl `trial_cut`).
+/// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the picture (lib_frame.wgsl
+/// `trial_cut`). Those in [`DEFAULT`](trial_cut::DEFAULT) are how the frame is drawn; the rest
+/// change the picture a little and are off.
 pub mod trial_cut {
+    /// How the frame is drawn since 11 Nov 2026: every cut that keeps the picture. Ground and
+    /// objects are shaded once a pixel from what a pass of their own stores (`GROUND_ONCE`,
+    /// `MESHES_ONCE` with its depth drawn first, holes found first and the nearest first), the
+    /// sun, sky cover, probes and fog are worked out once a pixel in the screen light pass,
+    /// and lamps are sorted into tiles. A bit cleared draws that part the old way, for the
+    /// PC's before and after only: the old ways are being taken out.
+    pub const DEFAULT: u32 = SKY_RING_TAPS
+        | TERRAIN_ANISO_8
+        | TERRAIN_COPY_ANISO
+        | TERRAIN_FADE_ANISO
+        | TERRAIN_COPY_SINGLE
+        | SUN_MARCH_STEPS
+        | SCREEN_LIGHT
+        | TILED_LAMPS
+        | SCREEN_FOG
+        | GROUND_LINES
+        | GROUND_ONCE
+        | MESHES_ONCE
+        | MESHES_EARLY_Z
+        | MESHES_DEPTH_FIRST
+        | MESHES_HOLES_FIRST
+        | MESHES_NEAR_FIRST
+        | THIN_OWN_SUN;
     /// The sky occlusion map read with four taps a ring instead of eight on surfaces, the rings
     /// turned by a different part of a step each pixel and frame (temporal anti-aliasing
     /// averages them).
@@ -344,8 +368,10 @@ pub mod trial_cut {
     pub const REFLECTIONS_ALTERNATE: u32 = 8388608;
 }
 
-/// Bits of [`RenderSettings::trial_cuts_more`]: trial cuts past the 24 of [`trial_cut`].
+/// Bits of [`RenderSettings::trial_cuts_more`]: cuts past the 24 of [`trial_cut`].
 pub mod trial_cut_more {
+    /// Those that are how the frame is drawn (see [`super::trial_cut::DEFAULT`]).
+    pub const DEFAULT: u32 = AERIAL_STEPWISE;
     /// The haze table (aerial.rs) carries the atmosphere on from depth slice to depth slice,
     /// one step across each slice, where it marched every slice's whole ray from the camera
     /// in 8 steps: 64 atmosphere steps a column, not 512. Both are estimates of the same
@@ -438,7 +464,7 @@ pub struct RenderSettings {
     /// the last cascade and the sky occlusion map at twice it, the far shadow map at four times
     /// (`shadows::static_holds`). The two nearest cascades never wait. In a busy scene something
     /// changes somewhere in a far map on most frames, and each change draws every still caster
-    /// in it again. 0 = at once (the default).
+    /// in it again. 0 = at once; 0.25 by default.
     pub shadow_refresh_secs: f32,
     /// Record and submit on a render thread (see [`Pipelining`]).
     pub pipelining: Pipelining,
@@ -565,13 +591,13 @@ pub struct RenderSettings {
     /// [`shade_skip`]; 0 = none, the default). The picture is wrong while any is set: for
     /// `tools/engine-mcp`'s `gpu_sweep` and A/B runs only.
     pub debug_skip: u32,
-    /// Cheaper ways to draw the same picture that are being measured before they become the
-    /// way it is drawn (bits of [`trial_cut`]; 0 = none, the default). For `gpu_sweep` and
-    /// side-by-side pictures: a cut that saves time and shows no difference loses its bit and
-    /// becomes the code, one that doesn't is removed.
+    /// Cheaper ways to draw the picture (bits of [`trial_cut`]). [`trial_cut::DEFAULT`], the
+    /// default, is how the frame is drawn; 0 draws it the way it was before 11 Nov 2026 (for
+    /// `gpu_sweep`'s before and after), and the bits outside the default are trades that
+    /// change the picture a little.
     pub trial_cuts: u32,
-    /// More of them (bits of [`trial_cut_more`]): the first set's 24 bits, all an f32 holds
-    /// exactly, are taken.
+    /// More of them (bits of [`trial_cut_more`]; [`trial_cut_more::DEFAULT`] by default): the
+    /// first set's 24 bits, all an f32 holds exactly, are taken.
     pub trial_cuts_more: u32,
     /// The frame rate the work spread over frames is set for: probe tracing's time a frame
     /// (`gi_budget_ms`), the environment map's interval (`environment_interval`) and, in the
@@ -786,7 +812,7 @@ impl Default for RenderSettings {
             far_shadow_distance: 8000.0,
             shadow_split_lambda: 0.8,
             shadow_cascade_reuse: 3,
-            shadow_refresh_secs: 0.0,
+            shadow_refresh_secs: 0.25,
             pipelining: Pipelining::Windowed,
             parallel_encoding: true,
             shadow_depth_bias: 0.0,
@@ -832,8 +858,8 @@ impl Default for RenderSettings {
             max_point_lights: 256,
             debug_view: DebugView::None,
             debug_skip: 0,
-            trial_cuts: 0,
-            trial_cuts_more: 0,
+            trial_cuts: trial_cut::DEFAULT,
+            trial_cuts_more: trial_cut_more::DEFAULT,
             pacing_fps: 0.0,
             perf_log_secs: 10.0,
             environment_interval: 4,
