@@ -5,7 +5,8 @@
 //!   a shield) the sword-and-shield set, a two-handed blade or axe the great sword's, a bow
 //!   the bow's, a firearm a carbine, empty hands boxing. The props are spawned here and
 //!   re-made when it changes.
-//! * A bow draws and holds on the trigger `draw` until `loose` (or `lower`); a carbine
+//! * A bow draws and holds on the trigger `draw` until `loose` (or `lower`), paced by
+//!   `draw_speed` (1 when unset: the anchor at 0.78 s); a carbine
 //!   shoulders and aims while `aim` is up, shoots on `fire` (any `MoveIntent::attack` press
 //!   too) and changes its magazine on `reload` ([`humanoid`](crate::build::humanoid)'s graph).
 //! * [`MoveIntent`]`.attack` presses a strike as it turns on (`Melee`, `Spell`, `Ranged`: a

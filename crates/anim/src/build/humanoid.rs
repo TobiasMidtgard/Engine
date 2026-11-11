@@ -4175,6 +4175,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         name: name.into(),
         node,
         speed: 1.0,
+        speed_param: None,
     };
     AnimGraph {
         name: name.into(),
@@ -4196,7 +4197,12 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state(COLLAPSE, NodeDef::one_shot(COLLAPSE)),
                 state(DOWNED, NodeDef::clip(DOWNED)),
                 state(KNEEL_TEND, NodeDef::clip(KNEEL_TEND)),
-                state(BOW_DRAW, NodeDef::one_shot(BOW_DRAW)),
+                // Paced by `draw_speed` (1: the anchor at 0.78 s), so an AI's aim time
+                // brings the hand to the jaw before it looses.
+                StateDef {
+                    speed_param: Some("draw_speed".into()),
+                    ..state(BOW_DRAW, NodeDef::one_shot(BOW_DRAW))
+                },
                 state(BOW_HOLD, NodeDef::clip(BOW_HOLD)),
                 state(BOW_LOOSE, NodeDef::one_shot(BOW_LOOSE)),
                 state(BOW_LOWER, NodeDef::one_shot(BOW_LOWER)),
@@ -4416,7 +4422,8 @@ fn down_and_kneel() -> Vec<TransitionDef> {
 }
 
 /// Drawing a bow and holding it at full draw for the game's own aim, carrying the bow
-/// (`bow_carry` up): the `draw` trigger draws ([`BOW_DRAW`], `drawn` at full draw) and holds
+/// (`bow_carry` up): the `draw` trigger draws ([`BOW_DRAW`], `drawn` at full draw, paced by
+/// `draw_speed`: 1 or unset reaches the anchor in 0.78 s, 2 in 0.39 s) and holds
 /// ([`BOW_HOLD`]) until `loose` shoots ([`BOW_LOOSE`], `release` at once; loosed while still
 /// drawing, it snaps off early) or `lower` lets the string down ([`BOW_LOWER`]). Putting the
 /// bow away lets it down too.

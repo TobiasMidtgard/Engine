@@ -182,6 +182,10 @@ pub struct StateDef {
     pub node: NodeDef,
     #[serde(default = "one")]
     pub speed: f32,
+    /// A parameter that scales `speed` while set (clamped to 0.25..3; 1 while unset), for
+    /// gameplay to pace a state (a bow's draw to an AI's aim time).
+    #[serde(default)]
+    pub speed_param: Option<String>,
 }
 
 /// Comparison for parameter conditions.
@@ -417,6 +421,19 @@ struct State {
     name: String,
     node: usize,
     speed: f32,
+    speed_param: Option<String>,
+}
+
+impl State {
+    /// How fast it plays: its speed, times its speed parameter while that is set.
+    fn rate(&self, params: &AnimationParams) -> f32 {
+        let scale = self
+            .speed_param
+            .as_ref()
+            .and_then(|p| params.values.get(p))
+            .map_or(1.0, |v| v.clamp(0.25, 3.0));
+        self.speed * scale
+    }
 }
 
 struct Transition {
@@ -662,6 +679,7 @@ impl GraphInstance {
                         name: s.name.clone(),
                         node: self.add(&s.node, skeleton, lookup)?,
                         speed: s.speed,
+                        speed_param: s.speed_param.clone(),
                     });
                 }
                 let find = |name: &str| -> Result<usize, String> {
@@ -954,7 +972,7 @@ impl GraphInstance {
             Node::StateMachine(sm) => {
                 // Transitions.
                 let state = &sm.states[sm.current];
-                sm.state_time += ctx.dt * args.rate * state.speed;
+                sm.state_time += ctx.dt * args.rate * state.rate(ctx.params);
                 self.nodes[i] = node;
                 let (current, state_time) = match &self.nodes[i] {
                     Node::StateMachine(sm) => (sm.current, sm.state_time),
@@ -1031,7 +1049,7 @@ impl GraphInstance {
                     unreachable!()
                 };
                 let state_node = sm.states[sm.current].node;
-                let speed = sm.states[sm.current].speed;
+                let speed = sm.states[sm.current].rate(ctx.params);
                 self.eval(
                     state_node,
                     ctx,
@@ -1498,6 +1516,7 @@ mod tests {
                     StateDef {
                         name: "move".into(),
                         speed: 1.0,
+                        speed_param: None,
                         node: NodeDef::Blend1d {
                             param: "speed".into(),
                             sync: true,
@@ -1521,6 +1540,7 @@ mod tests {
                     StateDef {
                         name: "swing".into(),
                         speed: 1.0,
+                        speed_param: None,
                         node: NodeDef::one_shot("swing"),
                     },
                 ],

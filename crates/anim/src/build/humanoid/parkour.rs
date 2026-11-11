@@ -725,6 +725,7 @@ pub(super) fn states() -> Vec<StateDef> {
         name: name.into(),
         node,
         speed: 1.0,
+        speed_param: None,
     };
     let air = NodeDef::Blend1d {
         param: "air_vy".into(),

@@ -593,3 +593,37 @@ fn a_rifle_shoulders_on_aim_fires_on_cue_and_changes_its_magazine() {
     assert!(said(&app, "shot"));
     assert!(in_state(&app, a, "move"));
 }
+
+#[test]
+fn draw_speed_paces_the_bow_draw() {
+    let drawn_after = |speed: Option<f32>| {
+        let (mut app, a, _) = duel();
+        app.world.init_resource::<Said>();
+        app.add_systems(Last, listen);
+        *app.world.get_mut::<Loadout>(a).unwrap() = Loadout {
+            main: ItemClass::Bow,
+            off: ItemClass::None,
+            two_handed: true,
+        };
+        if let Some(s) = speed {
+            app.world
+                .get_mut::<AnimationParams>(a)
+                .unwrap()
+                .set("draw_speed", s);
+        }
+        for _ in 0..20 {
+            app.update();
+        }
+        send(&mut app, a, "draw");
+        let mut secs = 0.0;
+        while !app.world.resource::<Said>().0.iter().any(|s| s == "drawn") && secs < 3.0 {
+            app.update();
+            secs += STEP;
+        }
+        secs
+    };
+    let normal = drawn_after(None);
+    let quick = drawn_after(Some(2.0));
+    assert!((0.7..0.9).contains(&normal), "unset: {normal}");
+    assert!((0.33..0.48).contains(&quick), "draw_speed 2: {quick}");
+}
