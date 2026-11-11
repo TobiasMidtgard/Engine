@@ -61,6 +61,7 @@ struct Globals {
     flood_scatter: vec4<f32>, // its scatter color rgb, roughness
     mouths: array<vec4<f32>, 4>, // where streams run into lakes: plume middle rel camera xyz, share of the radius
     plunge_dirs: array<vec4<f32>, 16>, // each plunge's way on (world xz, unit), landing speed (m/s)
+    cheaper: vec4<f32>,  // lakes' sky share and fog from their vertices (1/0, `WaterSettings::vertex_sky_and_fog`), unused x3
 };
 
 struct WaterUniform {
@@ -89,6 +90,12 @@ var<private> use_mirror: bool = false;
 // How much the bed seen through the water darkens: the swash's sand is soaked, though the scene
 // colour the water refracts was drawn dry (the sand decal goes on after it is copied).
 var<private> wet_bed: f32 = 1.0;
+// What `shade_water` would otherwise work out per pixel, from the surface's vertices instead
+// (`WaterSettings::vertex_sky_and_fog`, lakes only): the open sky's share above the water, and
+// the fog between the eye and it. A negative sky share: work both out per pixel.
+var<private> given_sky: f32 = -1.0;
+var<private> given_fog_in: vec3<f32> = vec3<f32>(0.0);
+var<private> given_fog_t: vec3<f32> = vec3<f32>(1.0);
 // The bed seen through running water is the stream's own stones (set by fs_flow), the current
 // there (m/s) sorting them by size.
 var<private> stream_bed: f32 = 0.0;
@@ -837,8 +844,15 @@ fn water_sun(rel: vec3<f32>) -> vec3<f32> {
 // a bubble cloud glows in the water's own color, paler: turquoise in a green lake. `sun_vis`:
 // how much of the sun reaches the water (a cloud just under the surface sits in its shadows).
 fn backscatter(look: WaterLook, rel: vec3<f32>, depth_below: f32, extra_bb: f32, sun_vis: f32) -> vec3<f32> {
-    let sun = water_sun(rel) * max(frame.sun_dir.y, 0.0) * sun_vis;
-    let sky = sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) * sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)) * PI;
+    return backscatter_in(look, depth_below, extra_bb, water_sun(rel) * sun_vis,
+        sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)));
+}
+
+// `backscatter` under sunlight `sun_air` (`water_sun` times how much of it reaches the water)
+// and the open sky's share `sky_vis` overhead, which a caller that has them passes in.
+fn backscatter_in(look: WaterLook, depth_below: f32, extra_bb: f32, sun_air: vec3<f32>, sky_vis: f32) -> vec3<f32> {
+    let sun = sun_air * max(frame.sun_dir.y, 0.0);
+    let sky = sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) * sky_vis * PI;
     let down = exp(-(look.absorb + vec3<f32>(look.scattering)) * max(depth_below, 0.0));
     let e = (sun * 0.98 + sky) * INV_PI * down;
     // Light the water sends back up from below the surface: Gordon's reflectance of deep
@@ -1103,7 +1117,13 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         lit_bottom = behind * (1.0 + c * k * 1.6);
     }
 
-    let medium = pre_expose(medium_radiance(look, rel, 0.0));
+    // The sunlight through the air and the open sky's share overhead, worked out once: the
+    // water's own glow, its bubbles, the glitter, the reflections and the foam all take them
+    // (each looked them up again before: the sky's share is two rings of taps a pixel).
+    let sun = water_sun(rel);
+    var sky_vis = given_sky;
+    if (sky_vis < 0.0) { sky_vis = sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)); }
+    let medium = pre_expose(backscatter_in(look, 0.0, 0.0, sun, sky_vis));
     let water_col = lit_bottom * t_bottom + medium * (1.0 - t_view);
 
     // ---- reflection
@@ -1112,7 +1132,6 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     // GGX's α² follows the facets' mean square slope (as Beckmann's m² does).
     let base_a = look.roughness * look.roughness;
     let rough = clamp(sqrt(sqrt(base_a * base_a + slope_var)), 0.02, 0.75);
-    let sky_vis = sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0));
     let fill = frame.ambient.rgb;
     let env = (mix(sample_env(r), sky_ambient(r), saturate(rough * 1.5)) - fill) * sky_vis + fill;
     var refl = pre_expose(env);
@@ -1140,8 +1159,6 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
 
     // ---- sun glitter
     let l = frame.sun_dir.xyz;
-    let sun = water_sun(rel);
-    let shadow = shadow_factor(rel, n);
     let h = normalize(l + v);
     let n_dot_l = saturate(dot(n, l));
     // The sun is a disk, not a point: its glitter spreads over at least its own width, so a
@@ -1150,7 +1167,6 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     let a = sqrt(rough * rough * rough * rough + tan_sun * tan_sun);
     let spec = d_ggx(saturate(dot(n, h)), a) * v_smith_ggx_correlated(n_dot_v, max(n_dot_l, 1e-3), a)
         * f_schlick(vec3<f32>(0.02), saturate(dot(l, h))) * n_dot_l;
-    let glitter = pre_expose(spec * sun * shadow);
 
     // ---- light through thin crests (wave tips glow when the sun is behind them)
     let behind_sun = pow(saturate(dot(v, -normalize(vec3<f32>(l.x, 0.0, l.z) + vec3<f32>(0.0001)))), 3.0);
@@ -1159,6 +1175,14 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     let bs = look.scatter_color / max(max(look.scatter_color.r, max(look.scatter_color.g, look.scatter_color.b)), 1e-5);
     let through = exp(-look.absorb * 1.5) * mix(vec3<f32>(1.0), bs, 0.5);
     let tint = through / max(max(through.r, max(through.g, through.b)), 1e-5);
+    // The sun's shadow (a dozen or more taps of the cascades) only where something here shows
+    // it: the glitter, light through a crest, bubbles or foam. Elsewhere it multiplies nothing
+    // a pixel can show (under a millionth of the sunlight).
+    let lit_by_sun = max(spec.r, max(spec.g, spec.b)) > 1e-6 || behind_sun * crest > 1e-6
+        || bubbles > 0.001 || foam_in + contact * 0.45 > 0.0 || shore_depth > 0.0;
+    var shadow = 1.0;
+    if (lit_by_sun) { shadow = shadow_factor(rel, n); }
+    let glitter = pre_expose(spec * sun * shadow);
     let sss = pre_expose(tint * 0.6 * sun * shadow * behind_sun * crest * 0.012);
 
     var color = water_col * (1.0 - fresnel) + refl * fresnel + glitter + sss;
@@ -1172,7 +1196,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         let wisps = fbm2(wp * 1.3 + vec2<f32>(3.7, time_s() * 0.03), 3) / 0.875;
         let theta = 1.0 - bubbles * 1.2;
         let dense = smoothstep(theta - 0.25, theta + 0.25, wisps) * saturate(bubbles * 1.5) * 0.8;
-        let cloud = pre_expose(backscatter(look, rel, 0.0, BUBBLE_BB, shadow));
+        let cloud = pre_expose(backscatter_in(look, 0.0, BUBBLE_BB, sun * shadow, sky_vis));
         color += (1.0 - fresnel) * dense * (cloud - water_col);
     }
 
@@ -1219,12 +1243,20 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI) * foam_tint(look);
         color = mix(color, foam_col * mix(1.0, 0.82 + 0.36 * fizz, bubbly), cover * mix(0.8, 0.95, saturate(foam * 2.0)));
     }
+    var fogged: vec3<f32>;
+    if (given_sky < 0.0) {
+        fogged = apply_fog(color, rel);
+    } else {
+        fogged = color * given_fog_t + given_fog_in;
+    }
+    // Off the waterline's last centimeters there is no film: no second look at the scene.
+    if (shoreline >= 1.0) { return fogged; }
     let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb * wet_bed;
     // The last centimeters at the waterline are a film over the sand: no water color to speak
     // of, but it darkens the grains a little more and mirrors the sky and the sun like the
     // water does (a swash film's sheen), before the mesh's edge gives way to the ground.
     let film = mix(ground, ground * 0.85 + refl * fresnel + glitter, smoothstep(0.0, 0.35, shoreline));
-    return mix(film, apply_fog(color, rel), shoreline);
+    return mix(film, fogged, shoreline);
 }
 
 // Where along its steps a ray march starts at pixel `px`, 0..1: interleaved gradient noise
@@ -1516,6 +1548,10 @@ struct BodyOut {
     @location(3) @interpolate(flat) body: u32,
     @location(4) jac: f32,
     @location(5) crest: f32,
+    // The open sky's share and the fog from the vertices (`Globals::cheaper.x`), or -1.
+    @location(6) sky: f32,
+    @location(7) fog_in: vec3<f32>,
+    @location(8) fog_t: vec3<f32>,
 };
 
 @vertex
@@ -1553,6 +1589,18 @@ fn vs_body(@builtin(vertex_index) vid: u32, @builtin(instance_index) bi: u32) ->
     out.body = bi;
     out.jac = w.jacobian;
     out.crest = saturate(w.offset.y / max(water.bodies[bi].grid2.w, 1e-3) * 0.5 + 0.5);
+    // Both change over meters, not over the waves: the grid's vertices hold them as well as
+    // its pixels (translucent surfaces take their fog per vertex in Unreal unless asked not
+    // to). The share of the sky is two rings of taps of the sky occluders and the canopy.
+    out.sky = -1.0;
+    out.fog_in = vec3<f32>(0.0);
+    out.fog_t = vec3<f32>(1.0);
+    if (water.g.cheaper.x > 0.5) {
+        out.sky = sky_visibility(out.rel, vec3<f32>(0.0, 1.0, 0.0));
+        let fog = surface_fog(out.rel);
+        out.fog_in = fog.inscatter;
+        out.fog_t = fog.transmittance;
+    }
     return out;
 }
 
@@ -1576,6 +1624,11 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     if (water.g.waterline.x > 0.5 && dot(in.rel, in.rel) < dome * dome) { discard; }
     use_mirror = i32(bi) == i32(water.g.mirror.w);
     wet_bed = mix(1.0, WET_SAND, sw.w);
+    if (in.sky >= 0.0) {
+        given_sky = in.sky;
+        given_fog_in = in.fog_in;
+        given_fog_t = in.fog_t;
+    }
     let look = flood_plume(body_look(bi), in.rel);
     let dist = length(in.rel);
     // Size of a pixel here, meters: drop detail finer than that.

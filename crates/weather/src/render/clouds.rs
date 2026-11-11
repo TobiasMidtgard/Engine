@@ -1017,7 +1017,9 @@ impl RenderFeature for CloudFeature {
                     .map_or(1.0, |p| p.share);
                 self.paced_side = paced_side(share, self.paced_side);
             }
-            self.paced_side
+            // A lake mirror draws before the main view: before the main view's first frame
+            // there is no paced side yet (0, which divided by zero sizing the targets).
+            self.paced_side.clamp(2, MAX_BLOCK_SIDE)
         };
         self.ensure_targets(&gpu.device, view, scale, side);
         if let Some(t) = self.current.and_then(|i| self.views.get_mut(i)) {
