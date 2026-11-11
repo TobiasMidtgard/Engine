@@ -11,6 +11,7 @@
 use engine_core::prelude::*;
 
 use super::sdf::{Body, Paint, Shape};
+use super::weapons::{BOW_DRAW, BOW_HOLD, BOW_LOOSE, BOW_LOWER};
 use super::{PoseBuilder, bone, bump, cycle, cycle_sin, keyed};
 use crate::clip::AnimationClip;
 use crate::graph::{
@@ -4188,6 +4189,10 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state(COLLAPSE, NodeDef::one_shot(COLLAPSE)),
                 state(DOWNED, NodeDef::clip(DOWNED)),
                 state(KNEEL_TEND, NodeDef::clip(KNEEL_TEND)),
+                state(BOW_DRAW, NodeDef::one_shot(BOW_DRAW)),
+                state(BOW_HOLD, NodeDef::clip(BOW_HOLD)),
+                state(BOW_LOOSE, NodeDef::one_shot(BOW_LOOSE)),
+                state(BOW_LOWER, NodeDef::one_shot(BOW_LOWER)),
                 state("sword_stance", sword_stance),
                 state("shield_guard", shield_guard),
                 state("greatsword_stance", greatsword_stance),
@@ -4329,6 +4334,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             ]
             .into_iter()
             .chain(down_and_kneel())
+            .chain(bow_hold())
             .chain(parkour::transitions())
             .collect(),
             initial: Some("move".into()),
@@ -4350,7 +4356,14 @@ fn down_and_kneel() -> Vec<TransitionDef> {
     let downed = || Condition::param("downed", Cmp::Gt, 0.5);
     let mut all: Vec<TransitionDef> = up
         .iter()
-        .chain([&KNEEL_TEND, &"kneel_hurt"])
+        .chain(&[
+            KNEEL_TEND,
+            "kneel_hurt",
+            BOW_DRAW,
+            BOW_HOLD,
+            BOW_LOOSE,
+            BOW_LOWER,
+        ])
         .map(|from| TransitionDef::new(from, COLLAPSE, downed(), 0.2))
         .collect();
     all.extend([
@@ -4386,6 +4399,31 @@ fn down_and_kneel() -> Vec<TransitionDef> {
         0.6,
     ));
     all
+}
+
+/// Drawing a bow and holding it at full draw for the game's own aim, carrying the bow
+/// (`bow_carry` up): the `draw` trigger draws ([`BOW_DRAW`], `drawn` at full draw) and holds
+/// ([`BOW_HOLD`]) until `loose` shoots ([`BOW_LOOSE`], `release` at once; loosed while still
+/// drawing, it snaps off early) or `lower` lets the string down ([`BOW_LOWER`]). Putting the
+/// bow away lets it down too.
+fn bow_hold() -> Vec<TransitionDef> {
+    let carrying = || Condition::param("bow_carry", Cmp::Gt, 0.5);
+    let on = |trigger: &str| Condition::All(vec![carrying(), Condition::trigger(trigger)]);
+    let put_away = || Condition::param("bow_carry", Cmp::Lt, 0.5);
+    vec![
+        TransitionDef::new("move", BOW_DRAW, on("draw"), 0.2),
+        TransitionDef::new(BOW_LOOSE, BOW_DRAW, on("draw"), 0.2),
+        TransitionDef::new(BOW_LOWER, BOW_DRAW, on("draw"), 0.2),
+        TransitionDef::new(BOW_DRAW, BOW_HOLD, Condition::Finished, 0.1),
+        TransitionDef::new(BOW_DRAW, BOW_LOOSE, Condition::trigger("loose"), 0.08),
+        TransitionDef::new(BOW_HOLD, BOW_LOOSE, Condition::trigger("loose"), 0.05),
+        TransitionDef::new(BOW_DRAW, BOW_LOWER, Condition::trigger("lower"), 0.15),
+        TransitionDef::new(BOW_HOLD, BOW_LOWER, Condition::trigger("lower"), 0.15),
+        TransitionDef::new(BOW_DRAW, BOW_LOWER, put_away(), 0.15),
+        TransitionDef::new(BOW_HOLD, BOW_LOWER, put_away(), 0.15),
+        TransitionDef::new(BOW_LOOSE, "move", Condition::Finished, 0.2),
+        TransitionDef::new(BOW_LOWER, "move", Condition::Finished, 0.2),
+    ]
 }
 
 #[cfg(test)]

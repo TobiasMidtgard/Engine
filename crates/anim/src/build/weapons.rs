@@ -2135,6 +2135,148 @@ fn bow_carry(s: &Skeleton) -> AnimationClip {
     .clip(s, "bow_carry", true)
 }
 
+/// The draw held for as long as the archer likes (`draw` and `loose` triggers, for the
+/// game's own aiming): [`BOW_DRAW`] brings the string to the anchor and stops there (its
+/// `drawn` event at full draw), [`BOW_HOLD`] holds it, a breath of sway in the aim, and
+/// [`BOW_LOOSE`] lets it go (`release` at once) and lowers the bow; [`BOW_LOWER`] lets the
+/// string down without shooting. The poses are the shot's ([`bow_shot_clip`]).
+pub const BOW_DRAW: &str = "bow_draw";
+pub const BOW_HOLD: &str = "bow_hold";
+pub const BOW_LOOSE: &str = "bow_loose";
+pub const BOW_LOWER: &str = "bow_lower";
+
+/// When the `release` event comes in [`BOW_LOOSE`], s.
+pub const LOOSE_RELEASE: f32 = 0.03;
+
+fn bow_drawn() -> Body {
+    BOW_STANCE.hips([0.0, -0.035, 0.01], [0.0, -87.0, 0.0], [-2.0, -4.0, 0.0])
+}
+
+fn bow_draw_clips(s: &Skeleton) -> Vec<AnimationClip> {
+    let (set, full) = (0.3, 0.78);
+    let drawn = bow_drawn();
+    let aim = |back: f32, at: Vec3| {
+        (
+            drawn.shoulders([4.0, -2.0], [back, 4.0]),
+            Stroke::To(bow_up()),
+            Stroke::To(anchor().at(ANCHOR + at)),
+        )
+    };
+    let k = |t: f32, (b, l, r): (Body, Stroke, Stroke)| key(t, b, l, r);
+    let carried = || {
+        (
+            SQUARE,
+            Stroke::To(bow_carry_hold()),
+            Stroke::To(hand_hanging()),
+        )
+    };
+    let draw_secs = full + 0.12;
+    let draw = Moves::new(
+        [HANDLE, Rig::Free],
+        vec![
+            k(0.0, carried()),
+            key(
+                set,
+                BOW_STANCE,
+                Stroke::To(bow_up()),
+                Stroke::To(on_string()),
+            ),
+            k(full, aim(-10.0, Vec3::ZERO)),
+            k(draw_secs, aim(-11.0, Vec3::new(0.0, 0.0, 0.005))),
+        ],
+    )
+    .clip(s, BOW_DRAW, false)
+    .with_curve("effort", 16, move |ph| {
+        keyed(ph * draw_secs, &[(0.0, 0.1), (set, 0.3), (full, 0.8)])
+    })
+    .with_curve("draw", (draw_secs * 60.0) as usize, move |ph| {
+        keyed(ph * draw_secs, &[(set, 0.0), (full, 1.0)])
+    })
+    .with_curve("nocked", (draw_secs * 60.0) as usize, move |ph| {
+        if ph * draw_secs >= set - 0.05 {
+            1.0
+        } else {
+            0.0
+        }
+    })
+    .with_event(full / draw_secs, "drawn", Some("hand_r"));
+    // Holding: the back keeps working, the anchor creeps a few millimetres and comes back.
+    let hold_secs = 2.4;
+    let hold = Moves::new(
+        [HANDLE, Rig::Free],
+        vec![
+            k(0.0, aim(-11.0, Vec3::new(0.0, 0.0, 0.005))),
+            k(0.8, aim(-12.0, Vec3::new(0.002, -0.003, 0.009))),
+            k(1.6, aim(-11.5, Vec3::new(-0.002, 0.002, 0.003))),
+            k(hold_secs, aim(-11.0, Vec3::new(0.0, 0.0, 0.005))),
+        ],
+    )
+    .clip(s, BOW_HOLD, true)
+    .with_curve("draw", 2, |_| 1.0)
+    .with_curve("nocked", 2, |_| 1.0)
+    .with_curve("effort", 2, |_| 0.9);
+    // The string goes; the hand carries on back along the jaw; the bow comes down.
+    let after = anchor().at(ANCHOR + Vec3::new(0.03, -0.02, 0.07));
+    let r = LOOSE_RELEASE;
+    let loose_secs = r + 0.5;
+    let loose = Moves::new(
+        [HANDLE, Rig::Free],
+        vec![
+            k(0.0, aim(-11.0, Vec3::new(0.0, 0.0, 0.005))),
+            key(
+                r + 0.05,
+                drawn.shoulders([4.0, -2.0], [-14.0, 4.0]),
+                Stroke::To(bow_up()),
+                Stroke::To(after),
+            ),
+            key(
+                r + 0.19,
+                drawn,
+                Stroke::To(bow_up()),
+                Stroke::To(after.at(after.at + Vec3::new(0.01, -0.03, 0.0))),
+            ),
+            k(loose_secs, carried()),
+        ],
+    )
+    .clip(s, BOW_LOOSE, false)
+    .with_curve("effort", 16, move |ph| {
+        keyed(
+            ph * loose_secs,
+            &[(0.0, 0.9), (r + 0.15, 0.3), (loose_secs, 0.1)],
+        )
+    })
+    .with_curve("draw", (loose_secs * 60.0) as usize, move |ph| {
+        if ph * loose_secs < r { 1.0 } else { 0.0 }
+    })
+    .with_curve("nocked", (loose_secs * 60.0) as usize, move |ph| {
+        if ph * loose_secs < r { 1.0 } else { 0.0 }
+    })
+    .with_event(r / loose_secs, "release", Some("hand_r"));
+    // Letting down: the string eases forward with the arrow still on it, the bow comes down.
+    let lower_secs = 0.7;
+    let lower = Moves::new(
+        [HANDLE, Rig::Free],
+        vec![
+            k(0.0, aim(-11.0, Vec3::new(0.0, 0.0, 0.005))),
+            key(
+                0.4,
+                BOW_STANCE,
+                Stroke::To(bow_up()),
+                Stroke::To(on_string()),
+            ),
+            k(lower_secs, carried()),
+        ],
+    )
+    .clip(s, BOW_LOWER, false)
+    .with_curve("draw", (lower_secs * 60.0) as usize, move |ph| {
+        keyed(ph * lower_secs, &[(0.0, 1.0), (0.4, 0.0)])
+    })
+    .with_curve("nocked", (lower_secs * 60.0) as usize, move |ph| {
+        if ph * lower_secs < 0.55 { 1.0 } else { 0.0 }
+    });
+    vec![draw, hold, loose, lower]
+}
+
 // ------------------------------------------------------------------------------ aimed lines
 
 /// How high an aimed cut or stab goes: at the head and neck, the trunk and arms, or the legs.
@@ -2844,6 +2986,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         bow_shot_clip(s, WeaponMove::BowShotFull),
         bow_carry(s),
     ];
+    all.extend(bow_draw_clips(s));
     all.extend(moving_stances(s));
     all.extend(line_clips(s));
     all

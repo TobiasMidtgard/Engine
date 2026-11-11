@@ -11,7 +11,8 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
 use engine_world::animation::{
-    AnimationEvent, AnimationParams, BodyRequest, Ragdoll, SkeletonPose, StrikeTargets,
+    AnimationEvent, AnimationParams, AnimationTrigger, BodyRequest, Ragdoll, SkeletonPose,
+    StrikeTargets,
 };
 use engine_world::combat::{AttackPhase, AttackWindow, BodyZone, ItemClass, Knockback, Loadout};
 use engine_world::events::AttackKind;
@@ -401,4 +402,113 @@ fn kneel_presses_both_hands_on_a_chest_ahead() {
         app.update();
     }
     assert!(bone_y(&app, a, "head") > 1.4, "stood up");
+}
+
+fn send(app: &mut App, entity: Entity, name: &str) {
+    app.world.write_message(AnimationTrigger {
+        entity,
+        name: name.into(),
+    });
+}
+
+fn in_state(app: &App, e: Entity, state: &str) -> bool {
+    app.world
+        .get::<engine_anim::animator::Animator>(e)
+        .unwrap()
+        .graph()
+        .is_some_and(|g| g.in_state(state))
+}
+
+#[test]
+fn a_bow_draws_holds_at_full_draw_and_looses_on_cue() {
+    use engine_anim::build::weapons::{BOW_HOLD, BOW_LOOSE, BOW_LOWER};
+    let (mut app, a, _) = duel();
+    app.world.init_resource::<Said>();
+    app.add_systems(Last, listen);
+    *app.world.get_mut::<Loadout>(a).unwrap() = Loadout {
+        main: ItemClass::Bow,
+        off: ItemClass::None,
+        two_handed: true,
+    };
+    for _ in 0..20 {
+        app.update();
+    }
+    let curve = |app: &App, name: &str| {
+        app.world
+            .get::<engine_anim::animator::Animator>(a)
+            .unwrap()
+            .curve(name)
+    };
+    send(&mut app, a, "draw");
+    for _ in 0..(1.2 / STEP) as usize {
+        app.update();
+    }
+    assert!(
+        app.world.resource::<Said>().0.iter().any(|s| s == "drawn"),
+        "{:?}",
+        app.world.resource::<Said>().0
+    );
+    // Held as long as it likes: three seconds on, still at full draw, nothing loosed.
+    for _ in 0..(3.0 / STEP) as usize {
+        app.update();
+    }
+    assert!(in_state(&app, a, BOW_HOLD));
+    assert!(curve(&app, "draw") > 0.99 && curve(&app, "nocked") > 0.99);
+    assert!(
+        !app.world
+            .resource::<Said>()
+            .0
+            .iter()
+            .any(|s| s == "release")
+    );
+    send(&mut app, a, "loose");
+    for _ in 0..6 {
+        app.update();
+    }
+    assert!(in_state(&app, a, BOW_LOOSE));
+    assert!(
+        app.world
+            .resource::<Said>()
+            .0
+            .iter()
+            .any(|s| s == "release"),
+        "{:?}",
+        app.world.resource::<Said>().0
+    );
+    assert!(curve(&app, "draw") < 0.5, "string still back");
+    for _ in 0..(1.0 / STEP) as usize {
+        app.update();
+    }
+    assert!(in_state(&app, a, "move"));
+    // Drawn again and let down without a shot.
+    app.world.resource_mut::<Said>().0.clear();
+    send(&mut app, a, "draw");
+    for _ in 0..(1.2 / STEP) as usize {
+        app.update();
+    }
+    send(&mut app, a, "lower");
+    app.update();
+    app.update();
+    assert!(in_state(&app, a, BOW_LOWER));
+    for _ in 0..(1.0 / STEP) as usize {
+        app.update();
+    }
+    assert!(in_state(&app, a, "move"));
+    assert!(
+        !app.world
+            .resource::<Said>()
+            .0
+            .iter()
+            .any(|s| s == "release")
+    );
+    // A sword fighter ignores the cue.
+    *app.world.get_mut::<Loadout>(a).unwrap() = sword_and_shield();
+    for _ in 0..30 {
+        app.update();
+    }
+    send(&mut app, a, "draw");
+    for _ in 0..30 {
+        app.update();
+    }
+    assert!(!in_state(&app, a, engine_anim::build::weapons::BOW_DRAW));
 }

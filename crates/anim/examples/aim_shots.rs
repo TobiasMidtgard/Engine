@@ -311,6 +311,42 @@ fn main() {
                 s.step();
             }
         }
-        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states"),
+        "bow" => {
+            // An archer drawing on cue, holding at full draw, loosing on cue; the foe out of
+            // the way.
+            let mut s = stage(width, height, false, false);
+            *s.app.world.get_mut::<Loadout>(s.a).unwrap() = Loadout {
+                main: ItemClass::Bow,
+                off: ItemClass::None,
+                two_handed: true,
+            };
+            s.app.world.get_mut::<Transform>(s.b).unwrap().translation.x = 4.7;
+            for _ in 0..30 {
+                s.step();
+            }
+            let cue = |s: &mut Stage, name: &str| {
+                let entity = s.a;
+                s.app
+                    .world
+                    .write_message(engine_world::animation::AnimationTrigger {
+                        entity,
+                        name: name.into(),
+                    });
+            };
+            let side = (Vec3::new(-2.7, 1.4, 3.2), Vec3::new(-2.7, 1.25, 0.0));
+            let front = (Vec3::new(-0.9, 1.6, 1.7), Vec3::new(-2.7, 1.35, 0.0));
+            cue(&mut s, "draw");
+            for k in 0..=300 {
+                if k == 240 {
+                    cue(&mut s, "loose");
+                }
+                if [20, 60, 200, 243, 262].contains(&k) {
+                    s.shoot(&out.join(format!("b{k:03}_side.png")), side.0, side.1);
+                    s.shoot(&out.join(format!("b{k:03}_front.png")), front.0, front.1);
+                }
+                s.step();
+            }
+        }
+        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states, bow"),
     }
 }
