@@ -421,52 +421,97 @@ struct ChunkGpu {
     skip: SkipCost,
 }
 
-/// The far shadow map's ground in the map's still image (`trial_cut_more::FAR_GROUND_STILL`):
-/// drawn when the image is, not every frame. The far map's walk is the camera's own, a level
-/// coarser, and its bias covers a level's difference, so its patches may be a moment old: the
-/// image is asked for again when they changed (the camera went on, patches arrived, the
-/// ground was edited), at most every [`FAR_STILL_HOLD`]. While a terrain moves its ground is
-/// drawn every frame as before.
+/// The ground patches a far shadow map's still image holds, each with its upload stamp.
+type FarStillPatches = HashMap<(Entity, NodeKey), u32>;
+
+/// The far shadow map's ground in the map's still image (`trial_cut_more::FAR_GROUND_STILL`).
+/// On the frames the image is drawn the far map's patches go into it; on the others only the
+/// patches it doesn't hold are drawn on top (the camera went on and the walk chose other
+/// levels, or patches arrived). What the image holds of a place at another level stays under
+/// them: the far map's texels are meters wide and its bias covers a level's difference. An
+/// edited patch built again asks for the image to be drawn again (the old ground must leave
+/// it), and so does a top layer grown to half the patches, at most every
+/// [`FAR_STILL_HOLD`]. While a terrain with ground in the far map moves, the ground is drawn
+/// every frame as before (the other planets move every frame and cast nothing here).
 #[derive(Default)]
 struct FarStill {
-    /// The ground goes into the image this frame if the image is drawn (the switch is on and
-    /// no terrain moved since last frame).
+    /// The switch is on and no terrain with patches in the far map moved since last frame.
     wanted: bool,
-    /// What the image holds of the ground: the patches' signature and when it was drawn.
-    /// `None`: no ground, it is drawn on top every frame.
-    image: Option<(u64, std::time::Instant)>,
+    /// The image is drawn this frame, with the ground in it.
+    into_image: bool,
+    /// What the image holds of the ground (each patch's upload stamp) and when it was drawn.
+    /// `None`: no ground, all of it is drawn on top every frame.
+    image: Option<(FarStillPatches, std::time::Instant)>,
     /// The image should be drawn again (`shadow_static_changed`).
     ask: bool,
-    /// The terrains' places last frame.
-    poses: u64,
+    /// The terrains' places last frame, and the terrains with patches in the far map then.
+    poses: HashMap<Entity, u64>,
+    casters: HashSet<Entity>,
+    /// This frame: the far map's patches, those of them drawn on top, an edited one seen.
+    all: usize,
+    top: usize,
+    edited: bool,
 }
 
-/// The far shadow map's still image holds the ground's patches at least this long before
-/// changed patches draw it again.
+/// The far shadow map's still image holds the ground at least this long before an edit or a
+/// grown top layer draws it again.
 const FAR_STILL_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl FarStill {
-    /// A main view's frame at `now`: `on` (the switch, with a far map), the terrains' places,
-    /// the far patches' signature, and whether the map's still image is drawn this frame.
-    fn frame(&mut self, on: bool, poses: u64, patches: u64, redraw: bool, now: std::time::Instant) {
-        self.wanted = on && poses == self.poses;
+    /// Starts a main view's frame at `now`: `on` (the switch, with a far map), the terrains'
+    /// places, and whether the map's still image is drawn this frame.
+    fn begin(
+        &mut self,
+        on: bool,
+        poses: HashMap<Entity, u64>,
+        redraw: bool,
+        now: std::time::Instant,
+    ) {
+        let moved = self
+            .casters
+            .iter()
+            .any(|e| poses.get(e) != self.poses.get(e));
+        self.wanted = on && !moved;
         self.poses = poses;
+        self.casters.clear();
+        self.into_image = self.wanted && redraw;
         if redraw {
-            self.image = self.wanted.then_some((patches, now));
+            self.image = self.wanted.then(|| (HashMap::new(), now));
         }
-        self.ask = match (self.wanted, self.image) {
-            (true, Some((drawn, at))) => {
-                drawn != patches && now.duration_since(at) >= FAR_STILL_HOLD
+        (self.all, self.top, self.edited) = (0, 0, false);
+    }
+
+    /// A patch of the far map's walk this frame (`stamp`: its upload): whether it is drawn,
+    /// into the image on the frames the image is drawn and on top of it on the others.
+    fn patch(&mut self, id: (Entity, NodeKey), stamp: u32) -> bool {
+        self.all += 1;
+        self.casters.insert(id.0);
+        let held = match &mut self.image {
+            Some((held, _)) if self.wanted => held,
+            _ => return true,
+        };
+        if self.into_image {
+            held.insert(id, stamp);
+            return true;
+        }
+        let in_image = held.get(&id);
+        self.edited |= in_image.is_some_and(|&s| s != stamp);
+        let top = in_image != Some(&stamp);
+        self.top += top as usize;
+        top
+    }
+
+    /// Ends the frame: whether to ask for the image.
+    fn end(&mut self, now: std::time::Instant) {
+        self.ask = match (self.wanted, &self.image) {
+            (true, Some((_, at))) => {
+                (self.edited || self.top * 2 > self.all)
+                    && now.duration_since(*at) >= FAR_STILL_HOLD
             }
             // Into the image, or out of it.
             (true, None) | (false, Some(_)) => true,
             (false, None) => false,
         };
-    }
-
-    /// Whether the ground is drawn into the far map on top of the image this frame.
-    fn moving(&self) -> bool {
-        !(self.wanted && self.image.is_some())
     }
 }
 
@@ -2408,16 +2453,35 @@ impl RenderFeature for TerrainFeature {
         built_total += uploads;
         steps.mark("uploads");
 
-        // What the far shadow map's ground is made of this frame, and where the terrains are
-        // (`FarStill`): sums of hashes, so the order doesn't count.
-        let mut far_patches = 0u64;
-        let mut far_poses = 0u64;
-        let hashed = |v: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
-            use std::hash::Hasher;
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            v(&mut h);
-            h.finish()
-        };
+        // The far shadow map's ground in the map's still image (`FarStill`): off while a
+        // terrain that casts into it moves (the terrains' places).
+        if !mirror {
+            let poses = entities.iter().map(|e| {
+                use std::hash::{Hash, Hasher};
+                let t = &terrains.entries[e];
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                t.version.hash(&mut h);
+                let place = t
+                    .position
+                    .to_array()
+                    .into_iter()
+                    .chain(t.rotation.to_array());
+                place.for_each(|v| v.to_bits().hash(&mut h));
+                (*e, h.finish())
+            });
+            let poses = poses.collect();
+            let on = render_settings.trial_cuts_more
+                & engine_render::settings::trial_cut_more::FAR_GROUND_STILL
+                != 0
+                && view.sun_shadows
+                && view.far_shadow.enabled;
+            self.far_still.begin(
+                on,
+                poses,
+                view.far_shadow.static_redraw,
+                std::time::Instant::now(),
+            );
+        }
         for (pi, e) in entities.iter().enumerate() {
             let t = &terrains.entries[e];
             let src = t.source.clone();
@@ -2757,6 +2821,9 @@ impl RenderFeature for TerrainFeature {
                 let Some(c) = state.chunks.get(key) else {
                     continue;
                 };
+                if !self.far_still.patch((*e, *key), c.stamp) {
+                    continue;
+                }
                 let morph = morph(key.level);
                 let rel = (pos + rot * c.origin - view.origin).as_vec3();
                 let instance = instances.len() as u32;
@@ -2771,18 +2838,7 @@ impl RenderFeature for TerrainFeature {
                     instance,
                     list: 0,
                 });
-                far_patches = far_patches.wrapping_add(hashed(&|h| {
-                    use std::hash::Hash;
-                    (pi, key, c.stamp).hash(h);
-                }));
             }
-            far_poses = far_poses.wrapping_add(hashed(&|h| {
-                use std::hash::Hash;
-                (pi, t.version).hash(h);
-                for v in pos.to_array().into_iter().chain(rot.to_array()) {
-                    v.to_bits().hash(h);
-                }
-            }));
 
             steps.mark("patches: draw lists");
             let p = &t.config.palette;
@@ -2910,30 +2966,14 @@ impl RenderFeature for TerrainFeature {
         }
 
         if !mirror {
-            let on = render_settings.trial_cuts_more
-                & engine_render::settings::trial_cut_more::FAR_GROUND_STILL
-                != 0
-                && view.sun_shadows
-                && view.far_shadow.enabled;
-            self.far_still.frame(
-                on,
-                far_poses,
-                far_patches,
-                view.far_shadow.static_redraw,
-                std::time::Instant::now(),
-            );
+            self.far_still.end(std::time::Instant::now());
         }
-        let far_drawn = if self.far_still.moving() || view.far_shadow.static_redraw {
-            self.far_shadow_draws.len()
-        } else {
-            0
-        };
         let index_lists = self.gpu.as_ref().map(|g| g.index_lists).unwrap_or_default();
         let triangles = |d: &Draw| (index_lists[d.list as usize].1 / 3) as u64;
         self.stats = FeatureStats {
             draw_calls: (self.draws.len()
                 + self.shadow_draws.iter().map(Vec::len).sum::<usize>()
-                + far_drawn) as u32,
+                + self.far_shadow_draws.len()) as u32,
             instances: self.draws.len() as u32,
             triangles: self.draws.iter().map(triangles).sum(),
             culled: 0,
@@ -3155,14 +3195,14 @@ impl RenderFeature for TerrainFeature {
     }
 
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        if self.far_still.moving() {
+        // (`FarStill`: on the frames the far map's still image is drawn, the ground is in it.)
+        if !self.far_still.into_image {
             self.draw_far_ground(pass);
         }
     }
 
     fn draw_shadow_static(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, _ctx: &FrameContext) {
-        // (`FarStill`: the far map's ground, kept in the map's still image.)
-        if map == engine_render::shadows::FAR_SHADOW_MAP && self.far_still.wanted {
+        if map == engine_render::shadows::FAR_SHADOW_MAP && self.far_still.into_image {
             self.draw_far_ground(pass);
         }
     }
@@ -3184,6 +3224,7 @@ impl RenderFeature for TerrainFeature {
                 .map(|l| self.draws.iter().filter(|d| d.list as usize == l).count())
                 .collect::<Vec<_>>(),
             "far_shadow_patches": self.far_shadow_draws.len(),
+            "far_shadow_patches_still": self.far_still.image.as_ref().map_or(0, |i| i.0.len()),
             "patches_resident": self.pool.used(),
             "patches_built_last_frame": self.built_last_frame,
             "patches_building": self.planets.values().map(|p| p.building.len()).sum::<usize>(),
@@ -3721,36 +3762,68 @@ mod tests {
     use engine_render::features::{compose_shader, validate_wgsl};
 
     #[test]
-    fn far_ground_stays_in_the_image_until_its_patches_change_and_the_hold_is_over() {
+    fn far_ground_stays_in_the_image_and_only_new_patches_are_drawn_on_top() {
         let t0 = std::time::Instant::now();
         let later = t0 + FAR_STILL_HOLD;
+        let key = |x: u32| {
+            (
+                Entity::from_raw_u32(1).expect("an entity"),
+                NodeKey {
+                    face: 0,
+                    level: 3,
+                    x,
+                    y: 0,
+                },
+            )
+        };
+        // The patches' terrain at a place, and a moon that moves every frame and casts nothing.
+        let mut frame = 0u64;
+        let mut at = |place: u64| {
+            frame += 1;
+            let moon = Entity::from_raw_u32(2).expect("an entity");
+            HashMap::from([(key(0).0, place), (moon, frame)])
+        };
         let mut f = FarStill::default();
-        // Off: drawn every frame, nothing asked.
-        f.frame(false, 7, 1, true, t0);
-        assert!(f.moving() && !f.ask);
-        // On: asks for the image, drawn on top until the image holds the ground.
-        f.frame(true, 7, 1, false, t0);
-        assert!(f.moving() && f.ask);
-        f.frame(true, 7, 1, true, t0);
-        assert!(!f.moving() && !f.ask && f.wanted);
-        // Changed patches wait for the hold.
-        f.frame(true, 7, 2, false, t0);
-        assert!(!f.moving() && !f.ask);
-        f.frame(true, 7, 2, false, later);
-        assert!(!f.moving() && f.ask);
-        f.frame(true, 7, 2, true, later);
-        assert!(!f.moving() && !f.ask);
-        // A terrain moved: out of the image, and drawn on top at once.
-        f.frame(true, 8, 2, false, later);
-        assert!(f.moving() && f.ask && !f.wanted);
-        f.frame(true, 9, 2, true, later);
-        assert!(f.moving() && !f.ask);
-        // Switched off while in the image: the same.
-        f.frame(true, 9, 2, false, later);
-        f.frame(true, 9, 2, true, later);
-        assert!(!f.moving());
-        f.frame(false, 9, 2, false, later);
-        assert!(f.moving() && f.ask);
+        // Off: every patch drawn on top, nothing asked.
+        f.begin(false, at(7), true, t0);
+        assert!(f.patch(key(0), 1) && !f.into_image);
+        f.end(t0);
+        assert!(!f.ask);
+        // On: asks for the image, all on top until the image holds the ground.
+        f.begin(true, at(7), false, t0);
+        assert!(f.patch(key(0), 1) && !f.into_image);
+        f.end(t0);
+        assert!(f.ask);
+        f.begin(true, at(7), true, t0);
+        assert!(f.into_image && f.patch(key(0), 1) && f.patch(key(1), 1) && f.patch(key(2), 1));
+        f.end(t0);
+        assert!(!f.ask);
+        // The next frames draw what the image holds no more, and a new patch on top.
+        f.begin(true, at(7), false, later);
+        assert!(!f.into_image && !f.patch(key(0), 1) && !f.patch(key(1), 1) && f.patch(key(3), 1));
+        f.end(later);
+        assert!(!f.ask && f.top == 1);
+        // An edited patch is drawn on top and the image asked for, once the hold is over.
+        f.begin(true, at(7), false, t0);
+        assert!(f.patch(key(0), 2) && !f.patch(key(1), 1) && !f.patch(key(2), 1));
+        f.end(t0);
+        assert!(!f.ask);
+        f.end(later);
+        assert!(f.ask);
+        // A top layer of more than half the patches asks too.
+        f.begin(true, at(7), false, later);
+        assert!(!f.patch(key(0), 1) && f.patch(key(4), 1) && f.patch(key(5), 1));
+        f.end(later);
+        assert!(f.ask);
+        // A terrain moved: all on top at once, and the ground asked out of the image.
+        f.begin(true, at(8), false, later);
+        assert!(f.patch(key(0), 1) && f.patch(key(1), 1));
+        f.end(later);
+        assert!(f.ask && !f.wanted);
+        f.begin(true, at(9), true, later);
+        assert!(f.image.is_none() && f.patch(key(0), 1));
+        f.end(later);
+        assert!(!f.ask);
     }
 
     #[test]

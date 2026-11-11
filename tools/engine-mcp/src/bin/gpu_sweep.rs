@@ -21,6 +21,9 @@
 //! only by what the switch does. `--shots-only` takes the pictures without the readings (a
 //! software GPU's times say nothing).
 //!
+//! `--skip a,b` leaves those switches out (one the game cannot take on a machine). The files are
+//! written after every stop, so a sweep that dies keeps the stops it finished.
+//!
 //! `--variants a,b` runs only those (names as in the table; `none` for the baseline alone, which
 //! is what a launch with an environment switch such as `TERRAIN_SHADER_OFF=1` wants, with
 //! `--label` to name it). `--list` prints the variants. Stops are `showcase.goto` places; with
@@ -422,7 +425,21 @@ fn variants() -> Vec<Variant> {
             "cut_far_ground_still",
             r,
             json!({"trial_cuts_more": 2}),
-            "the ground stays in the far shadow map's still image, drawn again when its patches changed (at most four times a second), not every frame",
+            "the ground stays in the far shadow map's still image; only the patches the image doesn't hold are drawn on top each frame",
+        ),
+        // Other modules' own switches, each a trade its owner left off until it is judged from
+        // pictures.
+        v(
+            "water_vertex_sky_and_fog",
+            "WaterSettings",
+            json!({"vertex_sky_and_fog": true}),
+            "lakes and seas take the open sky's share and the fog from their vertices, not every pixel (lake stop)",
+        ),
+        v(
+            "smoke_half_res",
+            "SmokeSettings",
+            json!({"half_res": true}),
+            "smoke marched at half the screen's resolution in each direction and laid over the scene (field, fortress)",
         ),
         v(
             "cut_tiled_lamps",
@@ -966,6 +983,8 @@ struct Args {
     addr: String,
     stops: Vec<String>,
     only: Option<Vec<String>>,
+    /// Switches left out (one that the game cannot take on this machine).
+    skip: Vec<String>,
     dwell: f32,
     settle: f32,
     secs: f32,
@@ -984,6 +1003,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         addr: "127.0.0.1:7878".into(),
         stops: vec!["plaza".into()],
         only: None,
+        skip: Vec::new(),
         dwell: 25.0,
         settle: 2.5,
         secs: 4.0,
@@ -1012,6 +1032,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                 } else {
                     list.split(',').map(|s| s.trim().to_string()).collect()
                 });
+            }
+            "--skip" => {
+                a.skip = value("--skip")?
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
             }
             "--dwell" => a.dwell = value("--dwell")?.parse().map_err(|_| "bad --dwell")?,
             "--settle" => a.settle = value("--settle")?.parse().map_err(|_| "bad --settle")?,
@@ -1055,19 +1081,20 @@ fn parse_args() -> Result<Option<Args>, String> {
 fn run(args: &Args) -> Result<(), String> {
     let mut bridge = Bridge::connect(&args.addr, Duration::from_secs(600))?;
     let all = variants();
-    let chosen: Vec<&Variant> = match &args.only {
-        None => all.iter().collect(),
-        Some(names) => {
-            for n in names {
-                if !all.iter().any(|v| v.name == n) {
-                    return Err(format!("no variant {n} (--list)"));
-                }
-            }
-            all.iter()
-                .filter(|v| names.iter().any(|n| n == v.name))
-                .collect()
+    for n in args.only.iter().flatten().chain(&args.skip) {
+        if !all.iter().any(|v| v.name == n) {
+            return Err(format!("no variant {n} (--list)"));
         }
-    };
+    }
+    let chosen: Vec<&Variant> = all
+        .iter()
+        .filter(|v| {
+            args.only
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|n| n == v.name))
+                && !args.skip.iter().any(|n| n == v.name)
+        })
+        .collect();
     let renderer = bridge
         .call("render.stats", json!({}))
         .unwrap_or(Value::Null);
@@ -1339,15 +1366,20 @@ fn run(args: &Args) -> Result<(), String> {
         }
         md.push('\n');
         results.insert(stop.clone(), Value::Object(stop_json));
+        // After every stop, so a sweep that dies at a later one keeps what it measured.
+        let json = json!({"label": args.label.clone(), "renderer": renderer.clone(), "stops": results.clone()});
+        std::fs::write(format!("{}.md", args.out), &md).map_err(|e| e.to_string())?;
+        std::fs::write(
+            format!("{}.json", args.out),
+            serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        eprintln!(
+            "wrote {0}.md and {0}.json ({1} stops)",
+            args.out,
+            results.len()
+        );
     }
-    let json = json!({"label": args.label, "renderer": renderer, "stops": results});
-    std::fs::write(format!("{}.md", args.out), &md).map_err(|e| e.to_string())?;
-    std::fs::write(
-        format!("{}.json", args.out),
-        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    eprintln!("wrote {0}.md and {0}.json", args.out);
     Ok(())
 }
 

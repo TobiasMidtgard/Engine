@@ -354,11 +354,12 @@ pub mod trial_cut_more {
     pub const AERIAL_STEPWISE: u32 = 1;
     /// The ground stays in the far shadow map's still image (the terrain's `FarStill`): it
     /// was drawn into the far map again every frame, as many triangles as the cascades take
-    /// together. The far map's patches are the camera's own walk a level coarser and its
-    /// bias covers a level's difference, so the image is drawn again when the patches
-    /// changed, at most four times a second, and at once when the camera leaves the map's
-    /// margin or the sun turns, as for buildings. The far map's shadows of the ground can be
-    /// a quarter of a second behind a camera that moves.
+    /// together. Now it is drawn when the image is (the camera left the map's margin, the sun
+    /// turned, a building changed), and on the other frames only the patches the image
+    /// doesn't hold are drawn on top: those the far map's walk chose at another level since,
+    /// and those that arrived. The image keeps what it held of those places, a level finer
+    /// or coarser, under them; the far map's texels are meters wide and its bias covers a
+    /// level's difference. An edited patch draws the image again.
     pub const FAR_GROUND_STILL: u32 = 2;
 }
 
