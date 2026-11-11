@@ -11,7 +11,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
 use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose, StrikeTargets};
-use engine_world::combat::{AttackPhase, AttackWindow, BodyZone, ItemClass, Loadout};
+use engine_world::combat::{AttackPhase, AttackWindow, BodyZone, ItemClass, Knockback, Loadout};
 use engine_world::events::AttackKind;
 use engine_world::locomotion::MoveIntent;
 
@@ -77,10 +77,16 @@ fn a_loadout_arms_a_requested_body() {
     assert_eq!(params.get("sword_stance"), 1.0);
 }
 
-/// What NPC AI's mover does with a strike's step: carries the body by it.
+/// What NPC AI's mover does with a strike's step: carries the body by the published
+/// `AttackWindow::warp_delta`.
 fn take_steps(app: &mut App, people: [Entity; 2], moved: &mut [DVec3; 2]) {
     for (k, e) in people.into_iter().enumerate() {
-        let step = app.world.get::<Attacker>(e).unwrap().warp_delta.as_dvec3();
+        let step = app
+            .world
+            .get::<AttackWindow>(e)
+            .unwrap()
+            .warp_delta
+            .as_dvec3();
         moved[k] += step;
         let mut t = app.world.get_mut::<Transform>(e).unwrap();
         t.translation += step;
@@ -96,6 +102,7 @@ fn an_intended_strike_plays_its_phases_and_lands() {
     app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Melee);
     let mut phases: Vec<AttackPhase> = Vec::new();
     let mut hits = 0;
+    let mut pushed = 0.0f32;
     for f in 0..(1.6 / STEP) as usize {
         if f == 2 {
             // The AI lets go; held or not, it is one press.
@@ -112,6 +119,7 @@ fn an_intended_strike_plays_its_phases_and_lands() {
             assert!(!w.name.is_empty());
         }
         hits = hits.max(app.world.get::<Attacker>(a).unwrap().hits);
+        pushed = pushed.max(app.world.get::<Knockback>(b).unwrap().velocity.length());
     }
     assert_eq!(
         &phases[..3],
@@ -123,6 +131,9 @@ fn an_intended_strike_plays_its_phases_and_lands() {
         "{phases:?}"
     );
     assert!(hits >= 1, "the cut didn't land");
+    // The blow pushed the foe through its published Knockback, gone once the stagger ends.
+    assert!(pushed > 0.1, "no knockback: {pushed}");
+    assert_eq!(app.world.get::<Knockback>(b).unwrap().velocity, Vec3::ZERO);
     assert_eq!(
         app.world.get::<AttackWindow>(a).unwrap().phase,
         None,

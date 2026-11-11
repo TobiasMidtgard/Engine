@@ -39,6 +39,7 @@
 
 use engine_core::prelude::*;
 use engine_world::DamageEvent;
+use engine_world::combat::Knockback;
 use engine_world::physics::{CharacterController, PhysicsBackend};
 
 use crate::animator::Animator;
@@ -427,6 +428,24 @@ pub(crate) fn stagger_system(
         reaction.stagger_velocity = if dt > 0.0 { step / dt } else { Vec3::ZERO };
         if reaction.stagger_move && controller.is_none() {
             transform.translation += step.as_dvec3();
+        }
+    }
+}
+
+/// Publish the push of a blow on bodies this module doesn't move itself (fighters on intent),
+/// as their [`Knockback`] for the requester's mover: the stagger's velocity while it pushes,
+/// zero after.
+pub(crate) fn publish_knockback(
+    mut q: Query<(&HitReaction, &mut Knockback, Option<&CharacterController>)>,
+) {
+    for (reaction, mut knockback, controller) in &mut q {
+        let velocity = if reaction.stagger_move && controller.is_none() {
+            Vec3::ZERO
+        } else {
+            reaction.stagger_velocity
+        };
+        if knockback.velocity != velocity {
+            knockback.velocity = velocity;
         }
     }
 }

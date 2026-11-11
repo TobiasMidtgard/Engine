@@ -210,6 +210,7 @@ impl Plugin for AnimationPlugin {
                     (
                         knockdown::knockdown_system,
                         hit::stagger_system,
+                        hit::publish_knockback,
                         hit::flinch_system,
                         hurt::hurt_system,
                     )

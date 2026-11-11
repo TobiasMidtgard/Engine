@@ -29,14 +29,14 @@
 //!   the AI to read instead of keeping timelines of their own.
 //!
 //! The requester keeps moving the entity (the contract says the animation module never does),
-//! so the [`Attacker`] it gets doesn't warp its transform: [`Attacker::warp_delta`] says
-//! where a strike's step would go, and [`HitReaction::stagger_velocity`](crate::hit::HitReaction)
-//! how fast a blow pushes it.
+//! so the [`Attacker`] it gets doesn't warp its transform: [`AttackWindow::warp_delta`] (and
+//! [`Attacker::warp_delta`]) says where a strike's step goes this frame, and [`Knockback`]
+//! (and [`HitReaction::stagger_velocity`](crate::hit::HitReaction)) how fast a blow pushes it.
 
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, BodyRequest, StrikeTargets};
 use engine_world::combat::{
-    AttackPhase as WindowPhase, AttackWindow, CombatSkills, ItemClass, Loadout,
+    AttackPhase as WindowPhase, AttackWindow, CombatSkills, ItemClass, Knockback, Loadout,
 };
 use engine_world::events::AttackKind;
 use engine_world::locomotion::MoveIntent;
@@ -182,12 +182,15 @@ fn arm(world: &mut World, entity: Entity, loadout: Loadout, old: &[Entity]) {
     let mut e = world.entity_mut(entity);
     let target = e.get::<Attacker>().and_then(|a| a.target);
     // Blows knock it back through the requester too: the push is published
-    // (`HitReaction::stagger_velocity`), not walked.
+    // ([`Knockback`] and `HitReaction::stagger_velocity`), not walked.
     if !e.contains::<crate::hit::HitReaction>() {
         e.insert(crate::hit::HitReaction {
             stagger_move: false,
             ..Default::default()
         });
+    }
+    if !e.contains::<Knockback>() {
+        e.insert(Knockback::default());
     }
     // Head and eyes on the foe (the brain's `StrikeTargets.target`).
     if !e.contains::<LookAt>() {
@@ -369,7 +372,11 @@ pub(crate) fn publish_windows(
     mut q: Query<(Entity, &Attacker, Option<&mut AttackWindow>), With<Armed>>,
 ) {
     for (entity, attacker, window) in &mut q {
-        let now = window_of(attacker, &sets, &library);
+        let mut now = window_of(attacker, &sets, &library);
+        // The strike's step, for the requester's mover (zero between strikes).
+        if attacker.current.is_some() {
+            now.warp_delta = attacker.warp_delta;
+        }
         match window {
             Some(mut w) => {
                 if *w != now {
