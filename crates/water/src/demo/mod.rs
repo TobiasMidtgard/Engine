@@ -39,7 +39,9 @@ use engine_core::prelude::*;
 use engine_core::tasks::{ComputeTaskPool, par_chunks_mut};
 use engine_render::{Mesh, Vertex};
 use engine_world::physics::{Fit, FitCollider, Velocity};
-use engine_world::{ContactKind, GroundContact, ProjectileTrace, WorldImpulse, WorldShift};
+use engine_world::{
+    ContactKind, GroundContact, ProjectileTrace, SurfaceMaterials, WorldImpulse, WorldShift,
+};
 
 use crate::boat::Boat;
 use crate::body::{RainShower, WaterBed, WaterBody, WaterOptics};
@@ -1285,6 +1287,7 @@ pub fn demo_system(
     mut traces: MessageWriter<ProjectileTrace>,
     mut blasts: MessageWriter<WorldImpulse>,
     mut contacts: MessageWriter<GroundContact>,
+    materials: Option<Res<SurfaceMaterials>>,
 ) {
     let Some(mut demo) = state else {
         return;
@@ -1396,6 +1399,14 @@ pub fn demo_system(
                 tf.rotation = Quat::from_rotation_y(yaw_between(Vec3::X, dir));
                 if let Some(left) = step {
                     let side = (tf.rotation * Vec3::Z).as_dvec3() * if left { 0.12 } else { -0.12 };
+                    // Sand in the shallows, silt where the bed lies deeper (`ground_color`):
+                    // named here, so footprints and footsteps need no ground look-up of their own.
+                    let bed = if ground < LAKE_LEVEL as f64 - 0.6 {
+                        "mud"
+                    } else {
+                        "sand"
+                    };
+                    let surface = materials.as_ref().and_then(|m| m.id(bed));
                     contacts.write(GroundContact {
                         position: feet + side,
                         normal: Vec3::Y,
@@ -1404,7 +1415,7 @@ pub fn demo_system(
                         load_kg: 75.0,
                         speed,
                         kind: ContactKind::Foot,
-                        surface: None,
+                        surface,
                         entity: Some(entity),
                     });
                 }

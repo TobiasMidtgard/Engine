@@ -620,6 +620,9 @@ struct Globals {
     /// the plume's radius. `plume[2]` counts them.
     mouths: [[f32; 4]; MAX_MOUTHS],
     plunge_dirs: [[f32; 4]; MAX_PLUNGES],
+    /// Lakes take the open sky's share and the fog from their vertices
+    /// (`WaterSettings::vertex_sky_and_fog`: 1/0), unused x3.
+    cheaper: [f32; 4],
 }
 
 #[repr(C)]
@@ -2691,6 +2694,10 @@ impl RenderFeature for WaterFeature {
             .get_resource::<crate::body::WaterSettings>()
             .is_none_or(|s| s.wind_shelter);
         g.shelter = [0.0, 0.0, 1.0, if sheltering { -1.0 } else { -2.0 }];
+        let per_vertex = world
+            .get_resource::<crate::body::WaterSettings>()
+            .is_some_and(|s| s.vertex_sky_and_fog);
+        g.cheaper = [if per_vertex { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
         if let (Some((corner, cell)), Some(slot)) = (shelter_place, shelter_slot) {
             let rel = view.relative(DVec3::new(corner.x, 0.0, corner.y));
             g.shelter = [
@@ -3055,12 +3062,13 @@ mod tests {
     #[test]
     fn uniform_layout_matches_the_shader() {
         // WGSL: Globals 10 vec4 + 4 showers + 16 plunges + the mirror's matrix and 2 vec4 +
-        // the shelter mask's + the swash's 2 + the waterline's 2 + the trail's + the falls';
-        // GpuBody 11 vec4
+        // the shelter mask's + the swash's 2 + the waterline's 2 + the trail's + the falls' +
+        // the plume's 3 + mouths + plunges' ways + `cheaper`; GpuBody 11 vec4
         // + 24 waves of 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + MAX_PLUNGES + 4 + 2 + 1 + 2 + 2 + 1 + 1 + 3 + MAX_MOUTHS + MAX_PLUNGES) * 16
+            (10 + 4 + MAX_PLUNGES + 4 + 2 + 1 + 2 + 2 + 1 + 1 + 3 + MAX_MOUTHS + MAX_PLUNGES + 1)
+                * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(

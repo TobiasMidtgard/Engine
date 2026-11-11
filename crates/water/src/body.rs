@@ -607,6 +607,11 @@ pub struct WaterSettings {
     /// The wind roughens a lake only where it reaches the water: calm in the lee of banks and
     /// crags, rougher downwind ([`crate::shelter`]).
     pub wind_shelter: bool,
+    /// Lakes and seas take the open sky's share above the water and the fog in front of it
+    /// from their surface's vertices instead of every pixel (as Unreal's translucency takes
+    /// its fog unless asked not to): about a third less GPU time for a lake filling the view,
+    /// the reflections' and the fog's gradients a little coarser far off. Off by default.
+    pub vertex_sky_and_fog: bool,
 }
 
 impl Default for WaterSettings {
@@ -633,6 +638,7 @@ impl Default for WaterSettings {
             mirror_resolution: 0.5,
             mirror_quality: Some(engine_world::QualityPreset::High),
             wind_shelter: lake,
+            vertex_sky_and_fog: false,
         }
     }
 }
