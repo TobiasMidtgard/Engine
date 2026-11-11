@@ -476,15 +476,40 @@ impl FireField {
         )
     }
 
-    /// Tiles not made yet under the square `reach` meters round `p` (what an ignition or a
-    /// splash there would have to make first: a ground and water query per cell).
-    pub fn tiles_missing(&self, p: DVec3, reach: f32) -> usize {
+    /// Whether every tile under the square `reach` meters round `p` is there, for an ignition
+    /// or a splash there. The missing ones are asked for: off the frame where the world can
+    /// answer there ([`FuelSource::fuel_later`]; they land at a later step or at
+    /// [`Self::land_grown`]), else made now. A tile the field has no room for counts as there
+    /// (the ignition just finds no cells in it).
+    pub fn ask_tiles(&mut self, p: DVec3, reach: f32, fuel: &mut dyn FuelSource) -> bool {
         let (lo, _) = Self::split(self.cell_coord(p - DVec3::splat(reach as f64)));
         let (hi, _) = Self::split(self.cell_coord(p + DVec3::splat(reach as f64)));
-        (lo.y..=hi.y)
-            .flat_map(|y| (lo.x..=hi.x).map(move |x| IVec2::new(x, y)))
-            .filter(|k| !self.map.contains_key(k))
-            .count()
+        let mut ready = true;
+        for y in lo.y..=hi.y {
+            for x in lo.x..=hi.x {
+                let k = IVec2::new(x, y);
+                if self.map.contains_key(&k) {
+                    continue;
+                }
+                if self.growing.iter().any(|(g, _, _)| *g == k) {
+                    ready = false;
+                    continue;
+                }
+                if self.tiles.len() + self.growing.len() >= self.max_tiles {
+                    continue;
+                }
+                match fuel.fuel_later(self.tile_points(k, p.y + 2.0)) {
+                    Some(answer) => {
+                        self.growing.push((k, answer, self.steps));
+                        ready = false;
+                    }
+                    None => {
+                        self.ensure_tile(k, p.y + 2.0, fuel);
+                    }
+                }
+            }
+        }
+        ready
     }
 
     /// Tile key and local cell of global cell coordinates.
@@ -1394,7 +1419,7 @@ impl FireField {
     }
 
     /// Make the tiles whose off-frame answers have landed, in the order they were asked.
-    fn land_grown(&mut self) {
+    pub(crate) fn land_grown(&mut self) {
         let steps = self.steps;
         for (key, answer, asked) in std::mem::take(&mut self.growing) {
             if self.map.contains_key(&key) {

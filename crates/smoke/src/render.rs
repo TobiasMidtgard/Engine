@@ -66,6 +66,11 @@ struct VolumeGpu {
     glow_view: wgpu::TextureView,
     /// How much hotter than the air the smoke is (°C), for the firelight under a plume.
     heat: wgpu::Texture,
+    /// Which bricks of [`BRICK`]³ voxels the raymarch must look in (R8, 1 = smoke may be there).
+    occupancy: wgpu::Texture,
+    occupancy_view: wgpu::TextureView,
+    /// Bricks holding smoke in each density state (indexed like `density`).
+    bricks: [Vec<bool>; 2],
     params: wgpu::Buffer,
     /// Draw bind group for each choice of current texture.
     draw_groups: [Option<wgpu::BindGroup>; 2],
@@ -98,6 +103,7 @@ pub struct SmokeFeature {
     order: Vec<usize>,
     pack: Vec<[u16; 4]>,
     pack_heat: Vec<u16>,
+    pack_occupancy: Vec<u8>,
     frames_since_light: u32,
     stats: FeatureStats,
     flow: Flow,
@@ -129,6 +135,69 @@ impl Flow {
         self.drift += (self.wind * 0.8).as_dvec3() * dt as f64;
         self.rise += 0.35 * dt as f64;
     }
+}
+
+/// Voxels along each side of an occupancy brick: the raymarch skips a brick with no smoke in
+/// it, or near it, in one go.
+pub const BRICK: u32 = 4;
+
+/// Bricks along each axis for a volume of `dims` voxels.
+pub fn brick_dims(dims: UVec3) -> UVec3 {
+    (dims + UVec3::splat(BRICK - 1)) / BRICK
+}
+
+/// Which bricks of a packed density hold any smoke.
+pub fn smoky_bricks(dims: UVec3, packed: &[[u16; 4]], out: &mut Vec<bool>) {
+    let b = brick_dims(dims);
+    out.clear();
+    out.resize((b.x * b.y * b.z) as usize, false);
+    for z in 0..dims.z {
+        for y in 0..dims.y {
+            let row = ((z * dims.y + y) * dims.x) as usize;
+            let brow = ((z / BRICK * b.y + y / BRICK) * b.x) as usize;
+            for x in 0..dims.x {
+                if packed[row + x as usize][0] != 0 {
+                    out[brow + (x / BRICK) as usize] = true;
+                }
+            }
+        }
+    }
+}
+
+/// The occupancy the raymarch reads: a brick is marked where either density state has smoke
+/// within `reach` bricks of it. The raymarch looks up the density up to a warp's reach (1.2
+/// cells per unit of detail) from each step, and the lookup filters across one more voxel, so
+/// smoke a brick away still shows in this one.
+pub fn occupancy(dims: UVec3, states: [&[bool]; 2], reach: i32, out: &mut Vec<u8>) {
+    let b = brick_dims(dims).as_ivec3();
+    out.clear();
+    out.resize((b.x * b.y * b.z) as usize, 0);
+    let at = |x: i32, y: i32, z: i32| ((z * b.y + y) * b.x + x) as usize;
+    for z in 0..b.z {
+        for y in 0..b.y {
+            for x in 0..b.x {
+                let i = at(x, y, z);
+                if !(states[0][i] || states[1][i]) {
+                    continue;
+                }
+                for dz in (z - reach).max(0)..=(z + reach).min(b.z - 1) {
+                    for dy in (y - reach).max(0)..=(y + reach).min(b.y - 1) {
+                        for dx in (x - reach).max(0)..=(x + reach).min(b.x - 1) {
+                            out[at(dx, dy, dz)] = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Bricks of reach the occupancy needs for `detail` (see [`occupancy`]), or `None` when it
+/// is so large that skipping isn't safe (then every brick is marked).
+pub fn occupancy_reach(detail: f32) -> Option<i32> {
+    let voxels = 1.2 * detail.max(0.0) + 1.0;
+    let reach = (voxels / BRICK as f32).ceil() as i32;
+    (reach <= 2).then_some(reach.max(1))
 }
 
 /// Pack a domain into (σ, σ·albedo) half floats: extinction 1/m and scattering color.
@@ -233,6 +302,22 @@ impl SmokeFeature {
             view_formats: &[],
         });
         let heat_view = heat.create_view(&Default::default());
+        let bricks = brick_dims(dims);
+        let occupancy = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("smoke occupancy"),
+            size: wgpu::Extent3d {
+                width: bricks.x,
+                height: bricks.y,
+                depth_or_array_layers: bricks.z,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: sampled,
+            view_formats: &[],
+        });
+        let occupancy_view = occupancy.create_view(&Default::default());
         let light = texture_3d(gpu, "smoke light", dims, storage);
         let glow = texture_3d(gpu, "smoke firelight", dims, storage);
         let light_view = light.create_view(&Default::default());
@@ -280,6 +365,9 @@ impl SmokeFeature {
             light_view,
             glow_view,
             heat,
+            occupancy,
+            occupancy_view,
+            bricks: [Vec::new(), Vec::new()],
             params,
             draw_groups: [None, None],
             light_groups,
@@ -294,7 +382,14 @@ impl SmokeFeature {
         })
     }
 
-    fn upload(&mut self, gpu: &GpuShared, slot: usize, domain: &Domain, extinction: f32) {
+    fn upload(
+        &mut self,
+        gpu: &GpuShared,
+        slot: usize,
+        domain: &Domain,
+        extinction: f32,
+        reach: Option<i32>,
+    ) {
         pack_density(domain, extinction, &mut self.pack);
         let v = &mut self.volumes[slot];
         // Both states the first time, and when the smoke jumped (no blending across that).
@@ -321,6 +416,40 @@ impl SmokeFeature {
         if first {
             write(&v.density[1 - v.current]);
         }
+        // Where the raymarch has to look: bricks with smoke in either state it blends.
+        let mut cur = std::mem::take(&mut v.bricks[v.current]);
+        smoky_bricks(dims, &self.pack, &mut cur);
+        if first {
+            v.bricks[1 - v.current] = cur.clone();
+        }
+        v.bricks[v.current] = cur;
+        match reach {
+            Some(reach) => occupancy(
+                dims,
+                [&v.bricks[0], &v.bricks[1]],
+                reach,
+                &mut self.pack_occupancy,
+            ),
+            None => {
+                self.pack_occupancy.clear();
+                self.pack_occupancy.resize(v.bricks[0].len(), 255);
+            }
+        }
+        let b = brick_dims(dims);
+        gpu.queue.write_texture(
+            v.occupancy.as_image_copy(),
+            &self.pack_occupancy,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(b.x),
+                rows_per_image: Some(b.y),
+            },
+            wgpu::Extent3d {
+                width: b.x,
+                height: b.y,
+                depth_or_array_layers: b.z,
+            },
+        );
         pack_heat(domain, &mut self.pack_heat);
         gpu.queue.write_texture(
             v.heat.as_image_copy(),
@@ -399,6 +528,16 @@ impl RenderFeature for SmokeFeature {
                 tex3d(3, fs),
                 tex3d(4, fs),
                 tex3d(6, fs),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: fs,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: fs,
@@ -721,7 +860,12 @@ impl RenderFeature for SmokeFeature {
         for slot in uploads {
             let id = self.volumes[slot].id;
             if let Some(d) = domains.list.iter().find(|d| d.id == id) {
-                self.upload(gpu, slot, &d.domain, settings.extinction_m2_kg);
+                let reach = if settings.skip_empty {
+                    occupancy_reach(settings.detail)
+                } else {
+                    None
+                };
+                self.upload(gpu, slot, &d.domain, settings.extinction_m2_kg, reach);
             }
         }
         self.volumes.retain(|v| v.seen);
@@ -789,6 +933,10 @@ impl RenderFeature for SmokeFeature {
                         wgpu::BindGroupEntry {
                             binding: 6,
                             resource: wgpu::BindingResource::TextureView(detail),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&v.occupancy_view),
                         },
                     ],
                 }));
@@ -943,6 +1091,34 @@ mod tests {
             std::mem::size_of::<SmokeParams>(),
             16 * (6 + MAX_TUNNELS * 2)
         );
+    }
+
+    /// The raymarch may skip a brick only where no smoke is within a warp and a filter's reach
+    /// of it, in either density state it blends.
+    #[test]
+    fn occupancy_marks_bricks_with_smoke_and_their_neighbors() {
+        let dims = UVec3::new(16, 8, 12);
+        let mut packed = vec![[0u16; 4]; (dims.x * dims.y * dims.z) as usize];
+        // One wisp at voxel (13, 2, 1): brick (3, 0, 0).
+        packed[((dims.y + 2) * dims.x + 13) as usize][0] = f16(0.5);
+        let mut cur = Vec::new();
+        smoky_bricks(dims, &packed, &mut cur);
+        let b = brick_dims(dims);
+        assert_eq!(b, UVec3::new(4, 2, 3));
+        assert_eq!(cur.iter().filter(|&&x| x).count(), 1);
+        assert!(cur[3]);
+        let empty = vec![false; cur.len()];
+        let mut occ = Vec::new();
+        occupancy(dims, [&empty, &cur], 1, &mut occ);
+        let at = |x: u32, y: u32, z: u32| occ[((z * b.y + y) * b.x + x) as usize];
+        // The brick and its neighbors are marked, the far side of the box isn't.
+        assert_eq!(at(3, 0, 0), 255);
+        assert_eq!(at(2, 1, 1), 255);
+        assert_eq!(at(0, 0, 0), 0);
+        assert_eq!(at(3, 0, 2), 0);
+        // The default detail needs one brick of reach; a huge detail turns skipping off.
+        assert_eq!(occupancy_reach(1.0), Some(1));
+        assert_eq!(occupancy_reach(20.0), None);
     }
 
     #[test]

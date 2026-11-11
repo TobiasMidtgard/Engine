@@ -52,6 +52,9 @@ pub struct SmokeSettings {
     pub detail: f32,
     /// Most raymarch steps per pixel.
     pub max_steps: u32,
+    /// Let the raymarch skip the parts of a box with no smoke in them, a brick of voxels at a
+    /// time (the picture is the same; off only to time what it saves).
+    pub skip_empty: bool,
     /// Step volumes on a background task (where there is one): the frame never waits for a
     /// big plume's step; what you see is one step behind, and a step that isn't done in time
     /// is owed to the next.
@@ -84,6 +87,7 @@ impl Default for SmokeSettings {
             tunnel_secs: 1.6,
             detail: 1.0,
             max_steps: 160,
+            skip_empty: true,
             background: true,
         }
     }

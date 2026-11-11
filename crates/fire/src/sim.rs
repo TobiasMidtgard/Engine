@@ -363,9 +363,6 @@ pub fn index_patches(
     field.refuel(min, max, &contains, &mut fuel);
 }
 
-/// New fire tiles the commands of one step may make in play (see [`handle_ignition`]).
-pub const IGNITION_TILES_PER_STEP: usize = 2;
-
 /// Handle `IgniteRequest`, hot `WorldImpulse`s and API commands.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_ignition(
@@ -381,6 +378,7 @@ pub fn handle_ignition(
     materials: Res<SurfaceMaterials>,
     mut heat: ResMut<HeatField>,
     time: Res<Time>,
+    clock: Res<FireClock>,
 ) {
     let mut events: Vec<FireCommand> = std::mem::take(&mut commands_queue.0);
     for r in ignites.read() {
@@ -403,38 +401,43 @@ pub fn handle_ignition(
     if events.is_empty() || !settings.enabled {
         return;
     }
+    // In play, the ground under the tiles the commands need is asked off the frame, and each
+    // command runs once its tiles are there: a new tile is a ground and water query per cell,
+    // 1024 of them (the meadow demo's line of fire took 420 ms in one step on the session VM;
+    // made two tiles a step, up to 69 ms). With a manual clock (tests, tours), and in a
+    // demo's jump ahead (which must burn the same way every time), they are made at once and
+    // every command runs now.
+    let manual =
+        matches!(time.source(), engine_core::time::TimeSource::Manual { .. }) || clock.fast_forward;
     let mut fuel = WorldFuel {
         ground: &ground,
         water: &water,
         materials: &materials,
         patches: &patches.list,
         ground_fuel: settings.ground_fuel,
-        later: false,
+        later: !manual,
     };
-    // In play, the commands that need new tiles are spread over steps, a few tiles a step
-    // ([`IGNITION_TILES_PER_STEP`]): the meadow demo's line of fire made all its tiles at
-    // once, 420 ms in one step on the session VM. With a manual clock all land at once.
-    let manual = matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
-    let mut made = 0;
-    let mut events = events.into_iter();
-    while let Some(e) = events.next() {
-        if !manual {
-            let need = match &e {
-                FireCommand::Ignite { at, radius, .. } => {
-                    field.tiles_missing(*at, radius.max(field.cell_m * 0.5))
-                }
-                FireCommand::Splash { at, radius, .. } => {
-                    field.tiles_missing(*at, radius.max(field.cell_m) * 1.6 + field.cell_m)
-                }
-                _ => 0,
-            };
-            if need > 0 && made > 0 && made + need > IGNITION_TILES_PER_STEP {
-                // This one and everything after it, in order, at the next step.
-                commands_queue.0.push(e);
-                commands_queue.0.extend(events);
-                break;
+    field.land_grown();
+    let cell = field.cell_m;
+    let ready: Vec<bool> = events
+        .iter()
+        .map(|e| match e {
+            FireCommand::Ignite { at, radius, .. } => {
+                field.ask_tiles(*at, radius.max(cell * 0.5), &mut fuel)
             }
-            made += need;
+            FireCommand::Splash { at, radius, .. } => {
+                field.ask_tiles(*at, radius.max(cell) * 1.6 + cell, &mut fuel)
+            }
+            _ => true,
+        })
+        .collect();
+    let mut events = events.into_iter().zip(ready);
+    while let Some((e, ready)) = events.next() {
+        if !ready {
+            // This one and everything after it, in order, once the ground has answered.
+            commands_queue.0.push(e);
+            commands_queue.0.extend(events.map(|(e, _)| e));
+            break;
         }
         match e {
             FireCommand::Ignite {

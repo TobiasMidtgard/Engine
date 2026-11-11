@@ -21,6 +21,10 @@ struct SmokeParams {
 // Tiling billowy noise: r Perlin-Worley (2 cells per tile), g/b/a inverted Worley fbm (4, 8,
 // 16 cells per tile).
 @group(1) @binding(6) var detail_tex: texture_3d<f32>;
+// Which bricks of BRICK³ voxels may hold smoke (1) or certainly don't, even a warp's reach
+// away (0): the march steps over those without looking (render.rs `occupancy`).
+@group(1) @binding(7) var occupancy: texture_3d<f32>;
+const BRICK: f32 = 4.0;
 
 // Meters per tile of the detail texture: the warp's and the billows'.
 const WARP_TILE: f32 = 16.0;
@@ -201,9 +205,26 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     var t = t0 + ds * spin;
     // How far the sun's shadow is spread in the smoke (m): about a cell, at least 40 cm.
     let shadow_blur = max(cell * 0.6, 0.4);
-    for (var i = 0; i < steps; i++) {
-        if (t > t1) { break; }
+    // Empty space is skipped a brick at a time (Space leaping, as in empty-space skipping for
+    // volume ray casting: a coarse occupancy grid over the voxels, here 4³ voxels a brick).
+    // The steps stay on the same lattice (t0 + ds × (spin + i)), so the smoke that is drawn
+    // is drawn exactly as before.
+    let bricks = vec3<i32>(textureDimensions(occupancy));
+    let brick_m = cell * BRICK;
+    var i = 0;
+    loop {
+        if (i >= steps || t > t1) { break; }
         let p = dir * t;
+        let b = vec3<i32>(floor((p - bmin) / brick_m));
+        if (all(b >= vec3<i32>(0)) && all(b < bricks) && textureLoad(occupancy, b, 0).r == 0.0) {
+            // Out of this brick in whole steps.
+            let lo = bmin + vec3<f32>(b) * brick_m;
+            let exits = (select(lo, lo + brick_m, safe > vec3<f32>(0.0)) - p) / safe;
+            let n = max(ceil(max(min(min(exits.x, exits.y), exits.z), 0.0) / ds), 1.0);
+            t += n * ds;
+            i += i32(n);
+            continue;
+        }
         var q = p;
         var lumps = 0.5;
         let detail = smoke.look.x * saturate(1.5 - pixel_per_m * max(t, 1.0) / (0.1 * grain));
@@ -316,6 +337,7 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
             if (transmittance < 0.004) { break; }
         }
         t += ds;
+        i += 1;
     }
     let alpha = 1.0 - transmittance;
     if (alpha < 0.002) { discard; }
