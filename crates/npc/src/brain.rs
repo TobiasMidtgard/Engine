@@ -1959,7 +1959,10 @@ fn drive(
     if let AttackPhase::Windup { aim, heavy, .. } = combat.phase {
         let d = Vec3::new((aim.x - pos.x) as f32, 0.0, (aim.z - pos.z) as f32).normalize_or(fwd);
         out.look = Some(d);
-        out.attack = Some(if weapon.style == WeaponStyle::Ranged {
+        // (An archer or rifleman the animation module poses shoots on its own cues:
+        // `intent_body.rs`.)
+        let cued = combat.anim_strikes && weapon.style == WeaponStyle::Ranged;
+        out.attack = (!cued).then_some(if weapon.style == WeaponStyle::Ranged {
             engine_world::AttackKind::Ranged
         } else if heavy && combat.anim_strikes {
             // The animation module presses a heavy strike for it.

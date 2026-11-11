@@ -1,6 +1,8 @@
 //! Brain drives, animation animates (N2), on contracts only: no animation module here, so the
 //! test plays its part (it arms a requested body with an `AttackWindow` and plays a wind-up in
-//! it). Hand-to-hand fighters ask for bodies, archers and riflemen don't; the downed keep
+//! it). Hand-to-hand fighters, archers and riflemen ask for bodies; an archer draws, holds and
+//! looses, and a rifleman aims, fires and changes magazines, on the animation module's cues as
+//! its brain shoots; the downed keep
 //! theirs and a mate kneels where that body lies; and a strike the animation module plays is pressed through the
 //! intent, lands through its blows (not this crate's), and has its telegraph timed to the
 //! brain's, aimed at the zone its brain picks.
@@ -8,7 +10,7 @@
 use engine_core::ecs::message::Messages;
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_npc::intent_body::loadout_of;
+use engine_npc::intent_body::{MAGAZINE_SHOTS, RELOAD_SECS, loadout_of};
 use engine_npc::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger, BodyRequest, StrikeTargets};
 use engine_world::character::draws_appearances;
@@ -103,13 +105,20 @@ fn hand_to_hand_people_ask_the_animation_module_for_bodies() {
     let skill = app.world.get::<CombatSkills>(sword).expect("its skill");
     let level = NpcSkills::veteran().level();
     assert!((skill.skill(ItemClass::TwoHandedBlade) - level).abs() < 1e-4);
-    assert!(
-        asked(&app, rifle).is_none(),
-        "riflemen keep the stand-in's pose"
+    assert!(asked(&app, rifle).is_some(), "riflemen ask");
+    assert_eq!(
+        app.world.get::<Loadout>(rifle).unwrap().main,
+        ItemClass::Firearm
     );
-    assert!(
-        asked(&app, bow).is_none(),
-        "archers keep the stand-in's pose"
+    // Archers too: the animation module's bow draws, holds and looses.
+    assert!(asked(&app, bow).is_some(), "archers ask");
+    assert_eq!(
+        *app.world.get::<Loadout>(bow).unwrap(),
+        Loadout {
+            main: ItemClass::Bow,
+            off: ItemClass::None,
+            two_handed: true,
+        }
     );
 
     // Off, and with no character module drawing people, nobody asks.
@@ -392,4 +401,120 @@ fn a_body_the_animation_module_poses_takes_its_strike_step_and_a_blows_push() {
         pushed.z < -0.45 && pushed.z > -0.75,
         "pushed back {pushed:?}"
     );
+}
+
+#[test]
+fn an_archer_draws_holds_and_looses_on_the_animation_modules_cues() {
+    let mut app = app();
+    let archer = fighter(&mut app, -12.0, Faction::ENEMY, NpcWeapon::bow(), 1);
+    let foe = fighter(&mut app, 12.0, Faction::RIVAL, NpcWeapon::sword(), 2);
+    app.world.get_mut::<Npc>(foe).unwrap().active = false;
+    run(&mut app, 0.2);
+    assert!(app.world.get::<BodyRequest>(archer).is_some());
+    app.world.entity_mut(archer).insert(AttackWindow::default());
+    let mut cues = app
+        .world
+        .resource::<Messages<AnimationTrigger>>()
+        .get_cursor();
+    let mut shots = app
+        .world
+        .resource::<Messages<engine_world::ProjectileTrace>>()
+        .get_cursor();
+    let (mut seen, mut flew, mut pressed) = (Vec::new(), 0, false);
+    for _ in 0..(8.0 / STEP) as usize {
+        app.update();
+        let msgs = app.world.resource::<Messages<AnimationTrigger>>();
+        seen.extend(
+            cues.read(msgs)
+                .filter(|t| t.entity == archer)
+                .map(|t| t.name.clone()),
+        );
+        let msgs = app
+            .world
+            .resource::<Messages<engine_world::ProjectileTrace>>();
+        flew += shots.read(msgs).count();
+        pressed |= app
+            .world
+            .get::<MoveIntent>(archer)
+            .is_some_and(|i| i.attack.is_some());
+        let mut v = app.world.get_mut::<NpcVitals>(foe).unwrap();
+        v.health = v.max_health;
+    }
+    assert!(app.world.get::<NpcCombat>(archer).unwrap().anim_strikes);
+    let draws = seen.iter().filter(|n| *n == "draw").count();
+    let looses = seen.iter().filter(|n| *n == "loose").count();
+    assert!(draws >= 2 && looses >= 2, "{seen:?}");
+    // Each draw is let go before the next (a loose, or the string let down).
+    for pair in seen.windows(2) {
+        assert!(!(pair[0] == "draw" && pair[1] == "draw"), "{seen:?}");
+    }
+    assert!(
+        !seen.iter().any(|n| n == "aim"),
+        "no stand-in cue: {seen:?}"
+    );
+    assert!(!pressed, "not pressed as a quick shot");
+    assert!(flew >= looses.min(2), "its arrows fly ({flew})");
+    // It shoots the animation module's bow.
+    let params = app.world.get::<AnimationParams>(archer).unwrap();
+    assert_eq!(params.get("hide_props"), 0.0);
+}
+
+#[test]
+fn a_rifleman_aims_fires_and_changes_magazines_on_the_animation_modules_cues() {
+    let mut app = app();
+    let gun = fighter(&mut app, -12.0, Faction::ENEMY, NpcWeapon::rifle(), 1);
+    let foe = fighter(&mut app, 12.0, Faction::RIVAL, NpcWeapon::sword(), 2);
+    app.world.get_mut::<Npc>(foe).unwrap().active = false;
+    run(&mut app, 0.2);
+    app.world.entity_mut(gun).insert(AttackWindow::default());
+    let mut cues = app
+        .world
+        .resource::<Messages<AnimationTrigger>>()
+        .get_cursor();
+    let mut shots = app
+        .world
+        .resource::<Messages<engine_world::ProjectileTrace>>()
+        .get_cursor();
+    let (mut seen, mut pressed, mut aimed, mut reloading) = (Vec::new(), false, false, 0.0);
+    let mut shots_in_reload = 0;
+    for _ in 0..(14.0 / STEP) as usize {
+        app.update();
+        let msgs = app.world.resource::<Messages<AnimationTrigger>>();
+        seen.extend(
+            cues.read(msgs)
+                .filter(|t| t.entity == gun)
+                .map(|t| t.name.clone()),
+        );
+        let msgs = app
+            .world
+            .resource::<Messages<engine_world::ProjectileTrace>>();
+        let flew = shots.read(msgs).count();
+        pressed |= app
+            .world
+            .get::<MoveIntent>(gun)
+            .is_some_and(|i| i.attack.is_some());
+        let params = app.world.get::<AnimationParams>(gun).unwrap();
+        aimed |= params.get("aim") > 0.5;
+        if params.get("reloading") > 0.5 {
+            reloading += STEP;
+            shots_in_reload += flew;
+        }
+        let mut v = app.world.get_mut::<NpcVitals>(foe).unwrap();
+        v.health = v.max_health;
+    }
+    let fires = seen.iter().filter(|n| *n == "fire").count();
+    let reloads = seen.iter().filter(|n| *n == "reload").count();
+    assert!(fires > MAGAZINE_SHOTS as usize, "{seen:?}");
+    assert!(reloads >= 1, "{seen:?}");
+    // A magazine's worth of shots, then the change.
+    let first = seen.iter().position(|n| n == "reload").unwrap();
+    let before = seen[..first].iter().filter(|n| *n == "fire").count();
+    assert_eq!(before, MAGAZINE_SHOTS as usize, "{seen:?}");
+    assert!(aimed, "shouldered");
+    assert!(!pressed, "not pressed as a shot");
+    // A real pause: no shot while the magazine changes, and foes see it.
+    assert!(reloading > RELOAD_SECS * 0.8, "reloading {reloading:.2} s");
+    assert_eq!(shots_in_reload, 0, "shot while reloading");
+    let params = app.world.get::<AnimationParams>(gun).unwrap();
+    assert_eq!(params.get("hide_props"), 0.0, "its carbine is the module's");
 }

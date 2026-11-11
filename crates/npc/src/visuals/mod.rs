@@ -641,6 +641,7 @@ pub(crate) fn pose_stand_ins(
             .then(|| fit.zip(st.motion.body()))
             .flatten()
             .and_then(|(f, (s, _))| character::worn_frames(f, s, pose.filter(|_| posed_elsewhere)));
+        let ranged = weapon.is_some_and(|w| w.style == crate::WeaponStyle::Ranged);
         let helmed = looks.is_some_and(|l| HELMED.contains(&l.headgear.as_str()));
         let tabarded = looks.is_some_and(|l| l.outfit.accent_on == "tabard");
         let helmet = placed(Part::Head);
@@ -653,7 +654,10 @@ pub(crate) fn pose_stand_ins(
             // In the hands the animation module poses: the weapon and shield, carried there as
             // the stand-in holds them.
             // (Not what the stand-in has set down or dropped: that stays where it lies.)
-            let carried = match (posed_elsewhere, worn, humanoid::in_hand(part.part)) {
+            // (Archers and riflemen shoot the animation module's bow and carbine: their own
+            // are put away.)
+            let hand = humanoid::in_hand(part.part).filter(|_| !ranged);
+            let carried = match (posed_elsewhere, worn, hand) {
                 (true, Some(frames), Some(k)) if p.pos.distance(frames[3 + k].own) < 0.3 => {
                     (p.pos, p.rot) = frames[3 + k].carry(p.pos, p.rot);
                     true
@@ -690,7 +694,7 @@ pub(crate) fn pose_stand_ins(
             }
             // What it holds stays: on a body the animation module poses, only what it carries
             // there (its own props are hidden, `hide_props`).
-            let set_down = posed_elsewhere && !carried && humanoid::in_hand(part.part).is_some();
+            let set_down = posed_elsewhere && !carried && hand.is_some();
             let held = humanoid::held(part.part) && (!posed_elsewhere || carried || set_down);
             let visible = p.visible && !(drawn_elsewhere && !held && kept.is_none());
             if r.visible != visible {

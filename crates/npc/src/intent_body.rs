@@ -3,15 +3,22 @@
 //!
 //! * **Who.** With [`NpcSettings::anim_bodies`] (and `character_looks`) on, while a character
 //!   module draws appearances (`AppearanceBodies`), a fighter that is a person (it has an
-//!   `Appearance` or asks for one) and fights hand to hand with a longsword or bare fists asks
-//!   the animation module for its body: a `BodyRequest::human` with its [`Seed`], a `Loadout`
-//!   from its weapon ([`loadout_of`]) and `StrikeTargets`. Archers and riflemen keep the
-//!   stand-in's pose (the animation module has no carbine and doesn't shoot this crate's
-//!   arrows). Until the animation module answers (arms the body: an `AttackWindow` appears)
-//!   the stand-in's pose stays, so without one nothing changes.
+//!   `Appearance` or asks for one) and fights hand to hand, with a bow or with a gun asks the
+//!   animation module for its body: a `BodyRequest::human` with its [`Seed`], a `Loadout`
+//!   from its weapon ([`loadout_of`]) and `StrikeTargets`. Until the animation module answers
+//!   (arms the body: an `AttackWindow` appears) the stand-in's pose stays, so without one
+//!   nothing changes.
 //! * **Props.** `hide_props` 1 hides the animation module's own sword and shield (their grips
 //!   stay): the fighter's team sword or club and its painted shield are drawn in the hands it
-//!   poses instead (`visuals`).
+//!   poses instead (`visuals`). Archers and riflemen shoot the animation module's bow (it
+//!   bends and strings as the body draws) and carbine.
+//! * **Bows.** As the brain winds a shot up the archer gets `draw` (it draws and holds at
+//!   full draw), and `loose` as the arrow flies (this crate's arrow, on this crate's time), or
+//!   `lower` when the shot is called off; it isn't pressed as a quick shot.
+//! * **Guns.** A rifleman's `aim` is up while the brain winds a shot up and for a moment
+//!   after; `fire` goes as the bullet flies, and after every [`MAGAZINE_SHOTS`] shots `reload`
+//!   changes the magazine ([`RELOAD_SECS`]): the brain holds its next shot until it's done,
+//!   and `reloading` shows foes the opening.
 //! * **Falls.** A fighter the animation module poses keeps its body when it goes down: the
 //!   `Ragdoll` weight 1 this crate gives the downed lets it fall limp, and weight 0 on a revive
 //!   gets it up. Mates kneel by where that body lies ([`drawn_lying`]), not by where the
@@ -66,13 +73,43 @@ pub struct IntentBody {
     pub natural_windup: [f32; 2],
     /// The strike being learned from (heavy) and whether its telegraph has been measured.
     learning: Option<(bool, bool)>,
+    /// An archer's bow is drawn (`draw` sent, no `loose` or `lower` yet), or a rifleman's
+    /// shot is winding up.
+    drawing: bool,
+    /// A rifleman's shots since its last magazine change, how long it keeps the gun shouldered
+    /// after a shot and when its magazine change is done (NPC clock).
+    shots: u32,
+    aimed_until: f64,
+    reloaded_at: f64,
 }
 
-/// What a fighter holds, for the animation module's move sets; `None` for those who fight
-/// from range (they keep the stand-in's pose).
+/// How many shots a rifleman's magazine holds: it changes it after every that many.
+pub const MAGAZINE_SHOTS: u32 = 6;
+
+/// How long the animation module's magazine change takes (world seconds).
+pub const RELOAD_SECS: f32 = 2.3;
+
+/// How long a rifleman keeps its gun shouldered after a shot (own seconds).
+const AIMED_SECS: f64 = 1.5;
+
+/// Whether a weapon is a bow (arrows fly slowly; bullets do not).
+pub(crate) fn is_bow(w: &NpcWeapon) -> bool {
+    w.style == WeaponStyle::Ranged && w.projectile_speed < 200.0
+}
+
+/// What a fighter holds, for the animation module's move sets.
 pub fn loadout_of(w: &NpcWeapon) -> Option<Loadout> {
     match w.style {
-        WeaponStyle::Ranged => None,
+        WeaponStyle::Ranged if is_bow(w) => Some(Loadout {
+            main: ItemClass::Bow,
+            off: ItemClass::None,
+            two_handed: true,
+        }),
+        WeaponStyle::Ranged => Some(Loadout {
+            main: ItemClass::Firearm,
+            off: ItemClass::None,
+            two_handed: true,
+        }),
         WeaponStyle::Melee if !w.can_block => Some(Loadout::default()),
         WeaponStyle::Melee if w.shield => Some(Loadout {
             main: ItemClass::OneHandedBlade,
@@ -174,16 +211,19 @@ pub(crate) fn give_bodies(
 }
 
 type Driving<'a> = (
-    &'a mut IntentBody,
-    &'a NpcBrain,
-    &'a NpcClock,
-    &'a NpcSkills,
-    &'a NpcWeapon,
-    &'a mut NpcCombat,
-    Option<&'a AttackWindow>,
-    Option<&'a mut StrikeTargets>,
-    Option<&'a mut AnimationParams>,
-    Has<BodyRequest>,
+    Entity,
+    (
+        &'a mut IntentBody,
+        &'a NpcBrain,
+        &'a NpcClock,
+        &'a NpcSkills,
+        &'a NpcWeapon,
+        &'a mut NpcCombat,
+        Option<&'a AttackWindow>,
+        Option<&'a mut StrikeTargets>,
+        Option<&'a mut AnimationParams>,
+        Has<BodyRequest>,
+    ),
 );
 
 /// How good a fighter is with what it holds, for the animation module's aimed strikes (how
@@ -214,9 +254,11 @@ pub(crate) fn strike_speed(skills: &NpcSkills) -> f32 {
 
 /// Write each intent body's foe and strike tempo, learn its strikes' telegraphs, and say
 /// whether the animation module plays its strikes (see the module docs).
-pub(crate) fn drive_bodies(mut q: Query<Driving>) {
-    for (mut body, brain, clock, skills, weapon, mut combat, window, targets, params, asked) in
-        &mut q
+pub(crate) fn drive_bodies(mut q: Query<Driving>, mut triggers: MessageWriter<AnimationTrigger>) {
+    for (
+        me,
+        (mut body, brain, clock, skills, weapon, mut combat, window, targets, params, asked),
+    ) in &mut q
     {
         let now = clock.now;
         let plays = body.asked && asked && window.is_some();
@@ -224,7 +266,28 @@ pub(crate) fn drive_bodies(mut q: Query<Driving>) {
             combat.anim_strikes = plays;
         }
         if !body.asked || !asked {
+            body.drawing = false;
             continue;
+        }
+        // An archer draws as its brain winds a shot up, holds, and looses as the arrow flies
+        // (or lets the string down when the shot is called off).
+        if is_bow(weapon) && plays {
+            let winding = matches!(combat.phase, AttackPhase::Windup { .. });
+            let cue = match (winding, body.drawing) {
+                (true, false) => Some("draw"),
+                (false, true) if matches!(combat.phase, AttackPhase::Recovery { .. }) => {
+                    Some("loose")
+                }
+                (false, true) => Some("lower"),
+                _ => None,
+            };
+            if let Some(name) = cue {
+                body.drawing = winding;
+                triggers.write(AnimationTrigger {
+                    entity: me,
+                    name: name.into(),
+                });
+            }
         }
         if let Some(mut t) = targets
             && (t.target != brain.target || t.zone != combat.zone)
@@ -287,10 +350,49 @@ pub(crate) fn drive_bodies(mut q: Query<Driving>) {
         if params.values.get("kneel") != Some(&kneel) {
             params.set("kneel", kneel);
         }
+        // A rifleman shoulders its gun as its brain winds a shot up (and for a moment after),
+        // fires as the shot goes, and changes the magazine after every few: a real pause,
+        // which its foes see (`reloading`).
+        if weapon.style == WeaponStyle::Ranged && !is_bow(weapon) && plays {
+            let winding = matches!(combat.phase, AttackPhase::Windup { .. });
+            if body.drawing && !winding && matches!(combat.phase, AttackPhase::Recovery { .. }) {
+                triggers.write(AnimationTrigger {
+                    entity: me,
+                    name: "fire".into(),
+                });
+                body.shots += 1;
+                body.aimed_until = now + AIMED_SECS;
+                if body.shots >= MAGAZINE_SHOTS {
+                    body.shots = 0;
+                    triggers.write(AnimationTrigger {
+                        entity: me,
+                        name: "reload".into(),
+                    });
+                    body.reloaded_at = now + (RELOAD_SECS * rate) as f64;
+                    combat.ready_at = combat.ready_at.max(body.reloaded_at);
+                }
+            }
+            body.drawing = winding;
+            let aim = if winding || now < body.aimed_until {
+                1.0
+            } else {
+                0.0
+            };
+            if params.values.get("aim") != Some(&aim) {
+                params.set("aim", aim);
+            }
+            let reloading = if now < body.reloaded_at { 1.0 } else { 0.0 };
+            if params.values.get("reloading") != Some(&reloading) {
+                params.set("reloading", reloading);
+            }
+        }
         // Its own sword and shield are drawn in the hands the animation module poses
-        // (`visuals`), so the animation module's props are hidden (their grips stay).
-        if params.values.get("hide_props") != Some(&1.0) {
-            params.set("hide_props", 1.0);
+        // (`visuals`), so the animation module's props are hidden (their grips stay); an
+        // archer shoots the animation module's bow, which bends and strings as it draws.
+        let ranged = weapon.style == WeaponStyle::Ranged;
+        let hide = if ranged { 0.0 } else { 1.0 };
+        if params.values.get("hide_props") != Some(&hide) {
+            params.set("hide_props", hide);
         }
         // A strike the animation module cancelled (blocked, deflected) rebounds: the brain's
         // attacker reels for the rest of it.
