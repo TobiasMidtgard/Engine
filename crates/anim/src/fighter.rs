@@ -3,7 +3,11 @@
 //!
 //! * [`Loadout`] picks the move set and the held props: a one-handed weapon (with or without
 //!   a shield) the sword-and-shield set, a two-handed blade or axe the great sword's, a bow
-//!   the bow's, empty hands boxing. The props are spawned here and re-made when it changes.
+//!   the bow's, a firearm a carbine, empty hands boxing. The props are spawned here and
+//!   re-made when it changes.
+//! * A bow draws and holds on the trigger `draw` until `loose` (or `lower`); a carbine
+//!   shoulders and aims while `aim` is up, shoots on `fire` (any `MoveIntent::attack` press
+//!   too) and changes its magazine on `reload` ([`humanoid`](crate::build::humanoid)'s graph).
 //! * [`MoveIntent`]`.attack` presses a strike as it turns on (`Melee`, `Spell`, `Ranged`: a
 //!   light one; `Dash`: a heavy one), and `.block` holds the guard up. An
 //!   [`AnimationTrigger`](engine_world::animation::AnimationTrigger) `attack_light` or
@@ -68,13 +72,15 @@ pub struct Arms {
     pub shield: bool,
     pub greatsword: bool,
     pub bow: bool,
+    pub rifle: bool,
 }
 
 /// Every stance and carry layer a fighter might have on, so a new loadout turns the old off.
-const LAYERS: [&str; 5] = [
+const LAYERS: [&str; 6] = [
     "sword_stance",
     "greatsword_stance",
     "bow_carry",
+    "rifle_carry",
     "sword_carry",
     "greatsword_carry",
 ];
@@ -88,6 +94,7 @@ impl Arms {
             shield: false,
             greatsword: false,
             bow: false,
+            rifle: false,
         };
         let one_handed = |c: ItemClass| {
             matches!(
@@ -100,6 +107,12 @@ impl Arms {
             )
         };
         match (loadout.main, loadout.off) {
+            (ItemClass::Firearm, _) | (_, ItemClass::Firearm) => Self {
+                set: "rifle",
+                stance: Some("rifle_carry"),
+                rifle: true,
+                ..none
+            },
             (ItemClass::Bow, _) | (_, ItemClass::Bow) => Self {
                 set: "bow",
                 stance: Some("bow_carry"),
@@ -178,6 +191,9 @@ fn arm(world: &mut World, entity: Entity, loadout: Loadout, old: &[Entity]) {
     }
     if arms.bow {
         props.extend(crate::props::spawn_bow(world, entity));
+    }
+    if arms.rifle {
+        props.extend(crate::props::spawn_rifle(world, entity));
     }
     let mut e = world.entity_mut(entity);
     let target = e.get::<Attacker>().and_then(|a| a.target);
@@ -330,6 +346,8 @@ pub(crate) fn drive_fighters(mut q: Query<Fighter>, places: Query<&GlobalTransfo
         };
         if intent.attack.is_some() && armed.attack_was.is_none() {
             animator.trigger(match intent.attack {
+                // A gun shoots, whatever the press (it has no blows to throw).
+                _ if arms.rifle => "fire",
                 Some(AttackKind::Dash) => "attack_heavy",
                 _ => "attack_light",
             });

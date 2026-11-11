@@ -11,7 +11,9 @@
 use engine_core::prelude::*;
 
 use super::sdf::{Body, Paint, Shape};
-use super::weapons::{BOW_DRAW, BOW_HOLD, BOW_LOOSE, BOW_LOWER};
+use super::weapons::{
+    BOW_DRAW, BOW_HOLD, BOW_LOOSE, BOW_LOWER, RIFLE_AIM, RIFLE_CARRY, RIFLE_FIRE, RIFLE_RELOAD,
+};
 use super::{PoseBuilder, bone, bump, cycle, cycle_sin, keyed};
 use crate::clip::AnimationClip;
 use crate::graph::{
@@ -4123,7 +4125,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
     };
     // Carrying a weapon about (`sword_carry`, `greatsword_carry`, `bow_carry`, 0..1): the
     // arms hold it while the legs walk.
-    let leaning = ["sword_carry", "greatsword_carry", "bow_carry"]
+    let leaning = ["sword_carry", "greatsword_carry", "bow_carry", RIFLE_CARRY]
         .into_iter()
         .fold(leaning, |base, carry| NodeDef::Layer {
             base: Box::new(base),
@@ -4162,8 +4164,13 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         sync: false,
         match_speed: false,
     };
-    let [sword_stance, shield_guard, greatsword_stance] =
-        ["sword_stance", "shield_guard", "greatsword_stance"].map(stance);
+    let [sword_stance, shield_guard, greatsword_stance, rifle_aim] = [
+        "sword_stance",
+        "shield_guard",
+        "greatsword_stance",
+        RIFLE_AIM,
+    ]
+    .map(stance);
     let state = |name: &str, node: NodeDef| StateDef {
         name: name.into(),
         node,
@@ -4193,6 +4200,9 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state(BOW_HOLD, NodeDef::clip(BOW_HOLD)),
                 state(BOW_LOOSE, NodeDef::one_shot(BOW_LOOSE)),
                 state(BOW_LOWER, NodeDef::one_shot(BOW_LOWER)),
+                state(RIFLE_AIM, rifle_aim),
+                state(RIFLE_FIRE, NodeDef::one_shot(RIFLE_FIRE)),
+                state(RIFLE_RELOAD, NodeDef::one_shot(RIFLE_RELOAD)),
                 state("sword_stance", sword_stance),
                 state("shield_guard", shield_guard),
                 state("greatsword_stance", greatsword_stance),
@@ -4335,6 +4345,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             .into_iter()
             .chain(down_and_kneel())
             .chain(bow_hold())
+            .chain(rifle())
             .chain(parkour::transitions())
             .collect(),
             initial: Some("move".into()),
@@ -4363,6 +4374,9 @@ fn down_and_kneel() -> Vec<TransitionDef> {
             BOW_HOLD,
             BOW_LOOSE,
             BOW_LOWER,
+            RIFLE_AIM,
+            RIFLE_FIRE,
+            RIFLE_RELOAD,
         ])
         .map(|from| TransitionDef::new(from, COLLAPSE, downed(), 0.2))
         .collect();
@@ -4424,6 +4438,44 @@ fn bow_hold() -> Vec<TransitionDef> {
         TransitionDef::new(BOW_LOOSE, "move", Condition::Finished, 0.2),
         TransitionDef::new(BOW_LOWER, "move", Condition::Finished, 0.2),
     ]
+}
+
+/// A long gun (`rifle_carry` up, carried at the low ready in "move"): shouldered and aimed
+/// while `aim` is up ([`RIFLE_AIM`], walking in it), a shot on the `fire` trigger
+/// ([`RIFLE_FIRE`], raised to the shoulder first when it wasn't aimed), a magazine change on
+/// `reload` ([`RIFLE_RELOAD`]); each ends aimed or at the low ready as `aim` says.
+fn rifle() -> Vec<TransitionDef> {
+    let carrying = || Condition::param(RIFLE_CARRY, Cmp::Gt, 0.5);
+    let aiming = || Condition::param("aim", Cmp::Gt, 0.5);
+    let lowered = || Condition::param("aim", Cmp::Lt, 0.5);
+    let on = |trigger: &str| Condition::All(vec![carrying(), Condition::trigger(trigger)]);
+    let done = |c: Condition| Condition::All(vec![Condition::Finished, c]);
+    let mut all = vec![
+        TransitionDef::new(
+            "move",
+            RIFLE_AIM,
+            Condition::All(vec![carrying(), aiming()]),
+            0.25,
+        )
+        .inertialize(),
+        TransitionDef::new(
+            RIFLE_AIM,
+            "move",
+            Condition::Any(vec![lowered(), Condition::param(RIFLE_CARRY, Cmp::Lt, 0.5)]),
+            0.3,
+        ),
+        TransitionDef::new("move", RIFLE_FIRE, on("fire"), 0.12),
+        TransitionDef::new(RIFLE_AIM, RIFLE_FIRE, on("fire"), 0.03),
+        TransitionDef::new(RIFLE_FIRE, RIFLE_RELOAD, on("reload"), 0.15),
+    ];
+    for from in ["move", RIFLE_AIM] {
+        all.push(TransitionDef::new(from, RIFLE_RELOAD, on("reload"), 0.2));
+    }
+    for from in [RIFLE_FIRE, RIFLE_RELOAD] {
+        all.push(TransitionDef::new(from, RIFLE_AIM, done(aiming()), 0.05));
+        all.push(TransitionDef::new(from, "move", done(lowered()), 0.25));
+    }
+    all
 }
 
 #[cfg(test)]

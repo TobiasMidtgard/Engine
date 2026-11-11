@@ -2277,6 +2277,217 @@ fn bow_draw_clips(s: &Skeleton) -> Vec<AnimationClip> {
     vec![draw, hold, loose, lower]
 }
 
+// ------------------------------------------------------------------------------- long gun
+
+/// A long gun (ItemClass::Firearm) in the right fist on its pistol grip: the barrel runs out
+/// over the knuckles (along the hand), its top on the thumb side, in the right hand's frame.
+pub const RIFLE_AXIS: Vec3 = Vec3::NEG_Y;
+pub const RIFLE_UP: Vec3 = Vec3::NEG_Z;
+
+/// The bore this far above the right fist's middle (along [`RIFLE_UP`]), meters.
+pub const RIFLE_BORE: f32 = 0.075;
+
+/// The left fist on the fore grip, this far ahead of the right fist along the barrel.
+pub const RIFLE_FORE: f32 = 0.26;
+
+/// The magazine's well this far ahead of the right fist along the barrel.
+pub const RIFLE_MAG: f32 = 0.1;
+
+/// The muzzle and the butt this far ahead of and behind the right fist along the barrel.
+pub const RIFLE_MUZZLE: f32 = 0.72;
+pub const RIFLE_BUTT: f32 = 0.41;
+
+/// The long gun's states: shouldered and aimed while `aim` is up ([`RIFLE_AIM`], walking in
+/// it from the spine up), a shot on `fire` ([`RIFLE_FIRE`], the `shot` event as it goes off:
+/// the game's to fly), a magazine changed on `reload` ([`RIFLE_RELOAD`], `mag_out` and
+/// `mag_in` events, the `mag_in_hand` curve while the left hand holds one), and carried low
+/// at the ready while walking about (`rifle_carry`, a layer).
+pub const RIFLE_AIM: &str = "rifle_aim";
+pub const RIFLE_FIRE: &str = "rifle_fire";
+pub const RIFLE_RELOAD: &str = "rifle_reload";
+pub const RIFLE_CARRY: &str = "rifle_carry";
+
+/// When a [`RIFLE_FIRE`] shot goes off, s.
+pub const RIFLE_SHOT_AT: f32 = 0.01;
+
+const RIFLE: Rig = Rig::Held {
+    axis: RIFLE_AXIS,
+    face: RIFLE_UP,
+};
+
+/// Bladed a little to the target, the left foot ahead, the weight forward over it.
+const RIFLE_STANCE: Body = body(
+    [0.0, -0.05, -0.02],
+    [0.0, -30.0, 0.0],
+    [-5.0, 12.0, 0.0],
+    [foot(-0.12, -0.13, -12.0), foot(0.15, 0.16, -48.0)],
+);
+
+/// The right fist that puts the bore at `bore`, pointing `dir` with its top toward `up`.
+fn rifle_at(bore: Vec3, dir: Vec3, up: Vec3, elbow: Vec3) -> Hold {
+    let h = Hold::new(bore, dir, up, elbow);
+    h.at(bore - h.face * RIFLE_BORE)
+}
+
+/// Shouldered: the butt in at the chest under the chin, the sights under the eye, the muzzle
+/// at the target ahead (the fist on the middle line: further right the wrist can't turn the
+/// barrel back in line).
+fn rifle_aimed() -> Hold {
+    rifle_at(
+        Vec3::new(0.0, 1.5, -0.3),
+        Vec3::NEG_Z,
+        Vec3::Y,
+        Vec3::new(0.6, -1.0, 0.2),
+    )
+}
+
+/// Low ready: the gun under the arm, the muzzle down ahead of the feet.
+fn rifle_low() -> Hold {
+    let dir = Vec3::new(-0.3, -0.5, -0.81).normalize();
+    rifle_at(
+        Vec3::new(0.17, 1.21, -0.1),
+        dir,
+        Vec3::Y,
+        Vec3::new(0.3, -1.0, 0.4),
+    )
+}
+
+/// The left hand off the gun at `at` (reaching with a straight wrist).
+fn left_free(at: Vec3) -> Hold {
+    Hold::new(at, Vec3::NEG_Z, Vec3::NEG_Y, Vec3::new(-0.5, -1.0, 0.2))
+}
+
+/// Where the left fist closes on the fore grip of the gun held `r`.
+fn on_fore(r: &Hold) -> Vec3 {
+    r.at + r.axis * RIFLE_FORE
+}
+
+/// Where the left fist holds the magazine of the gun held `r`, down out of the well `down`
+/// meters.
+fn at_mag(r: &Hold, down: f32) -> Vec3 {
+    r.at + r.axis * RIFLE_MAG - r.face * (0.05 + down)
+}
+
+fn rifle_clips(s: &Skeleton) -> Vec<AnimationClip> {
+    let aimed = rifle_aimed();
+    let fore = Stroke::Below(-RIFLE_FORE);
+    let grip = |c: AnimationClip| c.with_curve("grip", 2, |_| 1.0);
+    // Aiming: still but breathing, the muzzle wandering a few millimetres.
+    let breathe = RIFLE_STANCE.hips([0.0, -0.055, -0.02], [0.0, -30.0, 0.0], [-5.5, 12.0, 0.0]);
+    let aim_secs = 2.4;
+    let aim = Moves::new(
+        [RIFLE, RIFLE],
+        vec![
+            key(0.0, RIFLE_STANCE, fore, Stroke::To(aimed)),
+            key(
+                1.2,
+                breathe,
+                fore,
+                Stroke::To(aimed.at(aimed.at + Vec3::new(0.002, -0.004, 0.0))),
+            ),
+            key(aim_secs, RIFLE_STANCE, fore, Stroke::To(aimed)),
+        ],
+    )
+    .clip(s, RIFLE_AIM, true)
+    .with_curve("effort", 2, |_| 0.35);
+    let aim_moving = moving(
+        s,
+        "rifle_aim_moving",
+        [RIFLE, RIFLE],
+        RIFLE_STANCE,
+        [fore, Stroke::To(aimed)],
+    );
+    // A shot: the gun kicks back into the shoulder and the muzzle climbs, then settles.
+    let fire_secs = 0.24;
+    let kick = Hold::new(
+        aimed.at + Vec3::new(0.0, 0.012, 0.028),
+        Vec3::new(0.0, 0.06, -1.0),
+        Vec3::Y,
+        aimed.elbow,
+    );
+    let rocked = RIFLE_STANCE.hips([0.0, -0.05, -0.008], [0.0, -30.0, 0.0], [-3.0, 12.0, 0.0]);
+    let fire = Moves::new(
+        [RIFLE, RIFLE],
+        vec![
+            key(0.0, RIFLE_STANCE, fore, Stroke::To(aimed)),
+            key(RIFLE_SHOT_AT + 0.035, rocked, fore, Stroke::To(kick)),
+            key(fire_secs, RIFLE_STANCE, fore, Stroke::To(aimed)),
+        ],
+    )
+    .clip(s, RIFLE_FIRE, false)
+    .with_curve("effort", 8, move |ph| {
+        keyed(ph * fire_secs, &[(0.0, 0.5), (0.05, 0.8), (fire_secs, 0.4)])
+    })
+    .with_event(RIFLE_SHOT_AT / fire_secs, "shot", Some("hand_r"));
+    // A magazine change: the gun down off the shoulder and canted to the left hand, the old
+    // magazine out and away to the pouch, a fresh one in and slapped home, the hand back on
+    // the fore grip and the gun up again.
+    let canted = {
+        let dir = Vec3::new(-0.05, -0.18, -1.0).normalize();
+        let up = Quat::from_axis_angle(dir, 0.45) * Vec3::Y;
+        rifle_at(
+            Vec3::new(0.07, 1.36, -0.32),
+            dir,
+            up,
+            Vec3::new(1.0, -0.8, 0.3),
+        )
+    };
+    let pouch = Vec3::new(-0.1, 1.02, -0.16);
+    let ducked = RIFLE_STANCE.hips([0.0, -0.06, -0.02], [0.0, -30.0, 0.0], [-9.0, 12.0, 4.0]);
+    let r = |h: Hold| Stroke::To(h);
+    let l = |at: Vec3| Stroke::To(left_free(at));
+    let reload_secs = 2.3;
+    let [grab, out, stowed, back, home, slapped, regrip] = [0.32, 0.5, 0.88, 1.28, 1.48, 1.6, 1.9];
+    let reload = Moves::new(
+        [Rig::Free, RIFLE],
+        vec![
+            key(0.0, RIFLE_STANCE, l(on_fore(&aimed)), r(aimed)),
+            key(grab, ducked, l(at_mag(&canted, 0.0)), r(canted)),
+            key(out, ducked, l(at_mag(&canted, 0.16)), r(canted)),
+            key(stowed, ducked, l(pouch), r(canted)),
+            key(back, ducked, l(at_mag(&canted, 0.1)), r(canted)),
+            key(home, ducked, l(at_mag(&canted, 0.0)), r(canted)),
+            key(slapped, ducked, l(at_mag(&canted, -0.012)), r(canted)),
+            key(regrip, ducked, l(on_fore(&canted)), r(canted)),
+            key(reload_secs, RIFLE_STANCE, l(on_fore(&aimed)), r(aimed)),
+        ],
+    )
+    .clip(s, RIFLE_RELOAD, false)
+    .with_curve("effort", 16, |_| 0.4)
+    // The left hand on the fore grip only at the ends: off it, it goes where the clip says.
+    .with_curve("grip", (reload_secs * 30.0) as usize, move |ph| {
+        keyed(
+            ph * reload_secs,
+            &[
+                (0.1, 1.0),
+                (grab - 0.08, 0.0),
+                (regrip, 0.0),
+                (regrip + 0.12, 1.0),
+            ],
+        )
+    })
+    .with_curve("mag_in_hand", (reload_secs * 60.0) as usize, move |ph| {
+        if (grab + 0.04..home).contains(&(ph * reload_secs)) {
+            1.0
+        } else {
+            0.0
+        }
+    })
+    .with_event((grab + 0.04) / reload_secs, "mag_out", Some("hand_l"))
+    .with_event(home / reload_secs, "mag_in", Some("hand_l"));
+    // Walking about with it at the low ready: arms only, for a layer.
+    let low = rifle_low();
+    let carry = Moves::new(
+        [RIFLE, RIFLE],
+        vec![
+            key(0.0, SQUARE, fore, Stroke::To(low)),
+            key(1.0, SQUARE, fore, Stroke::To(low)),
+        ],
+    )
+    .clip(s, RIFLE_CARRY, true);
+    vec![grip(aim), grip(aim_moving), grip(fire), reload, grip(carry)]
+}
+
 // ------------------------------------------------------------------------------ aimed lines
 
 /// How high an aimed cut or stab goes: at the head and neck, the trunk and arms, or the legs.
@@ -2987,6 +3198,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         bow_carry(s),
     ];
     all.extend(bow_draw_clips(s));
+    all.extend(rifle_clips(s));
     all.extend(moving_stances(s));
     all.extend(line_clips(s));
     all

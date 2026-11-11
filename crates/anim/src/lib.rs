@@ -257,7 +257,7 @@ impl Plugin for AnimationPlugin {
                         attach::attachment_system,
                         events::emit_events,
                     ),
-                    props::bow_string_system,
+                    (props::bow_string_system, props::rifle_mag_system),
                 )
                     .chain()
                     .in_set(AnimSet::Output),

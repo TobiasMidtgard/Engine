@@ -1,8 +1,8 @@
 //! Weapon props for the humanoid's weapon moves ([`crate::build::weapons`]): a sword, a round
-//! shield, a great sword and a bow, built from primitives and held by the hands
+//! shield, a great sword, a bow and a carbine, built from primitives and held by the hands
 //! ([`BoneAttachment`]) where the clips put the grip, plus the bow's string (from both tips
 //! to the draw hand while the clip's `draw` curve is on), the arrow on it (while `nocked` is),
-//! and arrows in flight.
+//! arrows in flight, and the carbine's magazines where a reload has them ([`RifleMag`]).
 //!
 //! The shapes match what the attack sets strike with ([`Striker::sword`],
 //! [`Striker::greatsword`], [`Striker::shield`]) and what a [`Shield`] blocks with.
@@ -18,12 +18,14 @@ use crate::animator::Animator;
 use crate::attach::BoneAttachment;
 use crate::build::weapons::{
     BLADE_AXIS, BLADE_EDGE, BOW_HALF, BOW_TIP_BACK, GREATSWORD_BLADE, GREATSWORD_HANDS, GRIP,
-    HANDLE_AXIS, HANDLE_FACE, SHIELD_CENTER, SHIELD_RADIUS, SWORD_BLADE,
+    HANDLE_AXIS, HANDLE_FACE, RIFLE_AXIS, RIFLE_BORE, RIFLE_BUTT, RIFLE_FORE, RIFLE_MAG,
+    RIFLE_MUZZLE, RIFLE_UP, SHIELD_CENTER, SHIELD_RADIUS, SWORD_BLADE,
 };
 use crate::combat::Shield;
 use crate::grip::{GripPresets, Handle, HeldItems, fist_correction};
 use crate::ik::{Reach, ReachIk};
 use crate::retarget::{Retarget, Retargeter};
+use engine_world::animation::AnimationParams;
 
 fn steel() -> StandardMaterial {
     StandardMaterial::hex(0xc9cdd3)
@@ -491,8 +493,17 @@ fn span(t: &mut Transform, a: DVec3, b: DVec3) {
 }
 
 /// Pose bow strings and nocked arrows (after the pose is final).
+#[allow(clippy::type_complexity)]
 pub(crate) fn bow_string_system(
-    archers: Query<(&Animator, &GlobalTransform, Option<&Retarget>), Without<BowString>>,
+    archers: Query<
+        (
+            &Animator,
+            &GlobalTransform,
+            Option<&Retarget>,
+            Option<&AnimationParams>,
+        ),
+        Without<BowString>,
+    >,
     mut q: Query<(
         &BowString,
         &mut Transform,
@@ -501,10 +512,13 @@ pub(crate) fn bow_string_system(
     )>,
 ) {
     for (piece, mut t, mut gt, mut renderer) in &mut q {
-        let Some((nock, [upper, lower], _, nocked)) = piece
+        let Some(((nock, [upper, lower], _, nocked), hidden)) = piece
             .archer
             .and_then(|e| archers.get(e).ok())
-            .and_then(|(a, gt, r)| bow_state(a, gt, r.map(|r| &*r.retargeter)))
+            .and_then(|(a, gt, r, p)| {
+                let hidden = p.is_some_and(|p| p.get("hide_props") != 0.0);
+                Some((bow_state(a, gt, r.map(|r| &*r.retargeter))?, hidden))
+            })
         else {
             continue;
         };
@@ -512,7 +526,8 @@ pub(crate) fn bow_string_system(
             StringPart::Upper => span(&mut t, upper, nock),
             StringPart::Lower => span(&mut t, lower, nock),
             StringPart::Arrow => {
-                let visible = nocked > 0.5;
+                // The fighter's `hide_props` hides it with the rest.
+                let visible = nocked > 0.5 && !hidden;
                 if renderer.visible != visible {
                     renderer.visible = visible;
                 }
@@ -522,6 +537,168 @@ pub(crate) fn bow_string_system(
             }
         }
         *gt = GlobalTransform::from(*t);
+    }
+}
+
+/// Which magazine a [`RifleMag`] is: the one in the gun, or the one in the left hand while a
+/// reload's `mag_in_hand` curve is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MagPlace {
+    Fitted,
+    InHand,
+}
+
+/// A rifle magazine, shown where `shooter`'s reload has it.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RifleMag {
+    #[serde(skip)]
+    pub shooter: Option<Entity>,
+    pub place: MagPlace,
+}
+
+fn polymer() -> StandardMaterial {
+    StandardMaterial::hex(0x23251f).with_roughness(0.65)
+}
+
+/// A carbine in `person`'s right fist on its pistol grip (the barrel along the hand, its top
+/// on the thumb side), the left fist on its fore grip ahead, and a spare magazine for the
+/// left hand to bring in a reload.
+pub fn spawn_rifle(world: &mut World, person: Entity) -> Vec<Entity> {
+    hold(world, person, 1, "rifle", HANDLE_AXIS, 0.0);
+    hold(world, person, 0, "rifle", HANDLE_AXIS, 0.0);
+    let (f, u) = (RIFLE_AXIS, RIFLE_UP);
+    let side = f.cross(u);
+    let bore = |d: f32| GRIP + u * RIFLE_BORE + f * d;
+    // Long along the barrel, `w` across, `h` up.
+    let block = |w: f32, len: f32, h: f32| Shape::Cuboid { size: [w, len, h] };
+    let tube = |radius: f32, len: f32| Shape::Cylinder {
+        radius,
+        height: len,
+        segments: 12,
+    };
+    let lengthwise = along(side, f);
+    let upright = along(side, u);
+    let parts: Vec<(Shape, StandardMaterial, Vec3, Quat)> = vec![
+        // Receiver, rail and a short optic on it.
+        (
+            block(0.05, 0.3, 0.07),
+            dark_steel(),
+            bore(0.03) - u * 0.004,
+            lengthwise,
+        ),
+        (
+            block(0.024, 0.28, 0.012),
+            dark_steel(),
+            bore(0.06) + u * 0.04,
+            lengthwise,
+        ),
+        (
+            tube(0.019, 0.13),
+            polymer(),
+            bore(0.0) + u * 0.072,
+            lengthwise,
+        ),
+        // Handguard, barrel and muzzle.
+        (tube(0.025, 0.3), polymer(), bore(0.33), lengthwise),
+        (tube(0.01, 0.2), dark_steel(), bore(0.57), lengthwise),
+        (
+            tube(0.014, 0.05),
+            dark_steel(),
+            bore(RIFLE_MUZZLE - 0.025),
+            lengthwise,
+        ),
+        (
+            block(0.008, 0.012, 0.05),
+            dark_steel(),
+            bore(0.46) + u * 0.04,
+            lengthwise,
+        ),
+        // Stock and butt pad.
+        (
+            block(0.04, 0.27, 0.085),
+            polymer(),
+            bore(-0.26) - u * 0.022,
+            lengthwise,
+        ),
+        (
+            block(0.046, 0.022, 0.13),
+            polymer(),
+            bore(-RIFLE_BUTT + 0.011) - u * 0.03,
+            lengthwise,
+        ),
+        // Pistol grip and fore grip, through the fists.
+        (
+            block(0.03, 0.036, 0.11),
+            polymer(),
+            GRIP + u * 0.012,
+            lengthwise,
+        ),
+        (tube(0.016, 0.1), polymer(), GRIP + f * RIFLE_FORE, upright),
+    ];
+    let mut ids: Vec<Entity> = parts
+        .into_iter()
+        .map(|(shape, material, at, rotation)| {
+            part(world, person, "hand_r", shape, material, at, rotation)
+        })
+        .collect();
+    let mag = || block(0.026, 0.07, 0.18);
+    // The magazine in the well, leaning a little forward.
+    let fitted = part(
+        world,
+        person,
+        "hand_r",
+        mag(),
+        dark_steel(),
+        bore(RIFLE_MAG + 0.01) - u * 0.125,
+        Quat::from_axis_angle(side, -0.12) * lengthwise,
+    );
+    // A magazine in the left fist: its top out of the thumb side.
+    let in_hand = part(
+        world,
+        person,
+        "hand_l",
+        mag(),
+        dark_steel(),
+        GRIP + HANDLE_AXIS * 0.02,
+        Quat::IDENTITY,
+    );
+    for (e, place) in [(fitted, MagPlace::Fitted), (in_hand, MagPlace::InHand)] {
+        world.entity_mut(e).insert(RifleMag {
+            shooter: Some(person),
+            place,
+        });
+    }
+    ids.extend([fitted, in_hand]);
+    // The left fist on the fore grip, turned as the right one is.
+    world.entity_mut(person).insert(ReachIk::new(vec![Reach {
+        target_bone: "hand_r".into(),
+        target_offset: RIFLE_AXIS * RIFLE_FORE,
+        pole: Vec3::new(-0.5, -1.0, 0.2),
+        weight_curve: "grip".into(),
+        turn: 1.0,
+        fist: true,
+        keep_spin: true,
+        ..Reach::arm(0)
+    }]));
+    ids
+}
+
+/// Show each rifle's magazines where the reload has them (and neither while the shooter's
+/// `hide_props` is up).
+pub(crate) fn rifle_mag_system(
+    shooters: Query<(&Animator, Option<&AnimationParams>)>,
+    mut q: Query<(&RifleMag, &mut MeshRenderer)>,
+) {
+    for (mag, mut renderer) in &mut q {
+        let Some((animator, params)) = mag.shooter.and_then(|e| shooters.get(e).ok()) else {
+            continue;
+        };
+        let in_hand = animator.curve("mag_in_hand") > 0.5;
+        let hidden = params.is_some_and(|p| p.get("hide_props") != 0.0);
+        let visible = !hidden && (mag.place == MagPlace::InHand) == in_hand;
+        if renderer.visible != visible {
+            renderer.visible = visible;
+        }
     }
 }
 

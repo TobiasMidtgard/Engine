@@ -347,6 +347,51 @@ fn main() {
                 s.step();
             }
         }
-        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states, bow"),
+        "rifle" => {
+            // A carbine at the low ready, shouldered on `aim`, a shot, a magazine change.
+            let mut s = stage(width, height, false, false);
+            *s.app.world.get_mut::<Loadout>(s.a).unwrap() = Loadout {
+                main: ItemClass::Firearm,
+                off: ItemClass::None,
+                two_handed: true,
+            };
+            s.app.world.get_mut::<Transform>(s.b).unwrap().translation.x = 4.7;
+            for _ in 0..30 {
+                s.step();
+            }
+            let cue = |s: &mut Stage, name: &str| {
+                let entity = s.a;
+                s.app
+                    .world
+                    .write_message(engine_world::animation::AnimationTrigger {
+                        entity,
+                        name: name.into(),
+                    });
+            };
+            let side = (Vec3::new(-2.7, 1.4, 3.2), Vec3::new(-2.7, 1.2, 0.0));
+            let front = (Vec3::new(-0.9, 1.6, 1.7), Vec3::new(-2.7, 1.3, 0.0));
+            for k in 0..=330 {
+                match k {
+                    30 => s
+                        .app
+                        .world
+                        .get_mut::<engine_world::animation::AnimationParams>(s.a)
+                        .unwrap()
+                        .set("aim", 1.0),
+                    90 => cue(&mut s, "fire"),
+                    120 => cue(&mut s, "reload"),
+                    _ => {}
+                }
+                if [20, 80, 92, 142, 160, 178, 213, 220, 300].contains(&k) {
+                    // The first view of a frame can show a mesh where it was last drawn: it
+                    // is taken again after the second.
+                    s.shoot(&out.join(format!("r{k:03}_side.png")), side.0, side.1);
+                    s.shoot(&out.join(format!("r{k:03}_front.png")), front.0, front.1);
+                    s.shoot(&out.join(format!("r{k:03}_side.png")), side.0, side.1);
+                }
+                s.step();
+            }
+        }
+        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states, bow, rifle"),
     }
 }

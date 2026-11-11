@@ -512,3 +512,84 @@ fn a_bow_draws_holds_at_full_draw_and_looses_on_cue() {
     }
     assert!(!in_state(&app, a, engine_anim::build::weapons::BOW_DRAW));
 }
+
+#[test]
+fn a_rifle_shoulders_on_aim_fires_on_cue_and_changes_its_magazine() {
+    use engine_anim::build::weapons::{RIFLE_AIM, RIFLE_AXIS, RIFLE_FORE, RIFLE_RELOAD};
+    let (mut app, a, _) = duel();
+    app.world.init_resource::<Said>();
+    app.add_systems(Last, listen);
+    *app.world.get_mut::<Loadout>(a).unwrap() = Loadout {
+        main: ItemClass::Firearm,
+        off: ItemClass::None,
+        two_handed: true,
+    };
+    for _ in 0..20 {
+        app.update();
+    }
+    let said = |app: &App, what: &str| app.world.resource::<Said>().0.iter().any(|s| s == what);
+    // Model space: the muzzle's way, and how far the left fist is from the fore grip.
+    let hands = |app: &App| {
+        let pose = app.world.get::<SkeletonPose>(a).unwrap();
+        let bone = |b: &str| pose.bones[pose.index_of(b).unwrap()];
+        let (r, l) = (bone("hand_r"), bone("hand_l"));
+        // The fists' middles (each hand's standard fist).
+        let fist = |b: engine_world::animation::BonePose| {
+            b.translation + b.rotation * engine_anim::grip::GRIP
+        };
+        let muzzle = r.rotation * RIFLE_AXIS;
+        let fore = fist(r) + muzzle * RIFLE_FORE;
+        (muzzle, (fist(l) - fore).length())
+    };
+    // At the low ready the muzzle points down ahead.
+    let (low, _) = hands(&app);
+    assert!(low.y < -0.45 && low.z < -0.6, "low ready: {low}");
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("aim", 1.0);
+    for _ in 0..(0.8 / STEP) as usize {
+        app.update();
+    }
+    assert!(in_state(&app, a, RIFLE_AIM));
+    let (muzzle, off) = hands(&app);
+    assert!(muzzle.dot(Vec3::NEG_Z) > 0.995, "aimed: {muzzle}");
+    assert!(off < 0.06, "left hand {off} m off the fore grip");
+    // A press shoots.
+    app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Ranged);
+    app.update();
+    app.world.get_mut::<MoveIntent>(a).unwrap().attack = None;
+    for _ in 0..20 {
+        app.update();
+    }
+    assert!(said(&app, "shot"));
+    send(&mut app, a, "reload");
+    app.update();
+    app.update();
+    assert!(in_state(&app, a, RIFLE_RELOAD));
+    for _ in 0..(2.5 / STEP) as usize {
+        app.update();
+    }
+    assert!(said(&app, "mag_out") && said(&app, "mag_in"));
+    assert!(in_state(&app, a, RIFLE_AIM));
+    let (muzzle, off) = hands(&app);
+    assert!(
+        muzzle.dot(Vec3::NEG_Z) > 0.995 && off < 0.06,
+        "back on aim: {muzzle}, {off}"
+    );
+    // Lowered, a shot snaps up to the shoulder and goes back down.
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("aim", 0.0);
+    for _ in 0..40 {
+        app.update();
+    }
+    app.world.resource_mut::<Said>().0.clear();
+    send(&mut app, a, "fire");
+    for _ in 0..40 {
+        app.update();
+    }
+    assert!(said(&app, "shot"));
+    assert!(in_state(&app, a, "move"));
+}
