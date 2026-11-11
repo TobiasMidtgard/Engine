@@ -3402,6 +3402,147 @@ fn riposted(s: &Skeleton) -> AnimationClip {
     .with_curve("brace", 25, move |ph| keyed(ph, &brace))
 }
 
+/// Going down without a physics backend to fall with (a downed fighter, `downed` up): the
+/// legs give, the body drops onto the right knee, sits back onto its hands and lies down on
+/// its back, ending on `get_up_back`'s first pose ([`DOWNED`] holds it, the get-up plays
+/// straight out of it).
+pub const COLLAPSE: &str = "collapse_back";
+/// Lying still on the back on `get_up_back`'s first pose, after [`COLLAPSE`].
+pub const DOWNED: &str = "downed_back";
+/// Kneeling on both knees over someone lying across in front, both hands pressing on their
+/// chest (`kneel` up): the heels of the hands [`KNEEL_HANDS`] ahead of the entity.
+pub const KNEEL_TEND: &str = "kneel_tend";
+/// Where the hands of [`KNEEL_TEND`] press, character frame (m): a chest this far ahead,
+/// this high, the patient lying across.
+pub const KNEEL_HANDS: Vec3 = Vec3::new(0.0, 0.27, -0.42);
+
+fn collapse_back(s: &Skeleton) -> AnimationClip {
+    let secs = 1.6;
+    let at = |t: f32| t / secs;
+    let [lying, _, sitting, ..] = get_up_back_keys();
+    let feet = [
+        Some(Vec3::new(-0.12, 0.08, -0.03)),
+        Some(Vec3::new(0.12, 0.08, 0.05)),
+    ];
+    let limp = Arm {
+        flex: 8.0,
+        elbow: 20.0,
+        ..Arm::HANG
+    };
+    // The legs give, the head drops.
+    let buckled = Key {
+        at: at(0.25),
+        hips: Vec3::new(0.0, 0.8, 0.06),
+        pitch: -16.0,
+        yaw: 0.0,
+        roll: 0.0,
+        spine: [-14.0, -10.0, -4.0, -12.0],
+        arm: [limp; 2],
+        leg: [[34.0, 4.0, 56.0, 12.0], [30.0, 6.0, 58.0, 12.0]],
+        plant: [None, None, feet[0], feet[1]],
+        knee: [Vec3::NEG_Z; 2],
+        effort: 0.3,
+    };
+    // Down on the right knee, slumped.
+    let kneeling = Key {
+        at: at(0.6),
+        hips: Vec3::new(0.0, 0.58, 0.4),
+        pitch: -10.0,
+        spine: [-14.0, -10.0, -6.0, -20.0],
+        leg: [[96.0, 6.0, 92.0, 2.0], [-6.0, 4.0, 98.0, -40.0]],
+        plant: [None, None, feet[0], Some(Vec3::new(0.12, 0.13, 0.84))],
+        knee: [Vec3::NEG_Z, Vec3::new(0.0, -1.0, -0.4)],
+        effort: 0.2,
+        ..buckled
+    };
+    let keys = [
+        Key {
+            at: 0.0,
+            ..Key::STAND
+        },
+        buckled,
+        kneeling,
+        Key {
+            at: at(1.0),
+            effort: 0.2,
+            ..sitting
+        },
+        Key {
+            at: at(1.35),
+            ..lying
+        },
+        Key { at: 1.0, ..lying },
+    ];
+    let samples = (secs * 30.0) as usize + 1;
+    let floor = [(0.0, 0.0), (at(0.48), 0.0), (at(0.6), 1.0), (1.0, 1.0)];
+    AnimationClip::from_fn(COLLAPSE, secs, samples, false, |ph| {
+        Key::sample(s, &keys, ph).1
+    })
+    .with_curve("effort", samples, |ph| Key::sample(s, &keys, ph).0.effort)
+    .with_curve("floor", 25, move |ph| keyed(ph, &floor))
+}
+
+fn downed_back(s: &Skeleton) -> AnimationClip {
+    let [lying, ..] = get_up_back_keys();
+    let keys = [lying, Key { at: 1.0, ..lying }];
+    AnimationClip::from_fn(DOWNED, 2.0, 3, true, |ph| Key::sample(s, &keys, ph).1).with_curve(
+        "floor",
+        2,
+        |_| 1.0,
+    )
+}
+
+fn kneel_tend(s: &Skeleton) -> AnimationClip {
+    let secs = 1.2;
+    let hand = |dy: f32, side: f32| Some(KNEEL_HANDS + Vec3::new(0.06 * side, dy, 0.0));
+    // Kneeling up on both knees, the shins flat behind, bowed over the chest ahead.
+    let up = Key {
+        at: 0.0,
+        hips: Vec3::new(0.0, 0.52, 0.2),
+        pitch: -42.0,
+        yaw: 0.0,
+        roll: 0.0,
+        spine: [-10.0, -8.0, 4.0, -14.0],
+        arm: [Arm {
+            flex: 60.0,
+            abduct: -6.0,
+            elbow: 12.0,
+            wrist: -40.0,
+            ..Arm::HANG
+        }; 2],
+        leg: [[24.0, 6.0, 110.0, -40.0]; 2],
+        plant: [
+            hand(0.0, -1.0),
+            hand(0.0, 1.0),
+            Some(Vec3::new(-0.13, 0.08, 0.6)),
+            Some(Vec3::new(0.13, 0.08, 0.6)),
+        ],
+        knee: [Vec3::new(0.0, -1.0, -0.4); 2],
+        effort: 0.5,
+    };
+    // Weight over the hands, pressing down.
+    let down = Key {
+        at: 0.45,
+        hips: Vec3::new(0.0, 0.5, 0.17),
+        pitch: -46.0,
+        plant: [
+            hand(-0.05, -1.0),
+            hand(-0.05, 1.0),
+            up.plant[2],
+            up.plant[3],
+        ],
+        effort: 0.9,
+        ..up
+    };
+    let keys = [up, down, Key { at: 1.0, ..up }];
+    let samples = (secs * 30.0) as usize + 1;
+    AnimationClip::from_fn(KNEEL_TEND, secs, samples, true, |ph| {
+        Key::sample(s, &keys, ph).1
+    })
+    .with_curve("effort", samples, |ph| Key::sample(s, &keys, ph).0.effort)
+    .with_curve("floor", 2, |_| 1.0)
+}
+
 /// A liver shot folding the body onto a knee ([`crate::hurt`]): the legs give and the trunk
 /// folds over the right hand clutching the side, the right foot slides back and the body goes
 /// down on the right knee, the left forearm on the left knee and the head down, breathing
@@ -3745,6 +3886,9 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         punch(s, Punch::Uppercut),
         punch(s, Punch::BodyHook),
         kneel_hurt(s),
+        collapse_back(s),
+        downed_back(s),
+        kneel_tend(s),
         evasion(s, Evasion::SlipLeft),
         evasion(s, Evasion::SlipRight),
         evasion(s, Evasion::Roll),
@@ -4041,6 +4185,9 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("fall_brace", NodeDef::one_shot("fall_brace")),
                 state("fall_back_brace", NodeDef::one_shot("fall_back_brace")),
                 state("kneel_hurt", NodeDef::one_shot("kneel_hurt")),
+                state(COLLAPSE, NodeDef::one_shot(COLLAPSE)),
+                state(DOWNED, NodeDef::clip(DOWNED)),
+                state(KNEEL_TEND, NodeDef::clip(KNEEL_TEND)),
                 state("sword_stance", sword_stance),
                 state("shield_guard", shield_guard),
                 state("greatsword_stance", greatsword_stance),
@@ -4181,11 +4328,64 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 TransitionDef::new("kneel_hurt", "move", Condition::Finished, 0.4).inertialize(),
             ]
             .into_iter()
+            .chain(down_and_kneel())
             .chain(parkour::transitions())
             .collect(),
             initial: Some("move".into()),
         },
     }
+}
+
+/// Going down while `downed` is up (no physics to fall with: see [`crate::ragdoll`]) and
+/// lying there, getting up when it drops; kneeling over someone while `kneel` is up.
+fn down_and_kneel() -> Vec<TransitionDef> {
+    let up = [
+        "move",
+        "sword_stance",
+        "shield_guard",
+        "greatsword_stance",
+        "block",
+        "guard",
+    ];
+    let downed = || Condition::param("downed", Cmp::Gt, 0.5);
+    let mut all: Vec<TransitionDef> = up
+        .iter()
+        .chain([&KNEEL_TEND, &"kneel_hurt"])
+        .map(|from| TransitionDef::new(from, COLLAPSE, downed(), 0.2))
+        .collect();
+    all.extend([
+        TransitionDef::new(COLLAPSE, DOWNED, Condition::Finished, 0.0),
+        TransitionDef::new(
+            COLLAPSE,
+            "get_up_back",
+            Condition::param("downed", Cmp::Lt, 0.5),
+            0.3,
+        ),
+        TransitionDef::new(
+            DOWNED,
+            "get_up_back",
+            Condition::param("downed", Cmp::Lt, 0.5),
+            0.1,
+        ),
+    ]);
+    for from in up {
+        all.push(
+            TransitionDef::new(
+                from,
+                KNEEL_TEND,
+                Condition::param("kneel", Cmp::Gt, 0.5),
+                0.5,
+            )
+            .inertialize(),
+        );
+    }
+    all.push(TransitionDef::new(
+        KNEEL_TEND,
+        "move",
+        Condition::param("kneel", Cmp::Lt, 0.5),
+        0.6,
+    ));
+    all
 }
 
 #[cfg(test)]

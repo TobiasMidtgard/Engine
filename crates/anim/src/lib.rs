@@ -189,6 +189,9 @@ impl Plugin for AnimationPlugin {
                     .in_set(AnimSet::Setup),
                 animator::evaluate_animators.in_set(AnimSet::Graph),
                 fur_coat::export_fur_coats.after(AnimSet::Graph),
+                // After the graph so the events it fires aren't cleared before they are
+                // published; `downed` takes effect the next frame.
+                ragdoll::down_without_physics.after(AnimSet::Graph),
                 props::fly_arrows,
             ),
         )

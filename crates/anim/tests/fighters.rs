@@ -10,7 +10,9 @@ use engine_anim::fighter::Armed;
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
-use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose, StrikeTargets};
+use engine_world::animation::{
+    AnimationEvent, AnimationParams, BodyRequest, Ragdoll, SkeletonPose, StrikeTargets,
+};
 use engine_world::combat::{AttackPhase, AttackWindow, BodyZone, ItemClass, Knockback, Loadout};
 use engine_world::events::AttackKind;
 use engine_world::locomotion::MoveIntent;
@@ -320,4 +322,83 @@ fn six_presses_at_one_knee_give_six_cuts_that_land() {
         landed.iter().all(|&h| h >= 1),
         "{thrown:?} landed {landed:?}"
     );
+}
+
+/// The animation event names fired so far.
+#[derive(Resource, Default)]
+struct Said(Vec<String>);
+
+fn listen(mut said: ResMut<Said>, mut events: MessageReader<AnimationEvent>) {
+    said.0.extend(events.read().map(|e| e.name.clone()));
+}
+
+/// A bone's height above the entity, from the published pose (model space).
+fn bone_y(app: &App, e: Entity, bone: &str) -> f32 {
+    let pose = app.world.get::<SkeletonPose>(e).unwrap();
+    pose.bones[pose.index_of(bone).unwrap()].translation.y
+}
+
+#[test]
+fn without_physics_a_downed_fighter_goes_down_lies_still_and_gets_up() {
+    let (mut app, a, _) = duel();
+    app.world.init_resource::<Said>();
+    app.add_systems(Last, listen);
+    app.world.entity_mut(a).insert(Ragdoll { weight: 1.0 });
+    for _ in 0..(2.5 / STEP) as usize {
+        app.update();
+    }
+    assert!(
+        bone_y(&app, a, "head") < 0.4,
+        "lying: {}",
+        bone_y(&app, a, "head")
+    );
+    assert!(bone_y(&app, a, "hips") < 0.3);
+    app.world.get_mut::<Ragdoll>(a).unwrap().weight = 0.0;
+    let mut secs = 0.0;
+    while !app.world.resource::<Said>().0.iter().any(|s| s == "got_up") && secs < 5.0 {
+        app.update();
+        secs += STEP;
+    }
+    let said = &app.world.resource::<Said>().0;
+    assert!(said.iter().any(|s| s == "getting_up"), "{said:?}");
+    assert!(secs < 5.0, "never got up: {said:?}");
+    for _ in 0..30 {
+        app.update();
+    }
+    assert!(
+        bone_y(&app, a, "head") > 1.4,
+        "standing: {}",
+        bone_y(&app, a, "head")
+    );
+}
+
+#[test]
+fn kneel_presses_both_hands_on_a_chest_ahead() {
+    let (mut app, a, _) = duel();
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("kneel", 1.0);
+    for _ in 0..(1.5 / STEP) as usize {
+        app.update();
+    }
+    let pose = app.world.get::<SkeletonPose>(a).unwrap();
+    let at = |b: &str| pose.bones[pose.index_of(b).unwrap()].translation;
+    let want = engine_anim::build::humanoid::KNEEL_HANDS;
+    for hand in ["hand_l", "hand_r"] {
+        let h = at(hand);
+        assert!(
+            (Vec2::new(h.y, h.z) - Vec2::new(want.y, want.z)).length() < 0.12,
+            "{hand} at {h}, chest at {want}"
+        );
+    }
+    assert!(at("hips").y < 0.6, "kneeling: {}", at("hips"));
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("kneel", 0.0);
+    for _ in 0..(1.5 / STEP) as usize {
+        app.update();
+    }
+    assert!(bone_y(&app, a, "head") > 1.4, "stood up");
 }

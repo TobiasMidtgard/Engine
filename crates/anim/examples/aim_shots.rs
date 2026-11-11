@@ -284,6 +284,33 @@ fn main() {
                 }
             }
         }
-        _ => eprintln!("modes: aim, combo6, combo, knee_strip"),
+        "states" => {
+            // The foe going down without physics and getting up; the near fighter kneeling.
+            let mut s = stage(width, height, false, true);
+            s.app
+                .world
+                .entity_mut(s.b)
+                .insert(engine_world::animation::Ragdoll { weight: 1.0 });
+            s.app
+                .world
+                .get_mut::<engine_world::animation::AnimationParams>(s.a)
+                .unwrap()
+                .set("kneel", 1.0);
+            let near = (Vec3::new(0.2, 1.2, 3.0), Vec3::new(0.0, 0.5, 0.0));
+            for k in 0..=330 {
+                if k == 200 {
+                    s.app
+                        .world
+                        .get_mut::<engine_world::animation::Ragdoll>(s.b)
+                        .unwrap()
+                        .weight = 0.0;
+                }
+                if [12, 30, 50, 100, 230, 260, 300].contains(&k) {
+                    s.shoot(&out.join(format!("s{k:03}.png")), near.0, near.1);
+                }
+                s.step();
+            }
+        }
+        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states"),
     }
 }

@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use engine_core::prelude::*;
-use engine_world::animation::{Ragdoll, SkeletonPose};
+use engine_world::animation::{AnimationParams, Ragdoll, SkeletonPose};
 use engine_world::physics::{
     CharacterController, Collider, ColliderShape, CollisionLayers, ContactEvent, ContactPhase,
     ExternalForce, Joint, JointKind, PhysicsBackend, RigidBody, Velocity,
@@ -1347,6 +1347,72 @@ fn blend_back(blend: &mut BlendBack, animator: &mut Animator, dt: f32) -> bool {
 }
 
 /// Length of the get-up clip `clip` in the animator's graph, if it has one.
+/// A body going down through its graph instead of falling limp ([`down_without_physics`]):
+/// seconds until its get-up ends, once it has started.
+#[derive(Component, Debug, Default)]
+pub(crate) struct DownedByGraph {
+    up_in: Option<f32>,
+}
+
+/// Without a physics backend a body can't fall limp: at full [`Ragdoll`] weight a fighter
+/// on intent ([`Armed`](crate::fighter::Armed)) goes down through its graph instead (`downed` 1: [`COLLAPSE`](crate::build::humanoid::COLLAPSE), then
+/// lying still), and back at 0 gets up out of it, reporting `getting_up` and `got_up` as a
+/// physical body does. With a backend this does nothing.
+#[allow(clippy::type_complexity)]
+pub(crate) fn down_without_physics(
+    mut commands: Commands,
+    time: Res<Time>,
+    backend: Option<Res<PhysicsBackend>>,
+    mut q: Query<
+        (
+            Entity,
+            Option<&Ragdoll>,
+            &mut AnimationParams,
+            &mut Animator,
+            Option<&mut DownedByGraph>,
+        ),
+        With<crate::fighter::Armed>,
+    >,
+) {
+    if backend.is_some() {
+        return;
+    }
+    let dt = time.delta_secs();
+    for (entity, ragdoll, mut params, mut animator, downed) in &mut q {
+        let down = ragdoll.is_some_and(|r| r.weight >= 0.99);
+        let was = params.get("downed") > 0.5;
+        if down && !was {
+            params.set("downed", 1.0);
+            if downed.is_none() {
+                commands.entity(entity).insert(DownedByGraph::default());
+            }
+            continue;
+        }
+        let Some(mut downed) = downed else {
+            continue;
+        };
+        if !down && was {
+            params.set("downed", 0.0);
+            animator.events.push(FiredEvent {
+                name: "getting_up".into(),
+                bone: None,
+            });
+            downed.up_in = Some(get_up_secs(&animator, "get_up_back").unwrap_or(0.0));
+        } else if let Some(left) = downed.up_in {
+            let left = left - dt;
+            if left <= 0.0 {
+                animator.events.push(FiredEvent {
+                    name: "got_up".into(),
+                    bone: None,
+                });
+                commands.entity(entity).remove::<DownedByGraph>();
+            } else {
+                downed.up_in = Some(left);
+            }
+        }
+    }
+}
+
 fn get_up_secs(animator: &Animator, clip: &str) -> Option<f32> {
     let graph = animator.graph()?;
     graph.clip_duration(clip)
