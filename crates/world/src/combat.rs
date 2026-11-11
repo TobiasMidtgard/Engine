@@ -215,14 +215,19 @@ pub enum ItemClass {
     SpellFocus,
     Torch,
     Bow,
+    /// A long gun (carbine, rifle), held in both hands.
+    Firearm,
 }
 
 impl ItemClass {
-    /// Whether the class needs both hands (two-handed blade, axe or hammer, bow).
+    /// Whether the class needs both hands (two-handed blade, axe or hammer, bow, long gun).
     pub fn needs_both_hands(self) -> bool {
         matches!(
             self,
-            ItemClass::TwoHandedBlade | ItemClass::TwoHandedAxe | ItemClass::Bow
+            ItemClass::TwoHandedBlade
+                | ItemClass::TwoHandedAxe
+                | ItemClass::Bow
+                | ItemClass::Firearm
         )
     }
 }
@@ -352,7 +357,7 @@ pub(crate) fn register(app: &mut App) {
         .register_component::<Loadout>(
             "What a body holds: main and off hand item class (one-handed blade, axe, mace, \
              dagger, spear, two-handed blade, two-handed axe, shield, spell focus, torch, bow, \
-             none), and whether one item takes both hands.",
+             firearm, none), and whether one item takes both hands.",
         )
         .register_component::<CombatSkills>(
             "Skill 0..1 per item class (weapons map) and with the off hand; unlisted classes \
