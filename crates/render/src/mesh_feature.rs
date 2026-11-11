@@ -5237,6 +5237,10 @@ impl RenderFeature for MeshFeature {
         clusters || meshes
     }
 
+    fn has_prepass_own(&self) -> bool {
+        self.once_now
+    }
+
     fn prepass_own(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,

@@ -1952,13 +1952,31 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (trial_cut(CUT_GROUND_ONCE) && shade_skip(SKIP_SHOW_GROUND_ONCE)) {
         return vec4<f32>(0.0, 1.0, 0.0, 1.0);
     }
-    return ground_color(in);
+    return ground_color(in, GroundSteps(dpdx(in.rel), dpdy(in.rel), fwidth(in.climate.w)));
 }
 
-// The ground's color at a pixel (pre-exposed HDR), from what its vertices carry there: the
-// scene pass's `fs_main` for every triangle that touches the pixel's 2x2 block, or `fs_once`
-// once a pixel.
-fn ground_color(in: VertexOut) -> vec4<f32> {
+// How the ground changes from a pixel to the next one across (`dp1`) and down (`dp2`) on the
+// pixel's own triangle: the surface point (camera-relative, m) and the altitude (`alt_step`,
+// the sum of both steps' sizes, as `fwidth` gives it). `ground_color` takes them from its
+// caller, so it needs no neighbor: the rasterizer's own in `fs_main`, the stored ones in
+// `fs_once`.
+struct GroundSteps {
+    dp1: vec3<f32>,
+    dp2: vec3<f32>,
+    alt_step: f32,
+};
+
+// The sea's and the ice's waves at a place in the camera tile (m).
+fn wave_height(tp: vec3<f32>) -> f32 {
+    let wave_t = frame.time.x;
+    return pnoise3(vec3<f32>(tp.x * 0.25, wave_t * 0.25, tp.z * 0.25), 1024.0) * 0.6
+        + pnoise3(vec3<f32>(tp.x * 2.0 + 11.0, wave_t * 0.6, tp.z * 2.0), 8192.0) * 0.15;
+}
+
+// The ground's color at a pixel (pre-exposed HDR), from what its vertices carry there and
+// `st`: once a pixel in `fs_once` (the main view), or in `fs_main` for every triangle that
+// touches the pixel's 2x2 block (extra views, and the patches the night's lamps glow on).
+fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     if ((TERRAIN_OFF & 128u) != 0u || shade_skip(SKIP_TERRAIN)) {
         return vec4<f32>(0.1, 0.2, 0.05, 1.0);
     }
@@ -1998,9 +2016,8 @@ fn ground_color(in: VertexOut) -> vec4<f32> {
     let to_eye = in.rel / -max(dist, 1e-6);
     let ndv = dot(n_geo, to_eye);
 
-    // Screen derivatives up front (uniform control flow).
-    let dp1 = dpdx(in.rel);
-    let dp2 = dpdy(in.rel);
+    let dp1 = st.dp1;
+    let dp2 = st.dp2;
     let pixel = max(length(dp1), length(dp2));
     // (The pixel's short side: how large things look on the screen, however low the view.)
     let pixel_across = min(length(dp1), length(dp2));
@@ -2021,7 +2038,7 @@ fn ground_color(in: VertexOut) -> vec4<f32> {
     let sliver = (1.0 - smoothstep(0.03, 0.15, ndv)) * saturate((dot(up, to_eye) - ndv) * 8.0)
         * smoothstep(0.1, 0.4, pixel / max(in.lod.x, 1e-3));
     // Capped so far-off lowland at grazing angles never blends toward sea.
-    let alt_width = clamp(fwidth(altitude), 1e-3, 2.0);
+    let alt_width = clamp(st.alt_step, 1e-3, 2.0);
     // The meter-scale detail noises are finer than a pixel wider than 2-3 m, where every use
     // has faded them out (`fine_fade`): there they settle to their middle, uncomputed.
     var detail_n = 0.5;
@@ -2035,32 +2052,24 @@ fn ground_color(in: VertexOut) -> vec4<f32> {
     let mid_v = tile_fbm(tp, 1.0 / 8.0, 3);
     let patch_v = tile_fbm(tp, 1.0 / 32.0, 3);
     let meadow_v = tile_fbm(tp, 1.0 / 512.0, 3);
-    var ripple_h = 0.0;
-    if (frame.weather.w > 0.01) {
-        ripple_h = rain_ripples(tp.xz, frame.time.x, frame.weather.w * 0.25) * 0.004;
-    }
-    let dr1 = dpdx(ripple_h);
-    let dr2 = dpdy(ripple_h);
 
     // Sea: below sea level, with a smooth coastline between vertices. Seen from high up the
     // vertices are kilometers apart and the sea-level line across each triangle is straight,
     // so the coast drew the mesh's zigzag; there it wanders by up to a vertex spacing with the
     // per-pixel noise, into capes, bays and inlets.
-    let coast_wander = (far_n.y - 0.5) * 1.6 * fwidth(altitude) / max(pixel, 1e-3) * in.lod.x * far;
+    let coast_wander = (far_n.y - 0.5) * 1.6 * st.alt_step / max(pixel, 1e-3) * in.lod.x * far;
     // Beaches, shallows and the wash follow the same wandering coast.
     let coast_alt = altitude + coast_wander;
     let ocean = planet.params.w * saturate(0.5 - coast_alt / alt_width);
-    // Waves, on the sea and on rivers' and lakes' ice: computed where the 2×2 pixel quad
-    // holds any of either, so their screen derivatives stay right at the water's edge.
-    let wavy = select(0.0, 1.0, ocean > 0.0 || in.water.x > 0.002);
-    var wave_h = 0.0;
-    if (wavy + abs(dpdx(wavy)) + abs(dpdy(wavy)) > 0.0) {
-        let wave_t = frame.time.x;
-        wave_h = pnoise3(vec3<f32>(tp.x * 0.25, wave_t * 0.25, tp.z * 0.25), 1024.0) * 0.6
-            + pnoise3(vec3<f32>(tp.x * 2.0 + 11.0, wave_t * 0.6, tp.z * 2.0), 8192.0) * 0.15;
+    // Waves, on the sea and on rivers' and lakes' ice, as far as they are drawn (pixels under
+    // 8 m): their height's change to the next pixel across and down.
+    var dw1 = 0.0;
+    var dw2 = 0.0;
+    if ((ocean > 0.0 || in.water.x > 0.002) && pixel < 8.0) {
+        let wave_h = wave_height(tp);
+        dw1 = wave_height(tp + dp1) - wave_h;
+        dw2 = wave_height(tp + dp2) - wave_h;
     }
-    let dw1 = dpdx(wave_h);
-    let dw2 = dpdy(wave_h);
 
     // Ground maps around the focus.
     let duv = deform_uv(in.rel);
@@ -2897,8 +2906,18 @@ fn ground_color(in: VertexOut) -> vec4<f32> {
     let water_line = smoothstep(0.7, 1.0, rain_wet) * 0.2 * max(soil_like * 0.5, mud) * porosity;
     let low_pool = smoothstep(water_line + 0.01, water_line - 0.04, ground_h) * step(0.01, water_line);
     let puddle = saturate(max(max(smoothstep(0.0, 0.015, puddle_level), print_pool), low_pool)) * (1.0 - snow) * (1.0 - ocean);
+    // Rain's rings on standing water: their height's change to the next pixel across and down.
+    let rings = saturate(frame.weather.w * 0.2) * (1.0 - smoothstep(0.02, 0.2, pixel));
+    var dr1 = 0.0;
+    var dr2 = 0.0;
+    if (puddle > 0.0 && rings > 0.0 && frame.weather.w > 0.01) {
+        let rate = frame.weather.w * 0.25;
+        let ripple_h = rain_ripples(tp.xz, frame.time.x, rate);
+        dr1 = (rain_ripples(tp.xz + dp1.xz, frame.time.x, rate) - ripple_h) * 0.004;
+        dr2 = (rain_ripples(tp.xz + dp2.xz, frame.time.x, rate) - ripple_h) * 0.004;
+    }
     let ripple_n = bump(up, dp1, dp2, dr1, dr2);
-    let still = normalize(mix(up, ripple_n, saturate(frame.weather.w * 0.2) * (1.0 - smoothstep(0.02, 0.2, pixel))));
+    let still = normalize(mix(up, ripple_n, rings));
     n = normalize(mix(n, still, puddle));
     albedo = mix(albedo, albedo * 0.35, puddle);
     roughness = mix(roughness, 0.04, puddle);
@@ -2993,7 +3012,8 @@ fn ground_color(in: VertexOut) -> vec4<f32> {
     let line_f = fract(line_phase);
     let surf_front = smoothstep(0.0, 0.05, line_f) * (1.0 - smoothstep(0.05, 0.6, line_f));
     let broken = smoothstep(0.25, 0.65, detail_n + (mid_v - 0.5) * 0.5 * clump_fade);
-    let lines = mix(surf_front * broken, 0.2, smoothstep(0.3, 1.0, fwidth(line_phase)));
+    // (How far the phase moves from a pixel to the next: the depth's step over a line's.)
+    let lines = mix(surf_front * broken, 0.2, smoothstep(0.3, 1.0, st.alt_step / max(breaker * 0.45, 0.12)));
     let froth = (1.0 - smoothstep(0.03, 0.08 + breaker * 0.1, sea_depth)) * (0.55 + 0.45 * broken);
     var foam = saturate(lines * (1.0 - smoothstep(surf_depth * 0.6, surf_depth, sea_depth)) + froth) * coast_near;
     // Sea ice on cold seas: floes of snow-covered ice with dark leads of open water between
@@ -3175,149 +3195,143 @@ fn ground_color(in: VertexOut) -> vec4<f32> {
 
 
 // ---------------------------------------------------------------- the ground once a pixel
-// `RenderSettings::trial_cuts` bit `GROUND_ONCE` (lib_frame.wgsl `CUT_GROUND_ONCE`).
+// How the main view draws the ground (`RenderSettings::trial_cuts` bit `GROUND_ONCE`,
+// lib_frame.wgsl `CUT_GROUND_ONCE`; render.rs `prepass_own`).
 //
-// Why: the scene pass runs `fs_main` once for every triangle that touches a pixel's 2x2 block,
-// 1.9 to 2.6 times a pixel on the ground at 1600x900 (engine-perf/triangle-view), and each run
-// reads 30 to 65 texture probes besides its light.
+// Why: a pass that colors the ground from its triangles runs `ground_color` once for every
+// triangle that touches a pixel's 2x2 block, 1.9 to 2.6 times a pixel on the ground at
+// 1600x900 (engine-perf/triangle-view), and each run reads 30 to 65 texture probes besides its
+// light. Drawing the patches for depth first and for color after also draws every vertex
+// twice.
 //
-// How: before the scene pass the patches are drawn once more with `fs_attributes`, which only
-// writes down what the vertices carry at each pixel the prepass kept (seven targets, 52 bytes a
-// pixel). In the scene pass one triangle over the screen runs `fs_once` first: where all four
-// pixels of a 2x2 block are ground of one unbroken surface it builds the pixel's `VertexOut`
-// from the targets and the depth, colors it with `ground_color` as `fs_main` would, and moves
-// the depth one step nearer. The patches drawn after it fail their equal depth test there
-// before any shader runs. Blocks with an edge in them (another surface, the sky, a ridge in
-// front of farther ground) are left to `fs_main`: the differences between a block's pixels
-// stand for the screen derivatives the textures are filtered by, and across an edge they
-// would be wrong.
+// How: the patches are drawn once, in a pass of the ground's own over the prepass's targets.
+// `fs_ground` writes what the prepass needs (depth, normal, roughness, motion) and writes
+// down what the vertices carry at the pixel (six targets, 52 bytes a pixel). In the scene
+// pass one triangle over the screen runs `fs_once`: at every pixel whose prepass normal
+// still carries the ground's tag (nothing was drawn in front of it since) it builds the
+// pixel's `VertexOut` and its `GroundSteps` from the targets and the depth and colors it
+// with `ground_color`.
 //
-// Not here: a patch whose lamp page glows (its place in the page is per patch, 16 more bytes),
-// extra views (mirrors).
+// Not here: where the night's lamps glow on a patch (their place in the lamp page is per
+// patch): those pixels get the prepass's plain tag, and `fs_main` colors them from the
+// patches drawn again where the depth is still the ground's. Extra views (mirrors) draw the
+// ground with `fs_prepass` and `fs_main`.
+
+// What `fs_ground` writes in the prepass normal's fourth channel where the ground lies and
+// `fs_once` is to color it: read as "written" by everything else (above 0.5, no subsurface).
+const GROUND_TAG: f32 = 0.75;
 
 @group(2) @binding(2) var once_a: texture_2d<f32>;      // normal (octahedral), moisture, temperature °C
 @group(2) @binding(3) var once_b: texture_2d<f32>;      // `VertexOut.lod`
 // Regional variety, local patches, and the depth's change to the next pixel across and down
 // on the pixel's own triangle (as a share of the depth).
 @group(2) @binding(4) var once_c: texture_2d<f32>;
+// The altitude (m) and its change to the next pixel across plus down (`fwidth`).
 @group(2) @binding(5) var once_altitude: texture_2d<f32>;
-// Bytes: paint_a | paint_b | paint_c.xy, mare, ocean | painted, planet + 1 (0: not ground).
+// Bytes: paint_a | paint_b | paint_c.xy, mare, river banks | painted, planet (7 bits) and the
+// ocean flag, river and lake water, lake share.
 @group(2) @binding(6) var once_paint: texture_2d<u32>;
 @group(2) @binding(7) var once_tint: texture_2d<f32>;   // sqrt(color), amount
-@group(2) @binding(8) var once_water: texture_2d<f32>;  // `VertexOut.water`
 
-struct GroundAttributes {
-    @location(0) a: vec4<f32>,
-    @location(1) b: vec4<f32>,
-    @location(2) c: vec4<f32>,
-    @location(3) altitude: vec4<f32>,
-    @location(4) paint: vec4<u32>,
-    @location(5) tint: vec4<f32>,
-    @location(6) water: vec4<f32>,
+struct GroundOut {
+    @location(0) normal: vec4<f32>,   // the prepass's: octahedral normal, roughness, tag
+    @location(1) motion: vec2<f32>,   // the prepass's
+    @location(2) a: vec4<f32>,
+    @location(3) b: vec4<f32>,
+    @location(4) c: vec4<f32>,
+    @location(5) altitude: vec4<f32>,
+    @location(6) paint: vec4<u32>,
+    @location(7) tint: vec4<f32>,
 };
 
 @fragment
-fn fs_attributes(in: VertexOut) -> GroundAttributes {
-    let z = in.clip.z;
-    let slope = vec2<f32>(dpdx(z), dpdy(z)) / max(z, 1e-30);
-    let span = max(length(dpdx(in.rel)), length(dpdy(in.rel)));
-    let alt_step = fwidth(in.climate.w);
-    // Only the fragment the prepass kept: the same vertices give the same depth to the bit
-    // (two steps of slack for a GPU that rounds the shader's copy of it another way).
-    let pixel = vec2<i32>(in.clip.xy);
-    let kept = textureLoad(prepass_depth, pixel, 0);
-    if (abs(bitcast<i32>(kept) - bitcast<i32>(z)) > 2) {
-        discard;
-    }
-    var out: GroundAttributes;
-    out.a = vec4<f32>(oct_encode(normalize(in.normal)), in.climate.x, in.climate.y);
-    out.b = in.lod;
-    out.c = vec4<f32>(in.ocean_paint.zw, slope);
-    out.altitude = vec4<f32>(in.climate.w, 0.0, 0.0, 0.0);
-    // (A patch whose lamp page glows here is left to `fs_main`.)
+fn fs_ground(in: VertexOut) -> GroundOut {
     let planet = planets[in.planet];
-    var ground = in.planet + 1u;
-    if (in.night.w >= 0.0 && dot(normalize(in.up), frame.sun_dir.xyz) < 0.03
-        && length(in.rel) > planet.params4.y) {
-        ground = 0u;
-    }
-    // Seen from high up the coastline wanders by the altitude's change across the pixel's own
-    // triangle (`ground_color`'s `coast_wander`), which a block's four pixels cannot give
-    // back where they lie on triangles of different slopes: the coast's pixels (within twice
-    // the widest wander of sea level) are left to `fs_main`, so the coast stays where it was.
-    let far = smoothstep(40.0, 400.0, span);
-    if (far > 0.0 && planet.params.w > 0.0
-        && abs(in.climate.w) < 1.6 * alt_step / max(span, 1e-3) * in.lod.x * far + 4.0) {
-        ground = 0u;
-    }
+    // The prepass's part, as `fs_prepass` works it out.
+    let layers = surface_layers(in.rel);
+    cost_taps(5.0 + 1.0 + 2.0 + 8.0);
+    let rain_wet = saturate(layers.x);
+    let duv = deform_uv(in.rel);
+    let depth = textureSampleLevel(deform_tex, map_sampler, deform_st(duv), 0.0).r * inside01(duv) * maps.flags.x;
+    let snow = smoothstep(0.005, 0.03, layers.z);
+    let pool = max(
+        smoothstep(0.0005, 0.015, layers.y),
+        smoothstep(0.015, 0.04, depth) * smoothstep(0.5, 0.85, rain_wet),
+    );
+    let ocean = in.ocean_paint.x * planet.params.w;
+    let river = smoothstep(0.2, 0.6, in.water.x) * (1.0 - ocean);
+    let water = max(pool * (1.0 - snow) * (1.0 - ocean), ocean);
+    let up = normalize(in.up);
+    let n_geo = normalize(in.normal);
+    let n = normalize(mix(n_geo, up, water));
+    let ground = mix(0.85 - 0.35 * rain_wet * (1.0 - snow), 0.45, river);
+    let roughness = mix(ground, mix(0.04, 0.08, ocean), water);
+    let pre = prepass_output(n, roughness, motion_clip(in.rel),
+        prev_motion_clip(static_prev_rel(in.rel) - planet.motion.xyz));
+
+    let z = in.clip.z;
+    var out: GroundOut;
+    out.normal = pre.normal;
+    out.motion = pre.motion;
+    // Where the night's lamps glow on the patch, `fs_main` colors the pixel.
+    let glows = in.night.w >= 0.0 && dot(up, frame.sun_dir.xyz) < 0.03
+        && length(in.rel) > planet.params4.y;
+    out.normal.w = select(GROUND_TAG, 1.0, glows);
+    out.a = vec4<f32>(oct_encode(n_geo), in.climate.x, in.climate.y);
+    out.b = in.lod;
+    out.c = vec4<f32>(in.ocean_paint.zw, vec2<f32>(dpdx(z), dpdy(z)) / max(z, 1e-30));
+    out.altitude = vec4<f32>(in.climate.w, fwidth(in.climate.w), 0.0, 0.0);
+    let flag = select(0u, 128u, in.ocean_paint.x > 0.5);
     out.paint = vec4<u32>(
         pack4x8unorm(in.paint_a),
         pack4x8unorm(in.paint_b),
-        pack4x8unorm(vec4<f32>(in.paint_c, in.climate.z, in.ocean_paint.x)),
-        pack4x8unorm(vec4<f32>(in.ocean_paint.y, 0.0, 0.0, 0.0)) | (min(ground, 255u) << 8u),
+        pack4x8unorm(vec4<f32>(in.paint_c, in.climate.z, in.water.z)),
+        pack4x8unorm(vec4<f32>(in.ocean_paint.y, 0.0, in.water.x, in.water.y))
+            | ((min(in.planet, 127u) | flag) << 8u),
     );
     out.tint = vec4<f32>(sqrt(max(in.tint.rgb, vec3<f32>(0.0))), in.tint.a);
-    out.water = vec4<f32>(in.water, 0.0);
     return out;
 }
 
-// Whether the depth's step from one pixel to the next is one an unbroken surface makes: between
-// the steps the two pixels' own triangles make, give or take half the larger and a
-// ten-thousandth of the depth.
-fn once_step(z0: f32, z1: f32, g0: f32, g1: f32) -> bool {
-    let step = (z1 - z0) / max(z0, 1e-30);
-    let slack = 0.5 * max(abs(g0), abs(g1)) + 1e-4;
-    return step >= min(g0, g1) - slack && step <= max(g0, g1) + slack;
-}
-
-// Whether the 2x2 block at `block` (even coordinates: the blocks the GPU takes screen
-// derivatives in) is ground of one planet and one unbroken surface in all four pixels.
-fn once_block(block: vec2<i32>) -> bool {
-    let size = vec2<i32>(textureDimensions(once_paint));
-    if (any(block < vec2<i32>(0)) || any(block + 1 >= size)) {
-        return false;
-    }
-    var z: array<f32, 4>;
-    var g: array<vec2<f32>, 4>;
-    var ground = 0u;
-    for (var i = 0; i < 4; i++) {
-        let p = block + vec2<i32>(i & 1, i >> 1u);
-        let here = (textureLoad(once_paint, p, 0).w >> 8u) & 255u;
-        if (here == 0u || (i > 0 && here != ground)) {
-            return false;
-        }
-        ground = here;
-        z[i] = textureLoad(prepass_depth, p, 0);
-        g[i] = textureLoad(once_c, p, 0).zw;
-    }
-    return once_step(z[0], z[1], g[0].x, g[1].x) && once_step(z[2], z[3], g[2].x, g[3].x)
-        && once_step(z[0], z[2], g[0].y, g[2].y) && once_step(z[1], z[3], g[1].y, g[3].y);
-}
-
-// What the ground's vertices carry at a pixel `fs_attributes` wrote.
+// What the ground's vertices carry at a pixel `fs_ground` wrote.
 fn once_vertex(at: vec4<f32>, pixel: vec2<i32>, z: f32) -> VertexOut {
     let a = textureLoad(once_a, pixel, 0);
     let c = textureLoad(once_c, pixel, 0);
     let bits = textureLoad(once_paint, pixel, 0);
     let third = unpack4x8unorm(bits.z);
+    let fourth = unpack4x8unorm(bits.w);
     let tint = textureLoad(once_tint, pixel, 0);
     let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
     var v: VertexOut;
     v.clip = vec4<f32>(at.xy, z, at.w);
     v.rel = (frame.inv_view * vec4<f32>(view_position(uv, z), 0.0)).xyz;
-    v.planet = ((bits.w >> 8u) & 255u) - 1u;
+    v.planet = (bits.w >> 8u) & 127u;
     v.normal = oct_decode(a.xy);
     v.up = planet_up(planets[v.planet], v.rel);
     v.climate = vec4<f32>(a.zw, third.z, textureLoad(once_altitude, pixel, 0).r);
-    v.ocean_paint = vec4<f32>(third.w, unpack4x8unorm(bits.w).x, c.xy);
+    v.ocean_paint = vec4<f32>(select(0.0, 1.0, (bits.w & 32768u) != 0u), fourth.x, c.xy);
     v.lod = textureLoad(once_b, pixel, 0);
     v.tint = vec4<f32>(tint.rgb * tint.rgb, tint.a);
     v.paint_a = unpack4x8unorm(bits.x);
     v.paint_b = unpack4x8unorm(bits.y);
     v.paint_c = third.xy;
-    v.water = textureLoad(once_water, pixel, 0).xyz;
+    v.water = vec3<f32>(fourth.zw, third.w);
     v.night = vec4<f32>(0.0, 0.0, 0.0, -1.0);
     return v;
+}
+
+// The pixel's `GroundSteps`: the surface point at the next pixel across and down, on the
+// plane of the pixel's own triangle (the depth is linear across the screen on it).
+fn once_steps(v: VertexOut, pixel: vec2<i32>, z: f32) -> GroundSteps {
+    let slope = textureLoad(once_c, pixel, 0).zw;
+    let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
+    let across = view_position(uv + vec2<f32>(frame.viewport.z, 0.0), z * (1.0 + slope.x));
+    let down = view_position(uv + vec2<f32>(0.0, frame.viewport.w), z * (1.0 + slope.y));
+    var st: GroundSteps;
+    st.dp1 = (frame.inv_view * vec4<f32>(across, 0.0)).xyz - v.rel;
+    st.dp2 = (frame.inv_view * vec4<f32>(down, 0.0)).xyz - v.rel;
+    st.alt_step = textureLoad(once_altitude, pixel, 0).g;
+    return st;
 }
 
 struct OnceOut {
@@ -3333,18 +3347,24 @@ fn vs_once(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs_once(@builtin(position) at: vec4<f32>) -> OnceOut {
     let pixel = vec2<i32>(at.xy);
-    if (!once_block(pixel & vec2<i32>(-2))) {
+    // The ground's own pass had the prepass's last word on this pixel: the ground is what
+    // the prepass saw here.
+    if (abs(textureLoad(prepass_normal, pixel, 0).w - GROUND_TAG) > 0.1) {
         discard;
     }
     let z = textureLoad(prepass_depth, pixel, 0);
     var out: OnceOut;
-    // One step nearer (reverse Z): the patches' equal depth test fails here from now on.
+    // One step nearer (reverse Z), tested as nearer than the scene's depth: the pixel is
+    // colored only where the prepass's depth still stands (anything drawn in front since,
+    // such as hair, keeps it), and patches drawn after for `fs_main` fail their equal depth
+    // test here.
     out.depth = bitcast<f32>(bitcast<u32>(z) + 1u);
     if (shade_skip(SKIP_SHOW_GROUND_ONCE)) {
         out.color = vec4<f32>(1.0, 0.0, 1.0, 1.0);
         return out;
     }
-    out.color = ground_color(once_vertex(at, pixel, z));
+    let v = once_vertex(at, pixel, z);
+    out.color = ground_color(v, once_steps(v, pixel, z));
     return out;
 }
 

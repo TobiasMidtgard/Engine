@@ -852,6 +852,12 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// feature's `after_prepass` returned true: what turned out visible only then.
     fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
+    /// This frame the feature draws in [`prepass_own`](Self::prepass_own) (the frame profiler
+    /// then times it apart, as `render.gpu.prepass: <feature> stored`).
+    fn has_prepass_own(&self) -> bool {
+        false
+    }
+
     /// Record a prepass of the feature's own over the shared prepass's targets, for geometry
     /// that writes more than the shared prepass holds (the meshes' stored material,
     /// mesh_once.rs). Called right after the shared prepass (`late` false: `after_prepass`

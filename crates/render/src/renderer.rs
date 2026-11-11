@@ -2875,10 +2875,14 @@ impl Renderer {
             size: (self.targets.width, self.targets.height),
             group: &self.prepass_group,
         };
-        if engine_core::profile::enabled() {
-            self.perf.pass(&mut cpu, &mut encoder, "prepass: stored");
-        }
         for f in self.features.iter_mut() {
+            if engine_core::profile::enabled() && f.has_prepass_own() {
+                self.perf.pass(
+                    &mut cpu,
+                    &mut encoder,
+                    format!("prepass: {} stored", f.name()),
+                );
+            }
             f.prepass_own(&mut encoder, &own_targets, false, &ctx);
         }
         // Occlusion culling against that depth, then what it found visible after all.
