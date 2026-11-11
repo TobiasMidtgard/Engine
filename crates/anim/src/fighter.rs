@@ -432,6 +432,7 @@ pub fn window_of(
         name: m.name.clone(),
         phase_secs: (t - from).max(0.0) / rate,
         phase_length_secs: (to - from).max(0.0) / rate,
+        ..Default::default()
     }
 }
 

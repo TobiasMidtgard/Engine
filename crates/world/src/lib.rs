@@ -63,7 +63,7 @@ pub use character::{
 };
 pub use combat::{
     Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass,
-    Loadout, ZoneInjury,
+    Knockback, Loadout, ZoneInjury,
 };
 pub use cover::{CoverCell, CoverKind, GroundCover};
 pub use environment::*;
@@ -622,6 +622,7 @@ mod tests {
             "CombatSkills",
             "BodyInjuries",
             "AttackWindow",
+            "Knockback",
         ] {
             assert!(
                 registry.component(name).is_some(),

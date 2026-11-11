@@ -178,6 +178,7 @@ fn play(app: &mut App, e: Entity, natural: f32, pressed: &mut usize, was: &mut b
         name: "attack_light".into(),
         phase_secs: 0.0,
         phase_length_secs: if winding { length } else { 0.0 },
+        ..Default::default()
     };
     app.world.entity_mut(e).insert(w);
 }

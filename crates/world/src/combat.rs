@@ -332,6 +332,19 @@ pub struct AttackWindow {
     pub phase_secs: f32,
     /// Seconds (world time) this phase lasts in all, as the clip plays it now.
     pub phase_length_secs: f32,
+    /// The strike's own step this frame (a lunge, a pivot): world meters, zero between
+    /// strikes. The body's mover adds it to the body's position (anim moves only bodies it
+    /// drives itself).
+    pub warp_delta: Vec3,
+}
+
+/// A blow's push on a body, written by the animation module while a hit reaction shoves it;
+/// absent (or zero) otherwise. The body's mover adds it to the body's velocity.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Knockback {
+    /// World m/s.
+    pub velocity: Vec3,
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -344,6 +357,10 @@ pub(crate) fn register(app: &mut App) {
         .register_component::<CombatSkills>(
             "Skill 0..1 per item class (weapons map) and with the off hand; unlisted classes \
              read 0.3.",
+        )
+        .register_component::<Knockback>(
+            "A hit reaction's push on a body, world m/s, for its mover to add to its velocity \
+             (written by the animation module; absent or zero otherwise).",
         )
         .register_component::<BodyInjuries>(
             "Per body zone (head, neck, chest, belly, arms, hands, thighs, knees, shins): wound \
