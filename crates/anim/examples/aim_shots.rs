@@ -36,9 +36,9 @@ struct Stage {
     parked: Option<Renderer>,
 }
 
-/// Two fighters a step apart along X, facing each other (`b` turned away if `away`), `a`
-/// a master with the sword.
-fn stage(width: u32, height: u32, away: bool) -> Stage {
+/// Two fighters a step apart along X, facing each other (`b` turned away if `away`), both
+/// masters with the sword, `b` with a shield only if `shield` (so a blow shows on its mark).
+fn stage(width: u32, height: u32, away: bool, shield: bool) -> Stage {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -74,7 +74,7 @@ fn stage(width: u32, height: u32, away: bool) -> Stage {
             Transform::from_xyz(0.0, 1.2, 4.6).looking_at(DVec3::new(0.0, 0.95, 0.0), Vec3::Y),
         ))
         .id();
-    let fighter = |w: &mut World, x: f64, yaw: f32, seed: u64| {
+    let fighter = |w: &mut World, x: f64, yaw: f32, seed: u64, shield: bool| {
         let t = Transform::from_translation(DVec3::new(x, 0.0, 0.0))
             .with_rotation(Quat::from_rotation_y(yaw.to_radians()));
         w.spawn((
@@ -83,7 +83,11 @@ fn stage(width: u32, height: u32, away: bool) -> Stage {
             BodyRequest::human(seed),
             Loadout {
                 main: ItemClass::OneHandedBlade,
-                off: ItemClass::Shield,
+                off: if shield {
+                    ItemClass::Shield
+                } else {
+                    ItemClass::None
+                },
                 two_handed: false,
             },
             MoveIntent::default(),
@@ -95,13 +99,18 @@ fn stage(width: u32, height: u32, away: bool) -> Stage {
         ))
         .id()
     };
-    let a = fighter(w, -0.7, -90.0, 11);
-    let b = fighter(w, 0.7, if away { -90.0 } else { 90.0 }, 12);
+    let a = fighter(w, -0.7, -90.0, 11, true);
+    let b = fighter(w, 0.7, if away { -90.0 } else { 90.0 }, 12, shield);
     for (me, foe) in [(a, b), (b, a)] {
         app.world.get_mut::<StrikeTargets>(me).unwrap().target = Some(foe);
     }
     app.update();
     engine_anim::character::finish_loading(&mut app.world);
+    // The loadout's props are spawned in an update: let the renderer take them in before
+    // it is parked.
+    for _ in 0..3 {
+        app.update();
+    }
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("no GPU: {}", d.0);
         std::process::exit(1);
@@ -194,7 +203,7 @@ fn main() {
                 ("chest_stab", BodyZone::Belly, false, true, SIDE),
             ];
             for (name, zone, away, guard, (eye, target)) in shots {
-                let mut s = stage(width, height, away);
+                let mut s = stage(width, height, away, guard);
                 s.app.world.get_mut::<StrikeTargets>(s.a).unwrap().zone = Some(zone);
                 if guard {
                     s.app.world.get_mut::<MoveIntent>(s.b).unwrap().block = true;
@@ -208,7 +217,13 @@ fn main() {
                     s.step();
                     let at = s.attacker();
                     if at.hits + at.blocked + at.deflected > 0 {
-                        eprintln!("{name}: {}", at.current.clone().unwrap_or_default());
+                        eprintln!(
+                            "{name}: {} (hit {}, blocked {}, deflected {})",
+                            at.current.clone().unwrap_or_default(),
+                            at.hits,
+                            at.blocked,
+                            at.deflected
+                        );
                         s.shoot(&out.join(format!("{name}.png")), eye, target);
                         taken = true;
                         break;
@@ -220,7 +235,7 @@ fn main() {
             }
         }
         "combo6" | "combo" => {
-            let mut s = stage(width, height, false);
+            let mut s = stage(width, height, false, true);
             if mode == "combo6" {
                 s.app.world.get_mut::<StrikeTargets>(s.a).unwrap().zone = Some(BodyZone::KneeL);
             }
@@ -255,6 +270,20 @@ fn main() {
                 }
             }
         }
-        _ => eprintln!("modes: aim, combo6, combo"),
+        "knee_strip" => {
+            // Every third frame of one cut at the knee, from the press to the stance.
+            let mut s = stage(width, height, false, false);
+            s.app.world.get_mut::<StrikeTargets>(s.a).unwrap().zone = Some(BodyZone::KneeL);
+            s.press();
+            for k in 0..45 {
+                s.step();
+                if k % 3 == 0 {
+                    let at = s.attacker();
+                    eprintln!("{k}: {:?} hits {}", at.current, at.hits);
+                    s.shoot(&out.join(format!("k{k:02}.png")), SIDE.0, SIDE.1);
+                }
+            }
+        }
+        _ => eprintln!("modes: aim, combo6, combo, knee_strip"),
     }
 }

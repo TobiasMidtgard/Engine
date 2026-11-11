@@ -2261,7 +2261,14 @@ fn line_cut_with(
     let wound_dir = Quat::from_axis_angle(axis, -back.to_radians()) * point;
     // How far the body sinks into the cut, and where its right shoulder is then: a fist
     // the arm can't reach is drawn in toward it (`pull` thirds of the way).
-    let shoulder = Vec3::new(0.17, 1.42 - sink, -0.05);
+    // The trunk bows `dip` at the hips and again above them (a negative pitch leans it
+    // forward), carrying the shoulder 0.45 m above the hips forward and down.
+    let bow = (2.0_f32 * dip).to_radians();
+    let shoulder = Vec3::new(
+        0.17,
+        1.42 - sink - 0.45 * (1.0 - bow.cos()),
+        -0.05 - 0.45 * bow.sin(),
+    );
     let reachable = |p: Vec3| shoulder + (p - shoulder) * (1.0 - pull / 3.0);
     // The fist starts on the side the line comes from, drawn in toward the body, and ends on
     // the far side.
@@ -2287,8 +2294,8 @@ fn line_cut_with(
     let cut_body = base
         .hips(
             [0.0, -sink, -0.08],
-            [dip, base.turn.y - 16.0 * turn, 0.0],
-            [base.trunk.x + dip, base.trunk.y - 12.0 * turn, -4.0 * turn],
+            [-dip, base.turn.y - 16.0 * turn, 0.0],
+            [base.trunk.x - dip, base.trunk.y - 12.0 * turn, -4.0 * turn],
         )
         .foot(1, base.feet[1].heel(10.0 + 6.0 * low));
     let strike = Stroke::Cut {
@@ -2743,59 +2750,59 @@ fn line_stab_with(
 /// shift x, y, z (m), give, pull, elbow and edge.
 #[rustfmt::skip]
 const LINE_PLANS: &[(&str, [f32; 7])] = &[
-    ("sword_line_000_high", [0.058, 0.064, -0.060, 1.0, 0.0, 1.0, 1.0]),
-    ("sword_line_045_high", [0.035, 0.054, -0.157, 0.8, 1.0, -1.0, 1.0]),
-    ("sword_line_090_high", [0.048, -0.053, -0.156, 1.0, 1.0, -1.0, 1.0]),
-    ("sword_line_135_high", [-0.010, -0.034, -0.087, 1.0, 0.5, 1.0, 1.0]),
-    ("sword_line_180_high", [0.184, 0.006, -0.162, 1.0, 0.0, 1.0, 1.0]),
-    ("sword_line_225_high", [0.122, -0.044, -0.096, 1.0, 0.0, 1.0, 1.0]),
-    ("sword_line_270_high", [-0.021, -0.102, -0.071, 1.0, 0.0, 1.0, 1.0]),
-    ("sword_line_315_high", [0.002, 0.122, -0.164, 1.0, 1.0, 1.0, 1.0]),
+    ("sword_line_000_high", [0.079, 0.052, -0.079, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_045_high", [0.040, 0.015, -0.030, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_090_high", [0.050, -0.020, -0.017, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_135_high", [0.029, -0.048, -0.033, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_180_high", [0.171, 0.045, -0.148, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_225_high", [0.099, 0.026, -0.198, 1.0, 0.5, 0.0, 1.0]),
+    ("sword_line_270_high", [0.015, -0.111, -0.083, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_315_high", [-0.040, -0.054, -0.320, 1.0, 2.0, 1.0, 1.0]),
     ("sword_stab_high", [-0.281, -0.002, 0.109, 1.0, 0.0, 1.0, 1.0]),
-    ("sword_line_000_mid", [-0.040, 0.022, -0.046, 1.0, 0.5, 1.0, 1.0]),
-    ("sword_line_045_mid", [0.061, -0.014, -0.181, 0.8, 1.5, 0.0, 1.0]),
-    ("sword_line_090_mid", [-0.006, 0.002, -0.073, 0.8, 1.0, 0.0, 1.0]),
-    ("sword_line_135_mid", [0.010, -0.033, -0.054, 1.0, 0.5, 1.0, 1.0]),
-    ("sword_line_180_mid", [0.001, -0.006, -0.111, 1.0, 0.5, 0.0, 1.0]),
-    ("sword_line_225_mid", [0.088, 0.023, -0.061, 0.8, 0.0, 1.0, 1.0]),
-    ("sword_line_270_mid", [0.000, -0.027, -0.034, 1.0, 0.0, 1.0, 1.0]),
-    ("sword_line_315_mid", [0.003, -0.007, -0.138, 1.0, 1.0, 1.0, 1.0]),
+    ("sword_line_000_mid", [-0.031, -0.004, -0.007, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_045_mid", [0.004, 0.014, -0.009, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_090_mid", [0.052, 0.037, -0.012, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_135_mid", [-0.007, 0.027, -0.003, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_180_mid", [0.049, 0.172, -0.231, 1.0, 1.0, -1.0, 1.0]),
+    ("sword_line_225_mid", [0.112, 0.068, -0.225, 1.0, 1.5, 0.0, 1.0]),
+    ("sword_line_270_mid", [-0.005, -0.051, -0.033, 0.8, 0.0, 1.0, 1.0]),
+    ("sword_line_315_mid", [0.023, -0.049, -0.125, 1.0, 1.0, 0.0, 1.0]),
     ("sword_stab_mid", [-0.172, -0.004, 0.117, 1.0, 0.0, 1.0, 1.0]),
-    ("sword_line_000_low", [0.000, 0.000, 0.000, 0.2, 1.0, 0.0, 1.0]),
-    ("sword_line_045_low", [0.000, 0.000, 0.000, 0.2, 1.0, -1.0, 1.0]),
-    ("sword_line_090_low", [0.000, 0.000, 0.000, 0.0, 1.0, 0.0, -1.0]),
-    ("sword_line_135_low", [0.000, 0.000, 0.000, 1.0, 1.0, -1.0, 1.0]),
-    ("sword_line_180_low", [0.000, 0.000, 0.000, 0.4, 1.0, 1.0, 1.0]),
-    ("sword_line_225_low", [0.008, -0.113, -0.176, 0.2, 2.0, 1.0, 1.0]),
-    ("sword_line_270_low", [0.000, 0.000, 0.000, 0.2, 1.0, -1.0, 1.0]),
-    ("sword_line_315_low", [-0.061, -0.090, -0.168, 0.0, 2.0, -1.0, 1.0]),
+    ("sword_line_000_low", [0.076, 0.001, -0.156, 1.0, 0.0, 0.0, 1.0]),
+    ("sword_line_045_low", [0.015, -0.063, -0.164, 1.0, 1.5, 1.0, 1.0]),
+    ("sword_line_090_low", [0.001, -0.033, -0.072, 1.0, 1.0, -1.0, 1.0]),
+    ("sword_line_135_low", [0.000, 0.000, 0.000, 0.8, 1.0, 0.0, 1.0]),
+    ("sword_line_180_low", [-0.041, -0.053, -0.099, 0.0, 2.0, 1.0, 1.0]),
+    ("sword_line_225_low", [0.000, 0.000, 0.000, 0.0, 1.5, 1.0, 1.0]),
+    ("sword_line_270_low", [0.000, 0.000, 0.000, 0.8, 1.5, 1.0, 1.0]),
+    ("sword_line_315_low", [0.000, 0.000, 0.000, 1.0, 0.5, -1.0, 1.0]),
     ("sword_stab_low", [-0.106, -0.025, 0.132, 1.0, 0.0, 1.0, 1.0]),
-    ("greatsword_line_000_high", [0.039, 0.035, -0.236, 1.0, 1.0, 0.0, 1.0]),
-    ("greatsword_line_045_high", [0.028, 0.051, -0.237, 1.0, 1.5, 1.0, 1.0]),
-    ("greatsword_line_090_high", [-0.004, -0.049, -0.223, 1.0, 1.5, -1.0, 1.0]),
-    ("greatsword_line_135_high", [-0.061, 0.042, -0.228, 0.8, 1.5, -1.0, 1.0]),
-    ("greatsword_line_180_high", [-0.044, 0.063, -0.243, 0.8, 2.0, -1.0, -1.0]),
-    ("greatsword_line_225_high", [-0.002, -0.056, -0.201, 0.2, 1.0, 1.0, 1.0]),
-    ("greatsword_line_270_high", [-0.052, 0.006, -0.158, 1.0, 0.5, 1.0, 1.0]),
-    ("greatsword_line_315_high", [-0.049, -0.059, -0.317, 1.0, 2.0, -1.0, 1.0]),
+    ("greatsword_line_000_high", [-0.113, 0.009, -0.221, 1.0, 1.0, 1.0, 1.0]),
+    ("greatsword_line_045_high", [0.050, -0.015, -0.125, 0.8, 0.5, 1.0, 1.0]),
+    ("greatsword_line_090_high", [0.000, -0.011, -0.226, 1.0, 1.5, -1.0, 1.0]),
+    ("greatsword_line_135_high", [0.009, -0.103, -0.127, 1.0, 0.5, -1.0, 1.0]),
+    ("greatsword_line_180_high", [-0.013, 0.041, -0.081, 0.0, 0.0, -1.0, 1.0]),
+    ("greatsword_line_225_high", [-0.000, -0.096, -0.255, 0.2, 1.5, 0.0, 1.0]),
+    ("greatsword_line_270_high", [0.080, -0.001, -0.313, 1.0, 2.0, 1.0, 1.0]),
+    ("greatsword_line_315_high", [0.011, 0.134, -0.154, 1.0, 0.5, 0.0, 1.0]),
     ("greatsword_stab_high", [-0.060, -0.000, 0.120, 0.0, 0.0, 1.0, 1.0]),
-    ("greatsword_line_000_mid", [-0.016, 0.052, -0.079, 1.0, 0.5, 1.0, 1.0]),
-    ("greatsword_line_045_mid", [0.073, 0.022, -0.138, 1.0, 1.0, 0.0, 1.0]),
-    ("greatsword_line_090_mid", [-0.002, -0.068, -0.119, 1.0, 1.5, 1.0, 1.0]),
-    ("greatsword_line_135_mid", [-0.053, -0.061, -0.070, 1.0, 1.0, 0.0, 1.0]),
-    ("greatsword_line_180_mid", [-0.075, -0.042, -0.267, 0.0, 2.0, 1.0, 1.0]),
-    ("greatsword_line_225_mid", [0.035, -0.069, -0.269, 0.2, 2.0, -1.0, 1.0]),
-    ("greatsword_line_270_mid", [0.001, -0.133, -0.227, 0.8, 1.5, -1.0, 1.0]),
-    ("greatsword_line_315_mid", [0.072, 0.059, -0.222, 1.0, 1.5, -1.0, 1.0]),
+    ("greatsword_line_000_mid", [0.087, 0.076, -0.176, 1.0, 0.5, 0.0, 1.0]),
+    ("greatsword_line_045_mid", [0.014, -0.019, -0.084, 1.0, 0.5, 1.0, 1.0]),
+    ("greatsword_line_090_mid", [-0.046, -0.020, -0.173, 1.0, 1.5, -1.0, 1.0]),
+    ("greatsword_line_135_mid", [-0.036, -0.011, -0.029, 1.0, 0.5, 0.0, 1.0]),
+    ("greatsword_line_180_mid", [-0.058, -0.039, -0.155, 0.0, 1.5, 1.0, 1.0]),
+    ("greatsword_line_225_mid", [0.070, -0.030, -0.113, 0.2, 0.5, 1.0, 1.0]),
+    ("greatsword_line_270_mid", [0.019, -0.074, -0.070, 0.8, 0.0, 1.0, 1.0]),
+    ("greatsword_line_315_mid", [-0.024, -0.111, -0.169, 1.0, 1.0, -1.0, 1.0]),
     ("greatsword_stab_mid", [-0.060, -0.000, 0.120, 0.0, 0.0, 1.0, 1.0]),
-    ("greatsword_line_000_low", [-0.043, -0.033, -0.177, 0.0, 2.0, -1.0, 1.0]),
-    ("greatsword_line_045_low", [0.000, 0.000, 0.000, 1.0, 1.0, -1.0, 1.0]),
-    ("greatsword_line_090_low", [0.000, 0.000, 0.000, 0.0, 1.5, -1.0, 1.0]),
-    ("greatsword_line_135_low", [0.000, 0.000, 0.000, 0.0, 1.0, -1.0, 1.0]),
-    ("greatsword_line_180_low", [-0.042, -0.051, -0.178, 0.0, 2.0, 1.0, 1.0]),
-    ("greatsword_line_225_low", [0.017, -0.065, -0.178, 0.0, 2.0, 0.0, 1.0]),
-    ("greatsword_line_270_low", [-0.016, -0.110, -0.154, 0.0, 2.0, -1.0, 1.0]),
-    ("greatsword_line_315_low", [-0.060, -0.045, -0.134, 0.0, 1.5, -1.0, 1.0]),
+    ("greatsword_line_000_low", [-0.025, -0.011, -0.136, 0.8, 0.0, 1.0, 1.0]),
+    ("greatsword_line_045_low", [0.000, 0.000, 0.000, 1.0, 1.0, 0.0, 1.0]),
+    ("greatsword_line_090_low", [0.000, 0.000, 0.000, 0.0, 2.0, -1.0, 1.0]),
+    ("greatsword_line_135_low", [0.000, 0.000, 0.000, 0.0, 1.5, 1.0, 1.0]),
+    ("greatsword_line_180_low", [-0.041, -0.022, -0.092, 0.0, 2.0, 1.0, 1.0]),
+    ("greatsword_line_225_low", [0.000, 0.000, 0.000, 0.0, 1.5, 1.0, 1.0]),
+    ("greatsword_line_270_low", [0.000, 0.000, 0.000, 0.2, 1.5, -1.0, 1.0]),
+    ("greatsword_line_315_low", [0.000, 0.000, 0.000, 1.0, 1.0, -1.0, 1.0]),
     ("greatsword_stab_low", [-0.058, 0.000, 0.115, 0.0, 0.0, 1.0, 1.0]),
 ];
 
@@ -3167,7 +3174,7 @@ mod wrists {
         }
         eprintln!("{}", lines.join("\n"));
         assert!(
-            total <= 60 && aimed <= 560 && sword_upper <= 20,
+            total <= 60 && aimed <= 440 && sword_upper <= 20,
             "{total} samples out of range, {aimed} in the aimed lines ({sword_upper} in the \
              sword's high and mid ones)\n{}",
             lines.join("\n")
