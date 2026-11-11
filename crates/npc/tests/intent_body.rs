@@ -84,18 +84,19 @@ fn hand_to_hand_people_ask_the_animation_module_for_bodies() {
             two_handed: true,
         }
     );
-    // Not yet: the animation module's round shield carries no team colours.
-    assert!(
-        asked(&app, shield).is_none(),
-        "shield fighters keep the stand-in's pose"
-    );
+    // Sword and shield too: its own painted shield is drawn on the hand the module poses.
+    assert!(asked(&app, shield).is_some(), "shield fighters ask");
     assert_eq!(
-        loadout_of(&NpcWeapon::sword_and_shield()),
-        Some(Loadout {
+        *app.world.get::<Loadout>(shield).unwrap(),
+        Loadout {
             main: ItemClass::OneHandedBlade,
             off: ItemClass::Shield,
             two_handed: false,
-        })
+        }
+    );
+    assert_eq!(
+        loadout_of(&NpcWeapon::sword()).map(|l| l.two_handed),
+        Some(true)
     );
     assert!(app.world.get::<StrikeTargets>(sword).is_some());
     // How many lines of cut it knows: a veteran's skill with its two-handed blade.
@@ -249,8 +250,52 @@ fn a_strike_the_animation_module_plays_lands_through_it_on_the_brains_time() {
     let target = app.world.get::<StrikeTargets>(a).unwrap().target;
     assert_eq!(target, app.world.get::<NpcBrain>(a).unwrap().target);
     assert!(target.is_some(), "strikes close on its foe");
+    // Its own sword is drawn in the module's hands: the module's props are hidden.
+    assert_eq!(params.get("hide_props"), 1.0);
     // And aim where its brain picked (`aim.rs`).
     let zone = app.world.get::<StrikeTargets>(a).unwrap().zone;
     assert!(zone.is_some(), "an aimed strike");
     assert_eq!(zone, app.world.get::<NpcCombat>(a).unwrap().zone);
+}
+
+#[test]
+fn a_body_the_animation_module_poses_takes_its_strike_step_and_a_blows_push() {
+    let mut app = app();
+    let e = fighter(&mut app, 0.0, Faction::ENEMY, NpcWeapon::sword(), 1);
+    app.world.get_mut::<Npc>(e).unwrap().active = false;
+    run(&mut app, 0.2);
+    assert!(app.world.get::<BodyRequest>(e).is_some());
+    let at = |app: &App| app.world.get::<Transform>(e).unwrap().translation;
+    // The module arms it: a strike that steps 2 cm along +X each frame it publishes.
+    let step = Vec3::new(0.02, 0.0, 0.0);
+    let frames = 30;
+    app.update();
+    let from = at(&app);
+    for _ in 0..frames {
+        app.world.entity_mut(e).insert(AttackWindow {
+            warp_delta: step,
+            ..Default::default()
+        });
+        app.update();
+    }
+    assert!(app.world.get::<NpcCombat>(e).unwrap().anim_strikes);
+    let moved = at(&app) - from;
+    assert!(
+        (moved.x - 0.02 * frames as f64).abs() < 0.03 && moved.z.abs() < 0.01,
+        "stepped {moved:?}"
+    );
+    // Between strikes it stays put (an unchanged window adds nothing); a blow pushes it.
+    run(&mut app, 0.5);
+    let from = at(&app);
+    run(&mut app, 0.5);
+    assert!((at(&app) - from).length() < 0.02, "stays between strikes");
+    app.world.entity_mut(e).insert(engine_world::Knockback {
+        velocity: Vec3::new(0.0, 0.0, -1.5),
+    });
+    run(&mut app, 0.4);
+    let pushed = at(&app) - from;
+    assert!(
+        pushed.z < -0.45 && pushed.z > -0.75,
+        "pushed back {pushed:?}"
+    );
 }

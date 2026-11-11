@@ -4,14 +4,14 @@
 //! * **Who.** With [`NpcSettings::anim_bodies`] (and `character_looks`) on, while a character
 //!   module draws appearances (`AppearanceBodies`), a fighter that is a person (it has an
 //!   `Appearance` or asks for one) and fights hand to hand with a longsword or bare fists asks
-//!   the animation module for its body: a
-//!   `BodyRequest::human` with its [`Seed`], a `Loadout` from its weapon ([`loadout_of`]) and
-//!   `StrikeTargets`. Archers and riflemen keep the stand-in's pose (the animation module has
-//!   no carbine and doesn't shoot this crate's arrows), and so do sword-and-shield fighters for
-//!   now: the animation module's shield is a round board that doesn't carry the team's colours
-//!   (they ask once its props can be left to this crate's art). Until the animation module answers (arms
-//!   the body: an `AttackWindow` appears) the stand-in's pose stays, so without one nothing
-//!   changes.
+//!   the animation module for its body: a `BodyRequest::human` with its [`Seed`], a `Loadout`
+//!   from its weapon ([`loadout_of`]) and `StrikeTargets`. Archers and riflemen keep the
+//!   stand-in's pose (the animation module has no carbine and doesn't shoot this crate's
+//!   arrows). Until the animation module answers (arms the body: an `AttackWindow` appears)
+//!   the stand-in's pose stays, so without one nothing changes.
+//! * **Props.** `hide_props` 1 hides the animation module's own sword and shield (their grips
+//!   stay): the fighter's team sword or club and its painted shield are drawn in the hands it
+//!   poses instead (`visuals`).
 //! * **What stays with the stand-in.** What the animation module doesn't play yet goes back to
 //!   the stand-in's pose: the request is taken away while a fighter is down, kneels by a mate
 //!   or gets up from either, and given again once it stands
@@ -137,7 +137,6 @@ pub(crate) fn give_bodies(
             && drawn
             && (looks || asks)
             && kit.is_some()
-            && !weapon.shield
             && !vitals.downed
             && !brain.kneeling()
             && now >= brain.revive_rise_until
@@ -273,6 +272,11 @@ pub(crate) fn drive_bodies(mut q: Query<Driving>) {
         let evasive = if combat.is_dodging(now) { 1.0 } else { 0.0 };
         if params.values.get("evasive") != Some(&evasive) {
             params.set("evasive", evasive);
+        }
+        // Its own sword and shield are drawn in the hands the animation module poses
+        // (`visuals`), so the animation module's props are hidden (their grips stay).
+        if params.values.get("hide_props") != Some(&1.0) {
+            params.set("hide_props", 1.0);
         }
         // A strike the animation module cancelled (blocked, deflected) rebounds: the brain's
         // attacker reels for the rest of it.

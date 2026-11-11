@@ -641,10 +641,20 @@ pub(crate) fn pose_stand_ins(
             };
             let mut p = placed(part.part);
             let mut scale = part.scale;
+            // In the hands the animation module poses: the weapon and shield, carried there as
+            // the stand-in holds them.
+            let carried = match (posed_elsewhere, worn, humanoid::in_hand(part.part)) {
+                (true, Some(frames), Some(k)) => {
+                    (p.pos, p.rot) = frames[3 + k].carry(p.pos, p.rot);
+                    true
+                }
+                _ => false,
+            };
             let kept = match (worn, humanoid::worn(part.part)) {
+                _ if carried => None,
                 (Some(_), Some(humanoid::Worn::Head)) if !helmed => None,
                 (Some(_), Some(humanoid::Worn::Tabard)) if tabarded => None,
-                (Some([hips, chest, head]), Some(w)) => {
+                (Some([hips, chest, head, ..]), Some(w)) => {
                     let frame = match w {
                         humanoid::Worn::Hips | humanoid::Worn::Tabard => hips,
                         humanoid::Worn::Chest => chest,
@@ -668,8 +678,9 @@ pub(crate) fn pose_stand_ins(
             if *t != new {
                 *t = new;
             }
-            // What it holds stays, unless the animation module holds props of its own.
-            let held = humanoid::held(part.part) && !posed_elsewhere;
+            // What it holds stays: on a body the animation module poses, only what it carries
+            // there (its own props are hidden, `hide_props`).
+            let held = humanoid::held(part.part) && (!posed_elsewhere || carried);
             let visible = p.visible && !(drawn_elsewhere && !held && kept.is_none());
             if r.visible != visible {
                 r.visible = visible;

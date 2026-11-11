@@ -34,8 +34,10 @@
 //! * **Bodies drawn elsewhere.** While a character module draws appearances
 //!   (`AppearanceBodies` exists, checked every step), a fighter with an `Appearance` (or
 //!   asking for one) has its stand-in body hidden; what it holds stays (the weapon, the
-//!   shield, a magazine or arrow in hand) unless the animation module poses it from intent and
-//!   holds props of its own (`intent_body.rs`). Once the person is built (its `BodyFit`), what
+//!   shield, a magazine or arrow in hand). Where the animation module poses it from intent
+//!   (`intent_body.rs`) its own props are hidden (`hide_props`) and the sword or club with its
+//!   hilt goes into the drawn right hand, the shield onto the left, held as the stand-in holds
+//!   them. Once the person is built (its `BodyFit`), what
 //!   it wears over the clothes stays too, moved and turned with that person's joints as the
 //!   character module poses them, from the stand-in's pose or the animation module's
 //!   ([`worn_frames`]): the pouches on its hips (and the team's tabards,
@@ -205,7 +207,7 @@ fn drawn_joints(fit: &BodyFit, pose: &[BonePose]) -> Option<[Vec3; 3]> {
         let i = HUMANOID_BONES.iter().position(|(b, _)| *b == name)?;
         pose.get(i).copied()
     };
-    drawn_frames(fit, &ours).map(|f| f.map(|(at, _)| at))
+    drawn_frames(fit, &ours).map(|f| [f[0].0, f[1].0, f[2].0])
 }
 
 /// Where the person drawn from `fit` has its hips, chest and head joints (model space) when
@@ -216,7 +218,7 @@ fn drawn_joints(fit: &BodyFit, pose: &[BonePose]) -> Option<[Vec3; 3]> {
 fn drawn_frames(
     fit: &BodyFit,
     ours: &dyn Fn(&str) -> Option<BonePose>,
-) -> Option<[(Vec3, Quat); 3]> {
+) -> Option<[(Vec3, Quat); 5]> {
     let n = fit.names.len().min(fit.rest.len()).min(fit.parents.len());
     let mut turn = vec![Quat::IDENTITY; n];
     let mut at = vec![Vec3::ZERO; n];
@@ -265,7 +267,13 @@ fn drawn_frames(
         let i = fit.names[..n].iter().position(|b| b == name)?;
         Some((at[i] + shift, ours(name)?.rotation))
     };
-    Some([find("hips")?, find("chest")?, find("head")?])
+    Some([
+        find("hips")?,
+        find("chest")?,
+        find("head")?,
+        find("hand_l")?,
+        find("hand_r")?,
+    ])
 }
 
 /// How the pieces worn from one of the stand-in's joints move onto the person a character
@@ -292,7 +300,7 @@ pub(super) fn worn_frames(
     fit: &BodyFit,
     s: &Skeleton,
     drawn: Option<&SkeletonPose>,
-) -> Option<[WornFrame; 3]> {
+) -> Option<[WornFrame; 5]> {
     let mine = bones(s);
     let ours = |name: &str| {
         let i = HUMANOID_BONES.iter().position(|(b, _)| *b == name)?;
@@ -307,13 +315,13 @@ pub(super) fn worn_frames(
         None => drawn_frames(fit, &ours)?,
     };
     let own = s.worn_joints();
-    let names = ["hips", "chest", "head"];
+    let names = ["hips", "chest", "head", "hand_l", "hand_r"];
     let mut out = [WornFrame {
         own: Vec3::ZERO,
         at: Vec3::ZERO,
         turn: Quat::IDENTITY,
-    }; 3];
-    for i in 0..3 {
+    }; 5];
+    for i in 0..5 {
         let stand_in = ours(names[i])?.rotation;
         out[i] = WornFrame {
             own: own[i],

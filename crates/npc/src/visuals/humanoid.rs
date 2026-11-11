@@ -5965,14 +5965,30 @@ pub(super) fn worn(part: Part) -> Option<Worn> {
 }
 
 impl Skeleton {
-    /// Where the joints worn pieces hang from are, model space: the hips, the chest and the
-    /// head (as `character.rs` writes them).
-    pub(super) fn worn_joints(&self) -> [Vec3; 3] {
+    /// Where the joints worn and held pieces hang from are, model space: the hips, the chest,
+    /// the head and the left and right hands (as `character.rs` writes them).
+    pub(super) fn worn_joints(&self) -> [Vec3; 5] {
         [
             self.pelvis.at(super::character::HIPS),
             self.chest.at(super::character::CHEST),
             self.head.at(super::character::HEAD),
+            self.hand[0].pos,
+            self.hand[1].pos,
         ]
+    }
+}
+
+/// Which hand carries a held piece onto a body another module poses (0 left, 1 right): the
+/// sword or club and its hilt in the right, the shield in the left. The bow and the carbine
+/// aren't carried: archers and riflemen keep the stand-in's pose.
+pub(super) fn in_hand(part: Part) -> Option<usize> {
+    let is = |p: Part| slot(p).is_some() && slot(p) == slot(part);
+    if [Part::Weapon, HILT, PLAIN_WEAPON].into_iter().any(is) {
+        Some(1)
+    } else if [Part::Shield, PLAIN_SHIELD].into_iter().any(is) {
+        Some(0)
+    } else {
+        None
     }
 }
 

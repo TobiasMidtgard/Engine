@@ -10,10 +10,13 @@
 //! terrain, grass and audio react to NPCs and animals the same way they react to the player,
 //! with a `footstep_left` or `footstep_right` `AnimationEvent` (on the humanoid skeleton's
 //! `foot_l` or `foot_r` for people), except for a body the animation module poses from intent
-//! (`intent_body.rs`), whose feet it plants itself.
+//! (`intent_body.rs`), whose feet it plants itself. Such a body also takes the strike's own
+//! step (`AttackWindow::warp_delta`, once for each frame the animation module publishes) and
+//! a blow's push (`Knockback`).
 
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationEvent, AnimationParams};
+use engine_world::combat::{AttackWindow, Knockback};
 use engine_world::locomotion::{LocomotionBackend, LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::CharacterController;
 use engine_world::{ContactKind, Ground, GroundContact, Water, WorldShift};
@@ -105,6 +108,7 @@ type MoverItem<'a> = (
     Option<&'a NpcSkills>,
     Option<&'a Footfall>,
     Has<CharacterController>,
+    (Option<Ref<'a, AttackWindow>>, Option<&'a Knockback>),
 );
 
 /// One thread's footsteps from [`fallback_move`], handed over when the thread is done.
@@ -162,6 +166,7 @@ pub(crate) fn fallback_move(
             skills,
             foot,
             controlled,
+            (window, knockback),
         )| {
             if backend && controlled {
                 return;
@@ -226,6 +231,24 @@ pub(crate) fn fallback_move(
                 v += dv.clamp_length_max(max);
                 new_pos = pos + (v * dt).as_dvec3();
             }
+            // The animation module's strike step (published once a frame: taken when it
+            // changes) and a blow's push, on a body it poses from intent.
+            let mut shove = Vec3::ZERO;
+            if combat.is_some_and(|c| c.anim_strikes) {
+                if let Some(w) = &window
+                    && w.is_changed()
+                {
+                    shove += w.warp_delta;
+                }
+                if let Some(k) = knockback {
+                    shove += k.velocity * dt;
+                }
+                shove.y = 0.0;
+                if !shove.is_finite() {
+                    shove = Vec3::ZERO;
+                }
+                new_pos += shove.as_dvec3();
+            }
             // ---------------------------------------------------------------- collide and stand
             new_pos = world.resolve_overlap(new_pos, motor.radius, motor.height, motor.step_height);
             let surface = world.surface_height(new_pos, pos.y, motor.step_height, &ground);
@@ -248,7 +271,9 @@ pub(crate) fn fallback_move(
                 new_pos.y = w.surface_height - motor.height as f64 * 0.75;
                 grounded = false;
             }
-            let moved = new_pos - pos;
+            // Its own way of moving carries on; the step and the push don't (they are the
+            // animation module's, frame by frame).
+            let moved = new_pos - pos - shove.as_dvec3();
             let vel = (moved / dt as f64).as_vec3();
             t.translation = new_pos;
             // ---------------------------------------------------------------- turn
