@@ -1,6 +1,12 @@
 //! Stand-in bodies: simple figures built from primitives and posed every step from what the
 //! AI is doing, so behavior reads clearly before real character models exist.
 //!
+//! **Frozen, no new moves.** This posing is the no-animation fallback: engine_npc stays
+//! swappable, so without an animation module these poses still animate every fighter. Where
+//! one answers a fighter's `BodyRequest` (`intent_body.rs`) it poses that body and this module
+//! writes none of it, decided per body from the answer (tested in
+//! `tests/intent_body.rs`). New moves go to the animation module, not here.
+//!
 //! Fighters are armored combatants built from procedural meshes (see [`crate::art::fighter`])
 //! on a skeleton whose knees and elbows bend. Their feet stay where they are set on the ground
 //! while the body walks, runs or turns over them, the stride lengthening into a run with the
@@ -664,6 +670,18 @@ pub(crate) fn pose_stand_ins(
                 }
                 _ => false,
             };
+            // A rifleman's muzzle flash, at the muzzle of the animation module's carbine in
+            // the drawn right hand: from the wrist bone, 8.5 cm to the fist's middle, then
+            // along the barrel (the hand's −Y) to the muzzle, the bore 7.5 cm toward −Z.
+            let flash = match (posed_elsewhere && ranged, worn, part.part) {
+                (true, Some(frames), Part::Muzzle) => {
+                    let hand = frames[4];
+                    p.pos = hand.at + hand.rot * (Vec3::NEG_Y * 0.805 + Vec3::NEG_Z * 0.075);
+                    p.rot = hand.rot * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+                    true
+                }
+                _ => false,
+            };
             let kept = match (worn, humanoid::worn(part.part)) {
                 _ if carried => None,
                 (Some(_), Some(humanoid::Worn::Head)) if !helmed => None,
@@ -695,7 +713,8 @@ pub(crate) fn pose_stand_ins(
             // What it holds stays: on a body the animation module poses, only what it carries
             // there (its own props are hidden, `hide_props`).
             let set_down = posed_elsewhere && !carried && hand.is_some();
-            let held = humanoid::held(part.part) && (!posed_elsewhere || carried || set_down);
+            let held =
+                humanoid::held(part.part) && (!posed_elsewhere || carried || set_down || flash);
             let visible = p.visible && !(drawn_elsewhere && !held && kept.is_none());
             if r.visible != visible {
                 r.visible = visible;

@@ -14,7 +14,9 @@
 //!   bends and strings as the body draws) and carbine.
 //! * **Bows.** As the brain winds a shot up the archer gets `draw` (it draws and holds at
 //!   full draw), and `loose` as the arrow flies (this crate's arrow, on this crate's time), or
-//!   `lower` when the shot is called off; it isn't pressed as a quick shot.
+//!   `lower` when the shot is called off; it isn't pressed as a quick shot. `draw_speed` times
+//!   the draw so the hand reaches the anchor [`DRAWN_EARLY_SECS`] before the loose, whatever
+//!   the archer's skill.
 //! * **Guns.** A rifleman's `aim` is up while the brain winds a shot up and for a moment
 //!   after; `fire` goes as the bullet flies, and after every [`MAGAZINE_SHOTS`] shots `reload`
 //!   changes the magazine ([`RELOAD_SECS`]): the brain holds its next shot until it's done,
@@ -88,6 +90,10 @@ pub const MAGAZINE_SHOTS: u32 = 6;
 
 /// How long the animation module's magazine change takes (world seconds).
 pub const RELOAD_SECS: f32 = 2.3;
+/// The animation module's draw to the anchor at `draw_speed` 1, seconds.
+pub const BOW_DRAW_SECS: f32 = 0.78;
+/// How long before the loose an archer's draw reaches the anchor, seconds.
+pub const DRAWN_EARLY_SECS: f32 = 0.1;
 
 /// How long a rifleman keeps its gun shouldered after a shot (own seconds).
 const AIMED_SECS: f64 = 1.5;
@@ -338,6 +344,14 @@ pub(crate) fn drive_bodies(mut q: Query<Driving>, mut triggers: MessageWriter<An
         }
         if params.values.get("strike_speed") != Some(&speed) {
             params.set("strike_speed", speed);
+        }
+        // An archer's draw reaches the anchor just before the brain looses.
+        if is_bow(weapon) {
+            let draw = crate::combat::ranged_windup(weapon, skills) / rate - DRAWN_EARLY_SECS;
+            let draw_speed = (BOW_DRAW_SECS / draw.max(1e-3)).clamp(SPEED_RANGE.0, SPEED_RANGE.1);
+            if params.values.get("draw_speed") != Some(&draw_speed) {
+                params.set("draw_speed", draw_speed);
+            }
         }
         // The brain decides to dodge (and its mover carries the body): the animation module
         // slips or rolls under the strike only then.

@@ -284,6 +284,8 @@ pub(super) struct WornFrame {
     pub own: Vec3,
     pub at: Vec3,
     pub turn: Quat,
+    /// The drawn person's bone itself, turned as posed (model space).
+    pub rot: Quat,
 }
 
 impl WornFrame {
@@ -320,6 +322,7 @@ pub(super) fn worn_frames(
         own: Vec3::ZERO,
         at: Vec3::ZERO,
         turn: Quat::IDENTITY,
+        rot: Quat::IDENTITY,
     }; 5];
     for i in 0..5 {
         let stand_in = ours(names[i])?.rotation;
@@ -327,6 +330,7 @@ pub(super) fn worn_frames(
             own: own[i],
             at: posed[i].0,
             turn: (posed[i].1 * stand_in.inverse()).normalize(),
+            rot: posed[i].1,
         };
     }
     Some(out)

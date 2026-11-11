@@ -2,7 +2,8 @@
 //! test plays its part (it arms a requested body with an `AttackWindow` and plays a wind-up in
 //! it). Hand-to-hand fighters, archers and riflemen ask for bodies; an archer draws, holds and
 //! looses, and a rifleman aims, fires and changes magazines, on the animation module's cues as
-//! its brain shoots; the downed keep
+//! its brain shoots, its draw timed to reach the anchor just before the loose; an answered body
+//! is never posed by the stand-in too; the downed keep
 //! theirs and a mate kneels where that body lies; and a strike the animation module plays is pressed through the
 //! intent, lands through its blows (not this crate's), and has its telegraph timed to the
 //! brain's, aimed at the zone its brain picks.
@@ -10,7 +11,9 @@
 use engine_core::ecs::message::Messages;
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_npc::intent_body::{MAGAZINE_SHOTS, RELOAD_SECS, loadout_of};
+use engine_npc::intent_body::{
+    BOW_DRAW_SECS, DRAWN_EARLY_SECS, MAGAZINE_SHOTS, RELOAD_SECS, loadout_of,
+};
 use engine_npc::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger, BodyRequest, StrikeTargets};
 use engine_world::character::draws_appearances;
@@ -421,14 +424,29 @@ fn an_archer_draws_holds_and_looses_on_the_animation_modules_cues() {
         .resource::<Messages<engine_world::ProjectileTrace>>()
         .get_cursor();
     let (mut seen, mut flew, mut pressed) = (Vec::new(), 0, false);
-    for _ in 0..(8.0 / STEP) as usize {
+    let (mut drew_at, mut held) = (None, Vec::new());
+    for step in 0..(8.0 / STEP) as usize {
         app.update();
         let msgs = app.world.resource::<Messages<AnimationTrigger>>();
-        seen.extend(
-            cues.read(msgs)
-                .filter(|t| t.entity == archer)
-                .map(|t| t.name.clone()),
-        );
+        let new: Vec<_> = cues
+            .read(msgs)
+            .filter(|t| t.entity == archer)
+            .map(|t| t.name.clone())
+            .collect();
+        for name in &new {
+            match name.as_str() {
+                "draw" => drew_at = Some(step),
+                "loose" => {
+                    if let Some(d) = drew_at.take() {
+                        let speed = app.world.get::<AnimationParams>(archer).unwrap();
+                        let anchor = BOW_DRAW_SECS / speed.get("draw_speed");
+                        held.push((step - d) as f32 * STEP - anchor);
+                    }
+                }
+                _ => drew_at = None,
+            }
+        }
+        seen.extend(new);
         let msgs = app
             .world
             .resource::<Messages<engine_world::ProjectileTrace>>();
@@ -454,6 +472,14 @@ fn an_archer_draws_holds_and_looses_on_the_animation_modules_cues() {
     );
     assert!(!pressed, "not pressed as a quick shot");
     assert!(flew >= looses.min(2), "its arrows fly ({flew})");
+    // The draw reaches the anchor just before each loose, not after it.
+    assert!(!held.is_empty());
+    for h in &held {
+        assert!(
+            (h - DRAWN_EARLY_SECS).abs() <= 2.0 * STEP,
+            "anchored {h:.3} s before the loose"
+        );
+    }
     // It shoots the animation module's bow.
     let params = app.world.get::<AnimationParams>(archer).unwrap();
     assert_eq!(params.get("hide_props"), 0.0);
@@ -517,4 +543,79 @@ fn a_rifleman_aims_fires_and_changes_magazines_on_the_animation_modules_cues() {
     assert_eq!(shots_in_reload, 0, "shot while reloading");
     let params = app.world.get::<AnimationParams>(gun).unwrap();
     assert_eq!(params.get("hide_props"), 0.0, "its carbine is the module's");
+}
+
+/// One writer per body: once the animation module has answered a fighter's `BodyRequest` (armed
+/// it), the stand-in's frozen fallback posing never writes that body's `SkeletonPose`, through
+/// a fight, a fall and a revive, for every kit.
+#[test]
+fn an_answered_body_is_never_posed_by_the_stand_in() {
+    use engine_world::animation::{BonePose, SkeletonPose};
+    let mut app = app();
+    let fighters = [
+        fighter(&mut app, -3.0, Faction::ENEMY, NpcWeapon::sword(), 1),
+        fighter(
+            &mut app,
+            -2.0,
+            Faction::ENEMY,
+            NpcWeapon::sword_and_shield(),
+            2,
+        ),
+        fighter(&mut app, 3.0, Faction::RIVAL, NpcWeapon::bow(), 3),
+        fighter(&mut app, 4.0, Faction::RIVAL, NpcWeapon::rifle(), 4),
+    ];
+    // The animation module's own pose: one bone, nowhere a stand-in would put it.
+    let theirs = || SkeletonPose {
+        names: vec!["anim_root".to_string()].into(),
+        parents: vec![None].into(),
+        bones: vec![BonePose {
+            translation: Vec3::splat(9.0),
+            ..Default::default()
+        }],
+    };
+    let answered = |app: &App, e: Entity| {
+        app.world.get::<BodyRequest>(e).is_some() && app.world.get::<AttackWindow>(e).is_some()
+    };
+    run(&mut app, 0.3);
+    for e in fighters {
+        assert!(app.world.get::<BodyRequest>(e).is_some(), "asks for a body");
+        app.world
+            .entity_mut(e)
+            .insert((AttackWindow::default(), theirs()));
+    }
+    let mut checked = 0;
+    for step in 0..60 * 8 {
+        if step == 60 * 2 {
+            // Cut one down, so its fall and a mate's revive are covered too.
+            let at = app.world.get::<Transform>(fighters[0]).unwrap().translation;
+            app.world.write_message(DamageEvent {
+                target: fighters[0],
+                amount: 1000.0,
+                kind: engine_world::DamageKind::Ballistic,
+                point: at + DVec3::Y,
+                impulse: Vec3::Z * 10.0,
+                source: None,
+            });
+        }
+        let before: Vec<bool> = fighters.iter().map(|&e| answered(&app, e)).collect();
+        app.update();
+        for (i, &e) in fighters.iter().enumerate() {
+            if before[i] && answered(&app, e) {
+                let pose = app.world.get::<SkeletonPose>(e).unwrap();
+                assert_eq!(
+                    (&*pose.names, &pose.bones),
+                    (&*theirs().names, &theirs().bones),
+                    "fighter {i} posed by the stand-in at step {step}"
+                );
+                checked += 1;
+            } else {
+                // Not answered across this step: the fallback may pose it; start over.
+                app.world.entity_mut(e).insert(theirs());
+            }
+        }
+    }
+    assert!(
+        checked > 4 * 60 * 7,
+        "answered bodies checked ({checked} steps)"
+    );
 }

@@ -34,6 +34,12 @@ pub(crate) fn roll(seed: u64, now: f64, salt: u64) -> f32 {
     (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
+/// How long a shot's wind-up (aim, or an archer's draw) lasts, own-clock seconds: a better
+/// shot takes less time to line one up.
+pub(crate) fn ranged_windup(weapon: &NpcWeapon, skills: &NpcSkills) -> f32 {
+    weapon.windup * (1.4 - 0.7 * skills.accuracy)
+}
+
 /// Start an attack: enter the windup, telegraph it to the world and trigger the animation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn begin_attack(
@@ -52,7 +58,7 @@ pub(crate) fn begin_attack(
 ) {
     let ranged = weapon.style == WeaponStyle::Ranged;
     let windup = if ranged {
-        weapon.windup * (1.4 - 0.7 * skills.accuracy)
+        ranged_windup(weapon, skills)
     } else {
         weapon.windup * if heavy { 1.5 } else { 1.0 }
     };
