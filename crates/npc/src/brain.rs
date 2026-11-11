@@ -2136,7 +2136,10 @@ fn drive(
                         }
                         // It kneels where it gets to (the body kneels over to the spot);
                         // close enough counts when it gets no closer (someone stands there).
-                        let arrived = follow(pos, spot, 1.0, nav, now, w, s, &mut out)
+                        // A body the animation module poses kneels where it stands (its
+                        // hands reach no farther), so it walks right up to the spot.
+                        let near = if combat.anim_strikes { 0.25 } else { 1.0 };
+                        let arrived = follow(pos, spot, near, nav, now, w, s, &mut out)
                             || (gap < REVIVE_ARRIVE && level && brain.revive_stalled > 0.4);
                         // Every second counts: it sprints unless nearly there.
                         out.sprint = gap > 3.5;

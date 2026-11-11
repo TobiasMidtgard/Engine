@@ -210,7 +210,9 @@ fn a_mate_kneels_where_the_animation_module_let_the_body_fall() {
     assert!(app.world.get::<BodyRequest>(ally).is_some());
     // Armed by the animation module (so the stand-in writes no pose of its own), cut down,
     // and lying 2 m from where it stood.
-    app.world.entity_mut(ally).insert(AttackWindow::default());
+    for e in [ally, mate] {
+        app.world.entity_mut(e).insert(AttackWindow::default());
+    }
     let at = app.world.get::<Transform>(ally).unwrap().translation;
     app.world.write_message(DamageEvent {
         target: ally,
@@ -231,7 +233,11 @@ fn a_mate_kneels_where_the_animation_module_let_the_body_fall() {
             knelt += 1;
             let p = app.world.get::<Transform>(mate).unwrap().translation;
             let gap = DVec2::new(p.x - chest.x, p.z - chest.z).length();
-            assert!(gap < 1.0, "kneels {gap:.2} m from the body's chest");
+            assert!(gap < 0.8, "kneels {gap:.2} m from the body's chest");
+            // In its own body, which the animation module kneels.
+            assert!(app.world.get::<BodyRequest>(mate).is_some());
+            let kneel = app.world.get::<AnimationParams>(mate).unwrap().get("kneel");
+            assert_eq!(kneel, 1.0);
         }
         if !app.world.get::<NpcVitals>(ally).unwrap().downed {
             break;
@@ -243,6 +249,9 @@ fn a_mate_kneels_where_the_animation_module_let_the_body_fall() {
         app.world.get::<BodyRequest>(ally).is_some(),
         "in its own body"
     );
+    run(&mut app, 0.5);
+    let kneel = app.world.get::<AnimationParams>(mate).unwrap().get("kneel");
+    assert_eq!(kneel, 0.0, "and the mate stands again");
 }
 
 /// Plays the animation module's part for `e`: arms its body (an `AttackWindow`), and while

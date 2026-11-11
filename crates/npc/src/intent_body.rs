@@ -17,10 +17,11 @@
 //!   gets it up. Mates kneel by where that body lies ([`drawn_lying`]), not by where the
 //!   stand-in would have fallen. A fighter sent home gives its body back for a step, so it is
 //!   built afresh where it stands.
-//! * **What stays with the stand-in.** What the animation module doesn't play yet goes back to
-//!   the stand-in's pose: the request is taken away while a fighter kneels by a mate or gets
-//!   up from that, and given again once it stands ([`NpcBrain::GET_UP_SECS`] after). A fighter
-//!   on the stand-in's pose that goes down stays on it until it is up again.
+//! * **Revives.** A reviver the animation module poses kneels in its body (`kneel` 1 while the
+//!   brain has it down by a mate: both hands on a chest about 0.45 m ahead), so it walks right
+//!   up to its spot before getting down; what it held is set down where the stand-in sets it.
+//! * **What stays with the stand-in.** A fighter on the stand-in's pose that goes down or
+//!   kneels stays on it until it stands again ([`NpcBrain::GET_UP_SECS`] after).
 //! * **Intent.** The brain already writes `MoveIntent` (`attack` pressed for a strike, `heavy`
 //!   ones as `Dash`; `block` while it guards; `crouch`). Here each step writes
 //!   `StrikeTargets.target` (its foe) and `.zone` (where its strike aims, `aim.rs`: the
@@ -135,7 +136,7 @@ pub(crate) fn give_bodies(
             Some(b) => (b.into_inner(), false),
             None => (&mut fresh, true),
         };
-        if brain.kneeling() || (vitals.downed && !(body.asked && asked)) {
+        if (vitals.downed || brain.kneeling()) && !(body.asked && asked) {
             body.hold_until = body.hold_until.max(now + NpcBrain::GET_UP_SECS);
         }
         let kit = loadout_of(weapon);
@@ -144,10 +145,11 @@ pub(crate) fn give_bodies(
             && drawn
             && (looks || asks)
             && kit.is_some()
-            && !brain.kneeling()
             && now >= body.hold_until
-            // Falls and the get-up after are the animation module's, once it has the body.
-            && ((body.asked && asked) || (!vitals.downed && now >= brain.revive_rise_until));
+            // Falls, kneeling by a mate and getting up from either are the animation
+            // module's, once it has the body.
+            && ((body.asked && asked)
+                || (!vitals.downed && !brain.kneeling() && now >= brain.revive_rise_until));
         let mut cmd = commands.entity(e);
         if want && !asked {
             body.asked = true;
@@ -279,6 +281,11 @@ pub(crate) fn drive_bodies(mut q: Query<Driving>) {
         let evasive = if combat.is_dodging(now) { 1.0 } else { 0.0 };
         if params.values.get("evasive") != Some(&evasive) {
             params.set("evasive", evasive);
+        }
+        // Down on its knees by a mate, its hands on the chest.
+        let kneel = if brain.kneeling() { 1.0 } else { 0.0 };
+        if params.values.get("kneel") != Some(&kneel) {
+            params.set("kneel", kneel);
         }
         // Its own sword and shield are drawn in the hands the animation module poses
         // (`visuals`), so the animation module's props are hidden (their grips stay).

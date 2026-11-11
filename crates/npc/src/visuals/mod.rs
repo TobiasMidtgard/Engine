@@ -652,8 +652,9 @@ pub(crate) fn pose_stand_ins(
             let mut scale = part.scale;
             // In the hands the animation module poses: the weapon and shield, carried there as
             // the stand-in holds them.
+            // (Not what the stand-in has set down or dropped: that stays where it lies.)
             let carried = match (posed_elsewhere, worn, humanoid::in_hand(part.part)) {
-                (true, Some(frames), Some(k)) => {
+                (true, Some(frames), Some(k)) if p.pos.distance(frames[3 + k].own) < 0.3 => {
                     (p.pos, p.rot) = frames[3 + k].carry(p.pos, p.rot);
                     true
                 }
@@ -689,7 +690,8 @@ pub(crate) fn pose_stand_ins(
             }
             // What it holds stays: on a body the animation module poses, only what it carries
             // there (its own props are hidden, `hide_props`).
-            let held = humanoid::held(part.part) && (!posed_elsewhere || carried);
+            let set_down = posed_elsewhere && !carried && humanoid::in_hand(part.part).is_some();
+            let held = humanoid::held(part.part) && (!posed_elsewhere || carried || set_down);
             let visible = p.visible && !(drawn_elsewhere && !held && kept.is_none());
             if r.visible != visible {
                 r.visible = visible;
