@@ -352,6 +352,14 @@ pub mod trial_cut_more {
     /// light; the stepwise one is the finer of the two near the camera and about as fine far
     /// off, so distant haze can shift by a rounding of the march.
     pub const AERIAL_STEPWISE: u32 = 1;
+    /// The ground stays in the far shadow map's still image (the terrain's `FarStill`): it
+    /// was drawn into the far map again every frame, as many triangles as the cascades take
+    /// together. The far map's patches are the camera's own walk a level coarser and its
+    /// bias covers a level's difference, so the image is drawn again when the patches
+    /// changed, at most four times a second, and at once when the camera leaves the map's
+    /// margin or the sun turns, as for buildings. The far map's shadows of the ground can be
+    /// a quarter of a second behind a camera that moves.
+    pub const FAR_GROUND_STILL: u32 = 2;
 }
 
 /// What the screen shows.

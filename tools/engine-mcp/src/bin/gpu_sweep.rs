@@ -419,6 +419,12 @@ fn variants() -> Vec<Variant> {
             "the haze table's atmosphere carried on from slice to slice: 64 steps a column, not 512",
         ),
         v(
+            "cut_far_ground_still",
+            r,
+            json!({"trial_cuts_more": 2}),
+            "the ground stays in the far shadow map's still image, drawn again when its patches changed (at most four times a second), not every frame",
+        ),
+        v(
             "cut_tiled_lamps",
             r,
             json!({"trial_cuts": 1024}),
@@ -590,14 +596,15 @@ fn variants() -> Vec<Variant> {
             // reflection's halved cover taps (256: the plaza fountain's water 4 of 255
             // brighter) and rock's single lookup (1048576).
             // With 2097152: thin sheets read the sun's shadows themselves under the pass.
-            json!({"trial_cuts": 3_137_211, "shadow_refresh_secs": 0.25}),
+            // `trial_cuts_more` 1: the haze table in one sweep.
+            json!({"trial_cuts": 3_137_211, "trial_cuts_more": 1, "shadow_refresh_secs": 0.25}),
             "every same-picture cut in RenderSettings at once (lighting but for the deep-shadow shortcut and the reflection taps, ground textures but for rock's single lookup, ground lines, ground and objects once a pixel, depth first, holes first, nearest first, far shadow refresh): the frame if all of them pass",
         ),
         v(
             "cut_all_no_screen_pass",
             r,
             // `cut_all` without 512, 2048 and 2097152.
-            json!({"trial_cuts": 1_037_499, "shadow_refresh_secs": 0.25}),
+            json!({"trial_cuts": 1_037_499, "trial_cuts_more": 1, "shadow_refresh_secs": 0.25}),
             "cut_all without the screen pass (light and fog once per pixel): with ground and objects already shaded once a pixel, does the pass still pay?",
         ),
         v(

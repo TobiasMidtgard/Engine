@@ -410,6 +410,8 @@ fn material_arrays(
 
 struct ChunkGpu {
     slot: u32,
+    /// Which upload of its terrain's this is: an edited patch built again keeps its slot.
+    stamp: u32,
     origin: DVec3,
     center: DVec3,
     radius: f64,
@@ -419,10 +421,61 @@ struct ChunkGpu {
     skip: SkipCost,
 }
 
+/// The far shadow map's ground in the map's still image (`trial_cut_more::FAR_GROUND_STILL`):
+/// drawn when the image is, not every frame. The far map's walk is the camera's own, a level
+/// coarser, and its bias covers a level's difference, so its patches may be a moment old: the
+/// image is asked for again when they changed (the camera went on, patches arrived, the
+/// ground was edited), at most every [`FAR_STILL_HOLD`]. While a terrain moves its ground is
+/// drawn every frame as before.
+#[derive(Default)]
+struct FarStill {
+    /// The ground goes into the image this frame if the image is drawn (the switch is on and
+    /// no terrain moved since last frame).
+    wanted: bool,
+    /// What the image holds of the ground: the patches' signature and when it was drawn.
+    /// `None`: no ground, it is drawn on top every frame.
+    image: Option<(u64, std::time::Instant)>,
+    /// The image should be drawn again (`shadow_static_changed`).
+    ask: bool,
+    /// The terrains' places last frame.
+    poses: u64,
+}
+
+/// The far shadow map's still image holds the ground's patches at least this long before
+/// changed patches draw it again.
+const FAR_STILL_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
+
+impl FarStill {
+    /// A main view's frame at `now`: `on` (the switch, with a far map), the terrains' places,
+    /// the far patches' signature, and whether the map's still image is drawn this frame.
+    fn frame(&mut self, on: bool, poses: u64, patches: u64, redraw: bool, now: std::time::Instant) {
+        self.wanted = on && poses == self.poses;
+        self.poses = poses;
+        if redraw {
+            self.image = self.wanted.then_some((patches, now));
+        }
+        self.ask = match (self.wanted, self.image) {
+            (true, Some((drawn, at))) => {
+                drawn != patches && now.duration_since(at) >= FAR_STILL_HOLD
+            }
+            // Into the image, or out of it.
+            (true, None) | (false, Some(_)) => true,
+            (false, None) => false,
+        };
+    }
+
+    /// Whether the ground is drawn into the far map on top of the image this frame.
+    fn moving(&self) -> bool {
+        !(self.wanted && self.image.is_some())
+    }
+}
+
 struct PlanetState {
     lod: Lod,
     version: u64,
     edits_seen: usize,
+    /// Patches uploaded so far (`ChunkGpu::stamp`).
+    uploads: u32,
     chunks: HashMap<NodeKey, ChunkGpu>,
     /// Built patches to rebuild in place (edited), nearest first when drained.
     rebuild: Vec<NodeKey>,
@@ -471,6 +524,7 @@ impl PlanetState {
             lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
             version: t.version,
             edits_seen: 0,
+            uploads: 0,
             chunks: HashMap::new(),
             rebuild: Vec::new(),
             building: HashSet::new(),
@@ -656,6 +710,9 @@ pub struct TerrainFeature {
     shadow_draws: [Vec<Draw>; 4],
     /// Patches drawn into the far shadow map (big shadows beyond the cascades).
     far_shadow_draws: Vec<Draw>,
+    /// The far shadow map's ground kept in the map's still image
+    /// (`trial_cut_more::FAR_GROUND_STILL`).
+    far_still: FarStill,
     /// Draw each list's runs of patches on one vertex page with one
     /// `multi_draw_indexed_indirect` (`RenderSettings::multi_draw_indirect`, where the GPU
     /// takes a first instance in indirect draws): a few commands a pass instead of one per
@@ -2351,6 +2408,16 @@ impl RenderFeature for TerrainFeature {
         built_total += uploads;
         steps.mark("uploads");
 
+        // What the far shadow map's ground is made of this frame, and where the terrains are
+        // (`FarStill`): sums of hashes, so the order doesn't count.
+        let mut far_patches = 0u64;
+        let mut far_poses = 0u64;
+        let hashed = |v: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+            use std::hash::Hasher;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v(&mut h);
+            h.finish()
+        };
         for (pi, e) in entities.iter().enumerate() {
             let t = &terrains.entries[e];
             let src = t.source.clone();
@@ -2704,7 +2771,18 @@ impl RenderFeature for TerrainFeature {
                     instance,
                     list: 0,
                 });
+                far_patches = far_patches.wrapping_add(hashed(&|h| {
+                    use std::hash::Hash;
+                    (pi, key, c.stamp).hash(h);
+                }));
             }
+            far_poses = far_poses.wrapping_add(hashed(&|h| {
+                use std::hash::Hash;
+                (pi, t.version).hash(h);
+                for v in pos.to_array().into_iter().chain(rot.to_array()) {
+                    v.to_bits().hash(h);
+                }
+            }));
 
             steps.mark("patches: draw lists");
             let p = &t.config.palette;
@@ -2831,12 +2909,31 @@ impl RenderFeature for TerrainFeature {
             self.rebuild_group(gpu_shared);
         }
 
+        if !mirror {
+            let on = render_settings.trial_cuts_more
+                & engine_render::settings::trial_cut_more::FAR_GROUND_STILL
+                != 0
+                && view.sun_shadows
+                && view.far_shadow.enabled;
+            self.far_still.frame(
+                on,
+                far_poses,
+                far_patches,
+                view.far_shadow.static_redraw,
+                std::time::Instant::now(),
+            );
+        }
+        let far_drawn = if self.far_still.moving() || view.far_shadow.static_redraw {
+            self.far_shadow_draws.len()
+        } else {
+            0
+        };
         let index_lists = self.gpu.as_ref().map(|g| g.index_lists).unwrap_or_default();
         let triangles = |d: &Draw| (index_lists[d.list as usize].1 / 3) as u64;
         self.stats = FeatureStats {
             draw_calls: (self.draws.len()
                 + self.shadow_draws.iter().map(Vec::len).sum::<usize>()
-                + self.far_shadow_draws.len()) as u32,
+                + far_drawn) as u32,
             instances: self.draws.len() as u32,
             triangles: self.draws.iter().map(triangles).sum(),
             culled: 0,
@@ -3058,18 +3155,20 @@ impl RenderFeature for TerrainFeature {
     }
 
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        if self.far_shadow_draws.is_empty() {
-            return;
+        if self.far_still.moving() {
+            self.draw_far_ground(pass);
         }
-        let Some(gpu) = &self.gpu else {
-            return;
-        };
-        let Some(group) = &gpu.group else {
-            return;
-        };
-        pass.set_pipeline(&gpu.shadow_pipeline);
-        pass.set_bind_group(1, group, &[]);
-        self.draw_list(pass, gpu, DrawList::FarShadow, &self.far_shadow_draws);
+    }
+
+    fn draw_shadow_static(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, _ctx: &FrameContext) {
+        // (`FarStill`: the far map's ground, kept in the map's still image.)
+        if map == engine_render::shadows::FAR_SHADOW_MAP && self.far_still.wanted {
+            self.draw_far_ground(pass);
+        }
+    }
+
+    fn shadow_static_changed(&self, map: usize) -> bool {
+        map == engine_render::shadows::FAR_SHADOW_MAP && self.far_still.ask
     }
 
     fn stats(&self) -> FeatureStats {
@@ -3094,6 +3193,22 @@ impl RenderFeature for TerrainFeature {
 }
 
 impl TerrainFeature {
+    /// The far shadow map's patches, into the map or its still image.
+    fn draw_far_ground(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.far_shadow_draws.is_empty() {
+            return;
+        }
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let Some(group) = &gpu.group else {
+            return;
+        };
+        pass.set_pipeline(&gpu.shadow_pipeline);
+        pass.set_bind_group(1, group, &[]);
+        self.draw_list(pass, gpu, DrawList::FarShadow, &self.far_shadow_draws);
+    }
+
     fn draw_list(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -3567,10 +3682,12 @@ fn upload(
     state
         .lod
         .set_built(m.key, m.min_height, m.max_height, m.center, m.radius);
+    state.uploads = state.uploads.wrapping_add(1);
     state.chunks.insert(
         m.key,
         ChunkGpu {
             slot,
+            stamp: state.uploads,
             origin: m.origin,
             center: m.center,
             radius: m.radius,
@@ -3602,6 +3719,39 @@ fn melt_latitude(c: &crate::shape::Climate) -> f32 {
 mod tests {
     use super::*;
     use engine_render::features::{compose_shader, validate_wgsl};
+
+    #[test]
+    fn far_ground_stays_in_the_image_until_its_patches_change_and_the_hold_is_over() {
+        let t0 = std::time::Instant::now();
+        let later = t0 + FAR_STILL_HOLD;
+        let mut f = FarStill::default();
+        // Off: drawn every frame, nothing asked.
+        f.frame(false, 7, 1, true, t0);
+        assert!(f.moving() && !f.ask);
+        // On: asks for the image, drawn on top until the image holds the ground.
+        f.frame(true, 7, 1, false, t0);
+        assert!(f.moving() && f.ask);
+        f.frame(true, 7, 1, true, t0);
+        assert!(!f.moving() && !f.ask && f.wanted);
+        // Changed patches wait for the hold.
+        f.frame(true, 7, 2, false, t0);
+        assert!(!f.moving() && !f.ask);
+        f.frame(true, 7, 2, false, later);
+        assert!(!f.moving() && f.ask);
+        f.frame(true, 7, 2, true, later);
+        assert!(!f.moving() && !f.ask);
+        // A terrain moved: out of the image, and drawn on top at once.
+        f.frame(true, 8, 2, false, later);
+        assert!(f.moving() && f.ask && !f.wanted);
+        f.frame(true, 9, 2, true, later);
+        assert!(f.moving() && !f.ask);
+        // Switched off while in the image: the same.
+        f.frame(true, 9, 2, false, later);
+        f.frame(true, 9, 2, true, later);
+        assert!(!f.moving());
+        f.frame(false, 9, 2, false, later);
+        assert!(f.moving() && f.ask);
+    }
 
     #[test]
     fn weather_texture_follows_the_grid_as_it_moves() {
