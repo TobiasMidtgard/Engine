@@ -461,6 +461,8 @@ struct GroundStill {
     /// on such a frame.
     lacking: bool,
     provisional: bool,
+    /// Times the image was drawn with the ground in it (for `describe`).
+    drawn: u32,
 }
 
 /// A shadow map's still image holds the ground at least this long before an edit or a grown
@@ -498,6 +500,7 @@ impl GroundStill {
         self.poses.clone_from(poses);
         self.casters.clear();
         self.into_image = self.wanted && redraw;
+        self.drawn += self.into_image as u32;
         if redraw {
             self.image = self.wanted.then(|| (HashMap::new(), now));
         }
@@ -3398,6 +3401,10 @@ impl RenderFeature for TerrainFeature {
                 .zip(&self.stills)
                 .map(|(d, s)| if s.into_image { 0 } else { d.len() })
                 .collect::<Vec<_>>(),
+            // How often each image was drawn with the ground in it so far, and the images
+            // drawn while their ground was still loading (drawn again once a second).
+            "shadow_images_drawn": self.stills.iter().map(|s| s.drawn).collect::<Vec<_>>(),
+            "shadow_images_loading": self.stills.iter().map(|s| s.provisional).collect::<Vec<_>>(),
             "far_shadow_patches_still": self.stills[FAR_STILL].image.as_ref().map_or(0, |i| i.0.len()),
             "patches_resident": self.pool.used(),
             "patches_built_last_frame": self.built_last_frame,
