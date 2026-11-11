@@ -363,6 +363,33 @@ pub fn index_patches(
     field.refuel(min, max, &contains, &mut fuel);
 }
 
+/// Whether the fire field has every tile under the square `reach` meters round `p`; the
+/// missing ones are asked off the frame ([`FireField::ask_tiles`]), so a demo's jump ahead
+/// can wait for its ground instead of making it in the middle of a frame.
+pub(crate) fn ask_ground(world: &mut World, p: DVec3, reach: f32) -> bool {
+    world.resource_scope(|world, mut field: Mut<FireField>| {
+        let (Some(ground), Some(water), Some(materials), Some(patches), Some(settings)) = (
+            world.get_resource::<Ground>(),
+            world.get_resource::<Water>(),
+            world.get_resource::<SurfaceMaterials>(),
+            world.get_resource::<FirePatches>(),
+            world.get_resource::<FireSettings>(),
+        ) else {
+            return true;
+        };
+        let mut fuel = WorldFuel {
+            ground,
+            water,
+            materials,
+            patches: &patches.list,
+            ground_fuel: settings.ground_fuel,
+            later: true,
+        };
+        field.land_grown();
+        field.ask_tiles(p, reach, &mut fuel)
+    })
+}
+
 /// Handle `IgniteRequest`, hot `WorldImpulse`s and API commands.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_ignition(

@@ -903,6 +903,13 @@ fn run_ahead(world: &mut World, place: Place, demo: &FireDemo, state: &mut FireD
         world.resource::<Time>().source(),
         engine_core::time::TimeSource::Manual { .. }
     );
+    if !manual && !sim::ask_ground(world, place.origin, reach(demo) as f32) {
+        // The ground under the whole demo is asked off the frame first: in the jump every tile
+        // the fire walks into is made on the spot (so it burns the same way every time), up
+        // to 36 ms a frame on the session VM as the field streamed in (stutter round 3).
+        state.ahead = Some(ahead);
+        return;
+    }
     let budget = world
         .get_resource::<LoadingBudget>()
         .map(|b| b.budget_ms)
@@ -1467,6 +1474,50 @@ mod tests {
             0,
             "a manual clock jumps in the lighting frame"
         );
+    }
+
+    #[test]
+    fn in_play_the_jump_waits_for_its_ground_and_makes_no_tile_itself() {
+        engine_core::tasks::init_task_pools();
+        let mut app = App::new();
+        app.add_plugins(FirePlugin);
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, DVec3::ZERO);
+        }
+        app.world.flush();
+        let mut demos = app.world.query::<&mut FireDemo>();
+        demos.single_mut(&mut app.world).unwrap().warmup_secs = 5.0;
+        let state = |app: &mut App| {
+            let mut q = app.world.query::<&FireDemoState>();
+            *q.single(&app.world).unwrap()
+        };
+        let tiles = |app: &App| app.world.resource::<FireField>().tiles.len();
+        let mut frames = 0;
+        while !state(&mut app).started {
+            app.update();
+            frames += 1;
+            assert!(frames < 100, "the demo lights");
+        }
+        let steps = state(&mut app).ahead.expect("a jump to run").steps;
+        assert_eq!(tiles(&app), 0, "no ground was made on the lighting frame");
+        // The jump stands still until the whole demo's ground has landed, then makes none.
+        let mut jumping_with = None;
+        while app.world.contains_resource::<Starting>() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            app.update();
+            frames += 1;
+            assert!(frames < 5000);
+            let s = state(&mut app);
+            let moved = s.ahead.is_none_or(|a| a.steps < steps);
+            if moved && jumping_with.is_none() {
+                jumping_with = Some(tiles(&app));
+            }
+        }
+        let had = jumping_with.expect("the jump ran");
+        assert!(had > 0);
+        assert_eq!(tiles(&app), had, "the jump found all its ground there");
+        assert!(app.world.resource::<FireField>().stats.burning_m2 > 0.0);
     }
 
     #[test]
