@@ -1330,6 +1330,19 @@ fn run(args: &Args) -> Result<(), String> {
                 ));
                 stop_json.insert("meshes".into(), m.clone());
             }
+            // What the ground reports (patches resident and in the shadow maps' still images,
+            // how often each image was drawn so far), to read the shadow rows against.
+            if let Some(terrain) = at["renderer"]["features"]
+                .as_array()
+                .and_then(|f| f.iter().find(|f| f["name"] == "terrain"))
+            {
+                let t = &terrain["state"];
+                md.push_str(&format!(
+                    "Ground: {} patches resident, {} in the shadow maps' still images, each drawn {} times so far.\n\n",
+                    t["patches_resident"], t["shadow_patches_still"], t["shadow_images_drawn"]
+                ));
+                stop_json.insert("terrain".into(), t.clone());
+            }
         }
         md.push_str("| pass | ms |\n|---|---|\n");
         let mut passes: Vec<(&String, f64)> = base
