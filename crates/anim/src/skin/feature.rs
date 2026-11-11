@@ -70,7 +70,7 @@ use engine_render::features::{
 use engine_render::frame::ViewData;
 use engine_render::mesh_feature::MeshInstance;
 use engine_render::settings::RenderSettings;
-use engine_render::shadows::MAX_CASCADES;
+use engine_render::shadows::{MAX_CASCADES, ShadowTiles};
 use engine_render::wgpu;
 use wgpu::util::DeviceExt;
 
@@ -2041,6 +2041,15 @@ impl RenderFeature for SkinningFeature {
                 pass.draw_indexed(part.first..part.first + part.count, 0, shells.clone());
             }
         }
+    }
+
+    fn shadow_moving(&self, map: usize, ctx: &FrameContext) -> ShadowTiles {
+        let mut tiles = ShadowTiles::NONE;
+        for &i in self.shadow.get(map).into_iter().flatten() {
+            let item = &self.items[i as usize];
+            tiles.add_sphere(ctx.view, map, item.center, item.radius);
+        }
+        tiles
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {

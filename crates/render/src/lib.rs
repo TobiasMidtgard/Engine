@@ -627,6 +627,11 @@ mod tests {
                 include_str!("shaders/material_gen_mips.wgsl").into(),
                 false,
             ),
+            (
+                "shadow_restore",
+                include_str!("shaders/shadow_restore.wgsl").into(),
+                false,
+            ),
         ];
         // Every material preset's generator.
         for preset in MaterialPreset::ALL {

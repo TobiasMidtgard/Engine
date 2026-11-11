@@ -862,6 +862,261 @@ fn look_rotation_f64(forward: DVec3) -> DQuat {
     DQuat::from_mat3(&DMat3::from_cols(right, up, -f))
 }
 
+/// Tiles along each side of a shadow map in [`ShadowTiles`].
+pub const SHADOW_TILE_GRID: u32 = 16;
+
+/// Texels added around what a caster covers in [`ShadowTiles::add_sphere`]: a map whose size
+/// is no multiple of the grid has tile edges up to a texel off, and a vertex bias may move a
+/// caster by less than one.
+const TILE_MARGIN_TEXELS: f32 = 2.0;
+
+/// How camera-relative points land in a shadow map, for [`ShadowTiles::add_projected`]: the
+/// map's orthographic projection, taken apart once for many casters.
+#[derive(Debug, Clone, Copy)]
+pub struct TileProjection {
+    /// Clip space `x` and `y` of a point `p`: `across.dot(p.extend(1.0))`, `up.dot(..)`.
+    across: Vec4,
+    up: Vec4,
+    /// A meter's length in clip space along each (the same everywhere: orthographic).
+    meter: Vec2,
+    /// [`TILE_MARGIN_TEXELS`] in clip space.
+    margin: f32,
+}
+
+impl TileProjection {
+    /// Of shadow map `map` of `view` (none for a number that names no map).
+    pub fn of(view: &crate::ViewData, map: usize) -> Option<Self> {
+        let (view_proj, size) = match map {
+            SKY_OCCLUSION_VIEW => (view.sky_occlusion.view_proj, view.sky_occlusion.map_size),
+            FAR_SHADOW_MAP => (view.far_shadow.view_proj, view.far_shadow.map_size),
+            c if c < MAX_CASCADES => (view.cascades.view_proj[c], view.cascades.map_size),
+            _ => return None,
+        };
+        Some(Self::new(&view_proj, size))
+    }
+
+    /// Of a map drawn with the orthographic `view_proj` at `size`² texels.
+    pub fn new(view_proj: &Mat4, size: u32) -> Self {
+        let (across, up) = (view_proj.row(0), view_proj.row(1));
+        Self {
+            across,
+            up,
+            meter: Vec2::new(across.truncate().length(), up.truncate().length()),
+            margin: 2.0 * TILE_MARGIN_TEXELS / size.max(1) as f32,
+        }
+    }
+}
+
+/// Parts of a shadow map: a 16 by 16 grid of tiles over it, a bit a tile (row 0 at the top of
+/// the map, as its texels are stored).
+///
+/// A map holds its static image with the moving casters drawn on top. It is not copied from
+/// the image every frame (five maps of 4096² are 335 MB): each feature names the tiles its
+/// moving casters draw into ([`crate::RenderFeature::shadow_moving`]), and the next frame
+/// only those tiles are put back from the image before that frame's casters are drawn. Where
+/// nothing moves nothing is touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShadowTiles([u16; SHADOW_TILE_GRID as usize]);
+
+impl ShadowTiles {
+    pub const NONE: Self = Self([0; SHADOW_TILE_GRID as usize]);
+    /// The whole map: for casters whose place isn't known, or spread all over it.
+    pub const ALL: Self = Self([u16::MAX; SHADOW_TILE_GRID as usize]);
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|r| *r == 0)
+    }
+
+    /// Number of tiles (of 256).
+    pub fn count(&self) -> u32 {
+        self.0.iter().map(|r| r.count_ones()).sum()
+    }
+
+    pub fn add(&mut self, other: Self) {
+        for (a, b) in self.0.iter_mut().zip(other.0) {
+            *a |= b;
+        }
+    }
+
+    /// Add the tiles a rectangle touches: `min` and `max` in map coordinates (0 to 1 across,
+    /// `y` down from the top). Parts outside the map are left out; a rectangle that isn't
+    /// finite takes the whole map.
+    pub fn add_rect(&mut self, min: Vec2, max: Vec2) {
+        if !(min.is_finite() && max.is_finite()) {
+            *self = Self::ALL;
+            return;
+        }
+        if max.x < 0.0 || max.y < 0.0 || min.x > 1.0 || min.y > 1.0 {
+            return;
+        }
+        let n = SHADOW_TILE_GRID as f32;
+        let tile = |v: f32| ((v * n).floor().max(0.0) as u32).min(SHADOW_TILE_GRID - 1);
+        let (x0, x1) = (tile(min.x), tile(max.x));
+        let bits = (u16::MAX >> (15 - (x1 - x0))) << x0;
+        for row in &mut self.0[tile(min.y) as usize..=tile(max.y) as usize] {
+            *row |= bits;
+        }
+    }
+
+    /// Add the tiles a caster's bounding sphere (camera-relative, as the features cull with)
+    /// draws into in shadow map `map` of `view`: a cascade, [`SKY_OCCLUSION_VIEW`] or
+    /// [`FAR_SHADOW_MAP`]. A sphere without a finite size takes the whole map. For many
+    /// casters, make the map's [`TileProjection`] once and use
+    /// [`add_projected`](Self::add_projected).
+    pub fn add_sphere(&mut self, view: &crate::ViewData, map: usize, center: Vec3, radius: f32) {
+        if let Some(projection) = TileProjection::of(view, map) {
+            self.add_projected(&projection, center, radius);
+        }
+    }
+
+    /// [`add_sphere`](Self::add_sphere) with the map's projection made beforehand.
+    pub fn add_projected(&mut self, map: &TileProjection, center: Vec3, radius: f32) {
+        let p = center.extend(1.0);
+        let (x, y) = (map.across.dot(p), map.up.dot(p));
+        let (rx, ry) = (
+            map.meter.x * radius + map.margin,
+            map.meter.y * radius + map.margin,
+        );
+        // Clip space `y` is up, the map's rows go down.
+        self.add_rect(
+            Vec2::new(0.5 + 0.5 * (x - rx), 0.5 - 0.5 * (y + ry)),
+            Vec2::new(0.5 + 0.5 * (x + rx), 0.5 - 0.5 * (y - ry)),
+        );
+    }
+
+    /// The tiles as rectangles of a `size`² map, `[x, y, width, height]` in texels: runs along
+    /// each row, joined with the same run in the rows below.
+    pub fn rects(&self, size: u32) -> Vec<[u32; 4]> {
+        let n = SHADOW_TILE_GRID;
+        let edge = |t: u32| (t as u64 * size as u64 / n as u64) as u32;
+        // Rectangles in tiles, [x0, x1, y0, y1), and those that reach the row before.
+        let mut out: Vec<[u32; 4]> = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        for (y, &row) in self.0.iter().enumerate() {
+            let y = y as u32;
+            let mut reach = Vec::new();
+            let mut x = 0;
+            while x < n {
+                if row & (1 << x) == 0 {
+                    x += 1;
+                    continue;
+                }
+                let x0 = x;
+                while x < n && row & (1 << x) != 0 {
+                    x += 1;
+                }
+                // The run goes on from the row above, or starts a rectangle.
+                match open.iter().find(|&&k| out[k][0] == x0 && out[k][1] == x) {
+                    Some(&k) => {
+                        out[k][3] = y + 1;
+                        reach.push(k);
+                    }
+                    None => {
+                        reach.push(out.len());
+                        out.push([x0, x, y, y + 1]);
+                    }
+                }
+            }
+            open = reach;
+        }
+        out.iter()
+            .map(|r| {
+                let (x, y) = (edge(r[0]), edge(r[2]));
+                [x, y, edge(r[1]) - x, edge(r[3]) - y]
+            })
+            .filter(|r| r[2] > 0 && r[3] > 0)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+
+    /// Every texel of a `size`² map the rectangles cover, and that none is covered twice.
+    fn covered(tiles: &ShadowTiles, size: u32) -> Vec<bool> {
+        let mut texels = vec![false; (size * size) as usize];
+        for [x, y, w, h] in tiles.rects(size) {
+            assert!(x + w <= size && y + h <= size);
+            for v in y..y + h {
+                for u in x..x + w {
+                    let t = &mut texels[(v * size + u) as usize];
+                    assert!(!*t, "texel {u},{v} twice");
+                    *t = true;
+                }
+            }
+        }
+        texels
+    }
+
+    #[test]
+    fn rectangles_cover_their_tiles_once() {
+        let mut tiles = ShadowTiles::NONE;
+        assert!(tiles.is_empty() && tiles.rects(4096).is_empty());
+        // An L, a lone tile and a block that shares a run with the L for two rows.
+        tiles.add_rect(Vec2::new(0.01, 0.01), Vec2::new(0.3, 0.05));
+        tiles.add_rect(Vec2::new(0.01, 0.01), Vec2::new(0.05, 0.4));
+        tiles.add_rect(Vec2::new(0.9, 0.9), Vec2::new(0.91, 0.91));
+        tiles.add_rect(Vec2::new(0.5, 0.2), Vec2::new(0.7, 0.3));
+        for size in [256, 1000, 4096] {
+            let texels = covered(&tiles, size);
+            // The tile of a texel, by the whole-texel edges `rects` gives the tiles.
+            let tile = |u: u32| (0..16).rfind(|t| t * size / 16 <= u).unwrap();
+            for v in 0..size {
+                for u in 0..size {
+                    let inside = tiles.0[tile(v) as usize] & (1 << tile(u)) != 0;
+                    assert_eq!(texels[(v * size + u) as usize], inside, "{size}: {u},{v}");
+                }
+            }
+        }
+        assert_eq!(ShadowTiles::ALL.rects(4096), vec![[0, 0, 4096, 4096]]);
+        assert_eq!(ShadowTiles::ALL.count(), 256);
+        // The L's long row, its column below, the block and the lone tile.
+        assert_eq!(tiles.rects(4096).len(), 4);
+    }
+
+    #[test]
+    fn a_sphere_takes_the_tiles_it_draws_into() {
+        // A cascade of 100 m half extent, sun straight overhead, at the origin.
+        let mut c = Cascades {
+            count: 1,
+            map_size: 4096,
+            ..Default::default()
+        };
+        c.place(0, DVec3::ZERO, DVec3::ZERO, Vec3::Y, 100.0);
+        let map = TileProjection::new(&c.view_proj[0], 4096);
+        let texel_of = |p: Vec3| {
+            let clip = c.view_proj[0].project_point3(p);
+            Vec2::new(0.5 + 0.5 * clip.x, 0.5 - 0.5 * clip.y) * 4096.0
+        };
+        for (center, radius) in [
+            (Vec3::new(10.0, 3.0, -40.0), 2.0),
+            (Vec3::new(-99.0, 0.0, 99.0), 5.0),
+            (Vec3::new(0.0, 50.0, 0.0), 30.0),
+        ] {
+            let mut tiles = ShadowTiles::NONE;
+            tiles.add_projected(&map, center, radius);
+            let texels = covered(&tiles, 4096);
+            assert!(tiles.count() > 0 && tiles.count() < 256);
+            // Points on the sphere land on covered texels (those inside the map).
+            for k in 0..64 {
+                let (a, b) = (k as f32 * 0.4, k as f32 * 1.3);
+                let p = center + radius * Vec3::new(a.cos() * b.sin(), a.sin(), a.cos() * b.cos());
+                let t = texel_of(p);
+                if t.x >= 0.0 && t.y >= 0.0 && t.x < 4096.0 && t.y < 4096.0 {
+                    assert!(texels[t.y as usize * 4096 + t.x as usize], "{center} {p}");
+                }
+            }
+        }
+        // Outside the map: nothing; no finite size: everything.
+        let mut tiles = ShadowTiles::NONE;
+        tiles.add_projected(&map, Vec3::new(500.0, 0.0, 0.0), 10.0);
+        assert!(tiles.is_empty());
+        tiles.add_projected(&map, Vec3::ZERO, f32::INFINITY);
+        assert_eq!(tiles, ShadowTiles::ALL);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

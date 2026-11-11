@@ -326,6 +326,9 @@ pub struct FrameEmitter {
     pub cursor: Option<u32>,
     /// Bounding radius around `origin` for culling, meters.
     pub reach: f32,
+    /// The radius its solid pieces' shadows are drawn within, meters
+    /// ([`EmitterDesc::landing_reach`]).
+    pub landing_reach: f32,
 }
 
 /// Everything the GPU needs this frame. Rebuilt every frame by [`tick_effects`].
@@ -373,6 +376,7 @@ struct EmitterRun {
     feeders: Box<[usize]>,
     sub_layers: [Option<usize>; 3],
     reach: f32,
+    landing_reach: f32,
 }
 
 struct Instance {
@@ -539,6 +543,7 @@ impl Instance {
                 feeders: desc.feeders(i).map(|(j, ..)| j).collect(),
                 sub_layers: [layer(&e.on_hit), layer(&e.on_death), layer(&e.trailing)],
                 reach: desc.layer_reach(i),
+                landing_reach: desc.layer_landing_reach(i),
             })
             .collect();
     }
@@ -1185,6 +1190,8 @@ fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
             runs: run.runs.clone(),
             cursor: run.cursor,
             reach: run.reach * inst.scale.max(0.01) + inst.vel.length() * desc.max_lifetime(),
+            landing_reach: run.landing_reach * inst.scale.max(0.01)
+                + inst.vel.length() * desc.max_lifetime(),
         });
         let gpu = &mut out.last_mut().expect("just pushed").gpu;
         for (slot, layer) in gpu.sub_target.iter_mut().zip(run.sub_layers) {

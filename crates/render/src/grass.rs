@@ -34,7 +34,7 @@ use crate::features::{
 use crate::frame::{MAX_BENDERS, ViewData};
 use crate::renderer::layout_entry;
 use crate::settings::RenderSettings;
-use crate::shadows::MAX_CASCADES;
+use crate::shadows::{MAX_CASCADES, ShadowTiles};
 
 /// Tile edge, meters (must match `GRASS_TILE` in the shader).
 const TILE: f32 = 8.0;
@@ -1358,6 +1358,8 @@ pub struct GrassFeature {
     field_jobs: Vec<(usize, u32, u32)>,
     /// Draw groups with blades this frame.
     groups: [bool; GROUPS],
+    /// The tiles of each cascade the blades that cast draw into.
+    shadow_tiles: [ShadowTiles; MAX_CASCADES],
     map_layout: Option<wgpu::BindGroupLayout>,
     pipeline: Option<wgpu::RenderPipeline>,
     prepass_pipeline: Option<wgpu::RenderPipeline>,
@@ -1726,6 +1728,7 @@ impl RenderFeature for GrassFeature {
         self.jobs.clear();
         self.field_jobs.clear();
         self.groups = [false; GROUPS];
+        self.shadow_tiles = [ShadowTiles::NONE; MAX_CASCADES];
         let mut group_blades = [0u64; GROUPS];
         self.stats = FeatureStats::default();
         let (Some(map_layout), Some((_, no_wear))) = (&self.map_layout, &self.no_wear) else {
@@ -1900,6 +1903,8 @@ impl RenderFeature for GrassFeature {
                         push_jobs(&mut self.jobs, first, shadow_count, mask, segments);
                         for c in in_cascade {
                             group_blades[shadow_group(c, segments)] += shadow_count as u64;
+                            // (Blades lean out of their tile's box by less than this.)
+                            self.shadow_tiles[c].add_sphere(view, c, center, radius + 0.5);
                         }
                     }
                     drew = true;
@@ -2123,6 +2128,13 @@ impl RenderFeature for GrassFeature {
         }
         if let Some(pipeline) = &self.cut_pipeline {
             self.draw_kept(pass, pipeline, CUT_GROUP..CUT_GROUP + 1);
+        }
+    }
+
+    fn shadow_moving(&self, map: usize, _ctx: &FrameContext) -> ShadowTiles {
+        match self.shadow_tiles.get(map) {
+            Some(tiles) if self.shadow_pipeline.is_some() && !self.field_jobs.is_empty() => *tiles,
+            _ => ShadowTiles::NONE,
         }
     }
 

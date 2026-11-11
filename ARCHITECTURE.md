@@ -175,6 +175,7 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `draw_environment` | add to the sky environment map (clouds, nebulae); it is filtered afterwards, so what is drawn here lights every surface and shows in rough reflections |
 | `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
+| `shadow_moving(map)` | **required with `draw_shadow`/`draw_far_shadow`**: the tiles of the map this frame's moving casters draw into (`ShadowTiles::add_sphere` with each caster's bounding sphere). A map is put back to its static image only in the tiles named the frame before, and is not drawn into when no feature names any; a caster outside its tiles leaves its shadow behind (`crates/render/tests/shadow_tiles.rs` checks that every feature answers) |
 | `draw_far_shadow` | big casters only (terrain, mountains, cliffs, large buildings; cull with `ctx.view.far_shadow.casts(center, radius)`): the coarse far shadow map that shades the land beyond the cascades |
 | `draw_shadow_static(map)`, `shadow_static_changed(map)` | optional: casters that have not moved, drawn only when the map's static image is redrawn (`ShadowCache`); `draw_shadow`/`draw_far_shadow` then draw only the moving ones on top each frame. Say when something in the image changed (`shadow_static_changed`) so it is drawn again |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
@@ -292,8 +293,13 @@ shadows fall outside the view. **Static images** (`ShadowCache`, on unless
 `shadow_cascade_reuse` is 0): every map (cascades, sky occlusion, far map) keeps an image of
 the casters that have been still for 1.5 s (`draw_shadow_static`), drawn again only when the
 camera leaves the map's margin (8% of its radius), the sun turns (one map a frame), or a feature
-says something in it changed; each frame the image is copied into the live map and the moving
-casters drawn on top, so every map is current every frame. Clustered (virtual geometry) casters
+says something in it changed. The live map holds the image with the moving casters drawn on
+top: each frame the tiles they drew into the frame before (`ShadowTiles`, 16 by 16 a map, named
+by `RenderFeature::shadow_moving`) are put back from the image and this frame's are drawn, so
+every map is current every frame and nothing is touched where nothing moves (the whole layer
+is copied when the image was drawn again, or more than 96 tiles hold something else; casters
+that turn still join the image and the map by tile, `shadow_join_tiles`).
+Clustered (virtual geometry) casters
 are culled on the GPU and always drawn with the moving ones. Extra views draw everything
 straight in. A feature that needs a cascade's whole square uses
 `light_view` and `half_extent` directly.

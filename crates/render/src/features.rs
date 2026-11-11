@@ -45,6 +45,7 @@ use crate::frame::ViewData;
 use crate::image_cache::{ImageCache, ImageTexture};
 use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
 use crate::settings::RenderSettings;
+use crate::shadows::ShadowTiles;
 use crate::texture::Image;
 
 /// Shared types and pure functions (no bindings). Requires `engine_world::GUST_WAVES_WGSL`
@@ -782,6 +783,19 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// static image (see [`RenderFeature::draw_shadow_static`]): what moves goes here.
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {}
 
+    /// The tiles of shadow map `map` (a cascade, `SKY_OCCLUSION_VIEW` or `FAR_SHADOW_MAP`) this
+    /// frame's `draw_shadow` (`draw_far_shadow` for the far map) draws into. **A feature that
+    /// draws moving casters must name them here**: a map is put back to its static image only
+    /// in the tiles named the frame before, and a map nobody names tiles in is not drawn into
+    /// at all. A caster drawn outside its tiles leaves its shadow behind when it moves on.
+    /// Add each caster's bounding sphere with [`ShadowTiles::add_sphere`], or answer
+    /// [`ShadowTiles::ALL`] for casters spread over the map. Asked after `prepare_frame`,
+    /// once or twice a map; nothing by default (`crates/render/tests/shadow_tiles.rs` checks
+    /// that every feature in the workspace that draws shadows answers).
+    fn shadow_moving(&self, map: usize, ctx: &FrameContext) -> ShadowTiles {
+        ShadowTiles::NONE
+    }
+
     /// Draw depth into inset shadow map `inset`: one person's own sun shadow map
     /// (`ctx.view.shadow_insets[inset]`, a millimeter or two per texel; characters week R1).
     /// Draw only the casters [`crate::shadows::ShadowInset::casts`] keeps (the person, what they
@@ -822,6 +836,13 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// the whole image drawn again. Asked after `prepare_frame`, on frames it isn't drawn again.
     fn shadow_joins(&self, map: usize) -> bool {
         false
+    }
+
+    /// The tiles of `map` the casters joining its static image this frame draw into (asked
+    /// when [`shadow_joins`](Self::shadow_joins)): the map is put back to the image there.
+    /// The whole map unless the feature says.
+    fn shadow_join_tiles(&self, map: usize) -> ShadowTiles {
+        ShadowTiles::ALL
     }
 
     /// Draw the casters joining `map`'s static image (see

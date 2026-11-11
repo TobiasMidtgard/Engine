@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
-use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
+use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowTiles};
 use engine_render::{GpuShared, GrowBuffer, PrepareOut, ViewData, wgpu};
 use engine_world::{Gravity, HeatField, WeatherState, WindField, WorldShift};
 
@@ -314,6 +314,9 @@ pub struct GpuCloths {
     used: u32,
     frame: Vec<GpuFlag>,
     pub draws: Vec<GpuDraw>,
+    /// The tiles of each shadow map (the cascades, then the sky occlusion map) the cloths
+    /// that cast into it cover.
+    pub shadow_tiles: [ShadowTiles; MAX_CASCADES + 1],
     time: f32,
     probe: Option<(u32, [u32; 2], DVec3)>,
     readback: Option<Readback>,
@@ -385,6 +388,7 @@ impl GpuCloths {
             used: 0,
             frame: Vec::new(),
             draws: Vec::new(),
+            shadow_tiles: Default::default(),
             time: 0.0,
             probe: None,
             readback: None,
@@ -492,6 +496,7 @@ impl GpuCloths {
     ) {
         self.frame.clear();
         self.draws.clear();
+        self.shadow_tiles = Default::default();
         if let Some(timer) = self.timer.as_mut() {
             timer.collect(&gpu.device);
         }
@@ -653,10 +658,17 @@ impl GpuCloths {
             for c in 0..view.cascades.count as usize {
                 if view.cascades.sphere_in_cascade(c, rel, radius) {
                     shadows |= 1 << c;
+                    self.shadow_tiles[c].add_sphere(view, c, rel, radius);
                 }
             }
             if view.sky_occlusion.enabled && view.sky_occlusion.contains_sphere(rel, radius) {
                 shadows |= 1 << SKY_OCCLUSION_VIEW;
+                self.shadow_tiles[SKY_OCCLUSION_VIEW].add_sphere(
+                    view,
+                    SKY_OCCLUSION_VIEW,
+                    rel,
+                    radius,
+                );
             }
             if in_view || shadows != 0 {
                 self.draws.push(GpuDraw {

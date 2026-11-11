@@ -853,6 +853,23 @@ impl EmitterDesc {
         self.shape.extent() + len3(self.offset) + travel + size
     }
 
+    /// How far pieces that land get from the emitter, meters: what their shadows are drawn
+    /// within. [`Self::reach`] lets them fall for their whole life (a chip that lives three
+    /// seconds, 44 m); thrown over ground they come down within their throw.
+    pub fn landing_reach(&self) -> f32 {
+        let reach = self.reach();
+        let pull = self.gravity.abs() * 9.81;
+        if pull < 1.0 {
+            return reach;
+        }
+        let speed = self.speed[0].abs().max(self.speed[1].abs()) + len3(self.velocity);
+        let size = self.size[0].max(self.size[1]) * self.size_over_life.max().max(1.0);
+        // The longest throw over level ground is speed² / pull; a quarter more for a bounce
+        // and for ground that falls away, and half a meter for a piece dropped at rest.
+        let throw = 1.25 * speed * speed / pull + 0.5;
+        (self.shape.extent() + len3(self.offset) + throw + size).min(reach)
+    }
+
     /// This layer's sub-emitters and when each spawns.
     pub fn subs(&self) -> impl Iterator<Item = (&SubEmit, SubKind)> {
         [
@@ -1171,6 +1188,13 @@ impl EffectDesc {
     /// start wherever its feeders' particles get to.
     pub fn layer_reach(&self, i: usize) -> f32 {
         self.layer_reach_at(i, 0)
+    }
+
+    /// [`Self::layer_reach`] for a layer of solid pieces that land
+    /// ([`EmitterDesc::landing_reach`]).
+    pub fn layer_landing_reach(&self, i: usize) -> f32 {
+        let own = &self.emitters[i];
+        self.layer_reach(i) - own.reach() + own.landing_reach()
     }
 
     fn layer_reach_at(&self, i: usize, depth: u32) -> f32 {

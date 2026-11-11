@@ -215,7 +215,7 @@ fn variants() -> Vec<Variant> {
             "skip_shadow_copies",
             r,
             json!({"debug_skip": 1_048_576}),
-            "the shadow maps' still images are copied in only when they change (moving shadows leave trails): what copying them every frame costs in `shadows` and `sky occlusion`",
+            "the shadow maps are put back to their still images only when those change (moving shadows leave trails): what putting back the tiles under moving casters costs in `shadows` and `sky occlusion` (with `--old-way`: what copying all six layers every frame cost)",
         ),
         v(
             "no_grass",
@@ -441,6 +441,12 @@ fn variants() -> Vec<Variant> {
             json!({"trial_cuts_more": 2}),
             "the ground stays in the shadow maps' still images (four cascades and the far map); only the patches an image doesn't hold are drawn on top each frame",
         ),
+        v(
+            "cut_shadow_tiles",
+            r,
+            json!({"trial_cuts_more": 4}),
+            "a shadow map is put back to its still image only in the tiles where something moved the frame before; the six layers were copied whole every frame (335 MB of depth at 4096)",
+        ),
         // Other modules' own switches, each a trade its owner left off until it is judged from
         // pictures.
         v(
@@ -628,8 +634,8 @@ fn variants() -> Vec<Variant> {
             // brighter) and rock's single lookup (1048576).
             // With 2097152: thin sheets read the sun's shadows themselves under the pass.
             // `trial_cuts_more` 1: the haze table in one sweep; 2: the ground in the shadow
-            // maps' still images.
-            json!({"trial_cuts": 3_137_211, "trial_cuts_more": 3, "shadow_refresh_secs": 0.25}),
+            // maps' still images; 4: the maps put back by tile.
+            json!({"trial_cuts": 3_137_211, "trial_cuts_more": 7, "shadow_refresh_secs": 0.25}),
             "every same-picture cut in RenderSettings at once (lighting but for the deep-shadow shortcut and the reflection taps, ground textures but for rock's single lookup, ground lines, ground and objects once a pixel, depth first, holes first, nearest first, far shadow refresh): the frame if all of them pass",
         ),
         x(
@@ -647,7 +653,7 @@ fn variants() -> Vec<Variant> {
             "cut_all_no_screen_pass",
             r,
             // `cut_all` without 512, 2048 and 2097152.
-            json!({"trial_cuts": 1_037_499, "trial_cuts_more": 3, "shadow_refresh_secs": 0.25}),
+            json!({"trial_cuts": 1_037_499, "trial_cuts_more": 7, "shadow_refresh_secs": 0.25}),
             "cut_all without the screen pass (light and fog once per pixel): with ground and objects already shaded once a pixel, does the pass still pay?",
         ),
         v(

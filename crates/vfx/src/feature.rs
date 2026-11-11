@@ -28,6 +28,7 @@ use bytemuck::Zeroable;
 use engine_assets::Assets;
 use engine_core::math::{DVec3, Mat3, Vec3};
 use engine_render::image_cache::TextureUse;
+use engine_render::shadows::ShadowTiles;
 use engine_render::wgpu;
 use engine_render::wgpu::util::DeviceExt;
 use engine_render::{
@@ -207,6 +208,11 @@ pub struct ParticleFeature {
     debris_draws: Vec<(u32, u32)>,
     /// Debris layers near enough to cast shadows: first slot, slot count.
     debris_shadows: Vec<(u32, u32)>,
+    /// For each of `debris_shadows`, the part of each near cascade its pieces' shadows are
+    /// drawn within, in texels (x, y, width, height; none: outside the map).
+    debris_shadow_rects: Vec<[Option<[u32; 4]>; DEBRIS_SHADOW_CASCADES]>,
+    /// The tiles of each near cascade those parts cover.
+    debris_tiles: [ShadowTiles; DEBRIS_SHADOW_CASCADES],
     /// Smoke and dust layers that cast shadows, nearest first: distance, first slot, slot count.
     particle_shadows: Vec<(f32, u32, u32)>,
     /// Most sub-emitter events this frame (bounds the `cs_sub_spawn` dispatch).
@@ -1007,6 +1013,8 @@ impl RenderFeature for ParticleFeature {
         self.sort_jobs.clear();
         self.debris_draws.clear();
         self.debris_shadows.clear();
+        self.debris_shadow_rects.clear();
+        self.debris_tiles = Default::default();
         self.particle_shadows.clear();
         self.skipped = 0;
         self.sub_events = 0;
@@ -1104,7 +1112,20 @@ impl RenderFeature for ParticleFeature {
             let reach = fe.reach.max(0.5);
             let solid = e.direction[3] > 0.5;
             if solid && rel.length() - reach < DEBRIS_SHADOW_DISTANCE {
-                self.debris_shadows.push((base, len));
+                // Its shadows are drawn within where its pieces land, and cut to that
+                // (`draw_shadow`): the map is put back only in the tiles named here, so a
+                // piece that got further would leave its shadow behind.
+                let mut rects = [None; DEBRIS_SHADOW_CASCADES];
+                for (c, rect) in rects.iter_mut().enumerate() {
+                    let mut tiles = ShadowTiles::NONE;
+                    tiles.add_sphere(view, c, rel, fe.landing_reach.max(0.5));
+                    *rect = tiles.rects(view.cascades.map_size).first().copied();
+                    self.debris_tiles[c].add(tiles);
+                }
+                if rects.iter().any(Option::is_some) {
+                    self.debris_shadows.push((base, len));
+                    self.debris_shadow_rects.push(rects);
+                }
             }
             // Off-screen smoke still shadows what is on screen, so no frustum test here.
             if !solid
@@ -1409,9 +1430,41 @@ impl RenderFeature for ParticleFeature {
         }
     }
 
-    fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        if let (true, Some(g)) = (cascade < DEBRIS_SHADOW_CASCADES, &self.gpu) {
-            self.draw_debris(pass, &g.debris_shadow, &self.debris_shadows);
+    fn shadow_moving(&self, map: usize, _ctx: &FrameContext) -> ShadowTiles {
+        match self.debris_tiles.get(map) {
+            Some(tiles) if self.gpu.is_some() => *tiles,
+            _ => ShadowTiles::NONE,
+        }
+    }
+
+    fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {
+        let (true, Some(g)) = (cascade < DEBRIS_SHADOW_CASCADES, &self.gpu) else {
+            return;
+        };
+        let (false, Some(group)) = (self.debris_shadows.is_empty(), &g.debris_group) else {
+            return;
+        };
+        pass.set_pipeline(&g.debris_shadow);
+        pass.set_bind_group(1, group, &[]);
+        if ctx.view.extra_view {
+            // Its maps are drawn whole every frame, and the parts were worked out for the
+            // main view's.
+            for &(base, len) in &self.debris_shadows {
+                pass.draw(0..debris::VERTICES as u32, base..base + len);
+            }
+            return;
+        }
+        let mut cut = false;
+        for (&(base, len), rects) in self.debris_shadows.iter().zip(&self.debris_shadow_rects) {
+            if let Some([x, y, w, h]) = rects[cascade] {
+                pass.set_scissor_rect(x, y, w, h);
+                pass.draw(0..debris::VERTICES as u32, base..base + len);
+                cut = true;
+            }
+        }
+        if cut {
+            let size = ctx.view.cascades.map_size;
+            pass.set_scissor_rect(0, 0, size, size);
         }
     }
 
@@ -1568,6 +1621,8 @@ impl ParticleFeature {
         self.sort_jobs.clear();
         self.debris_draws.clear();
         self.debris_shadows.clear();
+        self.debris_shadow_rects.clear();
+        self.debris_tiles = Default::default();
         self.particle_shadows.clear();
     }
 

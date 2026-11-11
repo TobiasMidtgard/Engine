@@ -35,7 +35,7 @@ use crate::frame::{
 use crate::gpu::{self, SurfaceState};
 use crate::settings::{AntiAliasing, RenderSettings, Tonemapper};
 use crate::shadows::{
-    FAR_SHADOW_LAYER, FAR_SHADOW_MAP, MAX_CASCADES, SHADOW_MAPS, SKY_OCCLUSION_VIEW,
+    FAR_SHADOW_LAYER, FAR_SHADOW_MAP, MAX_CASCADES, SHADOW_MAPS, SKY_OCCLUSION_VIEW, ShadowTiles,
     ShadowViewUniform,
 };
 use crate::texture::Image;
@@ -118,6 +118,15 @@ pub struct RenderStats {
     /// GPU bytes those compressions saved.
     #[serde(default)]
     pub image_bytes_compressed_away: u64,
+    /// Shadow map layers copied whole from their static images this frame (of the cascades,
+    /// the far map and the sky occlusion map): an image that was drawn again, or a map with
+    /// moving casters over more than a third of it.
+    #[serde(default)]
+    pub shadow_layers_copied: u32,
+    /// Shadow map tiles (a 256th of a layer each, `shadows::ShadowTiles`) put back from the
+    /// static images this frame: where moving casters were drawn the frame before.
+    #[serde(default)]
+    pub shadow_tiles_restored: u32,
 }
 
 #[repr(C)]
@@ -158,6 +167,10 @@ struct ShadowResources {
     occlusion_size: u32,
     /// The maps' static images (`shadows::ShadowCache`), made the first time they are used.
     statics: Option<StaticShadows>,
+    /// The tiles of each map (by its number: cascades, `SKY_OCCLUSION_VIEW`, `FAR_SHADOW_MAP`)
+    /// that hold something else than its static image: where moving casters were drawn the
+    /// last time. The next frame puts those back before it draws its own.
+    on_top: [ShadowTiles; SHADOW_MAPS],
     /// People's inset shadow maps (`ViewData::shadow_insets`, frame binding 27).
     insets: InsetShadows,
 }
@@ -240,6 +253,12 @@ struct StaticShadows {
     layers: Vec<wgpu::TextureView>,
     occlusion: (wgpu::Texture, wgpu::TextureView),
     occlusion_size: u32,
+    /// Draws parts of an image into its map (`shadow_restore.wgsl`, [`restore_tiles`]).
+    restore: wgpu::RenderPipeline,
+    /// Each layer's image as `restore` reads it.
+    restore_layers: Vec<wgpu::BindGroup>,
+    /// The sky occlusion map's image as `restore` reads it.
+    restore_occlusion: wgpu::BindGroup,
 }
 
 impl StaticShadows {
@@ -255,19 +274,243 @@ impl StaticShadows {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: shared.formats.shadow,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let layers = layer_views(&texture);
+        let occlusion =
+            create_occlusion_target(shared, occlusion_size, wgpu::TextureUsages::COPY_SRC);
+        let layout = restore_layout(shared);
+        let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow restore"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let module = shared.shader(
+            "shadow_restore",
+            include_str!("shaders/shadow_restore.wgsl"),
+            false,
+        );
+        let restore = shared.render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow restore"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_restore"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            // The image's depth as it is, whatever the map holds there.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: shared.formats.shadow,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_restore"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
+            restore_layers: layers.iter().map(|v| restore_group(shared, v)).collect(),
+            restore_occlusion: restore_group(shared, &occlusion.1),
+            restore,
             texture,
             layers,
-            occlusion: create_occlusion_target(
-                shared,
-                occlusion_size,
-                wgpu::TextureUsages::COPY_SRC,
-            ),
+            occlusion,
             occlusion_size,
+        }
+    }
+}
+
+/// The layout of a static image as `shadow_restore.wgsl` reads it.
+fn restore_layout(shared: &GpuShared) -> wgpu::BindGroupLayout {
+    shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("shadow restore"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    })
+}
+
+fn restore_group(shared: &GpuShared, image: &wgpu::TextureView) -> wgpu::BindGroup {
+    shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("shadow restore"),
+        layout: &restore_layout(shared),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(image),
+        }],
+    })
+}
+
+/// More tiles than this to put back (of 256): the whole layer is copied, which costs less a
+/// texel than drawing it.
+const RESTORE_MOST_TILES: u32 = 96;
+
+/// Put `tiles` of a `size`² map back as its static image (`image`) holds them, in a pass on
+/// the map that loads it. Leaves the scissor on the whole map.
+fn restore_tiles(
+    pass: &mut wgpu::RenderPass<'_>,
+    statics: &StaticShadows,
+    image: &wgpu::BindGroup,
+    tiles: ShadowTiles,
+    size: u32,
+) {
+    pass.set_pipeline(&statics.restore);
+    pass.set_bind_group(0, image, &[]);
+    for [x, y, w, h] in tiles.rects(size) {
+        pass.set_scissor_rect(x, y, w, h);
+        pass.draw(0..3, 0..1);
+    }
+    pass.set_scissor_rect(0, 0, size, size);
+}
+
+/// The tiles of each shadow map the features' moving casters draw into this frame
+/// (`RenderFeature::shadow_moving`), and each feature's number of them a map (those with any).
+fn moving_tiles(
+    features: &[Box<dyn RenderFeature>],
+    ctx: &FrameContext,
+) -> ([ShadowTiles; SHADOW_MAPS], Vec<(usize, [u16; SHADOW_MAPS])>) {
+    let view = ctx.view;
+    let cascades = (view.cascades.count as usize).min(MAX_CASCADES);
+    let mut all = [ShadowTiles::NONE; SHADOW_MAPS];
+    let mut by_feature = Vec::new();
+    for (i, f) in features.iter().enumerate() {
+        let mut counts = [0; SHADOW_MAPS];
+        for (map, all) in all.iter_mut().enumerate() {
+            let drawn = match map {
+                SKY_OCCLUSION_VIEW => view.sky_occlusion.enabled,
+                FAR_SHADOW_MAP => view.sun_shadows && view.far_shadow.enabled,
+                c => view.sun_shadows && c < cascades,
+            };
+            if drawn {
+                let tiles = f.shadow_moving(map, ctx);
+                counts[map] = tiles.count() as u16;
+                all.add(tiles);
+            }
+        }
+        if counts.iter().any(|c| *c > 0) {
+            by_feature.push((i, counts));
+        }
+    }
+    (all, by_feature)
+}
+
+/// The tiles of `map` the casters joining its static image this frame are drawn into
+/// (`RenderFeature::shadow_join_tiles` of the features with joins).
+fn join_tiles(features: &[Box<dyn RenderFeature>], map: usize) -> ShadowTiles {
+    let mut tiles = ShadowTiles::NONE;
+    for f in features.iter().filter(|f| f.shadow_joins(map)) {
+        tiles.add(f.shadow_join_tiles(map));
+    }
+    tiles
+}
+
+/// How a map gets back to its static image before a frame's moving casters are drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Restore {
+    /// It holds nothing else.
+    Nothing,
+    /// These tiles are drawn from the image.
+    Tiles(ShadowTiles),
+    /// The whole layer is copied.
+    Whole,
+}
+
+/// The frame's way of putting maps back (`trial_cut_more::SHADOW_TILES`, and the measurement
+/// `shade_skip::SHADOW_COPIES`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PutBack {
+    /// Only the tiles that hold something else.
+    Tiles,
+    /// The whole image every frame (the frame as it was drawn until 11 Nov).
+    Always,
+    /// Never, but when the image changed: a measurement, moving casters leave trails.
+    Never,
+}
+
+impl PutBack {
+    fn of(settings: &RenderSettings) -> Self {
+        if settings.debug_skip & crate::settings::shade_skip::SHADOW_COPIES != 0 {
+            Self::Never
+        } else if settings.trial_cuts_more & crate::settings::trial_cut_more::SHADOW_TILES == 0 {
+            Self::Always
+        } else {
+            Self::Tiles
+        }
+    }
+
+    /// What to put back of a map that holds `on_top` on its image, before casters are drawn
+    /// into `moving`; `on_top` becomes what it holds after them. `redrawn`: the image was
+    /// drawn again this frame; `joined`: the tiles casters that turned still were drawn into
+    /// it in.
+    fn plan(
+        self,
+        on_top: &mut ShadowTiles,
+        moving: ShadowTiles,
+        redrawn: bool,
+        joined: ShadowTiles,
+    ) -> Restore {
+        let some = |tiles: ShadowTiles| {
+            if tiles.is_empty() {
+                Restore::Nothing
+            } else if tiles.count() > RESTORE_MOST_TILES {
+                Restore::Whole
+            } else {
+                Restore::Tiles(tiles)
+            }
+        };
+        let restore = match self {
+            _ if redrawn => Restore::Whole,
+            Self::Always => Restore::Whole,
+            Self::Never => some(joined),
+            Self::Tiles => {
+                // Where casters joined the image, the map holds it as it was.
+                on_top.add(joined);
+                some(*on_top)
+            }
+        };
+        match restore {
+            Restore::Whole => *on_top = moving,
+            Restore::Tiles(tiles) if tiles == *on_top => *on_top = moving,
+            // What it held is still there.
+            _ => on_top.add(moving),
+        }
+        restore
+    }
+}
+
+/// Layers copied whole and tiles drawn back in a frame's shadow maps (`RenderStats`).
+#[derive(Debug, Clone, Copy, Default)]
+struct PutBackCount {
+    layers: u32,
+    tiles: u32,
+}
+
+impl PutBackCount {
+    fn count(&mut self, restore: Restore) {
+        match restore {
+            Restore::Whole => self.layers += 1,
+            Restore::Tiles(tiles) => self.tiles += tiles.count(),
+            Restore::Nothing => {}
         }
     }
 }
@@ -482,6 +725,13 @@ pub struct Renderer {
     /// Shadow maps whose static image a feature asked to draw again (`shadow_static_changed`
     /// after the main view's `prepare_frame`), for the next frame.
     static_requests: [bool; SHADOW_MAPS],
+    /// What the main view's last frame put back of its shadow maps.
+    put_back: PutBackCount,
+    /// And all its frames (wrapping).
+    put_back_total: PutBackCount,
+    /// The tiles of each shadow map each feature's moving casters drew into in the main view's
+    /// last frame (features by index, those with any): `describe`.
+    moving_tiles: Vec<(usize, [u16; SHADOW_MAPS])>,
     /// Finishes the frame's earlier encoders on worker threads (`RenderSettings::parallel_encoding`).
     finisher: crate::finish::Finisher,
 }
@@ -1318,6 +1568,9 @@ impl Renderer {
             main_thread_submit_ms: 0.0,
             probe_gi,
             static_requests: [false; SHADOW_MAPS],
+            put_back: PutBackCount::default(),
+            put_back_total: PutBackCount::default(),
+            moving_tiles: Vec::new(),
             finisher: crate::finish::Finisher::new(crate::finish::THREADS),
             world_reflection_written: false,
         })
@@ -2226,6 +2479,7 @@ impl Renderer {
             view.sky_occlusion.enabled && view.sky_occlusion.map_size != self.shadow.occlusion_size;
         if occlusion_resized {
             self.shadow.occlusion_size = view.sky_occlusion.map_size;
+            self.shadow.on_top[SKY_OCCLUSION_VIEW] = ShadowTiles::ALL;
             (self.shadow.occlusion_texture, self.shadow.occlusion) = create_occlusion_target(
                 &self.shared,
                 self.shadow.occlusion_size,
@@ -2617,8 +2871,17 @@ impl Renderer {
                 .hand_off(device, &mut encoder, &mut part, "shadows");
         }
 
-        // Shadows: each map's static image (drawn again only when due, `ShadowCache`) copied
-        // in, then what moves drawn on top. Extra views draw everything straight in.
+        // Shadows: each map holds its static image (drawn again only when due, `ShadowCache`)
+        // with what moves drawn on top; the tiles the last frame's moving casters drew into
+        // are put back from the image first. Extra views draw everything straight in.
+        let mut copied = PutBackCount::default();
+        let moving = if extra {
+            Default::default()
+        } else {
+            let (moving, by_feature) = moving_tiles(&self.features, &ctx);
+            self.moving_tiles = by_feature;
+            moving
+        };
         if view.sun_shadows {
             // Under the profiler the moving casters are drawn feature by feature, each with
             // its own row ("shadows: grass"), after every map's static image is in.
@@ -2652,8 +2915,8 @@ impl Renderer {
                 .collect();
             let shadow = &self.shadow;
             let statics = shadow.statics.as_ref().filter(|_| !extra);
-            // (`shade_skip::SHADOW_COPIES`: a measurement, the maps keep what moved.)
-            let copy_always = settings.debug_skip & crate::settings::shade_skip::SHADOW_COPIES == 0;
+            let put_back = PutBack::of(&settings);
+            let mut on_top = shadow.on_top;
             for &(map, layer, redraw) in &maps {
                 let group = &shadow.view_bind_groups[map];
                 let live = &shadow.layer_views[layer];
@@ -2701,7 +2964,17 @@ impl Renderer {
                         f.draw_shadow_join(&mut pass, map, &ctx);
                     }
                 }
-                if copy_always || redraw || joins {
+                // The map is its image again where the last frame's casters were, then this
+                // frame's are drawn: nothing is touched where nothing moves.
+                let moving = moving[map];
+                let joined = if joins {
+                    join_tiles(&self.features, map)
+                } else {
+                    ShadowTiles::NONE
+                };
+                let restore = put_back.plan(&mut on_top[map], moving, redraw, joined);
+                copied.count(restore);
+                if restore == Restore::Whole {
                     copy_layer(
                         &mut encoder,
                         &statics.texture,
@@ -2709,9 +2982,24 @@ impl Renderer {
                         layer as u32,
                     );
                 }
-                if !split {
+                let tiles = match restore {
+                    Restore::Tiles(tiles) => Some(tiles),
+                    _ => None,
+                };
+                if tiles.is_some() || (!split && !moving.is_empty()) {
                     let mut pass = depth_pass(&mut encoder, "shadow map", live, false);
-                    draw_moving(&mut pass);
+                    if let Some(tiles) = tiles {
+                        restore_tiles(
+                            &mut pass,
+                            statics,
+                            &statics.restore_layers[layer],
+                            tiles,
+                            size,
+                        );
+                    }
+                    if !split {
+                        draw_moving(&mut pass);
+                    }
                 }
             }
             if split {
@@ -2719,6 +3007,9 @@ impl Renderer {
                     self.perf
                         .pass(&mut cpu, &mut encoder, format!("shadows: {}", f.name()));
                     for &(map, layer, _) in &maps {
+                        if f.shadow_moving(map, &ctx).is_empty() {
+                            continue;
+                        }
                         let live = &shadow.layer_views[layer];
                         let mut pass = depth_pass(&mut encoder, "shadow map", live, false);
                         pass.set_bind_group(0, &shadow.view_bind_groups[map], &[]);
@@ -2742,6 +3033,10 @@ impl Renderer {
                     f.draw_inset_shadow(&mut pass, i, &ctx);
                 }
             }
+            let kept = statics.is_some();
+            if kept {
+                self.shadow.on_top = on_top;
+            }
         }
 
         // Sky occlusion: the highest surface around the camera, seen from above. Cleared to
@@ -2761,11 +3056,13 @@ impl Renderer {
                     shadow.occlusion_size,
                     wgpu::TextureUsages::COPY_SRC,
                 );
+                statics.restore_occlusion = restore_group(&self.shared, &statics.occlusion.1);
                 statics.occlusion_size = shadow.occlusion_size;
             }
             let shadow = &self.shadow;
             let group = &shadow.view_bind_groups[SKY_OCCLUSION_VIEW];
             let statics = shadow.statics.as_ref().filter(|_| !extra);
+            let mut occlusion_on_top = None;
             match statics {
                 // Without static images (an extra view, or no sun): everything, straight in.
                 None => {
@@ -2778,8 +3075,6 @@ impl Renderer {
                     }
                 }
                 Some(statics) => {
-                    let copy_always =
-                        settings.debug_skip & crate::settings::shade_skip::SHADOW_COPIES == 0;
                     let redraw = view.sky_occlusion.static_redraw;
                     let joins = !redraw
                         && self
@@ -2809,7 +3104,16 @@ impl Renderer {
                             f.draw_shadow_join(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
                         }
                     }
-                    if copy_always || redraw || joins {
+                    let moving = moving[SKY_OCCLUSION_VIEW];
+                    let mut on_top = shadow.on_top[SKY_OCCLUSION_VIEW];
+                    let joined = if joins {
+                        join_tiles(&self.features, SKY_OCCLUSION_VIEW)
+                    } else {
+                        ShadowTiles::NONE
+                    };
+                    let restore = PutBack::of(&settings).plan(&mut on_top, moving, redraw, joined);
+                    copied.count(restore);
+                    if restore == Restore::Whole {
                         copy_layer(
                             &mut encoder,
                             &statics.occlusion.0,
@@ -2817,17 +3121,42 @@ impl Renderer {
                             0,
                         );
                     }
-                    let mut pass =
-                        depth_pass(&mut encoder, "sky occlusion", &shadow.occlusion, false);
-                    pass.set_bind_group(0, group, &[]);
-                    for f in &self.features {
-                        f.draw_shadow(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                    let tiles = match restore {
+                        Restore::Tiles(tiles) => Some(tiles),
+                        _ => None,
+                    };
+                    if tiles.is_some() || !moving.is_empty() {
+                        let mut pass =
+                            depth_pass(&mut encoder, "sky occlusion", &shadow.occlusion, false);
+                        if let Some(tiles) = tiles {
+                            restore_tiles(
+                                &mut pass,
+                                statics,
+                                &statics.restore_occlusion,
+                                tiles,
+                                shadow.occlusion_size,
+                            );
+                        }
+                        pass.set_bind_group(0, group, &[]);
+                        for f in &self.features {
+                            f.draw_shadow(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                        }
                     }
+                    occlusion_on_top = Some(on_top);
                 }
+            }
+            if let Some(on_top) = occlusion_on_top {
+                self.shadow.on_top[SKY_OCCLUSION_VIEW] = on_top;
             }
         } else if self.borrowed.is_none() {
             // Cleared to 1 (nothing) when disabled so stale data never darkens the sky light.
             depth_pass(&mut encoder, "sky occlusion", &self.shadow.occlusion, true);
+            self.shadow.on_top[SKY_OCCLUSION_VIEW] = ShadowTiles::ALL;
+        }
+        if !extra {
+            self.put_back = copied;
+            self.put_back_total.layers = self.put_back_total.layers.wrapping_add(copied.layers);
+            self.put_back_total.tiles = self.put_back_total.tiles.wrapping_add(copied.tiles);
         }
         if parallel {
             self.finisher
@@ -3485,6 +3814,14 @@ impl Renderer {
             d.set("render.instances", stats.instances as f64);
             d.set("render.triangles", stats.triangles as f64);
             d.set("render.clusters", stats.clusters as f64);
+            d.set(
+                "render.shadow_layers_copied",
+                stats.shadow_layers_copied as f64,
+            );
+            d.set(
+                "render.shadow_tiles_restored",
+                stats.shadow_tiles_restored as f64,
+            );
             d.set("render.ev100", stats.ev100 as f64);
             d.set(
                 "render.surface_weather_uploads",
@@ -3701,6 +4038,8 @@ impl Renderer {
             image_bytes_released: 0,
             images_compressed: 0,
             image_bytes_compressed_away: 0,
+            shadow_layers_copied: self.put_back.layers,
+            shadow_tiles_restored: self.put_back.tiles,
         }
     }
 
@@ -3723,7 +4062,24 @@ impl Renderer {
             })
             .collect();
         let images = self.shared.images.stats();
+        // What the shadow maps hold on top of their static images, in tiles of 256 a map (the
+        // cascades, the sky occlusion map, the far map), and whose moving casters put it there.
+        let moving: serde_json::Map<String, serde_json::Value> = self
+            .moving_tiles
+            .iter()
+            .filter_map(|(i, counts)| {
+                Some((self.features.get(*i)?.name().to_string(), json!(counts)))
+            })
+            .collect();
         json!({
+            "shadow_maps": {
+                "tiles_on_top": self.shadow.on_top.map(|t| t.count()),
+                "moving_tiles": moving,
+                "layers_copied": self.put_back.layers,
+                "tiles_restored": self.put_back.tiles,
+                "layers_copied_total": self.put_back_total.layers,
+                "tiles_restored_total": self.put_back_total.tiles,
+            },
             "adapter": self.shared.adapter_info.name,
             "backend": format!("{:?}", self.shared.adapter_info.backend),
             "size": [self.targets.width, self.targets.height],
@@ -3956,6 +4312,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         occlusion_texture: occlusion.0,
         occlusion_size,
         statics: None,
+        on_top: [ShadowTiles::ALL; SHADOW_MAPS],
     }
 }
 

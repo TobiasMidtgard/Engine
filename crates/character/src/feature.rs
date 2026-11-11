@@ -27,7 +27,7 @@ use engine_render::features::{
 };
 use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
-use engine_render::shadows::SKY_OCCLUSION_VIEW;
+use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowTiles};
 use engine_render::wgpu;
 use wgpu::util::DeviceExt;
 
@@ -1617,6 +1617,22 @@ impl RenderFeature for CharacterFeature {
             RenderPhase::Transparent => self.draw_meshes(pass, Pass::Fringe),
             _ => {}
         }
+    }
+
+    fn shadow_moving(&self, map: usize, ctx: &FrameContext) -> ShadowTiles {
+        let mut tiles = ShadowTiles::NONE;
+        // (`draw_shadow` is called for the cascades and the sky map, and skips that.)
+        if map >= MAX_CASCADES || self.pipelines.is_none() {
+            return tiles;
+        }
+        for c in self.characters.values().filter(|c| c.seen && c.drawn) {
+            match c.body_sphere() {
+                // Half again as wide: a sword arm's reach past the body's sphere.
+                Some((center, radius)) => tiles.add_sphere(ctx.view, map, center, 1.5 * radius),
+                None => return ShadowTiles::ALL,
+            }
+        }
+        tiles
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {

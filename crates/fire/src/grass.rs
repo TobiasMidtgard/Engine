@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use bytemuck::{Pod, Zeroable};
 use engine_core::math::{DVec2, DVec3, IVec2, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
-use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
+use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowTiles};
 use engine_render::wgpu;
 use engine_render::{
     FeatureStats, FrameContext, GpuShared, PrepareOut, RenderFeature, RenderPhase, RenderSettings,
@@ -631,6 +631,8 @@ pub struct GrassFeature {
     meadows: Vec<MeadowGpu>,
     draws: Vec<GrassDraw>,
     shadow_draws: [Vec<GrassDraw>; MAX_CASCADES],
+    /// The tiles of each cascade those draws cover.
+    shadow_tiles: [ShadowTiles; MAX_CASCADES],
     stats: FeatureStats,
     /// The wind the blades sway in, smoothed over [`SWAY_SECS`]: the wind at the camera jumps
     /// with every local gust (a fire's updraft, walking about), and blades fed it straight
@@ -1121,6 +1123,7 @@ impl RenderFeature for GrassFeature {
         for d in &mut self.shadow_draws {
             d.clear();
         }
+        self.shadow_tiles = Default::default();
         self.stats = FeatureStats::default();
         let flat = Vec3::new(view.wind.x, 0.0, view.wind.z);
         let k = 1.0 - (-view.delta.clamp(0.0, 0.25) / SWAY_SECS).exp();
@@ -1229,6 +1232,7 @@ impl RenderFeature for GrassFeature {
                     for k in 0..(view.cascades.count as usize).min(2) {
                         if view.cascades.sphere_in_cascade(k, center, radius) {
                             self.shadow_draws[k].push(shadow.clone());
+                            self.shadow_tiles[k].add_sphere(view, k, center, radius);
                         }
                     }
                 }
@@ -1237,6 +1241,13 @@ impl RenderFeature for GrassFeature {
         self.meadows.retain(|m| m.seen);
         self.stats.draw_calls = self.draws.len() as u32;
         out.set("fire.grass_blades", self.stats.instances as f64);
+    }
+
+    fn shadow_moving(&self, map: usize, _ctx: &FrameContext) -> ShadowTiles {
+        match self.shadow_tiles.get(map) {
+            Some(tiles) if self.shadow_pipeline.is_some() => *tiles,
+            _ => ShadowTiles::NONE,
+        }
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {

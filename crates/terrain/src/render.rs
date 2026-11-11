@@ -14,6 +14,7 @@ use engine_render::features::{
 };
 use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
+use engine_render::shadows::{FAR_SHADOW_MAP, ShadowTiles};
 use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 
 use crate::chunk::{
@@ -796,6 +797,9 @@ pub struct TerrainFeature {
     shadow_draws: [Vec<Draw>; 4],
     /// Patches drawn into the far shadow map (big shadows beyond the cascades).
     far_shadow_draws: Vec<Draw>,
+    /// The tiles of each map (the cascades, then the far map at [`FAR_STILL`]) the patches
+    /// drawn on top of its still image cover.
+    shadow_tiles: [ShadowTiles; FAR_STILL + 1],
     /// The ground kept in the shadow maps' still images (`trial_cut_more::GROUND_STILL`): the
     /// cascades', then the far map's ([`FAR_STILL`]).
     stills: [GroundStill; FAR_STILL + 1],
@@ -2367,6 +2371,7 @@ impl RenderFeature for TerrainFeature {
             s.clear();
         }
         self.far_shadow_draws.clear();
+        self.shadow_tiles = Default::default();
         self.glow_draws.clear();
         // The ground once a pixel in the main view (`trial_cut::GROUND_ONCE`), where the GPU
         // takes the ground pass's targets.
@@ -2928,6 +2933,7 @@ impl RenderFeature for TerrainFeature {
                         if view.cascades.sphere_in_cascade(i, center, c.radius as f32)
                             && (mirror || self.stills[i].patch((*e, *key), c.stamp))
                         {
+                            self.shadow_tiles[i].add_sphere(view, i, center, c.radius as f32);
                             self.shadow_draws[i].push(Draw {
                                 slot: c.slot,
                                 instance,
@@ -2975,6 +2981,13 @@ impl RenderFeature for TerrainFeature {
                 if !self.stills[FAR_STILL].patch((*e, *key), c.stamp) {
                     continue;
                 }
+                let center = (pos + rot * c.center - view.origin).as_vec3();
+                self.shadow_tiles[FAR_STILL].add_sphere(
+                    view,
+                    FAR_SHADOW_MAP,
+                    center,
+                    c.radius as f32,
+                );
                 let morph = morph(key.level);
                 let rel = (pos + rot * c.origin - view.origin).as_vec3();
                 let instance = instances.len() as u32;
@@ -3353,6 +3366,14 @@ impl RenderFeature for TerrainFeature {
         pass.set_pipeline(&gpu.prepass_pipeline);
         pass.set_bind_group(1, group, &[]);
         self.draw_list(pass, gpu, DrawList::Scene, &self.draws);
+    }
+
+    // The patches drawn on top of a map's still image, where they are.
+    fn shadow_moving(&self, map: usize, _ctx: &FrameContext) -> ShadowTiles {
+        match still_of(map) {
+            Some(i) if !self.stills[i].into_image => self.shadow_tiles[i],
+            _ => ShadowTiles::NONE,
+        }
     }
 
     // (`GroundStill`: on the frames a map's still image is drawn, the ground is in it.)

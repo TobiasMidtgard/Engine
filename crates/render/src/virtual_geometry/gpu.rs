@@ -665,6 +665,8 @@ pub struct ClusterRenderer {
     /// First draw slot per shadow view (cascades, then the sky occlusion map), when it is on:
     /// one slot per shadow bucket.
     shadow_slots: [Option<u32>; VIEWS - 1],
+    /// The tiles of each of those maps the instances that cast cover.
+    shadow_tiles: [crate::shadows::ShadowTiles; VIEWS - 1],
     /// Something to cull and draw this frame.
     active: bool,
     slots: u32,
@@ -1045,6 +1047,7 @@ impl ClusterRenderer {
             gpu_instances: Vec::new(),
             buckets: Vec::new(),
             shadow_slots: [None; VIEWS - 1],
+            shadow_tiles: Default::default(),
             active: false,
             slots: 0,
             readbacks,
@@ -1323,6 +1326,7 @@ impl ClusterRenderer {
         self.buckets.clear();
         self.shadow_buckets.clear();
         self.shadow_slots = [None; VIEWS - 1];
+        self.shadow_tiles = Default::default();
         self.stats.instances = 0;
         self.stats.swaying = 0;
         self.stats.draw_calls = 0;
@@ -1461,6 +1465,17 @@ impl ClusterRenderer {
             if *on {
                 self.shadow_slots[v] = Some(slots);
                 slots += shadow_buckets;
+            }
+        }
+        for (map, tiles) in self.shadow_tiles.iter_mut().enumerate() {
+            if self.shadow_slots[map].is_none() {
+                continue;
+            }
+            for i in &self.gpu_instances {
+                if i.extra[1] & INSTANCE_CASTS_SHADOWS != 0 {
+                    let [x, y, z, radius] = i.sphere;
+                    tiles.add_sphere(view, map, Vec3::new(x, y, z), radius);
+                }
             }
         }
         self.late = settings.virtual_geometry_occlusion;
@@ -2098,6 +2113,13 @@ impl ClusterRenderer {
             let at = *slot as u64 + 1 + k as u64;
             pass.draw_indirect(&self.draws, HEADER_BYTES + ARGS_BYTES * at);
         }
+    }
+
+    /// The tiles of shadow map `map` (a cascade, `SKY_OCCLUSION_VIEW` or the far map) the
+    /// clusters may draw into this frame: under every instance that casts, since which of
+    /// them the GPU keeps isn't known here.
+    pub fn shadow_tiles(&self, map: usize) -> crate::shadows::ShadowTiles {
+        self.shadow_tiles.get(map).copied().unwrap_or_default()
     }
 
     /// Whether anything is drawn as clusters this frame.

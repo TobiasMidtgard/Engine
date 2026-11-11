@@ -1168,6 +1168,24 @@ impl RenderFeature for StrandFeature {
         pass.dispatch_workgroups(f.widest.div_ceil(WORKGROUP), f.instances.len() as u32, 1);
     }
 
+    fn shadow_moving(&self, map: usize, ctx: &FrameContext) -> crate::shadows::ShadowTiles {
+        let mut tiles = crate::shadows::ShadowTiles::NONE;
+        if map >= crate::shadows::MAX_CASCADES || ctx.view.extra_view {
+            return tiles;
+        }
+        let (Some(f), Some(_), Some(_)) = (&self.frame, &self.pipelines, &self.groups) else {
+            return tiles;
+        };
+        for inst in &f.instances {
+            let s = inst.sphere;
+            let center = Vec3::new(s[0], s[1], s[2]);
+            if ctx.view.cascades.sphere_in_cascade(map, center, s[3]) {
+                tiles.add_sphere(ctx.view, map, center, s[3]);
+            }
+        }
+        tiles
+    }
+
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {
         if cascade >= crate::shadows::MAX_CASCADES || ctx.view.extra_view {
             return;

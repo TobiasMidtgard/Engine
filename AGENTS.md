@@ -100,7 +100,9 @@ A module is one crate (`crates/<name>`, package `engine_<name>`) with one `Plugi
    AI-controllable.
 4. **Render through `RenderFeature`.** Implement the trait (prepare/draw/draw_prepass/
    draw_shadow/draw_environment/overlay), add it with `app.add_render_feature(...)`. Opaque
-   geometry also implements `draw_prepass` so ambient occlusion and anti-aliasing see it. Compose shaders with
+   geometry also implements `draw_prepass` so ambient occlusion and anti-aliasing see it. A
+   feature with `draw_shadow` also answers `shadow_moving` (the shadow map tiles its casters
+   cover this frame), or its shadows are not drawn. Compose shaders with
    `GpuShared::shader(label, src, with_frame)`; use `shade_surface`, `apply_fog`,
    `shadow_factor`, `wind_offset` from `lib_frame.wgsl` so lighting matches everything else.
    Output **pre-exposed** radiance (`pre_expose`). Add a unit test that runs

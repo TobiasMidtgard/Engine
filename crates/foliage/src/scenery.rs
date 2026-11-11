@@ -4688,7 +4688,14 @@ pub struct SceneryFeature {
     instance_bytes: Vec<u8>,
     items: Vec<RockItem>,
     rock_draws: Vec<RockBatch>,
+    /// The rocks each shadow map's static image takes (the sun's cascades, then the sky
+    /// occlusion map), on the frames it is drawn again: rocks stand still, so they are in
+    /// the images and cost nothing the other frames.
     shadow_draws: Vec<Vec<RockBatch>>,
+    /// The casting rocks and chambers and where they stand, hashed; and whether that changed
+    /// this frame (the static images are drawn again: `shadow_static_changed`).
+    rock_state: u64,
+    rocks_changed: bool,
     frame: u64,
     stats: FeatureStats,
 }
@@ -4959,9 +4966,24 @@ impl SceneryFeature {
 
     fn prepare_rocks(&mut self, world: &mut World, gpu: &GpuShared, view: &ViewData) {
         self.items.clear();
-        self.prepare_chambers(world, gpu, view);
+        let mut state = 0;
+        self.prepare_chambers(world, gpu, view, &mut state);
         let mut q = world.query::<(&Rock, &GlobalTransform)>();
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
+        // The shadow maps whose static image is drawn again this frame.
+        let cascades = if view.sun_shadows {
+            (view.cascades.count as usize).min(MAX_CASCADES)
+        } else {
+            0
+        };
+        let redraw: [bool; SKY_OCCLUSION_VIEW + 1] = std::array::from_fn(|c| {
+            if c == SKY_OCCLUSION_VIEW {
+                view.sky_occlusion.enabled && view.sky_occlusion.static_redraw
+            } else {
+                c < cascades && view.cascades.static_redraw[c]
+            }
+        });
+        let any_redraw = redraw.contains(&true);
         for (rock, t) in q.iter(world) {
             let scale = t.scale();
             let size = scale.max_element();
@@ -4969,13 +4991,15 @@ impl SceneryFeature {
             let center = base + Vec3::Y * scale.y * 0.5;
             let radius = size * 0.75;
             let dist = center.length();
-            // Pebbles vanish in the distance; big rocks get coarser.
-            if dist > 25.0 + size * 160.0 {
-                continue;
-            }
-            let visible = view.frustum.intersects_sphere(center, radius);
             let casts = shadows && size > 0.2;
-            if !visible && !casts {
+            if size > 0.2 {
+                state = stands(state, rock.shape as u64, t);
+            }
+            // Pebbles vanish in the distance; big rocks get coarser. A static image takes
+            // every rock in its square, however far from the eye.
+            let near = dist <= 25.0 + size * 160.0;
+            let visible = near && view.frustum.intersects_sphere(center, radius);
+            if !visible && !(casts && any_redraw) {
                 continue;
             }
             let lod = if dist < 12.0 + size * 10.0 {
@@ -5037,24 +5061,32 @@ impl SceneryFeature {
             .filter(|i| i.visible)
             .map(|i| (i.mesh, i.instance));
         push_batches(&mut visible, &mut self.instance_bytes, &mut self.rock_draws);
-        // One list per sun cascade, then the sky occlusion map: rocks and cave roofs keep the
-        // open sky off whatever lies under them.
-        let cascades = if view.sun_shadows {
-            (view.cascades.count as usize).min(MAX_CASCADES)
-        } else {
-            0
-        };
+        // One list per sun cascade, then the sky occlusion map (rocks and cave roofs keep the
+        // open sky off whatever lies under them), for the maps whose static image is drawn
+        // again: every rock in the map's square that its texels can show.
+        if !view.extra_view {
+            self.rocks_changed = state != self.rock_state;
+            self.rock_state = state;
+        }
         self.shadow_draws
             .resize_with(SKY_OCCLUSION_VIEW + 1, Vec::new);
         for (c, draws) in self.shadow_draws.iter_mut().enumerate() {
             draws.clear();
+            if !redraw[c] {
+                continue;
+            }
+            let texel = if c == SKY_OCCLUSION_VIEW {
+                view.sky_occlusion.extent / view.sky_occlusion.map_size.max(1) as f32
+            } else {
+                2.0 * view.cascades.half_extent[c] / view.cascades.map_size.max(1) as f32
+            };
             let inside = |i: &RockItem| {
-                if c == SKY_OCCLUSION_VIEW {
-                    view.sky_occlusion.enabled
-                        && view.sky_occlusion.contains_sphere(i.center, i.radius)
-                } else {
-                    c < cascades && view.cascades.sphere_in_cascade(c, i.center, i.radius)
-                }
+                i.radius >= texel
+                    && if c == SKY_OCCLUSION_VIEW {
+                        view.sky_occlusion.contains_sphere(i.center, i.radius)
+                    } else {
+                        view.cascades.sphere_in_square(c, i.center, i.radius)
+                    }
             };
             let mut casters: Vec<(u32, [f32; 32])> = self
                 .items
@@ -5075,6 +5107,19 @@ impl SceneryFeature {
             push_batches(&mut casters.into_iter(), &mut self.instance_bytes, draws);
         }
     }
+}
+
+/// `state` with a caster of `kind` standing at `t` folded in (`SceneryFeature::rock_state`).
+fn stands(state: u64, kind: u64, t: &GlobalTransform) -> u64 {
+    let (p, s, r) = (t.translation(), t.scale(), t.rotation());
+    let mut h = hash_u64(state ^ kind);
+    for bits in [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()] {
+        h = hash_u64(h ^ bits);
+    }
+    for v in [s.x, s.y, s.z, r.x, r.y, r.z, r.w] {
+        h = hash_u64(h ^ v.to_bits() as u64);
+    }
+    h
 }
 
 /// Rock meshes the feature makes itself: every shape at every level of detail. Cave chambers'
@@ -5099,13 +5144,20 @@ fn upload_rock_mesh(gpu: &GpuShared, m: &RockMesh) -> GpuRockMesh {
 impl SceneryFeature {
     /// Cave chambers, drawn (and casting shadows) like rocks from their own meshes, built the
     /// first time each recipe is seen.
-    fn prepare_chambers(&mut self, world: &mut World, gpu: &GpuShared, view: &ViewData) {
+    fn prepare_chambers(
+        &mut self,
+        world: &mut World,
+        gpu: &GpuShared,
+        view: &ViewData,
+        state: &mut u64,
+    ) {
         use std::hash::{Hash, Hasher};
         let mut q = world.query::<(&crate::cave::CaveChamber, &GlobalTransform)>();
         for (chamber, t) in q.iter(world) {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             format!("{chamber:?}").hash(&mut h);
             let key = h.finish();
+            *state = stands(*state, key, t);
             let mesh = match self.chambers.get(&key) {
                 Some(&i) => i,
                 None => {
@@ -5424,6 +5476,10 @@ impl RenderFeature for SceneryFeature {
             self.items.clear();
             self.rock_draws.clear();
             self.shadow_draws.clear();
+            if !view.extra_view {
+                self.rocks_changed = self.rock_state != 0;
+                self.rock_state = 0;
+            }
             self.stats = FeatureStats::default();
             return;
         }
@@ -5473,12 +5529,12 @@ impl RenderFeature for SceneryFeature {
         );
     }
 
-    fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
+    fn draw_shadow_static(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, _ctx: &FrameContext) {
         let (Some(pipeline), Some(instances)) = (&self.rock_shadow_pipeline, &self.instances)
         else {
             return;
         };
-        let Some(draws) = self.shadow_draws.get(cascade) else {
+        let Some(draws) = self.shadow_draws.get(map) else {
             return;
         };
         if draws.is_empty() {
@@ -5492,6 +5548,10 @@ impl RenderFeature for SceneryFeature {
             pass.set_index_buffer(m.index.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..m.index_count, 0, b.first..b.first + b.count);
         }
+    }
+
+    fn shadow_static_changed(&self, map: usize) -> bool {
+        self.rocks_changed && map <= SKY_OCCLUSION_VIEW
     }
 
     fn stats(&self) -> FeatureStats {

@@ -67,7 +67,7 @@ use crate::mesh_pool::{MeshPool, PoolMesh};
 use crate::mesh_scene::{self, Cold, Hot, LOD_UNSET, MeshScene, SlotChange};
 use crate::plant_wind::{PlantWindMeshes, PlantWindSpecies, PlantWindTable};
 use crate::settings::{RenderSettings, TextureCompression};
-use crate::shadows::{FAR_SHADOW_MAP, MAX_CASCADES, SHADOW_MAPS, SKY_OCCLUSION_VIEW};
+use crate::shadows::{FAR_SHADOW_MAP, MAX_CASCADES, SHADOW_MAPS, SKY_OCCLUSION_VIEW, ShadowTiles};
 use crate::texture::Image;
 use crate::virtual_geometry::{
     BuildCache, BuildJob, ClusterInstance, ClusterRenderer, DisplacedJob, Displacement,
@@ -623,10 +623,22 @@ struct MapCasters {
     /// Every still caster when the map's static image is drawn again; else those that turned
     /// still since it last took casters in, which join it (`RenderFeature::draw_shadow_join`).
     still: CasterList,
+    /// The map's tiles the moving casters draw into (`RenderFeature::shadow_moving`).
+    tiles: ShadowTiles,
+    /// Those of them by why the caster is drawn every frame (`describe`): leaves that sway
+    /// in a map fine enough to show it, casters that never rest (skinned, or fading in or
+    /// out), and casters not still for long enough yet.
+    why_tiles: [ShadowTiles; 3],
+    /// The map's tiles the casters joining its static image draw into
+    /// (`RenderFeature::shadow_join_tiles`).
+    join_tiles: ShadowTiles,
 }
 
 impl MapCasters {
     fn clear(&mut self) {
+        self.tiles = ShadowTiles::NONE;
+        self.why_tiles = [ShadowTiles::NONE; 3];
+        self.join_tiles = ShadowTiles::NONE;
         for list in [&mut self.moving, &mut self.still] {
             list.picked.clear();
             list.keys.clear();
@@ -1642,6 +1654,12 @@ pub struct MeshFeature {
     /// Their ranges per shadow map: the cascades, the sky occlusion map, the far shadow map;
     /// moving and in the static images.
     impostor_shadow: [(u32, u32); SHADOW_MAPS],
+    /// The tiles of each map `shadow` and `impostor_shadow` draw into.
+    shadow_tiles: [ShadowTiles; SHADOW_MAPS],
+    /// The tiles of each map the casters joining its static image this frame draw into.
+    shadow_join_tiles: [ShadowTiles; SHADOW_MAPS],
+    /// Those of them by why the caster moves (`MapCasters::why_tiles`, for `describe`).
+    shadow_why_tiles: [[ShadowTiles; 3]; SHADOW_MAPS],
     impostor_shadow_static: [(u32, u32); SHADOW_MAPS],
     stats: FeatureStats,
     /// When the profiler's mesh report was last logged (`--profile`).
@@ -4429,6 +4447,9 @@ impl RenderFeature for MeshFeature {
         for s in self.shadow.iter_mut().chain(&mut self.shadow_static) {
             s.clear();
         }
+        self.shadow_tiles = [ShadowTiles::NONE; SHADOW_MAPS];
+        self.shadow_why_tiles = [[ShadowTiles::NONE; 3]; SHADOW_MAPS];
+        self.shadow_join_tiles = [ShadowTiles::NONE; SHADOW_MAPS];
         self.keys.clear();
 
         // Opaque.
@@ -4599,6 +4620,9 @@ impl RenderFeature for MeshFeature {
                 let image = if redraw { frame } else { image_frame[c] };
                 // Swaying leaves rest only in maps too coarse to show them move, in one pose.
                 let sway_moves = crate::shadows::sway_moves(texel);
+                let Some(tile_map) = crate::shadows::TileProjection::of(view, c) else {
+                    return;
+                };
                 for &n in casters {
                     let item = &items[n as usize];
                     // A caster with a stand-in for other maps (`ShadowTexelRange`).
@@ -4649,8 +4673,21 @@ impl RenderFeature for MeshFeature {
                         continue;
                     }
                     let list = if in_image {
+                        if !redraw {
+                            out.join_tiles
+                                .add_projected(&tile_map, item.center, item.radius);
+                        }
                         &mut out.still
                     } else {
+                        out.tiles.add_projected(&tile_map, item.center, item.radius);
+                        let why = if !can_rest {
+                            0
+                        } else if since == u64::MAX {
+                            1
+                        } else {
+                            2
+                        };
+                        out.why_tiles[why].add_projected(&tile_map, item.center, item.radius);
                         &mut out.moving
                     };
                     if item.impostor != crate::impostor::NONE
@@ -4691,6 +4728,11 @@ impl RenderFeature for MeshFeature {
                 for map_lists in lists.chunks_mut(parts) {
                     let (first, rest) = map_lists.split_at_mut(1);
                     for part in rest.iter() {
+                        first[0].tiles.add(part.tiles);
+                        first[0].join_tiles.add(part.join_tiles);
+                        for (to, from) in first[0].why_tiles.iter_mut().zip(part.why_tiles) {
+                            to.add(from);
+                        }
                         for (to, from) in [
                             (&mut first[0].moving, &part.moving),
                             (&mut first[0].still, &part.still),
@@ -4703,6 +4745,9 @@ impl RenderFeature for MeshFeature {
                 }
             }
             for (&c, lists) in maps.iter().zip(lists.iter().step_by(parts)) {
+                self.shadow_tiles[c] = lists.tiles;
+                self.shadow_join_tiles[c] = lists.join_tiles;
+                self.shadow_why_tiles[c] = lists.why_tiles;
                 for (list, still) in [(&lists.moving, false), (&lists.still, true)] {
                     let first = self.layout.len();
                     self.layout.extend_from_slice(&list.picked);
@@ -5340,6 +5385,15 @@ impl RenderFeature for MeshFeature {
         );
     }
 
+    fn shadow_moving(&self, map: usize, _ctx: &FrameContext) -> ShadowTiles {
+        let mut tiles = self.shadow_tiles.get(map).copied().unwrap_or_default();
+        // Clusters are culled on the GPU and drawn every frame: wherever one may cast.
+        if let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) {
+            tiles.add(clusters.shadow_tiles(map));
+        }
+        tiles
+    }
+
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         self.draw_shadow_view(
             pass,
@@ -5373,6 +5427,10 @@ impl RenderFeature for MeshFeature {
         self.joined.get(map).is_some_and(|j| j.0 > 0)
     }
 
+    fn shadow_join_tiles(&self, map: usize) -> ShadowTiles {
+        self.shadow_join_tiles.get(map).copied().unwrap_or_default()
+    }
+
     fn draw_shadow_join(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, ctx: &FrameContext) {
         // On frames the image isn't drawn again its static lists hold the joins.
         self.draw_shadow_static(pass, map, ctx);
@@ -5396,6 +5454,19 @@ impl RenderFeature for MeshFeature {
             "opaque_batches": self.opaque.len(),
             "transparent_batches": self.transparent.len(),
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
+            // Tiles (of 256) of each shadow map under what is drawn into it every frame: every
+            // moving caster; those that are swaying leaves, that never rest (skinned, or
+            // fading in or out) and that have not been still for long enough yet; and the
+            // clusters.
+            "shadow_moving_tiles": {
+                "casters": self.shadow_tiles.map(|t| t.count()),
+                "swaying": self.shadow_why_tiles.map(|t| t[0].count()),
+                "never_rest": self.shadow_why_tiles.map(|t| t[1].count()),
+                "not_still_yet": self.shadow_why_tiles.map(|t| t[2].count()),
+                "clusters": self.clusters.as_ref().filter(|c| c.is_active()).map(|c| {
+                    std::array::from_fn::<_, SHADOW_MAPS, _>(|map| c.shadow_tiles(map).count())
+                }),
+            },
             "shadow_static_batches": self.shadow_static.iter().map(|s| s.len()).collect::<Vec<_>>(),
             "impostors": self.impostors.as_ref().map_or(0, Impostors::count),
             "impostor_atlas_bc7": self.impostors.as_ref().is_some_and(Impostors::compressed),

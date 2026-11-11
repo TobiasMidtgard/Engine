@@ -17,7 +17,7 @@ use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
-use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
+use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowTiles};
 use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
     RenderSettings, ViewData, wgpu,
@@ -766,6 +766,8 @@ struct Draws {
     transparent: Vec<Range<u32>>,
     /// Per shadow cascade, plus the sky occlusion map last.
     shadow: [Vec<Range<u32>>; MAX_CASCADES + 1],
+    /// The tiles of each of those maps the bodies that cast into it cover.
+    tiles: [ShadowTiles; MAX_CASCADES + 1],
 }
 
 impl Draws {
@@ -773,6 +775,7 @@ impl Draws {
         self.opaque.clear();
         self.transparent.clear();
         self.shadow.iter_mut().for_each(Vec::clear);
+        self.tiles = Default::default();
     }
 }
 
@@ -1049,6 +1052,7 @@ impl RenderFeature for SoftBodyFeature {
                     && cascades.sphere_in_cascade(c, center, radius)
                 {
                     mask |= 1 << c;
+                    self.draws.tiles[c].add_sphere(view, c, center, radius);
                 }
             }
             let sky = &view.sky_occlusion;
@@ -1057,6 +1061,12 @@ impl RenderFeature for SoftBodyFeature {
                 && sky.contains_sphere(center, radius)
             {
                 mask |= 1 << SKY_OCCLUSION_VIEW;
+                self.draws.tiles[SKY_OCCLUSION_VIEW].add_sphere(
+                    view,
+                    SKY_OCCLUSION_VIEW,
+                    center,
+                    radius,
+                );
             }
             if !in_view && mask == 0 {
                 self.stats.culled += 1;
@@ -1227,6 +1237,18 @@ impl RenderFeature for SoftBodyFeature {
         if let Some(cloths) = self.cloths.as_mut() {
             cloths.compute(encoder, &ctx.gpu.device);
         }
+    }
+
+    fn shadow_moving(&self, map: usize, _ctx: &FrameContext) -> ShadowTiles {
+        let mut tiles = ShadowTiles::NONE;
+        if self.gpu.is_none() || map > MAX_CASCADES {
+            return tiles;
+        }
+        tiles.add(self.draws.tiles[map]);
+        if let Some(cloths) = &self.cloths {
+            tiles.add(cloths.shadow_tiles[map]);
+        }
+        tiles
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {

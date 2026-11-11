@@ -212,9 +212,10 @@ pub mod shade_skip {
     /// Skinned meshes are not posed (they freeze where they are; a new one stays in its bind
     /// pose): what posing them on the GPU costs in `compute meshes`.
     pub const FREEZE_SKINS: u32 = 524288;
-    /// A shadow map's still image is copied into the map only in the frames the image changed
-    /// (what moves leaves a trail in the maps): what the copies of every frame cost in
-    /// `shadows` and `sky occlusion`.
+    /// A shadow map is put back to its still image only in the frames the image changed
+    /// (what moves leaves a trail in the maps): what putting back each frame's moving casters
+    /// costs in `shadows` and `sky occlusion` (the whole copies of every frame, with
+    /// `trial_cut_more::SHADOW_TILES` off).
     pub const SHADOW_COPIES: u32 = 1048576;
 }
 
@@ -371,7 +372,7 @@ pub mod trial_cut {
 /// Bits of [`RenderSettings::trial_cuts_more`]: cuts past the 24 of [`trial_cut`].
 pub mod trial_cut_more {
     /// Those that are how the frame is drawn (see [`super::trial_cut::DEFAULT`]).
-    pub const DEFAULT: u32 = AERIAL_STEPWISE | GROUND_STILL;
+    pub const DEFAULT: u32 = AERIAL_STEPWISE | GROUND_STILL | SHADOW_TILES;
     /// The haze table (aerial.rs) carries the atmosphere on from depth slice to depth slice,
     /// one step across each slice, where it marched every slice's whole ray from the camera
     /// in 8 steps: 64 atmosphere steps a column, not 512. Both are estimates of the same
@@ -389,6 +390,12 @@ pub mod trial_cut_more {
     /// draws the image again. Off, or while a terrain that casts into a map moves: the
     /// ground is drawn into it every frame.
     pub const GROUND_STILL: u32 = 2;
+    /// A shadow map is put back to its static image only where moving casters were drawn the
+    /// frame before (`shadows::ShadowTiles`, `RenderFeature::shadow_moving`): those tiles are
+    /// drawn from the image, the rest of the map is left as it is. Off: every map's whole
+    /// image is copied every frame, as it was until 11 Nov (six layers, 335 MB of depth with
+    /// maps of 4096²), whether anything moved or not.
+    pub const SHADOW_TILES: u32 = 4;
 }
 
 /// What the screen shows.

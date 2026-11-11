@@ -35,7 +35,7 @@ use crate::features::{
 use crate::frame::ViewData;
 use crate::image_cache::{ImageTexture, upload_image};
 use crate::settings::RenderSettings;
-use crate::shadows::MAX_CASCADES;
+use crate::shadows::{MAX_CASCADES, ShadowTiles};
 use crate::texture::Image;
 
 /// Tiles per side of a tile map chunk (the unit of culling).
@@ -1529,6 +1529,14 @@ impl RenderFeature for SpriteFeature {
             && !self.opaque.is_empty()
         {
             self.draw_list(pass, &self.opaque, &p.sprite_prepass, &p.tile_prepass);
+        }
+    }
+
+    fn shadow_moving(&self, map: usize, _ctx: &FrameContext) -> ShadowTiles {
+        // Sprites and tile maps are drawn every frame, wherever they are in the map.
+        match self.shadow.get(map) {
+            Some(draws) if self.pipelines.is_some() && !draws.is_empty() => ShadowTiles::ALL,
+            _ => ShadowTiles::NONE,
         }
     }
 
