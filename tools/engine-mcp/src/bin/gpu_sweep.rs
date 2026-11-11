@@ -195,6 +195,12 @@ fn variants() -> Vec<Variant> {
             "skinned meshes are not posed (characters freeze): what GPU skinning costs in `compute meshes`",
         ),
         v(
+            "skip_shadow_copies",
+            r,
+            json!({"debug_skip": 1_048_576}),
+            "the shadow maps' still images are copied in only when they change (moving shadows leave trails): what copying them every frame costs in `shadows` and `sky occlusion`",
+        ),
+        v(
             "no_grass",
             r,
             json!({"grass_density": 0.0}),
@@ -405,6 +411,12 @@ fn variants() -> Vec<Variant> {
             r,
             json!({"trial_cuts": 8_388_608}),
             "world reflections trace every other ray a frame, the rest carried over from the frame before by the screen motion (the same picture at rest; to judge in motion)",
+        ),
+        v(
+            "cut_aerial_stepwise",
+            r,
+            json!({"trial_cuts_more": 1}),
+            "the haze table's atmosphere carried on from slice to slice: 64 steps a column, not 512",
         ),
         v(
             "cut_tiled_lamps",

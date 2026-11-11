@@ -33,6 +33,34 @@ fn cs_aerial(@builtin(global_invocation_id) id: vec3<u32>) {
     if (frame.volumetrics.x > 0.0) { fog_start = frame.volumetrics.x * per_depth; }
     var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     var prev = 0.0;
+    // `CUT_AERIAL_STEPWISE`: the atmosphere carried on from slice to slice, one step across each
+    // slice (64 steps along the ray, each about 15% of its distance long), not marched from
+    // the camera again for every slice (64 x 8). The step is `integrate_atmosphere_spaced`'s.
+    let stepwise = trial_cut_more(CUT_AERIAL_STEPWISE);
+    var air_light = vec3<f32>(0.0);
+    var air_through = vec3<f32>(1.0);
+    let h0 = frame.camera_world.w;
+    let up = normalize(-frame.planet.xyz);
+    let mu = dot(dir, up);
+    let mu_s = dot(frame.sun_dir.xyz, up);
+    let nu = dot(dir, frame.sun_dir.xyz);
+    let radius = frame.planet.w;
+    let r0 = radius + h0;
+    // Where the ray is in the air: from entering it to leaving it or reaching the ground.
+    var air_from = 0.0;
+    var air_to = -1.0;
+    if (stepwise && radius > 0.0) {
+        let hit_atmo = ray_shell_mu(h0, mu, frame.atmosphere.x);
+        if (hit_atmo.y >= 0.0) {
+            air_from = max(hit_atmo.x, 0.0);
+            air_to = hit_atmo.y;
+            let hit_ground = ray_shell_mu(h0, mu, 0.0);
+            if (hit_ground.x > 0.0) { air_to = min(air_to, hit_ground.x); }
+        }
+    }
+    let pr = phase_rayleigh(nu);
+    let g_ms = air_mie_g_scattered();
+    let pm = phase_mie_rgb(nu, g_ms);
     for (var k = 0u; k < size.z; k++) {
         let t = aerial_slice_distance(f32(k + 1u));
         let a = max(prev, fog_start);
@@ -49,11 +77,34 @@ fn cs_aerial(@builtin(global_invocation_id) id: vec3<u32>) {
                 fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
             }
         }
-        let air = atmosphere(vec3<f32>(0.0), dir, t, AIR_STEPS);
-        let light = pre_expose(air.radiance * frame.sun_color.rgb);
+        if (stepwise) {
+            let t0 = max(prev, air_from);
+            let t1 = min(t, air_to);
+            if (t1 > t0) {
+                let dt = t1 - t0;
+                let tm = (t0 + t1) * 0.5;
+                let h = height_along(h0, mu, tm);
+                let mu_s_t = clamp((r0 * mu_s + tm * nu) / (radius + h), -1.0, 1.0);
+                let m = atmo_medium(h);
+                let sun = transmittance_to_top(h, mu_s_t) * sun_above_horizon(h, mu_s_t);
+                let ms = multiscatter_parts(h, mu_s_t);
+                let mu_t = clamp((r0 * mu + tm) / (radius + h), -1.0, 1.0);
+                let g1 = m.mie * g_ms / max(m.mie + m.rayleigh, vec3<f32>(1e-20));
+                let mie_ms = multiscatter_inscatter(ms, mu_t, nu, g_ms, g1);
+                let sc = sun * (m.rayleigh * pr + m.mie * pm) + ms.total * m.rayleigh + mie_ms * m.mie;
+                let seg = exp(-m.extinction * dt);
+                air_light += air_through * (sc - sc * seg) / max(m.extinction, vec3<f32>(1e-12));
+                air_through *= seg;
+            }
+        } else {
+            let air = atmosphere(vec3<f32>(0.0), dir, t, AIR_STEPS);
+            air_light = air.radiance;
+            air_through = air.transmittance;
+        }
+        let light = pre_expose(air_light * frame.sun_color.rgb);
         textureStore(aerial_out, vec3<u32>(id.x, id.y, k), fog);
-        textureStore(aerial_out, vec3<u32>(id.x + columns, id.y, k), vec4<f32>(light, air.transmittance.r));
-        textureStore(aerial_out, vec3<u32>(id.x + 2u * columns, id.y, k), vec4<f32>(air.transmittance.gb, 0.0, 0.0));
+        textureStore(aerial_out, vec3<u32>(id.x + columns, id.y, k), vec4<f32>(light, air_through.r));
+        textureStore(aerial_out, vec3<u32>(id.x + 2u * columns, id.y, k), vec4<f32>(air_through.gb, 0.0, 0.0));
         prev = t;
     }
 }

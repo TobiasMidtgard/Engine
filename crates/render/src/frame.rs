@@ -1106,7 +1106,13 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             v.sun_color.z,
             if v.sun_shadows { 1.0 } else { 0.0 },
         ],
-        sun_camera: [sun_camera.x, sun_camera.y, sun_camera.z, 0.0],
+        sun_camera: [
+            sun_camera.x,
+            sun_camera.y,
+            sun_camera.z,
+            // (24 bits: exact in an f32.)
+            (settings.trial_cuts_more & 0x00ff_ffff) as f32,
+        ],
         ambient: [
             ambient_rgb.x,
             ambient_rgb.y,

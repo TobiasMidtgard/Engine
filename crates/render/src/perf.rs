@@ -61,7 +61,7 @@ const _: () = assert!(SLOT_BYTES.is_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGN
 type Label = Cow<'static, str>;
 
 /// Passes the profiler splits by feature ("scene: meshes", …): each also reports its whole.
-const SPLIT_PASSES: [&str; 3] = ["scene", "prepass", "transparent"];
+const SPLIT_PASSES: [&str; 4] = ["scene", "prepass", "transparent", "shadows"];
 
 struct Slot {
     buffer: wgpu::Buffer,

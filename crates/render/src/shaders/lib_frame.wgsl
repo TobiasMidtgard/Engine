@@ -374,6 +374,14 @@ fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;
 }
 
+// `RenderSettings::trial_cuts_more` (the first set of 24 is full).
+// The haze table's atmosphere carried on from slice to slice (aerial.wgsl).
+const CUT_AERIAL_STEPWISE: u32 = 1u;
+
+fn trial_cut_more(bit: u32) -> bool {
+    return (u32(frame.sun_camera.w) & bit) != 0u;
+}
+
 fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
     let r = sqrt((f32(i) + 0.5) / f32(n));
     let theta = f32(i) * GOLDEN_ANGLE + angle;

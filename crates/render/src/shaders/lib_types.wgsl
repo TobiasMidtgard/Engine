@@ -23,7 +23,7 @@ struct Frame {
     time: vec4<f32>,               // world seconds, real seconds, world delta, frame index
     sun_dir: vec4<f32>,            // direction TOWARD the sun, w = angular radius (radians)
     sun_color: vec4<f32>,          // linear RGB * illuminance (lux), w = shadows enabled (1/0)
-    sun_camera: vec4<f32>,         // sun illuminance reaching the camera through the atmosphere (lux RGB)
+    sun_camera: vec4<f32>,         // sun illuminance reaching the camera through the atmosphere (lux RGB); w: RenderSettings::trial_cuts_more
     ambient: vec4<f32>,            // extra ambient fill radiance (cd/m^2) RGB, w = ground albedo
     fog: vec4<f32>,                // density, height falloff, fog base altitude (m above the planet surface; world y without one), max opacity
     fog_color: vec4<f32>,          // fog albedo RGB (lit by sky and sun), w = sun scattering strength

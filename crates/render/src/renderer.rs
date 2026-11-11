@@ -2620,7 +2620,15 @@ impl Renderer {
         // Shadows: each map's static image (drawn again only when due, `ShadowCache`) copied
         // in, then what moves drawn on top. Extra views draw everything straight in.
         if view.sun_shadows {
-            self.perf.pass(&mut cpu, &mut encoder, "shadows");
+            // Under the profiler the moving casters are drawn feature by feature, each with
+            // its own row ("shadows: grass"), after every map's static image is in.
+            let split = engine_core::profile::enabled() && !extra && self.shadow.statics.is_some();
+            let whole = if split {
+                "shadows: still images"
+            } else {
+                "shadows"
+            };
+            self.perf.pass(&mut cpu, &mut encoder, whole);
             let size = self.shadow.size;
             let occlusion_size = self.shadow.occlusion_size;
             // The map size changed (the cache redraws every map then).
@@ -2634,16 +2642,19 @@ impl Renderer {
                 self.shadow.statics = Some(StaticShadows::new(&self.shared, size, occlusion_size));
             }
             let count = (view.cascades.count as usize).min(MAX_CASCADES);
-            let maps = (0..count)
+            let maps: Vec<(usize, usize, bool)> = (0..count)
                 .map(|i| (i, i, view.cascades.static_redraw[i]))
                 .chain(view.far_shadow.enabled.then_some((
                     FAR_SHADOW_MAP,
                     FAR_SHADOW_LAYER,
                     view.far_shadow.static_redraw,
-                )));
+                )))
+                .collect();
             let shadow = &self.shadow;
             let statics = shadow.statics.as_ref().filter(|_| !extra);
-            for (map, layer, redraw) in maps {
+            // (`shade_skip::SHADOW_COPIES`: a measurement, the maps keep what moved.)
+            let copy_always = settings.debug_skip & crate::settings::shade_skip::SHADOW_COPIES == 0;
+            for &(map, layer, redraw) in &maps {
                 let group = &shadow.view_bind_groups[map];
                 let live = &shadow.layer_views[layer];
                 let draw_moving = |pass: &mut wgpu::RenderPass<'_>| {
@@ -2668,6 +2679,7 @@ impl Renderer {
                     draw_moving(&mut pass);
                     continue;
                 };
+                let joins = !redraw && self.features.iter().any(|f| f.shadow_joins(map));
                 if redraw {
                     let mut pass = depth_pass(
                         &mut encoder,
@@ -2676,7 +2688,7 @@ impl Renderer {
                         true,
                     );
                     draw_still(&mut pass);
-                } else if self.features.iter().any(|f| f.shadow_joins(map)) {
+                } else if joins {
                     // Casters that turned still go into the image on top of what it holds.
                     let mut pass = depth_pass(
                         &mut encoder,
@@ -2689,14 +2701,36 @@ impl Renderer {
                         f.draw_shadow_join(&mut pass, map, &ctx);
                     }
                 }
-                copy_layer(
-                    &mut encoder,
-                    &statics.texture,
-                    &shadow.texture,
-                    layer as u32,
-                );
-                let mut pass = depth_pass(&mut encoder, "shadow map", live, false);
-                draw_moving(&mut pass);
+                if copy_always || redraw || joins {
+                    copy_layer(
+                        &mut encoder,
+                        &statics.texture,
+                        &shadow.texture,
+                        layer as u32,
+                    );
+                }
+                if !split {
+                    let mut pass = depth_pass(&mut encoder, "shadow map", live, false);
+                    draw_moving(&mut pass);
+                }
+            }
+            if split {
+                for f in &self.features {
+                    self.perf
+                        .pass(&mut cpu, &mut encoder, format!("shadows: {}", f.name()));
+                    for &(map, layer, _) in &maps {
+                        let live = &shadow.layer_views[layer];
+                        let mut pass = depth_pass(&mut encoder, "shadow map", live, false);
+                        pass.set_bind_group(0, &shadow.view_bind_groups[map], &[]);
+                        if map == FAR_SHADOW_MAP {
+                            f.draw_far_shadow(&mut pass, &ctx);
+                        } else {
+                            f.draw_shadow(&mut pass, map, &ctx);
+                        }
+                    }
+                }
+                self.perf
+                    .pass(&mut cpu, &mut encoder, "shadows: people's own maps");
             }
             // People's inset shadow maps: only what the features that draw people put in.
             let insets = &self.shadow.insets;
@@ -2744,7 +2778,15 @@ impl Renderer {
                     }
                 }
                 Some(statics) => {
-                    if view.sky_occlusion.static_redraw {
+                    let copy_always =
+                        settings.debug_skip & crate::settings::shade_skip::SHADOW_COPIES == 0;
+                    let redraw = view.sky_occlusion.static_redraw;
+                    let joins = !redraw
+                        && self
+                            .features
+                            .iter()
+                            .any(|f| f.shadow_joins(SKY_OCCLUSION_VIEW));
+                    if redraw {
                         let mut pass = depth_pass(
                             &mut encoder,
                             "sky occlusion static image",
@@ -2755,11 +2797,7 @@ impl Renderer {
                         for f in &self.features {
                             f.draw_shadow_static(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
                         }
-                    } else if self
-                        .features
-                        .iter()
-                        .any(|f| f.shadow_joins(SKY_OCCLUSION_VIEW))
-                    {
+                    } else if joins {
                         let mut pass = depth_pass(
                             &mut encoder,
                             "sky occlusion static join",
@@ -2771,12 +2809,14 @@ impl Renderer {
                             f.draw_shadow_join(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
                         }
                     }
-                    copy_layer(
-                        &mut encoder,
-                        &statics.occlusion.0,
-                        &shadow.occlusion_texture,
-                        0,
-                    );
+                    if copy_always || redraw || joins {
+                        copy_layer(
+                            &mut encoder,
+                            &statics.occlusion.0,
+                            &shadow.occlusion_texture,
+                            0,
+                        );
+                    }
                     let mut pass =
                         depth_pass(&mut encoder, "sky occlusion", &shadow.occlusion, false);
                     pass.set_bind_group(0, group, &[]);

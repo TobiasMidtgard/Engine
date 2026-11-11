@@ -569,6 +569,7 @@ mod tests {
                 false,
             ),
             ("sky", include_str!("shaders/sky.wgsl").into(), true),
+            ("aerial", include_str!("shaders/aerial.wgsl").into(), true),
             ("post", include_str!("shaders/post.wgsl").into(), false),
             ("bloom", include_str!("shaders/bloom.wgsl").into(), false),
             ("blit", include_str!("shaders/blit.wgsl").into(), false),

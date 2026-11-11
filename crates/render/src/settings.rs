@@ -212,6 +212,10 @@ pub mod shade_skip {
     /// Skinned meshes are not posed (they freeze where they are; a new one stays in its bind
     /// pose): what posing them on the GPU costs in `compute meshes`.
     pub const FREEZE_SKINS: u32 = 524288;
+    /// A shadow map's still image is copied into the map only in the frames the image changed
+    /// (what moves leaves a trail in the maps): what the copies of every frame cost in
+    /// `shadows` and `sky occlusion`.
+    pub const SHADOW_COPIES: u32 = 1048576;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the same picture, switchable
@@ -338,6 +342,16 @@ pub mod trial_cut {
     /// a frame old, and what came into view that frame is traced a frame late there. To judge
     /// in motion on the PC.
     pub const REFLECTIONS_ALTERNATE: u32 = 8388608;
+}
+
+/// Bits of [`RenderSettings::trial_cuts_more`]: trial cuts past the 24 of [`trial_cut`].
+pub mod trial_cut_more {
+    /// The haze table (aerial.rs) carries the atmosphere on from depth slice to depth slice,
+    /// one step across each slice, where it marched every slice's whole ray from the camera
+    /// in 8 steps: 64 atmosphere steps a column, not 512. Both are estimates of the same
+    /// light; the stepwise one is the finer of the two near the camera and about as fine far
+    /// off, so distant haze can shift by a rounding of the march.
+    pub const AERIAL_STEPWISE: u32 = 1;
 }
 
 /// What the screen shows.
@@ -547,6 +561,9 @@ pub struct RenderSettings {
     /// side-by-side pictures: a cut that saves time and shows no difference loses its bit and
     /// becomes the code, one that doesn't is removed.
     pub trial_cuts: u32,
+    /// More of them (bits of [`trial_cut_more`]): the first set's 24 bits, all an f32 holds
+    /// exactly, are taken.
+    pub trial_cuts_more: u32,
     /// The frame rate the work spread over frames is set for: probe tracing's time a frame
     /// (`gi_budget_ms`), the environment map's interval (`environment_interval`) and, in the
     /// weather module, the share of the cloud image marched a frame. At a higher rate each frame
@@ -807,6 +824,7 @@ impl Default for RenderSettings {
             debug_view: DebugView::None,
             debug_skip: 0,
             trial_cuts: 0,
+            trial_cuts_more: 0,
             pacing_fps: 0.0,
             perf_log_secs: 10.0,
             environment_interval: 4,
