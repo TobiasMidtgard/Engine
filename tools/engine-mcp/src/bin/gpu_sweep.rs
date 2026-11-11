@@ -639,8 +639,9 @@ fn variants() -> Vec<Variant> {
                 ("trial_cuts", 0.0),
                 ("trial_cuts_more", 0.0),
                 ("shadow_refresh_secs", 0.0),
+                ("pacing_fps", 0.0),
             ],
-            "the frame as it was drawn before 11 Nov 2026 (no cut on): against the default frame, the whole before and after",
+            "the frame as it was drawn before 11 Nov 2026 (no cut on, no pacing): against the default frame, the whole before and after",
         ),
         v(
             "cut_all_no_screen_pass",
@@ -1129,7 +1130,7 @@ fn run(args: &Args) -> Result<(), String> {
         .unwrap_or(Value::Null);
     // `--old-way`: the baseline is the frame without any cut, so a cut's row reads what that
     // cut saves by itself and `cut_all` what the default frame saves. Put back at the end.
-    let old = json!({"trial_cuts": 0, "trial_cuts_more": 0, "shadow_refresh_secs": 0.0});
+    let old = json!({"trial_cuts": 0, "trial_cuts_more": 0, "shadow_refresh_secs": 0.0, "pacing_fps": 0.0});
     let default_way = if args.old_way {
         let now = bridge.call("resource.get", json!({"name": "RenderSettings"}))?;
         bridge.call(

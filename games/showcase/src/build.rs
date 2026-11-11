@@ -531,6 +531,10 @@ pub fn start(world: &mut World) {
         // Every image in the showcase and its module demos is built once and only sampled on
         // the GPU (audited for round 11), so the CPU copies can go once they are uploaded.
         settings.release_image_pixels = true;
+        // Work spread over frames (probe tracing, the environment map, the cloud march) is set
+        // for 60 frames a second: above that each frame does less of it, so a second holds the
+        // same work at 120 as at 60. At 60 and below nothing changes.
+        settings.pacing_fps = 60.0;
     }
     // Clear mountain air: a faint valley haze, about 130 km visibility (3.9 / density), so the
     // atmosphere gives the distant ranges their blue and the far shadow map their shade.
