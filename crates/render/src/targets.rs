@@ -282,7 +282,7 @@ impl Targets {
             width.div_ceil(2),
             height.div_ceil(2),
             wgpu::TextureFormat::Rgba16Float,
-            U::STORAGE_BINDING | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT,
+            U::STORAGE_BINDING | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT | U::COPY_SRC,
         );
         let gi_raw = screen("screen-space gi trace", formats.hdr);
         let gi_history =

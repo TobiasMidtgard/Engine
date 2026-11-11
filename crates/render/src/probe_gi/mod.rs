@@ -558,6 +558,9 @@ pub(crate) struct ProbeGi {
     frame: u64,
     work: Option<Work>,
     stats: Stats,
+    /// Last frame's world reflections, for the texels this frame doesn't trace
+    /// (`trial_cut::REFLECTIONS_ALTERNATE`); made the first frame the switch is on.
+    reflect_last: Option<crate::targets::Tex>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -759,6 +762,7 @@ impl ProbeGi {
             rays_lately: 0.0,
             grid: None,
             schedule: schedule::Schedule::new(),
+            reflect_last: None,
             light: None,
             frame: 0,
             work: None,
@@ -851,6 +855,25 @@ impl ProbeGi {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: wgpu::TextureFormat::Rgba16Float,
                         view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                ),
+                // Last frame's result and the screen motion (`REFLECTIONS_ALTERNATE`).
+                layout_entry(
+                    3,
+                    S::COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    4,
+                    S::COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                 ),
             ],
@@ -1960,13 +1983,16 @@ impl ProbeGi {
 
     /// Trace world reflections into `targets.world_reflection` from the prepass (after it, before
     /// screen-space reflections). False, writing nothing, while probe GI is off or has no scene
-    /// yet: the target then holds no reflections only if the caller cleared it.
+    /// yet: the target then holds no reflections only if the caller cleared it. `alternate`
+    /// (`trial_cut::REFLECTIONS_ALTERNATE`): every other texel is traced, in a checkerboard
+    /// that swaps each frame, and the rest take last frame's reflection of their surface.
     pub fn encode_reflections(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         frame_group: &wgpu::BindGroup,
         targets: &crate::targets::Targets,
+        alternate: bool,
     ) -> bool {
         let Some(active) = self.active.as_ref() else {
             return false;
@@ -1974,6 +2000,32 @@ impl ProbeGi {
         let Some(group) = &active.group else {
             return false;
         };
+        let now = &targets.world_reflection;
+        if !alternate {
+            self.reflect_last = None;
+        } else {
+            let last = match &mut self.reflect_last {
+                Some(t) if (t.width, t.height) == (now.width, now.height) => t,
+                slot => slot.insert(crate::targets::Tex::new(
+                    device,
+                    "world reflections, last frame",
+                    now.width,
+                    now.height,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                )),
+            };
+            encoder.copy_texture_to_texture(
+                now.texture.as_image_copy(),
+                last.texture.as_image_copy(),
+                now.texture.size(),
+            );
+        }
+        // (Without the switch nothing reads it: any texture the pass doesn't write.)
+        let last = self
+            .reflect_last
+            .as_ref()
+            .map_or(&targets.motion.view, |t| &t.view);
         let inputs = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("world reflection inputs"),
             layout: &active.reflect_layout,
@@ -1989,6 +2041,14 @@ impl ProbeGi {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&targets.world_reflection.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(last),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&targets.motion.view),
                 },
             ],
         });

@@ -118,6 +118,13 @@ pub struct ScreenEffects {
     gi_temporal: wgpu::RenderPipeline,
     gi_blur_near: wgpu::RenderPipeline,
     gi_blur: wgpu::RenderPipeline,
+    /// The half-size way's pipelines (`trial_cut::BOUNCE_HALF`): trace, temporal, near blur,
+    /// wide blur, and the spread back to every pixel.
+    gi_half_pipelines: [wgpu::RenderPipeline; 5],
+    /// Its targets and groups, made the first frame it is on at this size.
+    gi_half: Option<GiHalf>,
+    /// Whether the last bounce light was made the half-size way (the histories are apart).
+    gi_was_half: bool,
     /// GI groups: trace (indexed like `ssr_groups`), temporal and blur (indexed by the GI
     /// history written this frame).
     gi_groups: GiGroups,
@@ -294,6 +301,13 @@ impl ScreenEffects {
         let gi_temporal = gi_pipeline("screen-space gi temporal", "fs_temporal");
         let gi_blur_near = gi_pipeline("screen-space gi blur near", "fs_blur_near");
         let gi_blur = gi_pipeline("screen-space gi blur", "fs_blur");
+        let gi_half_pipelines = [
+            gi_pipeline("screen-space gi trace, half", "fs_trace_half"),
+            gi_pipeline("screen-space gi temporal, half", "fs_temporal_half"),
+            gi_pipeline("screen-space gi blur near, half", "fs_blur_near_half"),
+            gi_pipeline("screen-space gi blur, half", "fs_blur_half"),
+            gi_pipeline("screen-space gi spread", "fs_spread"),
+        ];
         let taa = fullscreen_pipeline(
             shared,
             "taa resolve",
@@ -350,6 +364,9 @@ impl ScreenEffects {
             gi_temporal,
             gi_blur_near,
             gi_blur,
+            gi_half_pipelines,
+            gi_half: None,
+            gi_was_half: false,
             gi_groups,
             gi_current: 0,
             gi_history_ready: false,
@@ -516,6 +533,7 @@ impl ScreenEffects {
         self.chain = ReflectionChain::new(shared, targets, &self.chain_layout);
         self.ssr_groups = Self::ssr_groups(shared, targets, &self.ssr_layout, &self.chain.view);
         self.gi_groups = GiGroups::new(shared, targets, &self.gi_layout);
+        self.gi_half = None;
         self.history_ready = false;
         self.gi_history_ready = false;
         self.accumulated = 0;
@@ -656,13 +674,26 @@ impl ScreenEffects {
 
     /// Record screen-space global illumination into `targets.gi`: trace from the prepass into
     /// the previous frame's image, blend with the GI history, blur. Same requirements as
-    /// `encode_ssr`.
+    /// `encode_ssr`. `half`: on half-size targets, spread to every pixel at the end
+    /// (`trial_cut::BOUNCE_HALF`).
     pub fn encode_gi(
         &mut self,
+        shared: &GpuShared,
         encoder: &mut wgpu::CommandEncoder,
         targets: &Targets,
         prepass_group: &wgpu::BindGroup,
+        half: bool,
     ) {
+        if half != self.gi_was_half {
+            self.gi_was_half = half;
+            self.gi_history_ready = false;
+        }
+        if half {
+            self.encode_gi_half(shared, encoder, targets, prepass_group);
+            return;
+        }
+        // (Its targets are for the frames it is on.)
+        self.gi_half = None;
         let g = self.gi_current;
         if !self.gi_history_ready {
             // The history read this frame is from before a frame without bounce light, such as
@@ -700,6 +731,74 @@ impl ScreenEffects {
                 "screen-space gi blur",
                 &self.gi_blur,
                 &self.gi_groups.temporal[g],
+                &targets.gi.view,
+            ),
+        ];
+        for (label, pipeline, group, out) in passes {
+            let mut pass = fullscreen_pass(encoder, label, out, true);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, prepass_group, &[]);
+            pass.set_bind_group(1, group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.gi_current = 1 - g;
+        self.gi_history_ready = true;
+    }
+
+    /// `encode_gi` the half-size way: the trace, the history and both blurs on targets half as
+    /// wide and high (a quarter of the pixels), then one full-size pass that spreads the result
+    /// to every pixel by depth and normal.
+    fn encode_gi_half(
+        &mut self,
+        shared: &GpuShared,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        prepass_group: &wgpu::BindGroup,
+    ) {
+        let g = self.gi_current;
+        let half = self
+            .gi_half
+            .get_or_insert_with(|| GiHalf::new(shared, targets, &self.gi_layout));
+        if !self.gi_history_ready {
+            fullscreen_pass(
+                encoder,
+                "screen-space gi history reset",
+                &half.history[1 - g].view,
+                true,
+            );
+        }
+        let [trace, temporal, blur_near, blur, spread] = &self.gi_half_pipelines;
+        let passes = [
+            (
+                "screen-space gi trace",
+                trace,
+                &self.gi_groups.trace[self.current],
+                &half.raw.view,
+            ),
+            (
+                "screen-space gi temporal",
+                temporal,
+                &half.temporal[g],
+                &half.history[g].view,
+            ),
+            (
+                "screen-space gi blur near",
+                blur_near,
+                &half.blur_near[g],
+                &half.raw.view,
+            ),
+            // Last frame's history was read by the temporal pass and is free until the next
+            // frame writes it: the wide blur goes there.
+            (
+                "screen-space gi blur",
+                blur,
+                &half.blur[g],
+                &half.history[1 - g].view,
+            ),
+            (
+                "screen-space gi spread",
+                spread,
+                &half.spread[g],
                 &targets.gi.view,
             ),
         ];
@@ -873,32 +972,105 @@ struct GiGroups {
     blur: [wgpu::BindGroup; 2],
 }
 
+/// A group of the bounce light's inputs: prepass normal, depth, motion, previous frame, GI
+/// input, GI history. Each pass reads only some of them; the rest get any texture it doesn't
+/// write.
+fn gi_group(
+    shared: &GpuShared,
+    t: &Targets,
+    layout: &wgpu::BindGroupLayout,
+    label: &str,
+    previous: &Tex,
+    input: &Tex,
+    history: &Tex,
+) -> wgpu::BindGroup {
+    let views = [
+        &t.prepass_normal.view,
+        &t.prepass_depth.view,
+        &t.motion.view,
+        &previous.view,
+        &input.view,
+        &history.view,
+    ];
+    let entries: Vec<_> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| wgpu::BindGroupEntry {
+            binding: i as u32,
+            resource: wgpu::BindingResource::TextureView(v),
+        })
+        .collect();
+    shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &entries,
+    })
+}
+
+/// The half-size bounce light's targets and input groups (`Effects::encode_gi_half`).
+struct GiHalf {
+    /// The trace, then the near blur.
+    raw: Tex,
+    /// The temporal result of this frame and of the last; the last one's then holds the wide
+    /// blur until the next frame writes it.
+    history: [Tex; 2],
+    /// Indexed by the GI history written this frame, all four.
+    temporal: [wgpu::BindGroup; 2],
+    blur_near: [wgpu::BindGroup; 2],
+    blur: [wgpu::BindGroup; 2],
+    spread: [wgpu::BindGroup; 2],
+}
+
+impl GiHalf {
+    fn new(shared: &GpuShared, t: &Targets, layout: &wgpu::BindGroupLayout) -> Self {
+        let tex = |label: &str| {
+            Tex::new(
+                &shared.device,
+                label,
+                t.width.div_ceil(2),
+                t.height.div_ceil(2),
+                shared.formats.hdr,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            )
+        };
+        let raw = tex("screen-space gi trace, half");
+        let history = [0, 1].map(|i| tex(&format!("screen-space gi history {i}, half")));
+        let group = |label, input: &Tex, other: &Tex| {
+            gi_group(shared, t, layout, label, &t.history[0], input, other)
+        };
+        Self {
+            temporal: [0, 1].map(|g| {
+                group(
+                    "screen-space gi temporal inputs, half",
+                    &raw,
+                    &history[1 - g],
+                )
+            }),
+            blur_near: [0, 1].map(|g| {
+                group(
+                    "screen-space gi blur near inputs, half",
+                    &history[g],
+                    &history[1 - g],
+                )
+            }),
+            blur: [0, 1].map(|g| group("screen-space gi blur inputs, half", &raw, &history[g])),
+            spread: [0, 1].map(|g| {
+                group(
+                    "screen-space gi spread inputs",
+                    &history[1 - g],
+                    &history[g],
+                )
+            }),
+            raw,
+            history,
+        }
+    }
+}
+
 impl GiGroups {
     fn new(shared: &GpuShared, t: &Targets, layout: &wgpu::BindGroupLayout) -> Self {
-        // Bindings: prepass normal, depth, motion, previous frame, GI input, GI history. Each
-        // pass reads only some of them; the rest get any texture it doesn't write.
         let group = |label, previous: &Tex, input: &Tex, history: &Tex| {
-            let views = [
-                &t.prepass_normal.view,
-                &t.prepass_depth.view,
-                &t.motion.view,
-                &previous.view,
-                &input.view,
-                &history.view,
-            ];
-            let entries: Vec<_> = views
-                .iter()
-                .enumerate()
-                .map(|(i, v)| wgpu::BindGroupEntry {
-                    binding: i as u32,
-                    resource: wgpu::BindingResource::TextureView(v),
-                })
-                .collect();
-            shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout,
-                entries: &entries,
-            })
+            gi_group(shared, t, layout, label, previous, input, history)
         };
         Self {
             trace: [0, 1].map(|current| {

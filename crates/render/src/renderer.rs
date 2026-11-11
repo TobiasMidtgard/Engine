@@ -2942,6 +2942,8 @@ impl Renderer {
                         &mut encoder,
                         frame_group,
                         &self.targets,
+                        settings.trial_cuts & crate::settings::trial_cut::REFLECTIONS_ALTERNATE
+                            != 0,
                     )
                 {
                     self.world_reflection_written = true;
@@ -2968,8 +2970,13 @@ impl Renderer {
         }
         if gi {
             self.perf.pass(&mut cpu, &mut encoder, "bounce light");
-            self.effects
-                .encode_gi(&mut encoder, &self.targets, &self.prepass_group);
+            self.effects.encode_gi(
+                &self.shared,
+                &mut encoder,
+                &self.targets,
+                &self.prepass_group,
+                settings.trial_cuts & crate::settings::trial_cut::BOUNCE_HALF != 0,
+            );
         } else {
             self.effects.skip_gi();
         }
@@ -3075,31 +3082,18 @@ impl Renderer {
             self.finisher
                 .hand_off(device, &mut encoder, &mut part, "transparent");
         }
-        // Transparent.
-        self.perf.pass(&mut cpu, &mut encoder, "transparent");
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("transparent"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.hdr.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.targets.depth.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            pass.set_bind_group(0, frame_group, &[]);
+        // Transparent. With the frame profiler on, each feature's see-through draws get a pass
+        // of their own (`render.gpu.transparent: <feature>`), as the scene's do.
+        if engine_core::profile::enabled() {
+            for f in &self.features {
+                self.perf
+                    .pass(&mut cpu, &mut encoder, format!("transparent: {}", f.name()));
+                let mut pass = transparent_pass(&mut encoder, &self.targets, frame_group);
+                f.draw(RenderPhase::Transparent, &mut pass, &ctx);
+            }
+        } else {
+            self.perf.pass(&mut cpu, &mut encoder, "transparent");
+            let mut pass = transparent_pass(&mut encoder, &self.targets, frame_group);
             for f in &self.features {
                 f.draw(RenderPhase::Transparent, &mut pass, &ctx);
                 pass.set_bind_group(0, frame_group, &[]);
@@ -3801,6 +3795,15 @@ fn scene_pass<'e>(
     });
     pass.set_bind_group(0, frame_group, &[]);
     pass
+}
+
+/// The see-through pass: the scene pass's targets, continued.
+fn transparent_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    targets: &Targets,
+    frame_group: &wgpu::BindGroup,
+) -> wgpu::RenderPass<'e> {
+    scene_pass(encoder, targets, frame_group, false)
 }
 
 pub(crate) fn fullscreen_pass<'e>(

@@ -324,6 +324,20 @@ pub mod trial_cut {
     /// leaves start from another side: single pixels on leaves come out lighter or darker
     /// (3.8% of the forest's, 10 Nov). Costs the pass's saving on those pixels.
     pub const THIN_OWN_SUN: u32 = 2097152;
+    /// Bounce light (ssgi.wgsl) traced, kept over frames and blurred on targets half as wide
+    /// and high, for every fourth pixel with four rays (not two), then spread to every pixel
+    /// by depth and normal: four of its five passes cover a quarter of the pixels. NOT the same
+    /// picture pixel for pixel: the light is as bright, a little smoother across a surface,
+    /// and things thinner than two pixels borrow their neighbor's. The frame itself stays
+    /// full size.
+    pub const BOUNCE_HALF: u32 = 4194304;
+    /// World reflections (probe_gi.wgsl `cs_reflect`, one traced ray for every fourth pixel)
+    /// trace every other texel a frame, in a checkerboard that swaps each frame; the rest take
+    /// last frame's reflection of their own surface point (found by the screen motion). Half
+    /// the rays a frame. The same picture while nothing moves; in motion half the texels are
+    /// a frame old, and what came into view that frame is traced a frame late there. To judge
+    /// in motion on the PC.
+    pub const REFLECTIONS_ALTERNATE: u32 = 8388608;
 }
 
 /// What the screen shows.

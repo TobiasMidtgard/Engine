@@ -16,6 +16,13 @@
 //    (Karis 2014) so one doesn't spread into a blotch, and covering every pixel before the wide
 //    pass keeps the wide pass's spacing from showing as a dotted grid.
 // `shade_surface` adds the result times the diffuse albedo (`screen_gi`).
+//
+// The half-size way (`trial_cut::BOUNCE_HALF`, the `_half` entry points and `fs_spread`): steps
+// 1 to 3 run on targets half as wide and high, for the pixel at every even column and row, with
+// four rays where the full-size way sends two, the wide blur over every second texel; a last
+// full-size pass spreads the result to every pixel from the four texels around it, weighted by
+// depth and normal as the blurs are (a joint bilateral upsample). Bounce light varies slowly
+// across a surface, and the weights keep it from crossing edges.
 
 @group(1) @binding(0) var normal_input: texture_2d<f32>;   // prepass normals (octahedral xy, roughness, written)
 @group(1) @binding(1) var depth_input: texture_depth_2d;   // prepass depth (reverse-Z)
@@ -25,6 +32,7 @@
 @group(1) @binding(5) var gi_history: texture_2d<f32>;     // temporal: last frame's result (rgb, view depth in a)
 
 const RAYS: i32 = 2;
+const RAYS_HALF: i32 = 4;
 const STEPS: i32 = 16;
 // How far rays look for surfaces (meters at 10 m from the camera, scaled with distance). Light
 // from farther fades out gradually rather than stopping at a hard edge.
@@ -114,9 +122,9 @@ fn trace_ray(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> ve
     return vec3<f32>(0.0);
 }
 
-@fragment
-fn fs_trace(in: FullscreenOut) -> @location(0) vec4<f32> {
-    let px = vec2<i32>(floor(in.position.xy));
+// The mean radiance of `rays` rays from prepass pixel `px`; `cell` (the texel written) seeds
+// the random numbers.
+fn trace(px: vec2<i32>, cell: vec2<i32>, rays: i32) -> vec4<f32> {
     let z = textureLoad(depth_input, px, 0);
     if (z <= 0.0 || textureLoad(normal_input, px, 0).w < 0.5 || frame.reflections.y <= 0.0) {
         return vec4<f32>(0.0);
@@ -136,29 +144,42 @@ fn fs_trace(in: FullscreenOut) -> @location(0) vec4<f32> {
     let radius = RADIUS * max(1.0, depth / 10.0);
     // The rays' azimuths spread evenly over neighboring pixels (interleaved gradient noise,
     // rotated each frame); everything else is independent per ray.
-    let azimuth = interleaved_gradient_noise(vec2<f32>(px) + f32(frame_i % 64u) * 5.588238);
+    let azimuth = interleaved_gradient_noise(vec2<f32>(cell) + f32(frame_i % 64u) * 5.588238);
     var sum = vec3<f32>(0.0);
-    for (var r = 0; r < RAYS; r++) {
-        let u = random3(px, frame_i * u32(RAYS) + u32(r));
+    for (var r = 0; r < rays; r++) {
+        let u = random3(cell, frame_i * u32(rays) + u32(r));
         // Cosine-weighted direction around the normal.
-        let phi = TAU * fract(azimuth + f32(r) / f32(RAYS) + u.x * 0.1);
+        let phi = TAU * fract(azimuth + f32(r) / f32(rays) + u.x * 0.1);
         let s = sqrt(u.y);
         let dir = normalize(tangent * (cos(phi) * s) + bitangent * (sin(phi) * s) + n * sqrt(1.0 - u.y));
         sum += trace_ray(origin, dir, radius, u.z);
     }
-    return vec4<f32>(sum / f32(RAYS), 1.0);
+    return vec4<f32>(sum / f32(rays), 1.0);
 }
 
 @fragment
-fn fs_temporal(in: FullscreenOut) -> @location(0) vec4<f32> {
+fn fs_trace(in: FullscreenOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(floor(in.position.xy));
+    return trace(px, px, RAYS);
+}
+
+@fragment
+fn fs_trace_half(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let cell = vec2<i32>(floor(in.position.xy));
+    return trace(cell * 2, cell, RAYS_HALF);
+}
+
+// This frame's trace at texel `cell` of `gi_input`, made for prepass pixel `px`, blended into
+// the history. `cell_uv` is the texel's own center: a still camera reads the history's texel
+// itself, never a blend of neighbors.
+fn temporal(px: vec2<i32>, cell: vec2<i32>, cell_uv: vec2<f32>) -> vec4<f32> {
     let z = textureLoad(depth_input, px, 0);
     if (z <= 0.0) { return vec4<f32>(0.0); }
     let uv = (vec2<f32>(px) + 0.5) * frame.viewport.zw;
-    let current = textureLoad(gi_input, px, 0).rgb;
+    let current = textureLoad(gi_input, cell, 0).rgb;
     let depth = scene_linear_depth(uv, z);
     // Where this surface point was last frame, and how far from last frame's camera.
-    let prev_uv = uv - textureLoad(motion_input, px, 0).xy;
+    let prev_uv = cell_uv - textureLoad(motion_input, px, 0).xy;
     let rel = (frame.inv_view * vec4<f32>(view_position(uv, z), 1.0)).xyz;
     let prev_depth = (frame.prev_view_proj * vec4<f32>(rel + frame.camera_delta.xyz, 1.0)).w;
     var result = current;
@@ -171,22 +192,36 @@ fn fs_temporal(in: FullscreenOut) -> @location(0) vec4<f32> {
     return vec4<f32>(result, depth);
 }
 
-// Edge-aware 5x5 blur of `gi_input` with taps `stride` pixels apart. `fireflies` weights each
+@fragment
+fn fs_temporal(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(floor(in.position.xy));
+    return temporal(px, px, (vec2<f32>(px) + 0.5) * frame.viewport.zw);
+}
+
+@fragment
+fn fs_temporal_half(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let cell = vec2<i32>(floor(in.position.xy));
+    return temporal(cell * 2, cell, (vec2<f32>(cell) + 0.5) / vec2<f32>(textureDimensions(gi_input)));
+}
+
+// Edge-aware 5x5 blur of `gi_input` with taps `stride` texels apart. `fireflies` weights each
 // sample by 1 / (1 + its brightness on screen), which keeps rare very bright samples from
-// dominating. Alpha out: the center's view depth, for a following pass.
-fn blur(px: vec2<i32>, stride: i32, fireflies: bool) -> vec4<f32> {
+// dominating. Alpha out: the center's view depth, for a following pass. A texel of `gi_input`
+// belongs to the prepass pixel `scale` times its coordinates (1, or 2 on half-size targets).
+fn blur(px: vec2<i32>, stride: i32, fireflies: bool, scale: i32) -> vec4<f32> {
     let center = textureLoad(gi_input, px, 0);
     if (center.a <= 0.0) { return vec4<f32>(0.0); }
-    let n = view_normal(px);
+    let n = view_normal(px * scale);
+    let last = vec2<i32>(textureDimensions(gi_input)) - 1;
     var sum = vec3<f32>(0.0);
     var weight = 0.0;
     for (var y = -2; y <= 2; y++) {
         for (var x = -2; x <= 2; x++) {
-            let q = clamp(px + vec2<i32>(x, y) * stride, vec2<i32>(0), size_i() - 1);
+            let q = clamp(px + vec2<i32>(x, y) * stride, vec2<i32>(0), last);
             let s = textureLoad(gi_input, q, 0);
             if (s.a <= 0.0) { continue; }
             let wd = exp(-abs(s.a - center.a) / (0.02 * center.a + 0.01));
-            let wn = pow(saturate(dot(view_normal(q), n)), 8.0);
+            let wn = pow(saturate(dot(view_normal(q * scale), n)), 8.0);
             var w = wd * wn * exp(-f32(x * x + y * y) / 6.0);
             if (fireflies) {
                 w /= 1.0 + luminance(s.rgb) * frame.reflections.y * FIREFLY_SCALE;
@@ -200,11 +235,67 @@ fn blur(px: vec2<i32>, stride: i32, fireflies: bool) -> vec4<f32> {
 
 @fragment
 fn fs_blur_near(in: FullscreenOut) -> @location(0) vec4<f32> {
-    return blur(vec2<i32>(floor(in.position.xy)), 1, true);
+    return blur(vec2<i32>(floor(in.position.xy)), 1, true, 1);
 }
 
 @fragment
 fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
-    let b = blur(vec2<i32>(floor(in.position.xy)), 3, false);
+    let b = blur(vec2<i32>(floor(in.position.xy)), 3, false, 1);
     return vec4<f32>(b.rgb, select(0.0, 1.0, b.a > 0.0));
+}
+
+@fragment
+fn fs_blur_near_half(in: FullscreenOut) -> @location(0) vec4<f32> {
+    return blur(vec2<i32>(floor(in.position.xy)), 1, true, 2);
+}
+
+// The wide blur at half size: every second texel is every fourth pixel, a little wider than
+// the full-size way's every third. Alpha stays the view depth for `fs_spread`.
+@fragment
+fn fs_blur_half(in: FullscreenOut) -> @location(0) vec4<f32> {
+    return blur(vec2<i32>(floor(in.position.xy)), 2, false, 2);
+}
+
+// The half-size result (`gi_input`, view depth in alpha) spread to every pixel: the four
+// texels around it by their distance, their depth against this pixel's and their normal against
+// its own. A pixel the texel was made for (even column and row) takes that texel alone.
+@fragment
+fn fs_spread(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(floor(in.position.xy));
+    let z = textureLoad(depth_input, px, 0);
+    if (z <= 0.0) { return vec4<f32>(0.0); }
+    let uv = (vec2<f32>(px) + 0.5) * frame.viewport.zw;
+    let depth = scene_linear_depth(uv, z);
+    let n = view_normal(px);
+    let last = vec2<i32>(textureDimensions(gi_input)) - 1;
+    let cell = px / 2;
+    let f = vec2<f32>(px - cell * 2) * 0.5;
+    var sum = vec3<f32>(0.0);
+    var weight = 0.0;
+    var nearest = vec3<f32>(0.0);
+    var nearest_gap = 1e30;
+    for (var y = 0; y <= 1; y++) {
+        for (var x = 0; x <= 1; x++) {
+            let wx = select(1.0 - f.x, f.x, x == 1);
+            let wy = select(1.0 - f.y, f.y, y == 1);
+            if (wx * wy <= 0.0) { continue; }
+            let q = min(cell + vec2<i32>(x, y), last);
+            let s = textureLoad(gi_input, q, 0);
+            if (s.a <= 0.0) { continue; }
+            let gap = abs(s.a - depth);
+            if (gap < nearest_gap) {
+                nearest_gap = gap;
+                nearest = s.rgb;
+            }
+            let wd = exp(-gap / (0.02 * depth + 0.01));
+            let wn = pow(saturate(dot(view_normal(q * 2), n)), 8.0);
+            let w = wx * wy * wd * wn;
+            sum += s.rgb * w;
+            weight += w;
+        }
+    }
+    // No texel around it is of this pixel's surface (a thin thing between two traced pixels):
+    // the one nearest in depth.
+    if (weight < 1e-4) { return vec4<f32>(nearest, 1.0); }
+    return vec4<f32>(sum / weight, 1.0);
 }

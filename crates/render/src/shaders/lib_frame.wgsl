@@ -366,6 +366,9 @@ const CUT_TERRAIN_ROCK_SINGLE: u32 = 1048576u;
 // from its face's sunlit side as without the pass. The pass only has the shading normal,
 // which foliage bends away from the face, so it reads them from another side.
 const CUT_THIN_OWN_SUN: u32 = 2097152u;
+// World reflections trace every other texel a frame; the rest take last frame's (probe_gi.wgsl
+// `cs_reflect`).
+const CUT_REFLECTIONS_ALTERNATE: u32 = 8388608u;
 
 fn trial_cut(bit: u32) -> bool {
     return (u32(frame.shading.w) & bit) != 0u;

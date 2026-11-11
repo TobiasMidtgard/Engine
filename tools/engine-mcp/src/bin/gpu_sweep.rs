@@ -395,6 +395,18 @@ fn variants() -> Vec<Variant> {
             "the screen light pass, with leaves and other thin sheets reading the sun's shadows themselves (their exact picture; the pass alone moves single pixels on leaves)",
         ),
         v(
+            "cut_bounce_half",
+            r,
+            json!({"trial_cuts": 4_194_304}),
+            "bounce light traced and blurred for every fourth pixel with twice the rays, then spread to every pixel by depth and normal (the frame stays full size; a trade to judge from its picture)",
+        ),
+        v(
+            "cut_reflections_alternate",
+            r,
+            json!({"trial_cuts": 8_388_608}),
+            "world reflections trace every other ray a frame, the rest carried over from the frame before by the screen motion (the same picture at rest; to judge in motion)",
+        ),
+        v(
             "cut_tiled_lamps",
             r,
             json!({"trial_cuts": 1024}),

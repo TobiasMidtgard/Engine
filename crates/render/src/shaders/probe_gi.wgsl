@@ -464,6 +464,12 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
 // Reflected radiance (cd/m^2, not pre-exposed) and the distance to what the ray hit; 0 where
 // it hit nothing (the sky, which `shade_surface` reflects already) or wasn't traced.
 @group(2) @binding(2) var reflect_out: texture_storage_2d<rgba16float, write>;
+// With `CUT_REFLECTIONS_ALTERNATE`: last frame's `reflect_out` and the screen motion (uv,
+// current - previous). Half the texels are traced a frame, in a checkerboard that swaps each
+// frame; the others take last frame's reflection of their surface point, which was traced then
+// while the camera rests.
+@group(2) @binding(3) var reflect_last: texture_2d<f32>;
+@group(2) @binding(4) var reflect_motion: texture_2d<f32>;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -478,6 +484,16 @@ fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(full);
+    if (trial_cut(CUT_REFLECTIONS_ALTERNATE) && frame.camera_delta.w > 0.5
+        && ((id.x + id.y + u32(frame.time.w)) & 1u) == 1u) {
+        let prev_uv = uv - textureLoad(reflect_motion, px, 0).xy;
+        if (all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv < vec2<f32>(1.0))) {
+            // (Texel t was traced from pixel 2t: the texel whose pixel is nearest.)
+            let last = vec2<i32>(floor(prev_uv * vec2<f32>(full) * 0.5 + 0.25));
+            textureStore(reflect_out, id.xy, textureLoad(reflect_last, min(last, vec2<i32>(out_size) - 1), 0));
+            return;
+        }
+    }
     let pos = view_position(uv, z);
     let rel = (frame.inv_view * vec4<f32>(pos, 1.0)).xyz;
     let n = oct_decode(nr.xy);
