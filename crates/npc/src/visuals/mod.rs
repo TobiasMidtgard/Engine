@@ -507,7 +507,16 @@ pub(crate) fn pose_stand_ins(
     // hands on the chest).
     seen.lying.clear();
     seen.lying.extend(owners.iter().filter_map(|item| {
-        let (me, _, st, _, owner, ..) = item;
+        let (me, _, st, _, owner, .., vitals, _, _, extra) = item;
+        // A body the animation module lets fall lies where it fell.
+        if let (_, _, _, _, _, _, _, _, Some(pose), Some(body), true, _) = extra
+            && body.asked
+            && vitals.is_some_and(|v| v.downed)
+            && let Some(lying) = crate::intent_body::drawn_lying(owner, pose)
+        {
+            let (chest, knees) = crate::intent_body::kneel_by(owner.translation.y, lying);
+            return Some((me, chest, knees));
+        }
         let l = st.motion.lying()?;
         let world = |p: Vec3| owner.translation + (owner.rotation * p).as_dvec3();
         Some((me, world(l.chest), l.knees.map(world)))

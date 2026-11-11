@@ -16,7 +16,7 @@
 //! a reload, spent stamina), seen through the reaction delay, are struck or fired into.
 
 use engine_core::prelude::*;
-use engine_world::animation::AnimationTrigger;
+use engine_world::animation::{AnimationTrigger, SkeletonPose};
 use engine_world::locomotion::MoveIntent;
 use engine_world::physics::{PhysicsBackend, PhysicsQueries};
 use engine_world::{AttackEvent, FocusPoints, Ground, GroundWear, HeatField, Obscurance, Water};
@@ -257,6 +257,10 @@ pub(crate) fn think_and_act(
     mut revives: ResMut<ReviveClaims>,
     mut scratch: Local<Scratch>,
     seeds: Query<&crate::seed::Seed>,
+    drawn: Query<
+        (&SkeletonPose, &crate::intent_body::IntentBody),
+        With<engine_world::animation::BodyRequest>,
+    >,
 ) {
     let s = &mut *scratch;
     s.claims.clear();
@@ -307,12 +311,29 @@ pub(crate) fn think_and_act(
             let f = t.forward();
             let vary = seeds.get(e).map_or(0.0, |s| s.unit());
             let lie = Lie::of(vary, downed.and_then(|d| d.push));
+            let mut pos = t.translation;
+            let mut frame = Quat::from_rotation_y((-f.x).atan2(-f.z) + lie.yaw);
+            // A body the animation module lets fall lies where it fell: the frame is laid
+            // along it (its head toward +Z) with its breastbone where that body's is.
+            if let Ok((pose, body)) = drawn.get(e)
+                && body.asked
+                && let Some([chest, hips, head]) = crate::intent_body::drawn_lying(t, pose)
+            {
+                let along = Vec3::new((head.x - hips.x) as f32, 0.0, (head.z - hips.z) as f32);
+                if along.length_squared() > 1e-4 {
+                    let along = along.normalize();
+                    frame = Quat::from_rotation_y(along.x.atan2(along.z));
+                    let sternum = lie.sternum() * Vec3::new(1.0, 0.0, 1.0);
+                    pos = DVec3::new(chest.x, t.translation.y, chest.z)
+                        - (frame * sternum).as_dvec3();
+                }
+            }
             s.fallen.push(Fallen {
                 e,
                 squad,
                 faction: *faction,
-                pos: t.translation,
-                frame: Quat::from_rotation_y((-f.x).atan2(-f.z) + lie.yaw),
+                pos,
+                frame,
                 lie,
                 down_for: downed.map_or(0.0, |d| (clock.now - d.since) as f32),
                 medic: npc.role == NpcRole::Medic,

@@ -925,6 +925,7 @@ type ReviveItem<'a> = (
     &'a mut NpcCombat,
     &'a mut NpcMemory,
     &'a mut Transform,
+    Option<&'a mut crate::intent_body::IntentBody>,
 );
 
 /// What the revive pass saw of the NPCs this step (kept between steps to reuse the space).
@@ -982,7 +983,7 @@ pub(crate) fn revive(
     // Squad revives off: nobody is being revived (those on their way give up at their next
     // think).
     let on = settings.ally_revive_secs > 0.0;
-    for (e, npc, clock, skills, (faction, squad, _), vitals, brain, _, _, t) in q.iter() {
+    for (e, npc, clock, skills, (faction, squad, _), vitals, brain, _, _, t, _) in q.iter() {
         if vitals.downed {
             continue;
         }
@@ -1045,6 +1046,7 @@ pub(crate) fn revive(
         mut combat,
         mut memory,
         mut t,
+        body,
     ) in &mut q
     {
         let Some(downed) = downed else {
@@ -1075,6 +1077,11 @@ pub(crate) fn revive(
             brain.target = None;
             if let Some(home) = npc.home {
                 t.translation = home;
+                // A body the animation module poses is built afresh there (it would get up
+                // where it fell).
+                if let Some(mut body) = body {
+                    body.hold_until = body.hold_until.max(clock.now + 0.25);
+                }
             }
         }
         commands

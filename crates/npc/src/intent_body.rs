@@ -12,10 +12,15 @@
 //! * **Props.** `hide_props` 1 hides the animation module's own sword and shield (their grips
 //!   stay): the fighter's team sword or club and its painted shield are drawn in the hands it
 //!   poses instead (`visuals`).
+//! * **Falls.** A fighter the animation module poses keeps its body when it goes down: the
+//!   `Ragdoll` weight 1 this crate gives the downed lets it fall limp, and weight 0 on a revive
+//!   gets it up. Mates kneel by where that body lies ([`drawn_lying`]), not by where the
+//!   stand-in would have fallen. A fighter sent home gives its body back for a step, so it is
+//!   built afresh where it stands.
 //! * **What stays with the stand-in.** What the animation module doesn't play yet goes back to
-//!   the stand-in's pose: the request is taken away while a fighter is down, kneels by a mate
-//!   or gets up from either, and given again once it stands
-//!   ([`NpcBrain::GET_UP_SECS`] after a revive).
+//!   the stand-in's pose: the request is taken away while a fighter kneels by a mate or gets
+//!   up from that, and given again once it stands ([`NpcBrain::GET_UP_SECS`] after). A fighter
+//!   on the stand-in's pose that goes down stays on it until it is up again.
 //! * **Intent.** The brain already writes `MoveIntent` (`attack` pressed for a strike, `heavy`
 //!   ones as `Dash`; `block` while it guards; `crouch`). Here each step writes
 //!   `StrikeTargets.target` (its foe) and `.zone` (where its strike aims, `aim.rs`: the
@@ -32,7 +37,9 @@
 //!   rest of its window.
 
 use engine_core::prelude::*;
-use engine_world::animation::{AnimationParams, AnimationTrigger, BodyRequest, StrikeTargets};
+use engine_world::animation::{
+    AnimationParams, AnimationTrigger, BodyRequest, SkeletonPose, StrikeTargets,
+};
 use engine_world::character::{Appearance, AppearanceRequest};
 use engine_world::combat::{
     AttackPhase as WindowPhase, AttackWindow, CombatSkills, ItemClass, Loadout,
@@ -128,7 +135,7 @@ pub(crate) fn give_bodies(
             Some(b) => (b.into_inner(), false),
             None => (&mut fresh, true),
         };
-        if vitals.downed || brain.kneeling() {
+        if brain.kneeling() || (vitals.downed && !(body.asked && asked)) {
             body.hold_until = body.hold_until.max(now + NpcBrain::GET_UP_SECS);
         }
         let kit = loadout_of(weapon);
@@ -137,10 +144,10 @@ pub(crate) fn give_bodies(
             && drawn
             && (looks || asks)
             && kit.is_some()
-            && !vitals.downed
             && !brain.kneeling()
-            && now >= brain.revive_rise_until
-            && now >= body.hold_until;
+            && now >= body.hold_until
+            // Falls and the get-up after are the animation module's, once it has the body.
+            && ((body.asked && asked) || (!vitals.downed && now >= brain.revive_rise_until));
         let mut cmd = commands.entity(e);
         if want && !asked {
             body.asked = true;
@@ -305,4 +312,24 @@ pub(crate) fn feint(
             name: "feint".into(),
         });
     }
+}
+
+/// Where a body the animation module poses lies, in the world: about its breastbone (halfway
+/// from the chest joint to the neck), its hips and its head. `None` without those bones.
+pub(crate) fn drawn_lying(t: &Transform, pose: &SkeletonPose) -> Option<[DVec3; 3]> {
+    let g = GlobalTransform::from(*t);
+    let at = |name: &str| pose.bone_world(&g, pose.index_of(name)?).map(|(p, _)| p);
+    let (chest, neck) = (at("chest")?, at("neck")?);
+    Some([chest.lerp(neck, 0.5), at("hips")?, at("head")?])
+}
+
+/// Where a mate's hands and knees go to revive a body lying as [`drawn_lying`] says, on the
+/// ground at height `ground`: the breastbone, and beside it from the body's left and right
+/// (half a metre out, a little toward the head).
+pub(crate) fn kneel_by(ground: f64, [chest, hips, head]: [DVec3; 3]) -> (DVec3, [DVec3; 2]) {
+    let along = DVec3::new(head.x - hips.x, 0.0, head.z - hips.z).normalize_or(DVec3::Z);
+    let side = DVec3::new(along.z, 0.0, -along.x);
+    let flat = DVec3::new(chest.x, ground, chest.z);
+    let knee = |s: f64| flat + side * (0.5 * s) + along * 0.08;
+    (chest, [knee(-1.0), knee(1.0)])
 }

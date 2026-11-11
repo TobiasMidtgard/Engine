@@ -1,7 +1,7 @@
 //! Brain drives, animation animates (N2), on contracts only: no animation module here, so the
 //! test plays its part (it arms a requested body with an `AttackWindow` and plays a wind-up in
-//! it). Longsword fighters ask for bodies, archers and riflemen don't; the downed give theirs
-//! back and ask again once up; and a strike the animation module plays is pressed through the
+//! it). Hand-to-hand fighters ask for bodies, archers and riflemen don't; the downed keep
+//! theirs and a mate kneels where that body lies; and a strike the animation module plays is pressed through the
 //! intent, lands through its blows (not this crate's), and has its telegraph timed to the
 //! brain's, aimed at the zone its brain picks.
 
@@ -135,18 +135,36 @@ fn hand_to_hand_people_ask_the_animation_module_for_bodies() {
 }
 
 #[test]
-fn the_downed_give_their_bodies_back_and_ask_again_once_up() {
+fn the_downed_keep_their_bodies_through_the_fall() {
     let mut app = app();
     let e = fighter(&mut app, 0.0, Faction::ENEMY, NpcWeapon::sword(), 1);
     app.world.get_mut::<Npc>(e).unwrap().active = false;
     run(&mut app, 0.2);
     assert!(app.world.get::<BodyRequest>(e).is_some());
+    // The animation module takes its fall (the Ragdoll weight) and its get-up.
     app.world.get_mut::<NpcVitals>(e).unwrap().downed = true;
     run(&mut app, 0.5);
     assert!(
-        app.world.get::<BodyRequest>(e).is_none(),
-        "the stand-in's pose lies it down"
+        app.world.get::<BodyRequest>(e).is_some(),
+        "falls in its body"
     );
+    app.world.get_mut::<NpcVitals>(e).unwrap().downed = false;
+    run(&mut app, 0.5);
+    assert!(
+        app.world.get::<BodyRequest>(e).is_some(),
+        "and gets up in it"
+    );
+
+    // One down before it ever had a body stays on the stand-in's pose until it is up.
+    let mut app = self::app();
+    let e = fighter(&mut app, 0.0, Faction::ENEMY, NpcWeapon::sword(), 1);
+    app.world.get_mut::<Npc>(e).unwrap().active = false;
+    app.world.entity_mut(e).insert(NpcVitals {
+        downed: true,
+        ..Default::default()
+    });
+    run(&mut app, 0.5);
+    assert!(app.world.get::<BodyRequest>(e).is_none());
     app.world.get_mut::<NpcVitals>(e).unwrap().downed = false;
     run(&mut app, 1.0);
     assert!(
@@ -154,9 +172,76 @@ fn the_downed_give_their_bodies_back_and_ask_again_once_up() {
         "the stand-in's pose gets it up"
     );
     run(&mut app, NpcBrain::GET_UP_SECS as f32);
+    assert!(app.world.get::<BodyRequest>(e).is_some(), "asks once up");
+}
+
+/// A pose of `e` lying on its back 2 m to its right (model +X), head toward model +Z, as the
+/// animation module's ragdoll might leave it; where its breastbone is, in the world.
+fn lie_aside(app: &mut App, e: Entity) -> DVec3 {
+    use engine_world::animation::{BonePose, SkeletonPose};
+    let bones = [
+        ("hips", Vec3::new(2.0, 0.15, 0.0)),
+        ("chest", Vec3::new(2.0, 0.18, 0.3)),
+        ("neck", Vec3::new(2.0, 0.17, 0.55)),
+        ("head", Vec3::new(2.0, 0.15, 0.75)),
+    ];
+    let pose = SkeletonPose {
+        names: bones.iter().map(|(n, _)| n.to_string()).collect(),
+        parents: vec![None, Some(0), Some(1), Some(2)].into(),
+        bones: bones
+            .iter()
+            .map(|&(_, p)| BonePose {
+                translation: p,
+                ..Default::default()
+            })
+            .collect(),
+    };
+    app.world.entity_mut(e).insert(pose);
+    let t = *app.world.get::<Transform>(e).unwrap();
+    t.translation + (t.rotation * Vec3::new(2.0, 0.0, 0.425)).as_dvec3()
+}
+
+#[test]
+fn a_mate_kneels_where_the_animation_module_let_the_body_fall() {
+    let mut app = app();
+    let ally = fighter(&mut app, 0.0, Faction::ENEMY, NpcWeapon::sword(), 1);
+    let mate = fighter(&mut app, 6.0, Faction::ENEMY, NpcWeapon::sword(), 2);
+    run(&mut app, 0.3);
+    assert!(app.world.get::<BodyRequest>(ally).is_some());
+    // Armed by the animation module (so the stand-in writes no pose of its own), cut down,
+    // and lying 2 m from where it stood.
+    app.world.entity_mut(ally).insert(AttackWindow::default());
+    let at = app.world.get::<Transform>(ally).unwrap().translation;
+    app.world.write_message(DamageEvent {
+        target: ally,
+        amount: 1000.0,
+        kind: engine_world::DamageKind::Ballistic,
+        point: at + DVec3::Y,
+        impulse: Vec3::Z * 10.0,
+        source: None,
+    });
+    run(&mut app, 0.1);
+    assert!(app.world.get::<NpcVitals>(ally).unwrap().downed);
+    let chest = lie_aside(&mut app, ally);
+    let mut knelt = 0;
+    for _ in 0..60 * 12 {
+        app.update();
+        let b = app.world.get::<NpcBrain>(mate).unwrap();
+        if b.action == NpcAction::Revive && b.revive_progress > 0.0 {
+            knelt += 1;
+            let p = app.world.get::<Transform>(mate).unwrap().translation;
+            let gap = DVec2::new(p.x - chest.x, p.z - chest.z).length();
+            assert!(gap < 1.0, "kneels {gap:.2} m from the body's chest");
+        }
+        if !app.world.get::<NpcVitals>(ally).unwrap().downed {
+            break;
+        }
+    }
+    assert!(knelt > 60, "knelt by it ({knelt} steps)");
+    assert!(!app.world.get::<NpcVitals>(ally).unwrap().downed, "revived");
     assert!(
-        app.world.get::<BodyRequest>(e).is_some(),
-        "asks again once up"
+        app.world.get::<BodyRequest>(ally).is_some(),
+        "in its own body"
     );
 }
 
