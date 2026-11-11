@@ -9,7 +9,12 @@
 //!   [`AnimationTrigger`](engine_world::animation::AnimationTrigger) `attack_light` or
 //!   `attack_heavy` works too.
 //! * [`StrikeTargets`]`.target` is who the strikes close on and land on, and where the head
-//!   looks.
+//!   looks. With `.zone` set, a light press with a blade throws an aimed cut or stab at that
+//!   zone instead of the combo: the line for its height, a new angle each press, a stab when
+//!   the foe is open, guards high, has turned away or is too close to swing
+//!   ([`pick_line`](crate::combat::pick_line)).
+//! * [`CombatSkills`] for the main hand's class says how many lines it knows (three for a
+//!   rookie, all eight from 2/3; 0.3 when it has none).
 //! * [`AnimationParams`] `strike_speed` and `windup_speed` (1 when unset) scale the strike's
 //!   tempo, for skill (a rookie's slow telegraph, a master's fast one); an
 //!   [`AnimationTrigger`](engine_world::animation::AnimationTrigger) `feint` pulls a strike
@@ -28,7 +33,9 @@
 
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, BodyRequest, StrikeTargets};
-use engine_world::combat::{AttackPhase as WindowPhase, AttackWindow, ItemClass, Loadout};
+use engine_world::combat::{
+    AttackPhase as WindowPhase, AttackWindow, CombatSkills, ItemClass, Loadout,
+};
 use engine_world::events::AttackKind;
 use engine_world::locomotion::MoveIntent;
 use engine_world::magic::Statuses;
@@ -256,17 +263,36 @@ type Fighter<'a> = (
     Option<&'a StrikeTargets>,
     Option<&'a mut LookAt>,
     Option<&'a mut Statuses>,
+    Option<&'a CombatSkills>,
 );
 
 /// Turn intent into presses, guard, target, tempo and gaze.
 pub(crate) fn drive_fighters(mut q: Query<Fighter>, places: Query<&GlobalTransform>) {
-    for (mut armed, mut attacker, mut animator, mut params, intent, targets, look, statuses) in
-        &mut q
+    for (
+        mut armed,
+        mut attacker,
+        mut animator,
+        mut params,
+        intent,
+        targets,
+        look,
+        statuses,
+        skills,
+    ) in &mut q
     {
         if let Some(t) = targets
             && t.target.is_some()
         {
             attacker.target = t.target;
+        }
+        // The zone aimed at picks the cut, and skill with the weapon in hand how many it knows.
+        let zone = targets.and_then(|t| t.zone);
+        if attacker.zone != zone {
+            attacker.zone = zone;
+        }
+        let skill = skills.map_or(CombatSkills::DEFAULT_SKILL, |s| s.skill(armed.loadout.main));
+        if attacker.skill != skill {
+            attacker.skill = skill;
         }
         // Skill sets the tempo: `strike_speed` all of it, `windup_speed` the telegraph.
         let tempo = Tempo {

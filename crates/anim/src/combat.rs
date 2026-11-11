@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 
 use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
+use engine_world::combat::BodyZone;
 use engine_world::{DamageEvent, DamageKind};
 
 use crate::Animator;
@@ -294,6 +295,31 @@ pub struct AttackMove {
     /// moves on its input while the target is open.
     #[serde(default)]
     pub paired: Option<Pairing>,
+    /// The line an aimed cut or stab travels: a set with lines picks one by the aimed zone
+    /// on a light press (see [`Attacker::zone`]).
+    #[serde(default)]
+    pub line: Option<Line>,
+}
+
+/// The line of an aimed cut, or a stab: which way the blade travels across the foe (degrees
+/// round it as the attacker sees it, [`weapons::LINE_ANGLES`]) and at what height.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Line {
+    pub angle: f32,
+    pub height: weapons::Height,
+    pub stab: bool,
+}
+
+impl Line {
+    /// Which way the blade moves across the foe (model space, the attacker facing −Z), none
+    /// for a stab.
+    pub fn travel(&self) -> Vec3 {
+        if self.stab {
+            Vec3::ZERO
+        } else {
+            weapons::line_travel(self.angle)
+        }
+    }
 }
 
 /// How a target was opened up for a paired move.
@@ -516,6 +542,7 @@ impl AttackSet {
                 }
                 .map(|e| e.clip_name().to_string()),
                 paired: None,
+                line: None,
             }
         };
         AttackSet {
@@ -662,7 +689,10 @@ impl AttackSet {
                     54.0,
                     Striker::sword(DamageKind::Pierce),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(line_moves(false))
+            .collect(),
             block: Block::default(),
             approaches: Vec::new(),
         }
@@ -728,7 +758,10 @@ impl AttackSet {
                     60.0,
                     Striker::greatsword(DamageKind::Pierce),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(line_moves(true))
+            .collect(),
             block: Block::default(),
             approaches: Vec::new(),
         }
@@ -774,6 +807,7 @@ impl AttackSet {
                 ],
                 evaded_by: None,
                 paired: None,
+                line: None,
             }
         };
         AttackSet {
@@ -884,6 +918,7 @@ fn weapon(
             .collect(),
         evaded_by: None,
         paired: None,
+        line: None,
     }
 }
 
@@ -922,6 +957,7 @@ fn riposte(
         }],
         links: Vec::new(),
         evaded_by: None,
+        line: None,
         paired: Some(Pairing {
             victim_clip: RIPOSTED.into(),
             distance,
@@ -931,6 +967,108 @@ fn riposte(
             align_secs: default_pair_align(),
         }),
     }
+}
+
+/// An aimed cut along `angle` at `height`, or a stab, with one hand (sword and shield) or
+/// both (great sword): it closes to the range its clip strikes at in its wind-up, its blow
+/// lands where its blade crosses the aimed zone, and another aimed strike may follow after
+/// its stroke. Only an aimed press reaches it (no input starts it).
+pub fn line_move(two_handed: bool, line: Line) -> AttackMove {
+    let (secs, [a, b]) = weapons::line_timing(two_handed, line.stab);
+    let set = if two_handed { "greatsword" } else { "sword" };
+    let clip = if line.stab {
+        weapons::stab_clip(set, line.height)
+    } else {
+        weapons::line_clip(set, line.angle, line.height)
+    };
+    let kind = if line.stab {
+        DamageKind::Pierce
+    } else {
+        DamageKind::Slash
+    };
+    let striker = if two_handed {
+        Striker::greatsword(kind)
+    } else {
+        Striker::sword(kind)
+    };
+    // A stab hurts more for its point, a great sword for its weight; a low cut less.
+    let blow = match (two_handed, line.stab) {
+        (false, false) => Blow::new(12.0, 28.0, 0.07),
+        (false, true) => Blow::new(18.0, 40.0, 0.1),
+        (true, false) => Blow::new(22.0, 60.0, 0.11),
+        (true, true) => Blow::new(30.0, 70.0, 0.12),
+    };
+    let range = weapons::line_reach(two_handed);
+    // A cut sweeps through the middle of its stroke; a stab goes in at its end.
+    let hit = if line.stab {
+        [a + (b - a) * 0.5, b + 0.06]
+    } else {
+        [a + (b - a) * 0.3, b + 0.03]
+    };
+    AttackMove {
+        name: clip.clone(),
+        clip,
+        starts_on: None,
+        fade_in: 0.1,
+        fade_out: 0.25,
+        windows: vec![
+            Window {
+                kind: WindowKind::Warp {
+                    range,
+                    max_speed: 2.5,
+                    ease: false,
+                },
+                start: 0.0,
+                end: hit[0],
+            },
+            Window {
+                kind: WindowKind::Hit {
+                    bone: "hand_r".into(),
+                    reach: 0.3,
+                    damage: blow.damage,
+                    impulse: blow.impulse,
+                    hitstop: blow.hitstop,
+                    high: line.height == weapons::Height::High,
+                    liver: false,
+                    striker: Some(striker),
+                    breaks_guard: false,
+                },
+                start: hit[0],
+                end: hit[1],
+            },
+            Window {
+                kind: WindowKind::Cancel,
+                start: hit[1] + 0.01,
+                end: secs * 0.9,
+            },
+        ],
+        links: Vec::new(),
+        evaded_by: None,
+        paired: None,
+        line: Some(line),
+    }
+}
+
+/// Every aimed cut and stab of a set, one-handed or with both hands.
+fn line_moves(two_handed: bool) -> Vec<AttackMove> {
+    weapons::Height::ALL
+        .into_iter()
+        .flat_map(|height| {
+            weapons::LINE_ANGLES
+                .into_iter()
+                .map(move |angle| Line {
+                    angle,
+                    height,
+                    stab: false,
+                })
+                .chain([Line {
+                    angle: 0.0,
+                    height,
+                    stab: true,
+                }])
+        })
+        .map(|line| line_move(two_handed, line))
+        .collect()
 }
 
 /// An approach move on the humanoid's lunge or leap: the warp eases the body to just outside
@@ -964,6 +1102,7 @@ fn travel(kind: Travel, max_speed: f32) -> AttackMove {
         links: Vec::new(),
         evaded_by: None,
         paired: None,
+        line: None,
     }
 }
 
@@ -1104,6 +1243,20 @@ pub struct Attacker {
     /// Where the striker of the hit window under way was last frame (world), to sweep from.
     #[serde(skip)]
     swept: Option<(DVec3, DVec3)>,
+    /// The body zone its strikes aim at (from [`StrikeTargets`](engine_world::animation::StrikeTargets)):
+    /// with one set, a light press in a set with aimed lines picks the cut or stab for it.
+    #[serde(skip)]
+    pub zone: Option<BodyZone>,
+    /// How good it is with what it holds, 0..1: a rookie knows three lines, a master all
+    /// eight (see [`known_lines`]).
+    pub skill: f32,
+    /// The aimed strikes it threw, newest last (at most [`RECENT_LINES`]): the next one
+    /// takes a new angle.
+    #[serde(skip)]
+    pub recent: Vec<Line>,
+    /// The zone the aimed strike playing was picked for.
+    #[serde(skip)]
+    pub aimed: Option<BodyZone>,
 }
 
 impl Default for Attacker {
@@ -1136,6 +1289,10 @@ impl Default for Attacker {
             committed: None,
             aim: None,
             swept: None,
+            zone: None,
+            skill: 0.5,
+            recent: Vec::new(),
+            aimed: None,
         }
     }
 }
@@ -1203,6 +1360,138 @@ const AIM_SHORT: f64 = 0.1;
 
 /// From the wrist (the hand bone) to the knuckles, along the forearm, meters.
 const FIST_LEN: f32 = 0.08;
+
+/// How many aimed strikes an attacker remembers: none of them is thrown again at once.
+pub const RECENT_LINES: usize = 5;
+
+/// The cut lines known at `skill` (0..1): a rookie's three (the two diagonals down and the
+/// cut across from the right), then the backhand across and straight down, and from 2/3 on
+/// the rising cuts too.
+pub fn known_lines(skill: f32) -> &'static [f32] {
+    if skill < 1.0 / 3.0 {
+        &[45.0, 315.0, 90.0]
+    } else if skill < 2.0 / 3.0 {
+        &[45.0, 315.0, 90.0, 270.0, 0.0]
+    } else {
+        &weapons::LINE_ANGLES
+    }
+}
+
+/// The height an aimed strike at `zone` goes at.
+pub fn zone_height(zone: BodyZone) -> weapons::Height {
+    use BodyZone::*;
+    match zone {
+        Head | Neck => weapons::Height::High,
+        ThighL | ThighR | KneeL | KneeR | ShinL | ShinR => weapons::Height::Low,
+        _ => weapons::Height::Mid,
+    }
+}
+
+/// What an aimed press sees of its foe.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Foe {
+    /// Open: recovering from a strike, staggered, its blade deflected or its guard broken.
+    pub open: bool,
+    /// Its guard up (a shield or gloves held high).
+    pub guarding: bool,
+    /// Its back turned to the attacker.
+    pub turned_away: bool,
+    /// Flat distance between them, m.
+    pub distance: f32,
+}
+
+/// How close a stab pays (a bind, too close to swing: well inside the 1.15 m a cut strikes
+/// from), m.
+const STAB_CLOSE: f32 = 0.85;
+
+/// Score `line` for the next aimed strike at `zone`, after `recent`: a new angle (none of
+/// the last few, nothing within 60° of the last two), starting where the last one ended,
+/// a stab when the foe is open or too close to swing, or at its middle when it guards high
+/// or has turned away (the belly, the kidney).
+pub fn line_score(line: &Line, zone: BodyZone, recent: &[Line], foe: &Foe) -> f32 {
+    let mut score = 0.0;
+    if line.stab {
+        // Its guard high or its back turned, the point goes in at the belly or the kidney; an
+        // opening is taken at the body, not the legs (a leg is cut), but too close to swing
+        // the point is all there is.
+        let height = zone_height(zone);
+        let middle = height == weapons::Height::Mid;
+        let open = foe.open && height != weapons::Height::Low;
+        let pays =
+            open || foe.distance < STAB_CLOSE || (middle && (foe.guarding || foe.turned_away));
+        score += if pays { 3.0 } else { -3.0 };
+        // A stab never follows a stab.
+        if recent.last().is_some_and(|l| l.stab) {
+            score -= 4.0;
+        }
+        return score;
+    }
+    // Nothing thrown again while it is remembered, newer repeats costing more.
+    for (k, old) in recent.iter().rev().enumerate() {
+        if !old.stab && (old.angle - line.angle).abs() < 1.0 {
+            score -= 6.0 - k as f32;
+        }
+    }
+    let travel = line.travel();
+    for old in recent.iter().rev().take(2).filter(|l| !l.stab) {
+        if travel.angle_between(old.travel()).to_degrees() < 60.0 {
+            score -= 2.0;
+        }
+    }
+    // Starting where the last one ended: its far side is this one's near side.
+    if let Some(last) = recent.last().filter(|l| !l.stab) {
+        score += 1.0 * (1.0 - travel.dot(last.travel())) * 0.5;
+    }
+    // A cut from the side the zone is on reaches it first (its left is the attacker's
+    // right, the side a cut from the right comes from).
+    if let Some(side) = zone.side() {
+        let from_right = line.angle > 0.0 && line.angle < 180.0;
+        let near = (side == 0) == from_right;
+        if near {
+            score += 0.3;
+        }
+    }
+    score
+}
+
+/// The aimed strike for `zone` among `moves`, at `skill` after `recent`, or none when the
+/// set has no lines. A rookie goes round its three lines; a master never throws one of
+/// its last five again.
+pub fn pick_line<'a>(
+    moves: &'a AttackSet,
+    zone: BodyZone,
+    skill: f32,
+    recent: &[Line],
+    foe: &Foe,
+) -> Option<&'a AttackMove> {
+    let height = zone_height(zone);
+    let known = known_lines(skill);
+    // One who knows few lines goes round them: it remembers one fewer than it knows.
+    let recent = &recent[recent.len().saturating_sub(known.len() - 1)..];
+    moves
+        .moves
+        .iter()
+        .filter(|m| {
+            m.line.is_some_and(|l| {
+                l.height == height && (l.stab || known.iter().any(|a| (a - l.angle).abs() < 1.0))
+            })
+        })
+        .map(|m| {
+            (
+                line_score(m.line.as_ref().expect("a line"), zone, recent, foe),
+                m,
+            )
+        })
+        // The first best, so a tie goes the same way every time.
+        .fold(
+            None,
+            |best: Option<(f32, &AttackMove)>, (s, m)| match best {
+                Some((b, _)) if b >= s => best,
+                _ => Some((s, m)),
+            },
+        )
+        .map(|b| b.1)
+}
 
 /// Shoulder to knuckles of the arm the warp ranges are tuned for (the generated humanoid's),
 /// meters.
@@ -1354,6 +1643,12 @@ struct Target {
     opening: Option<Opening>,
     /// In a paired move with this one: nobody else's blows touch it.
     pair_with: Option<Entity>,
+    /// The middle of each body zone (world), by [`BodyZone::index`].
+    zones: [DVec3; 16],
+    /// Which way it faces (flat).
+    forward: DVec3,
+    /// Recovering from a strike of its own, or staggered by a blow.
+    recovering: bool,
 }
 
 /// A raised guard: which way the target faces (flat), its knuckles (world), and the middle
@@ -1543,10 +1838,38 @@ pub(crate) fn run_attacks(
                     }),
                 })
             });
+            // The middle of each zone: a limb's between its joints, the knee on the joint.
+            let mid = |a: &str, b: &str, up: f64| (at(a, up) + at(b, up)) * 0.5;
+            let side = |stem: &str, k: usize| format!("{stem}_{}", ["l", "r"][k]);
+            let mut zones = [DVec3::ZERO; 16];
+            for zone in BodyZone::ALL {
+                let k = zone.side().unwrap_or(0);
+                use BodyZone::*;
+                zones[zone.index()] = match zone {
+                    Head => at("head", 1.55) + DVec3::Y * FACE_ABOVE_HEAD,
+                    Neck => mid("neck", "head", 1.5),
+                    Chest => at("chest", 1.3),
+                    Belly => at("spine", 1.07),
+                    UpperArmL | UpperArmR => mid(&side("upper_arm", k), &side("lower_arm", k), 1.3),
+                    ForearmL | ForearmR => mid(&side("lower_arm", k), &side("hand", k), 1.1),
+                    HandL | HandR => at(&side("hand", k), 1.0),
+                    ThighL | ThighR => mid(&side("upper_leg", k), &side("lower_leg", k), 0.75),
+                    KneeL | KneeR => at(&side("lower_leg", k), 0.5),
+                    ShinL | ShinR => mid(&side("lower_leg", k), &side("foot", k), 0.3),
+                };
+            }
+            let recovering = striking.is_some_and(|a| a.phase == AttackPhase::Recovery)
+                || hurt.is_some_and(Hurt::guard_down);
             // The head bone sits at the top of the neck: the face is a little above it.
             targets.insert(
                 t,
                 Target {
+                    zones,
+                    forward: (gt.rotation() * Vec3::NEG_Z)
+                        .with_y(0.0)
+                        .normalize_or_zero()
+                        .as_dvec3(),
+                    recovering,
                     chest: at("chest", 1.3),
                     head: at("head", 1.55) + DVec3::Y * FACE_ABOVE_HEAD,
                     liver: at("spine", 1.07) + (gt.rotation() * Vec3::X).as_dvec3() * LIVER_SIDE,
@@ -1691,7 +2014,33 @@ pub(crate) fn run_attacks(
                 })
                 .map(|m| m.name.clone())
         };
-        let neutral = |input: &str| riposte(input).or_else(|| neutral(input));
+        // A light press with a zone aimed at, in a set with lines: the cut or stab for it.
+        let aimed = |input: &str| {
+            let zone = attacker.zone.filter(|_| input == "attack_light")?;
+            let foe = attacker
+                .target
+                .and_then(|e| targets.get(&e))
+                .map(|tg| {
+                    let to = (tg.chest - gt.translation()).with_y(0.0);
+                    Foe {
+                        open: tg.opening.is_some() || tg.recovering,
+                        guarding: tg.guard.is_some(),
+                        // Facing the way the attacker looks at it.
+                        turned_away: tg.forward.dot(to.normalize_or_zero()) > 0.5,
+                        distance: to.length() as f32,
+                    }
+                })
+                .unwrap_or(Foe {
+                    distance: f32::INFINITY,
+                    ..Foe::default()
+                });
+            pick_line(moves, zone, attacker.skill, &attacker.recent, &foe).map(|m| m.name.clone())
+        };
+        let neutral = |input: &str| {
+            riposte(input)
+                .or_else(|| aimed(input))
+                .or_else(|| neutral(input))
+        };
         let pressed_next = attacker
             .buffered
             .as_ref()
@@ -1705,7 +2054,7 @@ pub(crate) fn run_attacks(
                     // (the overhead that broke the guard runs straight into it).
                     let linked = cancel_open(m)
                         .then(|| {
-                            riposte(input).or_else(|| {
+                            riposte(input).or_else(|| aimed(input)).or_else(|| {
                                 m.links
                                     .iter()
                                     .find(|l| &l.input == input)
@@ -1764,6 +2113,12 @@ pub(crate) fn run_attacks(
             attacker.committed = None;
             attacker.swept = None;
             attacker.struck = attacker.target;
+            attacker.aimed = m.line.and(attacker.zone);
+            if let Some(line) = m.line {
+                attacker.recent.push(line);
+                let extra = attacker.recent.len().saturating_sub(RECENT_LINES);
+                attacker.recent.drain(..extra);
+            }
             if from_press {
                 attacker.buffered = None;
             }
@@ -1823,7 +2178,10 @@ pub(crate) fn run_attacks(
                 .map(|w| &w.kind)
                 .find(|k| matches!(k, WindowKind::Hit { .. }))
         {
-            let mid = tg.aim(*high, *liver);
+            let mid = match attacker.aimed {
+                Some(zone) => tg.zones[zone.index()],
+                None => tg.aim(*high, *liver),
+            };
             let mut back = gt.translation() - mid;
             back.y = 0.0;
             let back = back.normalize_or_zero();
@@ -1848,6 +2206,7 @@ pub(crate) fn run_attacks(
             attacker.aim = Some((bone.clone(), aim));
         }
         let mut sweeping = false;
+        let aimed = attacker.aimed;
         for (k, w) in m.windows.iter().enumerate() {
             // A hit window a long frame stepped right over still lands (the fist is still
             // close, its aim fading out); the others act only while they are open.
@@ -1934,7 +2293,10 @@ pub(crate) fn run_attacks(
                     let (aim, reach) = match &blocked_at {
                         Some((guard, Some((radius, _)))) => (*guard, reach.max(radius * 0.8)),
                         Some((guard, None)) => (*guard, *reach),
-                        None => (tg.aim(*high, *liver), *reach),
+                        None => match aimed {
+                            Some(zone) => (tg.zones[zone.index()], *reach),
+                            None => (tg.aim(*high, *liver), *reach),
+                        },
                     };
                     let to_target = (aim - gt.translation()).with_y(0.0).normalize_or_zero();
                     // How close it came, where it lands on them and which way it pushes: a
@@ -2328,5 +2690,109 @@ pub(crate) fn evade_strikes(
             evader.evading = Some((m, 0.0, secs, *from, false));
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod aimed {
+    use super::*;
+
+    fn picks(set: &AttackSet, zone: BodyZone, skill: f32, foe: Foe, n: usize) -> Vec<Line> {
+        let mut recent: Vec<Line> = Vec::new();
+        let mut all = Vec::new();
+        for _ in 0..n {
+            let m = pick_line(set, zone, skill, &recent, &foe).expect("a line");
+            let line = m.line.unwrap();
+            all.push(line);
+            recent.push(line);
+            let extra = recent.len().saturating_sub(RECENT_LINES);
+            recent.drain(..extra);
+        }
+        all
+    }
+
+    const FACING: Foe = Foe {
+        open: false,
+        guarding: false,
+        turned_away: false,
+        distance: 1.15,
+    };
+
+    /// Six presses at one zone give six different cuts at its height, and none comes within
+    /// 60° of the one before it, for a master with either blade.
+    #[test]
+    fn a_master_cuts_a_new_line_every_press() {
+        for set in [AttackSet::sword_shield(), AttackSet::greatsword()] {
+            for zone in [BodyZone::KneeL, BodyZone::Neck, BodyZone::UpperArmR] {
+                let lines = picks(&set, zone, 0.9, FACING, 6);
+                let angles: Vec<f32> = lines.iter().map(|l| l.angle).collect();
+                assert!(
+                    lines
+                        .iter()
+                        .all(|l| !l.stab && l.height == zone_height(zone))
+                );
+                for (k, a) in angles.iter().enumerate() {
+                    assert!(!angles[..k].contains(a), "{zone:?}: {angles:?}");
+                }
+                for w in lines.windows(2) {
+                    let turn = w[0].travel().angle_between(w[1].travel()).to_degrees();
+                    assert!(turn >= 60.0, "{zone:?}: {angles:?}");
+                }
+            }
+        }
+    }
+
+    /// A rookie only has its three lines; an open foe, or one guarding high, gets the point
+    /// at the belly; one that turned away gets it too.
+    #[test]
+    fn rookies_know_three_lines_and_openings_get_a_stab() {
+        let set = AttackSet::sword_shield();
+        let rookie = picks(&set, BodyZone::Chest, 0.1, FACING, 6);
+        for l in &rookie {
+            assert!(known_lines(0.1).contains(&l.angle) && !l.stab, "{rookie:?}");
+        }
+        let distinct: HashSet<i32> = rookie.iter().map(|l| l.angle as i32).collect();
+        assert_eq!(distinct.len(), 3);
+        for foe in [
+            Foe {
+                open: true,
+                ..FACING
+            },
+            Foe {
+                guarding: true,
+                ..FACING
+            },
+            Foe {
+                turned_away: true,
+                ..FACING
+            },
+            Foe {
+                distance: 0.6,
+                ..FACING
+            },
+        ] {
+            let first = picks(&set, BodyZone::Belly, 0.5, foe, 2);
+            assert!(first[0].stab, "{foe:?}: {first:?}");
+            // Never two stabs in a row.
+            assert!(!first[1].stab, "{foe:?}: {first:?}");
+        }
+        // Guarding high doesn't make a stab pay at the head.
+        let high = picks(
+            &set,
+            BodyZone::Head,
+            0.5,
+            Foe {
+                guarding: true,
+                ..FACING
+            },
+            1,
+        );
+        assert!(!high[0].stab);
+        // Nor a turned back at a hamstring.
+        let behind = Foe {
+            turned_away: true,
+            ..FACING
+        };
+        assert!(!picks(&set, BodyZone::ThighR, 0.5, behind, 1)[0].stab);
     }
 }

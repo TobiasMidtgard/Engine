@@ -223,13 +223,15 @@ enum Stroke {
     /// A cut: the blade turns `degrees` about `axis` from where the last key left it (the tip
     /// leads along axis × blade, and the edge turns to face that way), its speed peaking late;
     /// the fist circles the chest to `to`, `reach` times as far out halfway, and the elbow
-    /// eases to `elbow`.
+    /// eases to `elbow`. `edge` 1 leads with the true edge, −1 with the false (a rising cut
+    /// the wrist can't turn over for).
     Cut {
         axis: Vec3,
         degrees: f32,
         to: Vec3,
         reach: f32,
         elbow: Vec3,
+        edge: f32,
     },
     /// The left hand on a two-handed grip, this far down it from the right fist.
     Below(f32),
@@ -408,20 +410,15 @@ impl Moves {
                         degrees,
                         to,
                         elbow,
+                        edge,
                         ..
                     } => {
                         assert!(k > 0, "a weapon clip can't start on a cut");
                         let axis = axis.normalize();
-                        // An edge leads: it faces the way the tip moves. Either edge of a
-                        // two-edged blade can, so the one nearer where the face already is
-                        // (the hand turning least into the cut).
+                        // The edge leads: it faces the way the tip moves (the true edge, in
+                        // line with the knuckles, so the forearm drives it).
                         let from = &mut holds[k - 1][side];
-                        let lead = square(axis.cross(from.axis), from.axis);
-                        from.face = if lead.dot(from.face) < 0.0 {
-                            -lead
-                        } else {
-                            lead
-                        };
+                        from.face = square(axis.cross(from.axis) * edge, from.axis);
                         let r = Quat::from_axis_angle(axis, degrees.to_radians());
                         Hold {
                             at: to,
@@ -480,6 +477,7 @@ impl Moves {
                     to,
                     reach,
                     elbow,
+                    ..
                 } => {
                     let e = swing(u);
                     let r = Quat::from_axis_angle(axis.normalize(), degrees.to_radians() * e);
@@ -521,6 +519,11 @@ impl Moves {
 
     /// The clip, sampled 120 times a second (a cut turns the blade 20° in a 60th).
     fn clip(self, s: &Skeleton, name: &str, looping: bool) -> AnimationClip {
+        self.clip_reaching(s, name, looping).0
+    }
+
+    /// [`Moves::clip`], and the farthest a held weapon's fist fell short of its hold, m.
+    fn clip_reaching(self, s: &Skeleton, name: &str, looping: bool) -> (AnimationClip, f32) {
         let secs = self.secs();
         let keys = (secs * 120.0).ceil() as usize + 1;
         let trail_keys = keys;
@@ -536,9 +539,10 @@ impl Moves {
             tests::sampling(name, ph * secs);
             self.pose(s, ph * secs, &mut memo)
         });
-        clip.with_curve("trail", trail_keys, move |ph| {
+        let clip = clip.with_curve("trail", trail_keys, move |ph| {
             trail[((ph * (trail_keys - 1) as f32).round() as usize).min(trail_keys - 1)]
-        })
+        });
+        (clip, memo.short)
     }
 }
 
@@ -635,6 +639,8 @@ fn blade_through_shield(a: Vec3, b: Vec3, centre: Vec3, normal: Vec3) -> f32 {
 struct ArmMemo {
     arms: [Option<(f32, f32)>; 2],
     give: f32,
+    /// The farthest a held weapon's fist fell short of its hold so far, m.
+    short: f32,
 }
 
 impl Default for ArmMemo {
@@ -642,6 +648,7 @@ impl Default for ArmMemo {
         Self {
             arms: [None; 2],
             give: 1.0,
+            short: 0.0,
         }
     }
 }
@@ -818,7 +825,8 @@ fn solve(
                         }
                     }
                 }
-                let (_, swivel, spin, _miss, pole, local, model) = best.expect("a reach to try");
+                let (_, swivel, spin, miss, pole, local, model) = best.expect("a reach to try");
+                memo.short = memo.short.max(miss);
                 edit.local.copy_from_slice(&local);
                 edit.model.copy_from_slice(&model);
                 memo.arms[side] = Some((swivel, spin));
@@ -886,7 +894,7 @@ fn solve(
                     }
                 }
                 #[cfg(test)]
-                tests::note_miss(side, _miss);
+                tests::note_miss(side, miss);
             }
             Rig::Free => {
                 // The fist is a hand's length past the wrist along a straight forearm.
@@ -1018,6 +1026,7 @@ fn sword_slash(s: &Skeleton) -> AnimationClip {
                     to: Vec3::new(-0.12, 1.02, -0.36),
                     reach: 1.12,
                     elbow: Vec3::new(0.5, -0.7, -0.5),
+                    edge: 1.0,
                 },
             ),
             key(
@@ -1090,6 +1099,7 @@ fn sword_backhand(s: &Skeleton) -> AnimationClip {
                     to: Vec3::new(0.36, 1.5, -0.3),
                     reach: 1.1,
                     elbow: Vec3::new(1.0, -0.2, 0.1),
+                    edge: 1.0,
                 },
             ),
             key(
@@ -1218,6 +1228,7 @@ fn sword_overhead(s: &Skeleton) -> AnimationClip {
                     to: Vec3::new(0.06, 1.02, -0.42),
                     reach: 1.05,
                     elbow: Vec3::new(0.6, -0.6, -0.4),
+                    edge: 1.0,
                 },
             ),
             key(
@@ -1612,6 +1623,7 @@ fn greatsword_sweep(s: &Skeleton) -> AnimationClip {
                     to: Vec3::new(-0.28, 1.14, -0.3),
                     reach: 1.1,
                     elbow: Vec3::new(0.3, -1.0, -0.2),
+                    edge: 1.0,
                 },
             ),
             key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
@@ -1661,6 +1673,7 @@ fn greatsword_rise(s: &Skeleton) -> AnimationClip {
                     to: Vec3::new(0.3, 1.58, -0.3),
                     reach: 1.05,
                     elbow: Vec3::new(1.0, -0.2, 0.0),
+                    edge: 1.0,
                 },
             ),
             key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
@@ -1735,6 +1748,7 @@ fn overhead_moves_with(
                     to: Vec3::new(-0.03, 1.02, -0.4),
                     reach: 0.97,
                     elbow: Vec3::new(0.6, -0.8, -0.3),
+                    edge: 1.0,
                 },
             ),
             key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
@@ -2121,6 +2135,684 @@ fn bow_carry(s: &Skeleton) -> AnimationClip {
     .clip(s, "bow_carry", true)
 }
 
+// ------------------------------------------------------------------------------ aimed lines
+
+/// How high an aimed cut or stab goes: at the head and neck, the trunk and arms, or the legs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Height {
+    High,
+    Mid,
+    Low,
+}
+
+impl Height {
+    pub const ALL: [Height; 3] = [Height::High, Height::Mid, Height::Low];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Height::High => "high",
+            Height::Mid => "mid",
+            Height::Low => "low",
+        }
+    }
+
+    /// Where on a foe of the generated size it crosses (meters up).
+    fn at(self) -> f32 {
+        match self {
+            Height::High => 1.58,
+            Height::Mid => 1.2,
+            Height::Low => 0.55,
+        }
+    }
+}
+
+/// The eight lines an aimed cut can travel, degrees round the foe as the attacker sees it:
+/// 0 straight down, 45 down from the right shoulder (the forehand diagonal), 90 across from
+/// the right, 135 rising from the right hip, 180 straight up, 225 rising from the left hip,
+/// 270 across from the left (the backhand) and 315 down from the left shoulder.
+pub const LINE_ANGLES: [f32; 8] = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
+
+/// The way a cut along `angle` travels across the foe (model space, the attacker facing −Z,
+/// its right +X).
+pub fn line_travel(angle: f32) -> Vec3 {
+    let a = angle.to_radians();
+    Vec3::new(-a.sin(), -a.cos(), 0.0)
+}
+
+/// An aimed cut's clip: `set` (`sword` or `greatsword`), the line and the height.
+pub fn line_clip(set: &str, angle: f32, height: Height) -> String {
+    format!("{set}_line_{:03}_{}", angle.round() as i32, height.name())
+}
+
+/// An aimed stab's clip.
+pub fn stab_clip(set: &str, height: Height) -> String {
+    format!("{set}_stab_{}", height.name())
+}
+
+/// An aimed cut's or stab's length and stroke (end of the wind-up, end of the cut), seconds,
+/// one-handed or with both hands.
+pub fn line_timing(two_handed: bool, stab: bool) -> (f32, [f32; 2]) {
+    match (two_handed, stab) {
+        (false, false) => (0.62, [0.18, 0.4]),
+        (false, true) => (0.66, [0.22, 0.36]),
+        (true, false) => (1.0, [0.34, 0.6]),
+        (true, true) => (0.95, [0.32, 0.5]),
+    }
+}
+
+/// Where the fist is as the blade crosses the foe at `height` (model space).
+fn line_contact(height: Height, two_handed: bool) -> Vec3 {
+    let y = (0.75 + height.at() * 0.42).clamp(0.98, 1.42);
+    Vec3::new(0.06, y, if two_handed { -0.4 } else { -0.44 })
+}
+
+/// How far ahead of the attacker the foe's middle is when its aimed cuts and stabs cross
+/// it, m.
+pub fn line_reach(two_handed: bool) -> f32 {
+    if two_handed { 1.45 } else { 1.15 }
+}
+
+/// The point a cut or stab at `height` passes through, the foe's middle a step ahead.
+fn line_point(height: Height, two_handed: bool) -> Vec3 {
+    Vec3::new(0.0, height.at(), -line_reach(two_handed))
+}
+
+/// An aimed cut along `angle` at `height`: wound back on the side it comes from, the blade
+/// turning about the line's axis through the foe and on past it, the body turning and
+/// sinking with it (low lines bend at the hips and knees), then back to the stance.
+fn line_cut_with(
+    s: &Skeleton,
+    two_handed: bool,
+    angle: f32,
+    height: Height,
+    plan: LinePlan,
+) -> (AnimationClip, f32) {
+    let LinePlan {
+        shift,
+        give,
+        pull,
+        elbow: lead,
+        edge,
+    } = plan;
+    let (secs, [wound, cut]) = line_timing(two_handed, false);
+    let travel = line_travel(angle);
+    let (low, dip) = match height {
+        Height::Low => (1.0, 18.0),
+        Height::Mid => (0.35, 6.0),
+        Height::High => (0.0, 2.0),
+    };
+    let sink = 0.1 + 0.17 * low;
+    // The fist meets the line as low as the body sinks: a blade sits at least 37° off its
+    // forearm, so a fist held high can't turn it down at a shin.
+    let contact = line_contact(height, two_handed) - Vec3::Y * (sink - 0.1);
+    let point = (line_point(height, two_handed) - contact).normalize();
+    let along = square(travel, point);
+    // The tip leads along axis × blade: at the foe the blade points at it and moves along
+    // the line.
+    let axis = point.cross(along).normalize();
+    let back = 105.0_f32;
+    // On past the foe far enough to follow through, short of the wrist folding over: a low
+    // cut stops sooner, the arm already reaching down.
+    let through = if height == Height::Low {
+        140.0_f32
+    } else {
+        165.0
+    };
+    let wound_dir = Quat::from_axis_angle(axis, -back.to_radians()) * point;
+    // How far the body sinks into the cut, and where its right shoulder is then: a fist
+    // the arm can't reach is drawn in toward it (`pull` thirds of the way).
+    let shoulder = Vec3::new(0.17, 1.42 - sink, -0.05);
+    let reachable = |p: Vec3| shoulder + (p - shoulder) * (1.0 - pull / 3.0);
+    // The fist starts on the side the line comes from, drawn in toward the body, and ends on
+    // the far side.
+    let side = |v: Vec3, k: f32| {
+        let p = contact + v * k + Vec3::new(0.0, 0.0, 0.24);
+        Vec3::new(p.x, p.y.clamp(0.95 - sink, 1.62), p.z)
+    };
+    let start = reachable(side(-along, 0.36)) + shift;
+    let end = contact + along * 0.34 + Vec3::new(0.0, 0.0, 0.1);
+    let end = reachable(Vec3::new(end.x, end.y.clamp(0.85 - sink, 1.62), end.z)) + shift;
+    // The elbow out on the side the cut comes from, down for rising cuts; through the cut
+    // it leads (`lead` 1), stays out and down (0) or trails (−1), as the wrist likes best.
+    let elbow = |toward: Vec3| (Vec3::new(0.7, -0.6, 0.2) + toward * 0.6).normalize();
+    let wound_hold = Hold::new(start, wound_dir, Vec3::NEG_Z, elbow(-along));
+    // Turn into it from the far side: a cut from the right winds the chest right.
+    let turn = -along.x;
+    let base = if two_handed { GS_STANCE } else { STANCE };
+    let wound_body = base.hips(
+        [0.0, -0.08 - 0.04 * low, 0.04],
+        [2.0, base.turn.y + 26.0 * turn, 0.0],
+        [base.trunk.x, base.trunk.y + 12.0 * turn, 0.0],
+    );
+    let cut_body = base
+        .hips(
+            [0.0, -sink, -0.08],
+            [dip, base.turn.y - 16.0 * turn, 0.0],
+            [base.trunk.x + dip, base.trunk.y - 12.0 * turn, -4.0 * turn],
+        )
+        .foot(1, base.feet[1].heel(10.0 + 6.0 * low));
+    let strike = Stroke::Cut {
+        axis,
+        degrees: through,
+        to: end,
+        reach: 1.0,
+        elbow: elbow(along * lead),
+        edge,
+    };
+    let (rigs, keys) = if two_handed {
+        let grip = Stroke::Below(GREATSWORD_HANDS);
+        (
+            [SWORD, SWORD],
+            vec![
+                key(0.0, GS_STANCE, grip, Stroke::To(gs_ready())),
+                key(wound, wound_body, grip, Stroke::To(wound_hold)),
+                key(cut, cut_body, grip, strike),
+                key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
+            ],
+        )
+    } else {
+        (
+            [HANDLE, SWORD],
+            vec![
+                key(
+                    0.0,
+                    STANCE,
+                    Stroke::To(shield_low()),
+                    Stroke::To(sword_ready()),
+                ),
+                key(
+                    wound,
+                    wound_body,
+                    Stroke::To(shield_low().at(Vec3::new(-0.12, 1.14 - 0.04 * low, -0.32))),
+                    Stroke::To(wound_hold),
+                ),
+                key(
+                    cut,
+                    cut_body,
+                    // The shield sinks with the body.
+                    Stroke::To(shield_low().at(Vec3::new(-0.34, 1.28 - sink, -0.16))),
+                    strike,
+                ),
+                key(
+                    secs,
+                    STANCE,
+                    Stroke::To(shield_low()),
+                    Stroke::To(sword_ready()),
+                ),
+            ],
+        )
+    };
+    let set = if two_handed { "greatsword" } else { "sword" };
+    let (clip, short) =
+        Moves::new(rigs, keys)
+            .give(give)
+            .clip_reaching(s, &line_clip(set, angle, height), false);
+    let clip = clip
+        .with_curve("effort", 31, move |ph| {
+            keyed(
+                ph * secs,
+                &[(0.0, 0.15), (wound, 0.5), (cut - 0.08, 1.0), (secs, 0.15)],
+            )
+        })
+        .with_curve("grip", 2, move |_| if two_handed { 1.0 } else { 0.0 })
+        .with_event(wound / secs, "swing", Some("hand_r"));
+    (clip, short)
+}
+
+/// Where a clip's blade passes nearest `point` during `[from, to]` seconds: the gap from the
+/// blade to the point there (model space, point minus blade) and how much the blade there
+/// moves along `travel` (−1 to 1, across the foe).
+fn blade_gap(
+    s: &Skeleton,
+    clip: &AnimationClip,
+    length: f32,
+    point: Vec3,
+    span: [f32; 2],
+    travel: Vec3,
+) -> (Vec3, f32) {
+    let binding = crate::clip::ClipBinding::new(clip, s);
+    let mut local = s.rest.clone();
+    let mut model = s.rest_model.clone();
+    let mut blade = |t: f32| {
+        local.copy_from_slice(&s.rest);
+        clip.sample(t, &binding, &mut local);
+        s.to_model(&local, &mut model);
+        let hand = model[s.bone("hand_r")];
+        let a = hand.transform_point(GRIP);
+        (a, a + hand.r * BLADE_AXIS * length)
+    };
+    let mut best = (f32::INFINITY, Vec3::ZERO, 0.0);
+    let n = 40;
+    let mut was = blade(span[0]);
+    for k in 1..=n {
+        let t = span[0] + (span[1] - span[0]) * k as f32 / n as f32;
+        let (a, b) = blade(t);
+        let ab = b - a;
+        let u = ((point - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+        let gap = point - (a + ab * u);
+        if gap.length() < best.0 {
+            let moved = (a + ab * u) - was.0.lerp(was.1, u);
+            let along = moved.with_z(0.0).normalize_or_zero().dot(travel);
+            best = (gap.length(), gap, along);
+        }
+        was = (a, b);
+    }
+    (best.1, best.2)
+}
+
+/// How far a two-handed clip's left fist comes off its grip, at worst (m, 240 samples a
+/// second: a slip can last a frame).
+fn grip_gap(s: &Skeleton, clip: &AnimationClip) -> f32 {
+    let binding = crate::clip::ClipBinding::new(clip, s);
+    let mut local = s.rest.clone();
+    let mut model = s.rest_model.clone();
+    let n = ((clip.duration * 240.0).ceil() as usize).max(1);
+    let mut worst = 0.0f32;
+    for k in 0..=n {
+        local.copy_from_slice(&s.rest);
+        clip.sample(clip.duration * k as f32 / n as f32, &binding, &mut local);
+        s.to_model(&local, &mut model);
+        let (r, l) = (model[s.bone("hand_r")], model[s.bone("hand_l")]);
+        let want = r.transform_point(GRIP) - r.r * BLADE_AXIS * GREATSWORD_HANDS;
+        worst = worst.max(l.transform_point(GRIP).distance(want));
+    }
+    worst
+}
+
+/// How many of a clip's samples (60 a second) take a wrist past its range, both counted.
+fn wrist_out(s: &Skeleton, clip: &AnimationClip) -> usize {
+    let binding = crate::clip::ClipBinding::new(clip, s);
+    let mut local = s.rest.clone();
+    let mut model = s.rest_model.clone();
+    let n = ((clip.duration * 60.0).ceil() as usize).max(1);
+    let mut out = 0;
+    for k in 0..=n {
+        local.copy_from_slice(&s.rest);
+        clip.sample(clip.duration * k as f32 / n as f32, &binding, &mut local);
+        s.to_model(&local, &mut model);
+        for side in 0..2 {
+            let (lower, hand) = (s.bone(LOWER_ARM[side]), s.bone(HAND[side]));
+            if wrist_strain(s, &model, lower, hand, side) > 5.0 {
+                out += 1;
+            }
+        }
+    }
+    out
+}
+
+/// How a line's clip is built: the fist's path moved by `shift` (m), the wrist given
+/// `give` of its strain, the fists drawn `pull` thirds of the way in toward the shoulder and
+/// the elbow leading the cut by `elbow` (−1 trailing to 1 leading) and the cut led by its
+/// true `edge` (1) or false (−1; cuts only). Found by [`plan_cut`] and [`plan_stab`] and kept in [`LINE_PLANS`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinePlan {
+    pub shift: Vec3,
+    pub give: f32,
+    pub pull: f32,
+    pub elbow: f32,
+    pub edge: f32,
+}
+
+/// The search for a line's plan: the cut's fist moved until the blade, turned as the wrists
+/// let it, crosses the line's point going its way with every fist on its hold; of those, the
+/// one that strains the wrists least (samples out, then centimeters off). Building a clip
+/// takes a few ms and the search hundreds of them, so it runs offline (`cargo test -p
+/// engine_anim --lib -- --ignored print_line_plans`) and its answers sit in [`LINE_PLANS`].
+pub fn plan_cut(s: &Skeleton, two_handed: bool, angle: f32, height: Height) -> LinePlan {
+    let length = if two_handed {
+        GREATSWORD_BLADE[1]
+    } else {
+        SWORD_BLADE[1]
+    };
+    let point = line_point(height, two_handed);
+    let travel = line_travel(angle);
+    let (_, span) = line_timing(two_handed, false);
+    // A low cut takes the shin with the blade's last hand, past the 85% mark.
+    let close = if height == Height::Low { 0.2 } else { 0.15 };
+    let mut nearest: Option<(f32, LinePlan)> = None;
+    let mut best: Option<(f32, LinePlan)> = None;
+    'search: for (edge, elbow) in [1.0, -1.0]
+        .into_iter()
+        .flat_map(|e| [(e, 1.0), (e, 0.0), (e, -1.0)])
+    {
+        for pull in [0.0, 0.5, 1.0, 1.5, 2.0] {
+            for give in [1.0, 0.8, 0.6, 0.4, 0.2, 0.0] {
+                let mut shift = Vec3::ZERO;
+                for _ in 0..10 {
+                    let plan = LinePlan {
+                        shift,
+                        give,
+                        pull,
+                        elbow,
+                        edge,
+                    };
+                    let (clip, short) = line_cut_with(s, two_handed, angle, height, plan);
+                    // The left fist off the grip counts as short of its hold.
+                    let short = if two_handed {
+                        short.max(grip_gap(s, &clip) - 0.02)
+                    } else {
+                        short
+                    };
+                    let (gap, along) = blade_gap(s, &clip, length * 0.85, point, span, travel);
+                    let wrong = if along < 0.3 { 1.0 } else { 0.0 };
+                    if short <= 0.004 && gap.length() + wrong < close {
+                        let score = wrist_out(s, &clip) as f32 + gap.length() * 30.0;
+                        if best.is_none_or(|(b, _)| score < b) {
+                            best = Some((score, plan));
+                        }
+                        if score < 1.0 {
+                            break 'search;
+                        }
+                    } else {
+                        let off = gap.length() + wrong + short * 100.0;
+                        if nearest.is_none_or(|(n, _)| off < n) {
+                            nearest = Some((off, plan));
+                        }
+                    }
+                    shift = (shift + gap * 0.5).clamp_length_max(0.6);
+                }
+            }
+        }
+    }
+    best.or(nearest).expect("a cut").1
+}
+
+/// The search for a stab's plan: the fist moved until the point, turned as the wrists let
+/// it, goes in where aimed with the fist on its hold; the wrists get all of their strain,
+/// then less (see [`plan_cut`]).
+pub fn plan_stab(s: &Skeleton, two_handed: bool, height: Height) -> LinePlan {
+    let at = line_point(height, two_handed);
+    let mut nearest: Option<(f32, LinePlan)> = None;
+    let mut best: Option<(f32, LinePlan)> = None;
+    'search: for give in [1.0, 0.8, 0.6, 0.4, 0.2, 0.0] {
+        let mut shift = Vec3::ZERO;
+        for _ in 0..8 {
+            let plan = LinePlan {
+                shift,
+                give,
+                pull: 0.0,
+                elbow: 1.0,
+                edge: 1.0,
+            };
+            let (clip, short) = line_stab_with(s, two_handed, height, plan);
+            let short = if two_handed {
+                short.max(grip_gap(s, &clip) - 0.02)
+            } else {
+                short
+            };
+            let gap = at - stab_tip(s, &clip, two_handed);
+            if short <= 0.004 && gap.length() < 0.08 {
+                let score = wrist_out(s, &clip) as f32 + gap.length() * 30.0;
+                if best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, plan));
+                }
+                if score < 1.0 {
+                    break 'search;
+                }
+            } else {
+                let off = gap.length() + short * 100.0;
+                if nearest.is_none_or(|(n, _)| off < n) {
+                    nearest = Some((off, plan));
+                }
+            }
+            shift = (shift + gap * 0.8).clamp_length_max(0.6);
+        }
+    }
+    best.or(nearest).expect("a stab").1
+}
+
+/// A line's plan from [`LINE_PLANS`] (none moved, all strain given, when it isn't there).
+fn line_plan(name: &str) -> LinePlan {
+    LINE_PLANS.iter().find(|(n, _)| *n == name).map_or(
+        LinePlan {
+            shift: Vec3::ZERO,
+            give: 1.0,
+            pull: 0.0,
+            elbow: 1.0,
+            edge: 1.0,
+        },
+        |(_, [x, y, z, give, pull, elbow, edge])| LinePlan {
+            shift: Vec3::new(*x, *y, *z),
+            give: *give,
+            pull: *pull,
+            elbow: *elbow,
+            edge: *edge,
+        },
+    )
+}
+
+fn line_cut(s: &Skeleton, two_handed: bool, angle: f32, height: Height) -> AnimationClip {
+    let set = if two_handed { "greatsword" } else { "sword" };
+    let plan = line_plan(&line_clip(set, angle, height));
+    line_cut_with(s, two_handed, angle, height, plan).0
+}
+
+/// How far a stab's edge is turned about its point from facing down (the fist thumb-up, as
+/// a handshake), degrees: the turn that leaves the wrists in range, found by trying every
+/// 30° (edge up with both hands; with one, up for the head and turned out from up below).
+fn stab_turn(two_handed: bool, height: Height) -> f32 {
+    match (two_handed, height) {
+        (false, Height::High) => 180.0,
+        (false, _) => 150.0,
+        (true, Height::Mid) => 210.0,
+        (true, _) => 180.0,
+    }
+}
+
+/// Which way a stab's edge faces, the blade along `point`.
+fn stab_face(two_handed: bool, height: Height, point: Vec3) -> Vec3 {
+    Quat::from_axis_angle(point, stab_turn(two_handed, height).to_radians())
+        * square(Vec3::NEG_Y, point)
+}
+
+/// Where a stab's point is as it goes in (model space).
+fn stab_tip(s: &Skeleton, clip: &AnimationClip, two_handed: bool) -> Vec3 {
+    let (_, [_, drive]) = line_timing(two_handed, true);
+    let length = if two_handed {
+        GREATSWORD_BLADE[1]
+    } else {
+        SWORD_BLADE[1]
+    };
+    let binding = crate::clip::ClipBinding::new(clip, s);
+    let mut local = s.rest.clone();
+    clip.sample(drive + 0.04, &binding, &mut local);
+    let mut model = s.rest_model.clone();
+    s.to_model(&local, &mut model);
+    let hand = model[s.bone("hand_r")];
+    hand.transform_point(GRIP) + hand.r * BLADE_AXIS * length
+}
+
+fn line_stab(s: &Skeleton, two_handed: bool, height: Height) -> AnimationClip {
+    let set = if two_handed { "greatsword" } else { "sword" };
+    line_stab_with(s, two_handed, height, line_plan(&stab_clip(set, height))).0
+}
+
+/// An aimed stab at `height`: drawn back by the hip, the point driven at the foe's middle
+/// at that height with a step, and back.
+fn line_stab_with(
+    s: &Skeleton,
+    two_handed: bool,
+    height: Height,
+    plan: LinePlan,
+) -> (AnimationClip, f32) {
+    let LinePlan { shift, give, .. } = plan;
+    let (secs, [wound, drive]) = line_timing(two_handed, true);
+    let face = stab_face(
+        two_handed,
+        height,
+        (line_point(height, two_handed) - line_contact(height, two_handed)).normalize(),
+    );
+    let contact = line_contact(height, two_handed);
+    let at = line_point(height, two_handed);
+    let point = (at - contact).normalize();
+    let blade = if two_handed {
+        GREATSWORD_BLADE[1]
+    } else {
+        SWORD_BLADE[1]
+    };
+    // The fist a hand short of where the point goes in, a little past the foe's front.
+    let fist = at + Vec3::new(0.0, 0.0, -0.12) - point * blade;
+    let fist = Vec3::new(fist.x + 0.06, fist.y.clamp(0.9, 1.5), fist.z) + shift;
+    let drawn = Hold::new(
+        Vec3::new(0.24, contact.y.clamp(1.0, 1.25), 0.02),
+        point,
+        face,
+        Vec3::new(0.6, -0.6, 0.6),
+    );
+    let home = Hold::new(fist, point, face, Vec3::new(0.6, -0.8, 0.1));
+    let low = if height == Height::Low { 1.0 } else { 0.0 };
+    let base = if two_handed { GS_STANCE } else { STANCE };
+    let lunge = base
+        .hips(
+            [0.0, -0.14 - 0.1 * low, -0.22],
+            [6.0 + 10.0 * low, base.turn.y + 8.0, 0.0],
+            [base.trunk.x + 10.0 + 8.0 * low, base.trunk.y, 0.0],
+        )
+        .foot(
+            0,
+            foot(
+                base.feet[0].at.x,
+                base.feet[0].at.z - 0.26,
+                base.feet[0].yaw,
+            ),
+        )
+        .foot(1, base.feet[1].heel(14.0));
+    let drawn_body = base.hips(
+        [0.0, -0.1, 0.06],
+        [2.0, base.turn.y - 22.0, 0.0],
+        [base.trunk.x, base.trunk.y - 8.0, 0.0],
+    );
+    let (rigs, keys) = if two_handed {
+        let grip = Stroke::Below(GREATSWORD_HANDS);
+        (
+            [SWORD, SWORD],
+            vec![
+                key(0.0, GS_STANCE, grip, Stroke::To(gs_ready())),
+                key(wound, drawn_body, grip, Stroke::To(drawn)),
+                key(drive, lunge, grip, Stroke::To(home)),
+                key(drive + 0.08, lunge, grip, Stroke::To(home)),
+                key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
+            ],
+        )
+    } else {
+        let aside = shield_low().at(Vec3::new(-0.24, 1.1, -0.28));
+        (
+            [HANDLE, SWORD],
+            vec![
+                key(
+                    0.0,
+                    STANCE,
+                    Stroke::To(shield_low()),
+                    Stroke::To(sword_ready()),
+                ),
+                key(
+                    wound,
+                    drawn_body,
+                    Stroke::To(shield_low()),
+                    Stroke::To(drawn),
+                ),
+                key(drive, lunge, Stroke::To(aside), Stroke::To(home)),
+                key(drive + 0.08, lunge, Stroke::To(aside), Stroke::To(home)),
+                key(
+                    secs,
+                    STANCE,
+                    Stroke::To(shield_low()),
+                    Stroke::To(sword_ready()),
+                ),
+            ],
+        )
+    };
+    let set = if two_handed { "greatsword" } else { "sword" };
+    let (clip, short) =
+        Moves::new(rigs, keys)
+            .give(give)
+            .clip_reaching(s, &stab_clip(set, height), false);
+    let clip = clip
+        .with_curve("effort", 31, move |ph| {
+            keyed(
+                ph * secs,
+                &[(0.0, 0.2), (wound, 0.6), (drive, 1.0), (secs, 0.15)],
+            )
+        })
+        .with_curve("grip", 2, move |_| if two_handed { 1.0 } else { 0.0 })
+        .with_event(wound / secs, "swing", Some("hand_r"));
+    (clip, short)
+}
+
+/// Each aimed line's [`LinePlan`] as [`plan_cut`] and [`plan_stab`] found it: clip, then
+/// shift x, y, z (m), give, pull, elbow and edge.
+#[rustfmt::skip]
+const LINE_PLANS: &[(&str, [f32; 7])] = &[
+    ("sword_line_000_high", [0.058, 0.064, -0.060, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_045_high", [0.035, 0.054, -0.157, 0.8, 1.0, -1.0, 1.0]),
+    ("sword_line_090_high", [0.048, -0.053, -0.156, 1.0, 1.0, -1.0, 1.0]),
+    ("sword_line_135_high", [-0.010, -0.034, -0.087, 1.0, 0.5, 1.0, 1.0]),
+    ("sword_line_180_high", [0.184, 0.006, -0.162, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_225_high", [0.122, -0.044, -0.096, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_270_high", [-0.021, -0.102, -0.071, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_315_high", [0.002, 0.122, -0.164, 1.0, 1.0, 1.0, 1.0]),
+    ("sword_stab_high", [-0.281, -0.002, 0.109, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_000_mid", [-0.040, 0.022, -0.046, 1.0, 0.5, 1.0, 1.0]),
+    ("sword_line_045_mid", [0.061, -0.014, -0.181, 0.8, 1.5, 0.0, 1.0]),
+    ("sword_line_090_mid", [-0.006, 0.002, -0.073, 0.8, 1.0, 0.0, 1.0]),
+    ("sword_line_135_mid", [0.010, -0.033, -0.054, 1.0, 0.5, 1.0, 1.0]),
+    ("sword_line_180_mid", [0.001, -0.006, -0.111, 1.0, 0.5, 0.0, 1.0]),
+    ("sword_line_225_mid", [0.088, 0.023, -0.061, 0.8, 0.0, 1.0, 1.0]),
+    ("sword_line_270_mid", [0.000, -0.027, -0.034, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_315_mid", [0.003, -0.007, -0.138, 1.0, 1.0, 1.0, 1.0]),
+    ("sword_stab_mid", [-0.172, -0.004, 0.117, 1.0, 0.0, 1.0, 1.0]),
+    ("sword_line_000_low", [0.000, 0.000, 0.000, 0.2, 1.0, 0.0, 1.0]),
+    ("sword_line_045_low", [0.000, 0.000, 0.000, 0.2, 1.0, -1.0, 1.0]),
+    ("sword_line_090_low", [0.000, 0.000, 0.000, 0.0, 1.0, 0.0, -1.0]),
+    ("sword_line_135_low", [0.000, 0.000, 0.000, 1.0, 1.0, -1.0, 1.0]),
+    ("sword_line_180_low", [0.000, 0.000, 0.000, 0.4, 1.0, 1.0, 1.0]),
+    ("sword_line_225_low", [0.008, -0.113, -0.176, 0.2, 2.0, 1.0, 1.0]),
+    ("sword_line_270_low", [0.000, 0.000, 0.000, 0.2, 1.0, -1.0, 1.0]),
+    ("sword_line_315_low", [-0.061, -0.090, -0.168, 0.0, 2.0, -1.0, 1.0]),
+    ("sword_stab_low", [-0.106, -0.025, 0.132, 1.0, 0.0, 1.0, 1.0]),
+    ("greatsword_line_000_high", [0.039, 0.035, -0.236, 1.0, 1.0, 0.0, 1.0]),
+    ("greatsword_line_045_high", [0.028, 0.051, -0.237, 1.0, 1.5, 1.0, 1.0]),
+    ("greatsword_line_090_high", [-0.004, -0.049, -0.223, 1.0, 1.5, -1.0, 1.0]),
+    ("greatsword_line_135_high", [-0.061, 0.042, -0.228, 0.8, 1.5, -1.0, 1.0]),
+    ("greatsword_line_180_high", [-0.044, 0.063, -0.243, 0.8, 2.0, -1.0, -1.0]),
+    ("greatsword_line_225_high", [-0.002, -0.056, -0.201, 0.2, 1.0, 1.0, 1.0]),
+    ("greatsword_line_270_high", [-0.052, 0.006, -0.158, 1.0, 0.5, 1.0, 1.0]),
+    ("greatsword_line_315_high", [-0.049, -0.059, -0.317, 1.0, 2.0, -1.0, 1.0]),
+    ("greatsword_stab_high", [-0.060, -0.000, 0.120, 0.0, 0.0, 1.0, 1.0]),
+    ("greatsword_line_000_mid", [-0.016, 0.052, -0.079, 1.0, 0.5, 1.0, 1.0]),
+    ("greatsword_line_045_mid", [0.073, 0.022, -0.138, 1.0, 1.0, 0.0, 1.0]),
+    ("greatsword_line_090_mid", [-0.002, -0.068, -0.119, 1.0, 1.5, 1.0, 1.0]),
+    ("greatsword_line_135_mid", [-0.053, -0.061, -0.070, 1.0, 1.0, 0.0, 1.0]),
+    ("greatsword_line_180_mid", [-0.075, -0.042, -0.267, 0.0, 2.0, 1.0, 1.0]),
+    ("greatsword_line_225_mid", [0.035, -0.069, -0.269, 0.2, 2.0, -1.0, 1.0]),
+    ("greatsword_line_270_mid", [0.001, -0.133, -0.227, 0.8, 1.5, -1.0, 1.0]),
+    ("greatsword_line_315_mid", [0.072, 0.059, -0.222, 1.0, 1.5, -1.0, 1.0]),
+    ("greatsword_stab_mid", [-0.060, -0.000, 0.120, 0.0, 0.0, 1.0, 1.0]),
+    ("greatsword_line_000_low", [-0.043, -0.033, -0.177, 0.0, 2.0, -1.0, 1.0]),
+    ("greatsword_line_045_low", [0.000, 0.000, 0.000, 1.0, 1.0, -1.0, 1.0]),
+    ("greatsword_line_090_low", [0.000, 0.000, 0.000, 0.0, 1.5, -1.0, 1.0]),
+    ("greatsword_line_135_low", [0.000, 0.000, 0.000, 0.0, 1.0, -1.0, 1.0]),
+    ("greatsword_line_180_low", [-0.042, -0.051, -0.178, 0.0, 2.0, 1.0, 1.0]),
+    ("greatsword_line_225_low", [0.017, -0.065, -0.178, 0.0, 2.0, 0.0, 1.0]),
+    ("greatsword_line_270_low", [-0.016, -0.110, -0.154, 0.0, 2.0, -1.0, 1.0]),
+    ("greatsword_line_315_low", [-0.060, -0.045, -0.134, 0.0, 1.5, -1.0, 1.0]),
+    ("greatsword_stab_low", [-0.058, 0.000, 0.115, 0.0, 0.0, 1.0, 1.0]),
+];
+
+/// Every aimed cut and stab, one-handed (sword and shield) and with the great sword.
+fn line_clips(s: &Skeleton) -> Vec<AnimationClip> {
+    let mut all = Vec::new();
+    for two_handed in [false, true] {
+        for height in Height::ALL {
+            for angle in LINE_ANGLES {
+                all.push(line_cut(s, two_handed, angle, height));
+            }
+            all.push(line_stab(s, two_handed, height));
+        }
+    }
+    all
+}
+
 /// Every weapon clip.
 pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
     let mut all = vec![
@@ -2146,6 +2838,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         bow_carry(s),
     ];
     all.extend(moving_stances(s));
+    all.extend(line_clips(s));
     all
 }
 
@@ -2402,13 +3095,16 @@ mod wrists {
     /// Every weapon clip's wrists, sampled at 60 Hz, stay in their range (5° slack, the
     /// validator's) but for a few samples where a sword would otherwise cut its own shield or
     /// an off hand follows its grip round, and the paired thrusts (held exactly, not counted);
-    /// the table gives the samples out, the worst strain
+    /// the 54 aimed cuts and stabs, held to their marks, have their own budget: the sword's
+    /// high and mid ones next to none, the low ones and the great sword's (whose left hand
+    /// must stay on the grip) still bend past range for about a third of each clip, measured
+    /// here so it can only fall; the table gives the samples out, the worst strain
     /// and the worst flexion, extension, deviation and roll per hand.
     #[test]
     fn weapon_clips_keep_their_wrists_in_range() {
         let s = humanoid::skeleton();
         let mut lines = Vec::new();
-        let mut total = 0;
+        let (mut total, mut aimed, mut sword_upper) = (0, 0, 0);
         for clip in clips(&s) {
             let binding = crate::clip::ClipBinding::new(&clip, &s);
             let n = ((clip.duration * 60.0).ceil() as usize).max(1);
@@ -2446,8 +3142,14 @@ mod wrists {
                     angles[side][3] = angles[side][3].max(r);
                 }
             }
-            // The paired thrusts are held exactly where their foes take them.
-            if clip.name != SWORD_RIPOSTE && clip.name != GREATSWORD_RIPOSTE {
+            // The paired thrusts are held exactly where their foes take them; the aimed
+            // cuts and stabs, which must cross their mark, have their own budget.
+            if clip.name.contains("_line_") || clip.name.contains("_stab_") {
+                aimed += out[0] + out[1];
+                if clip.name.starts_with("sword") && !clip.name.ends_with("_low") {
+                    sword_upper += out[0] + out[1];
+                }
+            } else if clip.name != SWORD_RIPOSTE && clip.name != GREATSWORD_RIPOSTE {
                 total += out[0] + out[1];
             }
             lines.push(format!(
@@ -2465,9 +3167,128 @@ mod wrists {
         }
         eprintln!("{}", lines.join("\n"));
         assert!(
-            total <= 60,
-            "{total} samples out of range\n{}",
+            total <= 60 && aimed <= 560 && sword_upper <= 20,
+            "{total} samples out of range, {aimed} in the aimed lines ({sword_upper} in the \
+             sword's high and mid ones)\n{}",
             lines.join("\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod lines {
+    use super::*;
+    use crate::build::humanoid;
+
+    /// Where the blade (hilt end, tip) is at `t`, model space.
+    fn blade_at(s: &Skeleton, clip: &AnimationClip, t: f32, length: f32) -> (Vec3, Vec3) {
+        let binding = crate::clip::ClipBinding::new(clip, s);
+        let mut local = s.rest.clone();
+        clip.sample(t, &binding, &mut local);
+        let mut model = s.rest_model.clone();
+        s.to_model(&local, &mut model);
+        let hand = model[s.bone("hand_r")];
+        let fist = hand.transform_point(GRIP);
+        (fist, fist + hand.r * BLADE_AXIS * length)
+    }
+
+    /// Closest distance from `p` to the segment `a`–`b`, and how far along it.
+    fn closest(a: Vec3, b: Vec3, p: Vec3) -> (f32, f32) {
+        let ab = b - a;
+        let u = ((p - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+        ((a + ab * u).distance(p), u)
+    }
+
+    /// Prints [`LINE_PLANS`] from the searches, to paste over it after a change to how
+    /// lines are built.
+    #[test]
+    #[ignore = "a tool: regenerates LINE_PLANS"]
+    fn print_line_plans() {
+        let s = humanoid::skeleton();
+        let mut rows = Vec::new();
+        for two_handed in [false, true] {
+            let set = if two_handed { "greatsword" } else { "sword" };
+            for height in Height::ALL {
+                let mut plans: Vec<(String, LinePlan)> = LINE_ANGLES
+                    .iter()
+                    .map(|&a| {
+                        (
+                            line_clip(set, a, height),
+                            plan_cut(&s, two_handed, a, height),
+                        )
+                    })
+                    .collect();
+                plans.push((stab_clip(set, height), plan_stab(&s, two_handed, height)));
+                for (name, p) in plans {
+                    rows.push(format!(
+                        "    (\"{name}\", [{:.3}, {:.3}, {:.3}, {:.1}, {:.1}, {:.1}, {:.1}]),",
+                        p.shift.x, p.shift.y, p.shift.z, p.give, p.pull, p.elbow, p.edge
+                    ));
+                }
+            }
+        }
+        println!("LINE_PLANS\n{}", rows.join("\n"));
+    }
+
+    /// Every aimed cut's blade sweeps within 20 cm of its line's point at its height, moving
+    /// within 75° of its line there (the wrists turn some lines off theirs); every stab's
+    /// point goes in at its height.
+    #[test]
+    fn aimed_cuts_cross_their_point_along_their_line() {
+        let s = humanoid::skeleton();
+        let all = clips(&s);
+        let mut report = Vec::new();
+        let mut bad = Vec::new();
+        for two_handed in [false, true] {
+            let set = if two_handed { "greatsword" } else { "sword" };
+            let length = if two_handed {
+                GREATSWORD_BLADE[1]
+            } else {
+                SWORD_BLADE[1]
+            };
+            for height in Height::ALL {
+                let target = line_point(height, two_handed);
+                for angle in LINE_ANGLES {
+                    let name = line_clip(set, angle, height);
+                    let clip = all.iter().find(|c| c.name == name).expect(&name);
+                    let (_, [a, b]) = line_timing(two_handed, false);
+                    let mut best = (f32::INFINITY, Vec3::ZERO, 0.0);
+                    let n = 60;
+                    let mut was = blade_at(&s, clip, a, length);
+                    for k in 1..=n {
+                        let t = a + (b - a) * k as f32 / n as f32;
+                        let now = blade_at(&s, clip, t, length);
+                        let (d, u) = closest(now.0, now.1, target);
+                        if d < best.0 {
+                            let p_now = now.0.lerp(now.1, u);
+                            let p_was = was.0.lerp(was.1, u);
+                            best = (d, p_now - p_was, t);
+                        }
+                        was = now;
+                    }
+                    let travel = line_travel(angle);
+                    let motion = best.1.with_z(0.0).normalize_or_zero();
+                    let along = motion.dot(travel);
+                    report.push(format!(
+                        "{name}: {:.2} m at {:.2} s, along {along:.2}",
+                        best.0, best.2
+                    ));
+                    if best.0 > 0.2 || along < 0.25 {
+                        bad.push(name);
+                    }
+                }
+                let name = stab_clip(set, height);
+                let clip = all.iter().find(|c| c.name == name).expect(&name);
+                let (_, [_, drive]) = line_timing(two_handed, true);
+                let tip = blade_at(&s, clip, drive + 0.04, length).1;
+                let off = (tip - target).with_z(0.0).length();
+                report.push(format!("{name}: tip {off:.2} m off at {:.2}", tip.y));
+                if off > 0.15 || tip.z > target.z + 0.05 {
+                    bad.push(name);
+                }
+            }
+        }
+        eprintln!("{}", report.join("\n"));
+        assert!(bad.is_empty(), "{bad:?}\n{}", report.join("\n"));
     }
 }

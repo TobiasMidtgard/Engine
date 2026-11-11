@@ -11,7 +11,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
 use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose, StrikeTargets};
-use engine_world::combat::{AttackPhase, AttackWindow, ItemClass, Loadout};
+use engine_world::combat::{AttackPhase, AttackWindow, BodyZone, ItemClass, Loadout};
 use engine_world::events::AttackKind;
 use engine_world::locomotion::MoveIntent;
 
@@ -217,4 +217,61 @@ fn a_feint_pulls_the_strike_back_and_skill_sets_the_telegraph() {
     app.update();
     let fast = app.world.get::<AttackWindow>(a).unwrap().phase_length_secs;
     assert!(fast < slow * 0.5, "rookie {slow} s, master {fast} s");
+}
+
+#[test]
+fn six_presses_at_one_knee_give_six_cuts_that_land() {
+    let (mut app, a, b) = duel();
+    let skilled = engine_world::combat::CombatSkills {
+        weapons: [(ItemClass::OneHandedBlade, 0.9)].into_iter().collect(),
+        off_hand: 0.5,
+    };
+    app.world.entity_mut(a).insert(skilled);
+    app.world.get_mut::<StrikeTargets>(a).unwrap().zone = Some(BodyZone::KneeL);
+    let mut moved = [DVec3::ZERO; 2];
+    let mut thrown: Vec<String> = Vec::new();
+    let mut landed = Vec::new();
+    let mut pressing = false;
+    for _ in 0..(8.0 / STEP) as usize {
+        let at = app.world.get::<Attacker>(a).unwrap().clone();
+        // Press once the last cut is over or its follow-on opens, and let go after a frame.
+        let ready = at.current.is_none() || at.cancel_open;
+        let intent = if thrown.len() < 6 && ready && !pressing {
+            pressing = true;
+            Some(AttackKind::Melee)
+        } else {
+            pressing = false;
+            None
+        };
+        app.world.get_mut::<MoveIntent>(a).unwrap().attack = intent;
+        app.update();
+        take_steps(&mut app, [a, b], &mut moved);
+        let now = app.world.get::<Attacker>(a).unwrap();
+        if let Some(c) = &now.current
+            && now.time < 0.1
+            && thrown.last() != Some(c)
+        {
+            thrown.push(c.clone());
+            landed.push(0);
+        }
+        if let Some(l) = landed.last_mut() {
+            *l = (*l).max(now.hits);
+        }
+        if thrown.len() == 6 && now.current.is_none() {
+            break;
+        }
+    }
+    assert_eq!(thrown.len(), 6, "{thrown:?}");
+    let distinct: std::collections::HashSet<_> = thrown.iter().collect();
+    assert_eq!(distinct.len(), 6, "a cut came twice: {thrown:?}");
+    assert!(
+        thrown
+            .iter()
+            .all(|c| c.starts_with("sword_line_") && c.ends_with("_low")),
+        "not low cuts: {thrown:?}"
+    );
+    assert!(
+        landed.iter().all(|&h| h >= 1),
+        "{thrown:?} landed {landed:?}"
+    );
 }
