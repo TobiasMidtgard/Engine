@@ -55,6 +55,10 @@ pub struct SmokeSettings {
     /// Let the raymarch skip the parts of a box with no smoke in them, a brick of voxels at a
     /// time (the picture is the same; off only to time what it saves).
     pub skip_empty: bool,
+    /// March the smoke at half the screen's resolution in each direction (a quarter of the
+    /// rays) and lay it over the scene with a depth-aware upsample. Softer smoke edges and
+    /// grain for about a quarter of the cost; off until judged from pictures.
+    pub half_res: bool,
     /// Step volumes on a background task (where there is one): the frame never waits for a
     /// big plume's step; what you see is one step behind, and a step that isn't done in time
     /// is owed to the next.
@@ -88,6 +92,7 @@ impl Default for SmokeSettings {
             detail: 1.0,
             max_steps: 160,
             skip_empty: true,
+            half_res: std::env::var("ENGINE_SMOKE_HALF").is_ok_and(|v| v == "1"),
             background: true,
         }
     }

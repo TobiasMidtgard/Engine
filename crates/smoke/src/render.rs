@@ -16,7 +16,27 @@ use crate::domain::Domain;
 use crate::settings::SmokeSettings;
 use crate::sim::{SmokeClock, SmokeDomains, SmokeTunnels};
 
-pub const SMOKE_SHADER: &str = include_str!("shaders/smoke.wgsl");
+pub const SMOKE_SHADER: &str = concat!(
+    include_str!("shaders/smoke_block.wgsl"),
+    include_str!("shaders/smoke.wgsl")
+);
+/// Lays the half-resolution smoke over the scene (`SmokeSettings::half_res`).
+pub const SMOKE_UPSAMPLE_SHADER: &str = concat!(
+    include_str!("shaders/smoke_block.wgsl"),
+    include_str!("shaders/smoke_upsample.wgsl")
+);
+/// The line of [`SMOKE_SHADER`] that sets the march's resolution, and its half-resolution
+/// version.
+const MARCH_FULL: &str = "const MARCH_SCALE: i32 = 1;";
+const MARCH_HALF: &str = "const MARCH_SCALE: i32 = 2;";
+
+/// The smoke shader marching at half resolution, before the scene.
+pub fn half_res_shader() -> String {
+    SMOKE_SHADER.replace(MARCH_FULL, MARCH_HALF)
+}
+
+/// Format of the half-resolution smoke target (premultiplied color and coverage).
+const LOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const SMOKE_LIGHT_SHADER: &str = include_str!("shaders/smoke_light.wgsl");
 pub const SMOKE_SHADOW_SHADER: &str = include_str!("shaders/smoke_shadow.wgsl");
 
@@ -89,9 +109,27 @@ struct VolumeGpu {
     seen: bool,
 }
 
+/// The half-resolution smoke of the main view: marched before the scene, laid over it in the
+/// transparent pass.
+struct LowTarget {
+    size: (u32, u32),
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    group: wgpu::BindGroup,
+}
+
 #[derive(Default)]
 pub struct SmokeFeature {
     pipeline: Option<wgpu::RenderPipeline>,
+    /// The march at half resolution into `low` (`SmokeSettings::half_res`).
+    half_pipeline: Option<wgpu::RenderPipeline>,
+    /// Lays `low` over the scene.
+    up_pipeline: Option<wgpu::RenderPipeline>,
+    up_layout: Option<wgpu::BindGroupLayout>,
+    low: Option<LowTarget>,
+    half_res: bool,
+    /// `low` holds this frame's smoke of the main view.
+    low_drawn: bool,
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     light_pipeline: Option<wgpu::ComputePipeline>,
     draw_layout: Option<wgpu::BindGroupLayout>,
@@ -614,6 +652,95 @@ impl RenderFeature for SmokeFeature {
             }),
         );
 
+        // Half resolution: the same march into a target of its own, accumulating coverage
+        // (back to front, "over"), then one full-screen triangle lays it over the scene.
+        let over = wgpu::BlendState {
+            color: premultiplied.color,
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let half_shader = gpu.shader("smoke half", &half_res_shader(), true);
+        self.half_pipeline = Some(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("smoke half"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &half_shader,
+                    entry_point: Some("vs_smoke"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &half_shader,
+                    entry_point: Some("fs_smoke"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: LOW_FORMAT,
+                        blend: Some(over),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            }),
+        );
+        let up_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("smoke upsample"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: fs,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let up_shader = gpu.shader("smoke upsample", SMOKE_UPSAMPLE_SHADER, true);
+        let up_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("smoke upsample"),
+            bind_group_layouts: &[Some(&gpu.frame_layout), Some(&up_layout)],
+            immediate_size: 0,
+        });
+        self.up_pipeline = Some(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("smoke upsample"),
+                layout: Some(&up_pl),
+                vertex: wgpu::VertexState {
+                    module: &up_shader,
+                    entry_point: Some("vs_up"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: Some(depth.clone()),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &up_shader,
+                    entry_point: Some("fs_up"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.formats.hdr,
+                        blend: Some(premultiplied),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            }),
+        );
+        self.up_layout = Some(up_layout);
+
         // Shadows multiply the scene: dst × src.
         let multiply = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -741,6 +868,7 @@ impl RenderFeature for SmokeFeature {
         if !settings.enabled || self.light_pipeline.is_none() {
             return;
         }
+        self.half_res = settings.half_res;
         self.flow.advance(view.wind, view.delta);
         let flow = self.flow;
         let clock = world
@@ -969,7 +1097,89 @@ impl RenderFeature for SmokeFeature {
         }
     }
 
-    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+    fn before_scene(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        _motion: &wgpu::TextureView,
+        ctx: &FrameContext,
+    ) {
+        if ctx.view.extra_view {
+            return;
+        }
+        self.low_drawn = false;
+        let any = self.order.iter().any(|&i| self.volumes[i].visible);
+        if !self.half_res || !any {
+            return;
+        }
+        let (Some(_), Some(layout)) = (&self.half_pipeline, &self.up_layout) else {
+            return;
+        };
+        let size = (
+            ctx.view.width.div_ceil(2).max(1),
+            ctx.view.height.div_ceil(2).max(1),
+        );
+        if self.low.as_ref().map(|l| l.size) != Some(size) {
+            let device = &ctx.gpu.device;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("smoke half resolution"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: LOW_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("smoke upsample"),
+                layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                }],
+            });
+            self.low = Some(LowTarget {
+                size,
+                _texture: texture,
+                view,
+                group,
+            });
+        }
+        let (Some(pipeline), Some(low)) = (&self.half_pipeline, &self.low) else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("smoke half resolution"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &low.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, ctx.frame_group, &[]);
+        for &i in &self.order {
+            let v = &self.volumes[i];
+            if let (true, Some(group)) = (v.visible, &v.draw_groups[v.current]) {
+                pass.set_bind_group(1, group, &[]);
+                pass.draw(0..36, 0..1);
+            }
+        }
+        self.low_drawn = true;
+    }
+
+    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {
         if phase != RenderPhase::Transparent {
             return;
         }
@@ -984,6 +1194,18 @@ impl RenderFeature for SmokeFeature {
                 pass.set_bind_group(1, group, &[]);
                 pass.draw(0..36, 0..1);
             }
+        }
+        // Marched at half resolution before the scene: lay it over.
+        if let (false, true, Some(up), Some(low)) = (
+            ctx.view.extra_view,
+            self.low_drawn,
+            &self.up_pipeline,
+            &self.low,
+        ) {
+            pass.set_pipeline(up);
+            pass.set_bind_group(1, &low.group, &[]);
+            pass.draw(0..3, 0..1);
+            return;
         }
         pass.set_pipeline(pipeline);
         for &i in &self.order {
@@ -1040,9 +1262,15 @@ mod tests {
             ("smoke", SMOKE_SHADER),
             ("smoke light", SMOKE_LIGHT_SHADER),
             ("smoke shadow", SMOKE_SHADOW_SHADER),
+            ("smoke upsample", SMOKE_UPSAMPLE_SHADER),
         ] {
             validate_wgsl(name, &compose_shader(src, true)).unwrap();
         }
+        assert!(
+            SMOKE_SHADER.contains(MARCH_FULL),
+            "the half-resolution switch line moved"
+        );
+        validate_wgsl("smoke half", &compose_shader(&half_res_shader(), true)).unwrap();
     }
 
     #[test]

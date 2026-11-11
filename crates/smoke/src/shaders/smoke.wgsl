@@ -26,6 +26,22 @@ struct SmokeParams {
 @group(1) @binding(7) var occupancy: texture_3d<f32>;
 const BRICK: f32 = 4.0;
 
+// 1: the march runs at the scene's resolution, in the transparent pass. 2: at half of it in
+// both directions, before the scene, into a target of its own that smoke_upsample.wgsl lays
+// over the scene (render.rs swaps this line; `SmokeSettings::half_res`).
+const MARCH_SCALE: i32 = 1;
+
+// The scene depth (reverse-Z) the march stops at. At half resolution each pixel stands for
+// 2x2 of the scene's: alternate pixels take the nearest and the farthest of their four (a
+// checkerboard), so where an edge runs through a block one of its neighbors holds each side
+// and the upsample can pick the one whose depth matches (nearest-depth upsampling).
+fn march_depth(px: vec2<f32>) -> f32 {
+    if (MARCH_SCALE == 1) {
+        return textureLoad(scene_depth, vec2<i32>(px), 0);
+    }
+    return block_depth(vec2<i32>(px));
+}
+
 // Meters per tile of the detail texture: the warp's and the billows'.
 const WARP_TILE: f32 = 16.0;
 const BILLOW_TILE: f32 = 8.0;
@@ -145,7 +161,7 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
 
     let t0 = t_near;
     var t1 = t_far;
-    let d = textureLoad(scene_depth, vec2<i32>(in.clip.xy), 0);
+    let d = march_depth(in.clip.xy);
     if (d > 0.0) {
         let forward = -(frame.view * vec4<f32>(dir, 0.0)).z;
         t1 = min(t1, frame.exposure.z / d / max(forward, 1e-4));
