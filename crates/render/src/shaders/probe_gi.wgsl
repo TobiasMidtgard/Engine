@@ -307,7 +307,22 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         rays[id.x] = vec4<f32>(0.0, 0.0, 0.0, -hit.t * 0.2);
         return;
     }
-    rays[id.x] = vec4<f32>(shaded.rgb * PROBE_GI_SCALE, min(hit.t, t_max));
+    rays[id.x] = vec4<f32>(probe_ray_firefly(shaded.rgb) * PROBE_GI_SCALE, min(hit.t, t_max));
+}
+
+// A ray's radiance at most PROBE_RAY_MOST times white on screen (hue kept). A probe's 64 rays
+// can't tell a lamp globe (tens of thousands of cd/m² over a few square centimeters) from a
+// wall: the one ray in a few frames that hits it carried a sixty-fourth of the probe's light
+// at the globe's brightness, and the ground under the lamps flared and faded from frame to
+// frame (12% of the night market's pixels changed by more than 8/255 between two paused
+// frames, 11 Nov). The lamp's light already reaches the probes as a point light. The same
+// limit as the screen-space bounce's firefly weight (ssgi.wgsl), relative to the exposure.
+const PROBE_RAY_MOST: f32 = 8.0;
+
+fn probe_ray_firefly(c: vec3<f32>) -> vec3<f32> {
+    let most = PROBE_RAY_MOST / max(frame.exposure.x, 1e-12);
+    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return c * min(1.0, most / max(l, 1e-12));
 }
 
 // Light leaving the surface a ray from `origin` along `dir` hit (`hit`, not a miss), toward the
