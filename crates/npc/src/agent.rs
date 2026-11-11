@@ -621,6 +621,8 @@ pub struct NpcCombat {
     /// The animation module plays this fighter's strikes (an intent body, see
     /// `intent_body.rs`): they land through its `DamageEvent`s, not this crate's.
     pub anim_strikes: bool,
+    /// Where on its foe its current (or last) melee strike aims (`aim.rs`).
+    pub zone: Option<engine_world::combat::BodyZone>,
 }
 
 impl NpcCombat {

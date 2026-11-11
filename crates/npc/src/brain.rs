@@ -2362,6 +2362,26 @@ fn follow(
     false
 }
 
+/// Pick where on the foe the strike just begun aims (`aim.rs`).
+fn aim_at(
+    p: &Snapshot,
+    skills: &NpcSkills,
+    from: DVec3,
+    heavy: bool,
+    moving: bool,
+    brain: &mut NpcBrain,
+    combat: &mut NpcCombat,
+) {
+    let a = crate::aim::AimInput {
+        from,
+        heavy,
+        moving,
+        last: combat.zone,
+        roll: brain.random(),
+    };
+    combat.zone = Some(crate::aim::pick_zone(p, skills, a));
+}
+
 /// Melee: keep the right distance, circle, take turns, strike at openings, punish mistakes.
 #[allow(clippy::too_many_arguments)]
 fn melee(
@@ -2446,6 +2466,7 @@ fn melee(
                     &mut w.attacks,
                     &mut w.triggers,
                 );
+                aim_at(p, skills, pos, false, true, brain, combat);
                 brain.committed_until = 0.0;
             } else {
                 out.direction = dir;
@@ -2477,6 +2498,7 @@ fn melee(
                 &mut w.attacks,
                 &mut w.triggers,
             );
+            aim_at(p, skills, pos, heavy, false, brain, combat);
             brain.committed_until = 0.0;
         }
         return;

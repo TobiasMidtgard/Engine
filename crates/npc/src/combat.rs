@@ -321,6 +321,8 @@ pub(crate) struct Strike {
     seed: u64,
     /// The animation module lands it (see [`NpcCombat::anim_strikes`]).
     anim: bool,
+    /// Where on the target a melee strike aims (`aim.rs`).
+    zone: Option<engine_world::combat::BodyZone>,
 }
 
 type FighterItem<'a> = (
@@ -412,6 +414,7 @@ pub(crate) fn resolve_attacks(
             at: now,
             seed: seed_of(&seeds, me),
             anim: combat.anim_strikes,
+            zone: combat.zone,
         });
     }
     if !settings.resolve_hits {
@@ -443,13 +446,16 @@ pub(crate) fn resolve_attacks(
     }
 }
 
-/// Where a landed cut strikes `target` (struck along `dir`): a heavy blow comes down on the head
-/// and shoulders, a cut on the run drives into the trunk, and the rest land on the trunk or, about
+/// Where a landed cut strikes `target` (struck along `dir`): at the height of the zone it aimed
+/// at (`aim.rs`) when it aimed at one; otherwise a heavy blow comes down on the head and
+/// shoulders, a cut on the run drives into the trunk, and the rest land on the trunk or, about
 /// one in four (picked by the swing's time, so a run repeats), low on the legs. The point is on
 /// the side of the body the blade came from.
 fn strike_point(s: &Strike, target: &Perceivable, dir: Vec3) -> DVec3 {
     let low = (s.at * 7.31).fract() < 0.27;
-    let up = if s.heavy {
+    let up = if let Some(z) = s.zone {
+        crate::aim::zone_height(z)
+    } else if s.heavy {
         0.9
     } else if s.moving || !low {
         0.6
@@ -1200,6 +1206,7 @@ mod tests {
             at,
             seed: 0,
             anim: false,
+            zone: None,
         };
         let dir = -Vec3::Z;
         let (mut head, mut body, mut legs) = (0, 0, 0);

@@ -18,7 +18,9 @@
 //!   ([`NpcBrain::GET_UP_SECS`] after a revive).
 //! * **Intent.** The brain already writes `MoveIntent` (`attack` pressed for a strike, `heavy`
 //!   ones as `Dash`; `block` while it guards; `crouch`). Here each step writes
-//!   `StrikeTargets.target` (its foe) and the strike's tempo in `AnimationParams`: `windup_speed`
+//!   `StrikeTargets.target` (its foe) and `.zone` (where its strike aims, `aim.rs`: the
+//!   animation module throws an aimed cut or stab there, from as many lines as the
+//!   `CombatSkills` given with the body say it knows), and the strike's tempo in `AnimationParams`: `windup_speed`
 //!   so the clip's telegraph lasts as long as the brain's wind-up (learned per light and heavy
 //!   strike from the first `AttackWindow` it plays), `strike_speed` by skill (a rookie's strikes
 //!   0.82 times as fast, a master's 1.19), and `evasive` only while the brain dodges (the
@@ -32,7 +34,9 @@
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger, BodyRequest, StrikeTargets};
 use engine_world::character::{Appearance, AppearanceRequest};
-use engine_world::combat::{AttackPhase as WindowPhase, AttackWindow, ItemClass, Loadout};
+use engine_world::combat::{
+    AttackPhase as WindowPhase, AttackWindow, CombatSkills, ItemClass, Loadout,
+};
 
 use crate::agent::{
     AttackPhase, Npc, NpcBrain, NpcClock, NpcCombat, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
@@ -88,6 +92,7 @@ pub(crate) type Asking<'a> = (
     Has<Loadout>,
     Has<Appearance>,
     Has<AppearanceRequest>,
+    (&'a NpcSkills, Has<CombatSkills>),
 );
 
 /// Which fighters [`give_bodies`] looks at.
@@ -101,8 +106,21 @@ pub(crate) fn give_bodies(
     drawn: bool,
     q: &mut Query<Asking, AskingFilter>,
 ) {
-    for (e, seed, weapon, vitals, brain, clock, body, asked, targets, loadout, looks, asks) in
-        q.iter_mut()
+    for (
+        e,
+        seed,
+        weapon,
+        vitals,
+        brain,
+        clock,
+        body,
+        asked,
+        targets,
+        loadout,
+        looks,
+        asks,
+        (skills, skilled),
+    ) in q.iter_mut()
     {
         let now = clock.now;
         let mut fresh = IntentBody::default();
@@ -134,6 +152,9 @@ pub(crate) fn give_bodies(
             if !targets {
                 cmd.try_insert(StrikeTargets::default());
             }
+            if !skilled && let Some(kit) = kit {
+                cmd.try_insert(combat_skills(&kit, skills));
+            }
         } else if !want && asked && body.asked {
             body.asked = false;
             cmd.remove::<BodyRequest>();
@@ -156,6 +177,24 @@ type Driving<'a> = (
     Option<&'a mut AnimationParams>,
     Has<BodyRequest>,
 );
+
+/// How good a fighter is with what it holds, for the animation module's aimed strikes (how
+/// many lines of cut it knows): its skill level with its main weapon, its defense with the off
+/// hand.
+pub fn combat_skills(kit: &Loadout, skills: &NpcSkills) -> CombatSkills {
+    let level = skills.level().clamp(0.0, 1.0);
+    let mut weapons = std::collections::BTreeMap::new();
+    if kit.main != ItemClass::None {
+        weapons.insert(kit.main, level);
+    }
+    if kit.off != ItemClass::None {
+        weapons.insert(kit.off, skills.defense.clamp(0.0, 1.0));
+    }
+    CombatSkills {
+        weapons,
+        off_hand: (0.5 * (level + skills.defense)).clamp(0.0, 1.0),
+    }
+}
 
 /// The windup speed the animation module plays at, clamped as it clamps it.
 const SPEED_RANGE: (f32, f32) = (0.25, 3.0);
@@ -180,9 +219,10 @@ pub(crate) fn drive_bodies(mut q: Query<Driving>) {
             continue;
         }
         if let Some(mut t) = targets
-            && t.target != brain.target
+            && (t.target != brain.target || t.zone != combat.zone)
         {
             t.target = brain.target;
+            t.zone = combat.zone;
         }
         let Some(mut params) = params else {
             continue;

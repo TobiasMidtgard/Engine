@@ -3,7 +3,7 @@
 //! it). Longsword fighters ask for bodies, archers and riflemen don't; the downed give theirs
 //! back and ask again once up; and a strike the animation module plays is pressed through the
 //! intent, lands through its blows (not this crate's), and has its telegraph timed to the
-//! brain's.
+//! brain's, aimed at the zone its brain picks.
 
 use engine_core::ecs::message::Messages;
 use engine_core::prelude::*;
@@ -12,7 +12,9 @@ use engine_npc::intent_body::loadout_of;
 use engine_npc::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger, BodyRequest, StrikeTargets};
 use engine_world::character::draws_appearances;
-use engine_world::combat::{AttackPhase as WindowPhase, AttackWindow, ItemClass, Loadout};
+use engine_world::combat::{
+    AttackPhase as WindowPhase, AttackWindow, CombatSkills, ItemClass, Loadout,
+};
 use engine_world::locomotion::MoveIntent;
 use engine_world::{DamageEvent, WorldPlugin};
 
@@ -96,6 +98,10 @@ fn hand_to_hand_people_ask_the_animation_module_for_bodies() {
         })
     );
     assert!(app.world.get::<StrikeTargets>(sword).is_some());
+    // How many lines of cut it knows: a veteran's skill with its two-handed blade.
+    let skill = app.world.get::<CombatSkills>(sword).expect("its skill");
+    let level = NpcSkills::veteran().level();
+    assert!((skill.skill(ItemClass::TwoHandedBlade) - level).abs() < 1e-4);
     assert!(
         asked(&app, rifle).is_none(),
         "riflemen keep the stand-in's pose"
@@ -190,6 +196,8 @@ fn a_strike_the_animation_module_plays_lands_through_it_on_the_brains_time() {
         let mut app = app();
         let a = fighter(&mut app, -0.8, Faction::ENEMY, NpcWeapon::sword(), 1);
         let b = fighter(&mut app, 0.8, Faction::RIVAL, NpcWeapon::sword(), 2);
+        // A foe that guards poorly, so blows get through.
+        app.world.entity_mut(b).insert(NpcSkills::rookie());
         let mut blows = app.world.resource::<Messages<DamageEvent>>().get_cursor();
         let mut cues = app
             .world
@@ -241,4 +249,8 @@ fn a_strike_the_animation_module_plays_lands_through_it_on_the_brains_time() {
     let target = app.world.get::<StrikeTargets>(a).unwrap().target;
     assert_eq!(target, app.world.get::<NpcBrain>(a).unwrap().target);
     assert!(target.is_some(), "strikes close on its foe");
+    // And aim where its brain picked (`aim.rs`).
+    let zone = app.world.get::<StrikeTargets>(a).unwrap().zone;
+    assert!(zone.is_some(), "an aimed strike");
+    assert_eq!(zone, app.world.get::<NpcCombat>(a).unwrap().zone);
 }
