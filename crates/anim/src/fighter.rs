@@ -19,7 +19,9 @@
 //!   tempo, for skill (a rookie's slow telegraph, a master's fast one); an
 //!   [`AnimationTrigger`](engine_world::animation::AnimationTrigger) `feint` pulls a strike
 //!   back while it winds up. `MoveIntent::crouch` sets `crouch`. `evasive` 1 lets it slip
-//!   and roll under the strikes it reads (0 at first).
+//!   and roll under the strikes it reads (0 at first). `hide_props` 1 hides the props'
+//!   meshes and keeps their grips, for a game that draws its own weapons on `hand_r` and
+//!   `hand_l` (0 at first).
 //! * Strikes that land send `DamageEvent`s; [`Statuses`] `shielding` follows the guard and
 //!   `staggered` an opening after a deflect, where the body has `Statuses`.
 //! * [`AttackWindow`] says each frame which phase the strike being played is in (wind-up,
@@ -337,6 +339,24 @@ pub(crate) fn drive_fighters(mut q: Query<Fighter>, places: Query<&GlobalTransfo
         let crouch = if intent.crouch { 1.0 } else { 0.0 };
         if params.get("crouch") != crouch {
             params.set("crouch", crouch);
+        }
+    }
+}
+
+/// Show or hide each fighter's props as its `hide_props` param says (the grips stay).
+#[allow(clippy::type_complexity)]
+pub(crate) fn show_props(
+    fighters: Query<(&Armed, &AnimationParams), Or<(Changed<Armed>, Changed<AnimationParams>)>>,
+    mut meshes: Query<&mut engine_render::MeshRenderer>,
+) {
+    for (armed, params) in &fighters {
+        let visible = params.get("hide_props") == 0.0;
+        for &p in &armed.props {
+            if let Ok(mut m) = meshes.get_mut(p)
+                && m.visible != visible
+            {
+                m.visible = visible;
+            }
         }
     }
 }

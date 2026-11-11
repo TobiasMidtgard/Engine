@@ -173,6 +173,7 @@ impl Plugin for AnimationPlugin {
                         freeflow::pick_targets,
                         combat::run_attacks,
                         fighter::publish_windows,
+                        fighter::show_props,
                         paired::hold_pairs,
                         combat::evade_strikes,
                         footwork::step_footwork,

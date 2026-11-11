@@ -179,6 +179,41 @@ fn the_guard_follows_the_intent_and_a_new_loadout_swaps_the_props() {
 }
 
 #[test]
+fn hide_props_hides_the_meshes_and_keeps_the_grip() {
+    let (mut app, a, _) = duel();
+    let props = app.world.get::<Armed>(a).unwrap().props.clone();
+    let shown = |app: &App| {
+        props
+            .iter()
+            .filter(|p| {
+                app.world
+                    .get::<engine_render::MeshRenderer>(**p)
+                    .unwrap()
+                    .visible
+            })
+            .count()
+    };
+    assert_eq!(shown(&app), props.len());
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("hide_props", 1.0);
+    app.update();
+    assert_eq!(shown(&app), 0);
+    assert_eq!(
+        app.world.get::<Armed>(a).unwrap().props,
+        props,
+        "props kept"
+    );
+    app.world
+        .get_mut::<AnimationParams>(a)
+        .unwrap()
+        .set("hide_props", 0.0);
+    app.update();
+    assert_eq!(shown(&app), props.len());
+}
+
+#[test]
 fn a_feint_pulls_the_strike_back_and_skill_sets_the_telegraph() {
     let (mut app, a, _) = duel();
     // A rookie: twice as long a wind-up.
