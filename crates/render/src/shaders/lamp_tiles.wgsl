@@ -36,10 +36,14 @@ fn fs_tiles(in: FullscreenOut) -> TilesOut {
     let hi = min(lo + vec2<i32>(LAMP_TILE_PX), size);
 
     // The farthest surface in the tile: the smallest depth (reverse Z), 0 where nothing is.
+    // Always 16 by 16 loads, clamped to the image (an edge tile reads its last pixels again):
+    // loop ends that differ between the pixels of a block never ended on lavapipe at 160x120.
     var far_z = 1.0;
-    for (var y = lo.y; y < hi.y; y++) {
-        for (var x = lo.x; x < hi.x; x++) {
-            far_z = min(far_z, textureLoad(prepass_depth, vec2<i32>(x, y), 0));
+    let last = size - vec2<i32>(1);
+    for (var y = 0; y < LAMP_TILE_PX; y++) {
+        for (var x = 0; x < LAMP_TILE_PX; x++) {
+            let at = clamp(lo + vec2<i32>(x, y), vec2<i32>(0), last);
+            far_z = min(far_z, textureLoad(prepass_depth, at, 0));
         }
     }
     var far = 3.0e38;
