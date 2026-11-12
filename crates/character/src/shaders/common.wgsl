@@ -40,6 +40,7 @@ struct Pose {
     eye_l: vec4<f32>,                    // eye centers (model space before posing)
     eye_r: vec4<f32>,
     wear: vec4<f32>,                     // dirt, blood, bruises, wet (Appearance::wear, 0..1)
+    injury: array<vec4<f32>, 32>,        // per bone, two by two: wound, bleeding (sever.rs)
     weights: array<vec4<f32>, 16>,       // expression channels this frame
     prev_weights: array<vec4<f32>, 16>,  // and last frame
     bones: array<mat4x4<f32>>,           // this frame's bones, then last frame's
@@ -152,6 +153,17 @@ fn clear_thighs(p: vec3<f32>, bones: vec4<u32>, prev: bool, margin: f32) -> vec3
         }
     }
     return q;
+}
+
+// How wounded (x) and bleeding (y) what these bones move is (`BodyInjuries`, per bone).
+fn bone_injury(bones: vec4<u32>, w: vec4<f32>) -> vec2<f32> {
+    var out = vec2<f32>(0.0);
+    for (var k = 0u; k < 4u; k++) {
+        let b = min(bones[k], 63u);
+        let v = pose.injury[b / 2u];
+        out += w[k] * select(v.xy, v.zw, b % 2u == 1u);
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------- clothes

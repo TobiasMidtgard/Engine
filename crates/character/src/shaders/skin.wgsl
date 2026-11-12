@@ -50,6 +50,8 @@ struct SkinOut {
     @location(10) bind: vec3<f32>,
     @location(11) axis_x: vec3<f32>,
     @location(12) axis_y: vec3<f32>,
+    // Wound and bleeding here (`bone_injury`).
+    @location(13) injury: vec2<f32>,
 };
 
 @vertex
@@ -88,6 +90,7 @@ fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     out.bind = hand.p + lift;
     out.axis_x = model_dir((now * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz);
     out.axis_y = model_dir((now * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
+    out.injury = bone_injury(in.bones, in.weights);
     return out;
 }
 
@@ -562,6 +565,37 @@ fn mail_surface(uv: vec2<f32>, footprint: f32, seed: f32) -> Mail {
     return m;
 }
 
+// Where a limb was cut off (`sever.rs`): skin rolled in at the rim, a ring of yellow fat,
+// wet dark-red muscle, the pale bone in the middle (`in.curvature`: 0 rim .. 1 middle).
+fn stump_surface(in: SkinOut, n_in: vec3<f32>) -> SkinLight {
+    let t = saturate(in.curvature);
+    let r = in.rest;
+    let seed = character.look.w * 917.0;
+    let fibre = value_noise3(r * vec3<f32>(900.0, 900.0, 900.0) + seed);
+    let clot = value_noise3(r * 220.0 + seed);
+    var s: SkinLight;
+    s.curvature = 0.0;
+    s.thin = 0.0;
+    s.scatter = 0.0;
+    s.occlusion = 0.85;
+    let meat = vec3<f32>(0.2, 0.018, 0.014) * (0.7 + 0.5 * fibre);
+    let fat = vec3<f32>(0.5, 0.36, 0.16);
+    let bone = vec3<f32>(0.62, 0.55, 0.42) * (0.9 + 0.2 * fibre);
+    let clotted = vec3<f32>(0.04, 0.004, 0.003);
+    var c = mix(skin_tone(character.skin.x) * 0.6, fat, smoothstep(0.03, 0.08, t));
+    c = mix(c, meat, smoothstep(0.12, 0.2, t));
+    c = mix(c, clotted, smoothstep(0.55, 0.8, clot) * smoothstep(0.1, 0.25, t) * 0.8);
+    let marrow = smoothstep(0.8, 0.83, t);
+    c = mix(c, bone, marrow);
+    c = mix(c, vec3<f32>(0.18, 0.03, 0.02), smoothstep(0.96, 0.98, t));
+    s.albedo = c;
+    s.roughness = mix(0.25, 0.45, marrow);
+    s.specular = mix(0.9, 0.5, marrow);
+    s.n = bump(n_in, in.rel, fibre * 0.0008);
+    s.n_soft = n_in;
+    return s;
+}
+
 // Bump a shading normal `n` by a height `h` (m) over the surface at camera-relative `rel`
 // (Mikkelsen's surface gradient, from screen derivatives).
 fn bump(n: vec3<f32>, rel: vec3<f32>, h: f32) -> vec3<f32> {
@@ -589,7 +623,9 @@ fn armor_surface(in: SkinOut, n_in: vec3<f32>) -> SkinLight {
     s.occlusion = 1.0;
     var h = 0.0;
     var mail = 0.0;
-    var uv = vec2<f32>(atan2(r.x, r.z) * 0.17, r.y);
+    // Round the body and down it, in the shell's own shape before the pose (its rest
+    // position is its anchors', which wavers between them).
+    var uv = vec2<f32>(atan2(in.bind.x, in.bind.z) * 0.17, in.bind.y);
     if (in.part == 9u) {
         let d = r - character.rest_head.xyz;
         uv = vec2<f32>(atan2(d.x, d.z) * 0.1, r.y);
@@ -652,6 +688,9 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
     s.n_soft = n;
     s.curvature = 0.0;
     s.thin = 0.0;
+    if (in.part == 10u) {
+        return stump_surface(in, n);
+    }
     if (in.part >= 7u) {
         return armor_surface(in, n);
     }
@@ -965,7 +1004,22 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Wear (`Appearance::wear`, live each frame without a rebuild): dirt gathers low and in
     // patches, blood in glossy dark splashes, bruises tint the skin purple, wet darkens and
     // glosses everything.
-    let wear = pose.wear;
+    // Wounds where the body was hurt: blood round them, more where it bleeds, and gashes.
+    let injury = clamp(in.injury, vec2<f32>(0.0), vec2<f32>(1.0));
+    let wear = vec4<f32>(pose.wear.x, max(pose.wear.y, saturate(injury.y * 0.85 + injury.x * 0.35)),
+        max(pose.wear.z, injury.x * 0.6), pose.wear.w);
+    if (injury.x > 0.2) {
+        // Cuts: a few dark, wet lines across the wound.
+        let warp = value_noise3(r * 40.0 + seed) * 0.012;
+        let line = abs(fract((r.y + r.x * 0.6 + warp) / 0.045 + seed) - 0.5) * 0.045;
+        let spot = smoothstep(0.55, 0.75, value_noise3(r * vec3<f32>(14.0, 9.0, 14.0) + seed * 2.0));
+        let gash = (1.0 - smoothstep(0.0006, 0.0016 * (0.5 + injury.x), line)) * spot
+            * smoothstep(0.2, 0.6, injury.x);
+        albedo = mix(albedo, vec3<f32>(0.05, 0.004, 0.003), gash);
+        rough = mix(rough, mix(0.3, 0.6, cloth), gash);
+        specular = mix(specular, mix(0.7, 0.35, cloth), gash);
+        metal = metal * (1.0 - gash);
+    }
     if (any(wear > vec4<f32>(0.0))) {
         let low = 1.0 - smoothstep(0.15, 1.2, r.y);
         let dn = fbm3(r * 8.0 + seed, 3) / 0.875 * 0.7 + low * 0.3 + value_noise3(r * 90.0 + seed) * 0.15;
@@ -979,8 +1033,9 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
         let blood = smoothstep(0.98 - 0.36 * wear.y, 1.0 - 0.36 * wear.y, bn) * step(0.001, wear.y);
         let blood_color = mix(vec3<f32>(0.11, 0.009, 0.006), vec3<f32>(0.03, 0.005, 0.004), cloth);
         albedo = mix(albedo, blood_color, blood * 0.95);
-        rough = mix(rough, 0.35, blood);
-        specular = mix(specular, 0.6, blood);
+        // (Soaked into cloth, blood is dull; on skin it is wet.)
+        rough = mix(rough, mix(0.35, 0.7, cloth), blood);
+        specular = mix(specular, mix(0.6, 0.3, cloth), blood);
         let brn = fbm3(r * 6.0 + seed * 5.3 + 13.0, 2) / 0.75;
         let bruise = smoothstep(1.0 - 0.6 * wear.z, 1.12 - 0.6 * wear.z, brn) * (1.0 - cloth)
             * step(0.001, wear.z);

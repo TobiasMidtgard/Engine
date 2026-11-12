@@ -42,6 +42,8 @@ pub struct CharacterMeshes {
     pub hair_shadow: Option<strands::ShadowGrid>,
     /// Expression shapes (empty when built without a face).
     pub face: FaceShapes,
+    /// Per skin bone, the zones whose wounds show on what it moves (`sever::bone_zones`).
+    pub bone_zones: Vec<[u8; 2]>,
     /// Per strand set, the set as the GPU reads it (`StrandSet::packed`), packed here off the
     /// frame thread.
     pub packed_strands: Vec<strands::PackedStrands>,
@@ -79,6 +81,9 @@ pub struct BuildOptions {
     pub hair: bool,
     /// Build the expression shapes (a face that can move).
     pub face: bool,
+    /// Zones cut off (`crate::sever::severed_mask`): left out at their joints and closed by
+    /// stumps.
+    pub severed: u16,
 }
 
 impl Default for BuildOptions {
@@ -88,6 +93,7 @@ impl Default for BuildOptions {
             levels: 2,
             hair: true,
             face: true,
+            severed: 0,
         }
     }
 }
@@ -139,7 +145,8 @@ pub fn build(
         .clone()
         .map(|lids| lids.map(|lid| lid.iter().map(|v| morphed[*v as usize]).collect::<Vec<_>>()));
     let lids = eyes::lid_curves([le, re], &margins);
-    let mut strands = if opts.hair {
+    let headless = crate::sever::takes_head(opts.severed);
+    let mut strands = if opts.hair && !headless {
         strands::grow_all(a, &skin, &margins, &landmarks, &lm0)
     } else {
         Vec::new()
@@ -162,7 +169,7 @@ pub fn build(
     let cut = clothes::Cut::of(a);
     let cloth = clothes::dress(pack, regions, &morphed, &mut skin, cut);
     skin.build_coarse(&cloth);
-    let face_shows = headgear.face_shows();
+    let face_shows = headgear.face_shows() && !headless;
     if opts.face && face_shows {
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
     }
@@ -196,6 +203,13 @@ pub fn build(
     }
     headgear.cover_skin(&mut skin, lm0.head);
     crate::cover::hide(&mut skin, &pack.bones, &a.hide);
+    if opts.severed != 0 {
+        // The stumps follow a vertex with no expressions: the lowest, under a foot.
+        let sole = (0..pack.positions.len())
+            .min_by(|a, b| pack.positions[*a].y.total_cmp(&pack.positions[*b].y))
+            .unwrap_or(0) as u32;
+        crate::sever::sever(&mut skin, &pack.bones, opts.severed, sole);
+    }
     let hair_shadow = strands::shadow_grid(&strands, &skin);
     let face = if opts.face {
         face::build(pack, &skin, a)
@@ -204,6 +218,7 @@ pub fn build(
     };
     CharacterMeshes {
         rig: Rig::new(pack, &morphed),
+        bone_zones: crate::sever::bone_zones(&pack.bones),
         lids,
         hair_shadow,
         thigh,

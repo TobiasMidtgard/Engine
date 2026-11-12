@@ -235,9 +235,14 @@ struct GpuPose {
     eye_r: [f32; 4],
     /// Dirt, blood, bruises, wet (`Appearance::wear`), read live so wear needs no rebuild.
     wear: [f32; 4],
+    /// Per bone, two by two: wound and bleeding of what it moves (`sever::bone_injuries`).
+    injury: [[f32; 4]; INJURY_BONES / 2],
     weights: [[f32; 4]; MAX_CHANNELS / 4],
     prev_weights: [[f32; 4]; MAX_CHANNELS / 4],
 }
+
+/// Bones whose wounds the pose buffer carries (`Pose::injury` in common.wgsl).
+const INJURY_BONES: usize = 64;
 
 /// Eye vertex; must match `EyeIn` in eye.wgsl.
 #[repr(C)]
@@ -784,6 +789,7 @@ type CharacterItem = (
     Option<&'static Appearance>,
     Option<&'static HairGuides>,
     Option<&'static HairGuidesPosed>,
+    Option<&'static engine_world::combat::BodyInjuries>,
 );
 
 enum Pass {
@@ -1453,7 +1459,7 @@ impl RenderFeature for CharacterFeature {
         }
         let mut present = Vec::new();
         let (mut upload_ms, mut pose_ms, mut culled) = (0.0f32, 0.0f32, 0u32);
-        for (entity, transform, built, skeleton, face, hands, look, guides, posed) in
+        for (entity, transform, built, skeleton, face, hands, look, guides, posed, injuries) in
             query.iter(world)
         {
             present.push(entity);
@@ -1582,7 +1588,7 @@ impl RenderFeature for CharacterFeature {
                     c,
                     &built.meshes,
                     skeleton,
-                    (face, hands, look.map(|a| &a.wear)),
+                    (face, hands, look.map(|a| &a.wear), injuries),
                     &mut self.palette,
                     &mut self.pose_bytes,
                 );
@@ -1703,10 +1709,11 @@ fn write_pose(
     c: &mut GpuMeshes,
     m: &CharacterMeshes,
     skeleton: Option<&SkeletonPose>,
-    (face_controls, hands, wear): (
+    (face_controls, hands, wear, injuries): (
         Option<&FaceControls>,
         Option<&HandControls>,
         Option<&engine_world::character::Wear>,
+        Option<&engine_world::combat::BodyInjuries>,
     ),
     palette: &mut Vec<Mat4>,
     bytes: &mut Vec<u8>,
@@ -1759,6 +1766,17 @@ fn write_pose(
         wear: wear.map_or([0.0; 4], |w| {
             [w.dirt, w.blood, w.bruises, w.wet].map(|v| v.clamp(0.0, 1.0))
         }),
+        injury: {
+            let mut out = [[0.0f32; 4]; INJURY_BONES / 2];
+            if let (Some(inj), Some(rig)) = (injuries, rig) {
+                let per_bone = crate::sever::bone_injuries(&m.bone_zones, &rig.bones, inj);
+                for (i, [w, b]) in per_bone.into_iter().take(INJURY_BONES).enumerate() {
+                    out[i / 2][(i % 2) * 2] = w;
+                    out[i / 2][(i % 2) * 2 + 1] = b;
+                }
+            }
+            out
+        },
         weights: fours(&weights),
         prev_weights: fours(&c.last.weights),
     };
@@ -1802,7 +1820,10 @@ mod tests {
     fn gpu_structs_match_wgsl_sizes() {
         assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 23 * 16);
         assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
-        assert_eq!(std::mem::size_of::<GpuPose>(), 5 * 16 + 2 * 16 * 16);
+        assert_eq!(
+            std::mem::size_of::<GpuPose>(),
+            5 * 16 + INJURY_BONES / 2 * 16 + 2 * 16 * 16
+        );
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);
     }
 }

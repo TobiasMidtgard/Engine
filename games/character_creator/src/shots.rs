@@ -49,6 +49,10 @@ pub struct ShotPlan {
     grip: Option<f32>,
     /// `--handle r`: a grip's handle radius, cm.
     handle_cm: f32,
+    /// `--sever forearm_l,neck` and `--wound chest=0.8,thigh_r=0.5`: the subject's injuries
+    /// (as the combat module writes them), and whether they're on it yet.
+    injuries: Option<engine::world::combat::BodyInjuries>,
+    injured: bool,
 }
 
 fn view(name: &str) -> Option<(Orbit, u8)> {
@@ -184,6 +188,22 @@ fn body_view(name: &str) -> Option<Orbit> {
             drop: 0.06,
             fov_deg: 30.0,
         },
+        // Close-ups at the left elbow and the right knee (where a cut limb's stump is),
+        // from the front and a little to the side.
+        "lelbow" => Orbit {
+            yaw: -1.2,
+            pitch: 0.2,
+            distance: 0.7,
+            drop: 0.06,
+            fov_deg: 30.0,
+        },
+        "rknee" => Orbit {
+            yaw: 0.7,
+            pitch: 0.3,
+            distance: 0.8,
+            drop: 0.06,
+            fov_deg: 30.0,
+        },
         // A close look at the left hand, from that side.
         "hand" => Orbit {
             yaw: 1.35,
@@ -248,6 +268,7 @@ impl ShotPlan {
         let outfit = value("--outfit");
         let colors = value("--colors");
         let grip = value("--grip").and_then(|g| g.parse::<f32>().ok());
+        let injuries = injuries_from(value("--sever"), value("--wound"));
         let handle_cm = value("--handle")
             .and_then(|g| g.parse::<f32>().ok())
             .unwrap_or(1.7);
@@ -362,6 +383,8 @@ impl ShotPlan {
                 let focus = match v {
                     "lhand" | "lhandfront" | "lhandpalm" => Some("hand_l"),
                     "rhand" => Some("hand_r"),
+                    "lelbow" => Some("lower_arm_l"),
+                    "rknee" => Some("lower_leg_r"),
                     _ => None,
                 };
                 let edit = design.as_ref().map(|d| d.pose.clone());
@@ -405,8 +428,47 @@ impl ShotPlan {
             completed_before: 0,
             grip,
             handle_cm,
+            injuries,
+            injured: false,
         })
     }
+}
+
+/// A body zone by its name in the flags (`forearm_l`, `neck`, ...).
+fn zone_named(name: &str) -> Option<engine::world::combat::BodyZone> {
+    let want = name.trim().replace('_', "").to_lowercase();
+    engine::world::combat::BodyZone::ALL
+        .into_iter()
+        .find(|z| format!("{z:?}").to_lowercase() == want)
+}
+
+/// `--sever` (zones cut off) and `--wound` (`zone=amount`: wound and bleeding that much).
+fn injuries_from(
+    sever: Option<String>,
+    wound: Option<String>,
+) -> Option<engine::world::combat::BodyInjuries> {
+    if sever.is_none() && wound.is_none() {
+        return None;
+    }
+    let mut inj = engine::world::combat::BodyInjuries::default();
+    for z in sever
+        .iter()
+        .flat_map(|s| s.split(','))
+        .filter_map(zone_named)
+    {
+        let z = inj.get_mut(z);
+        (z.severed, z.wound, z.bleeding) = (true, 1.0, 1.0);
+    }
+    for kv in wound.iter().flat_map(|s| s.split(',')) {
+        let Some((name, v)) = kv.split_once('=') else {
+            continue;
+        };
+        if let (Some(z), Ok(v)) = (zone_named(name), v.trim().parse::<f32>()) {
+            let z = inj.get_mut(z);
+            (z.wound, z.bleeding) = (v, v);
+        }
+    }
+    Some(inj)
 }
 
 type ShotSubject<'w, 's> = Query<
@@ -455,6 +517,12 @@ pub fn run_shots(
     let Ok((entity, mut a, build, pose_name, face, built)) = subject.single_mut() else {
         return;
     };
+    if let (Some(inj), false) = (plan.injuries, plan.injured) {
+        commands.entity(entity).insert(inj);
+        plan.injured = true;
+        plan.settled = 0;
+        return;
+    }
     let want_build = if shot.pose.is_some() || shot.edit.is_some() {
         CharacterBuild::default()
     } else {
@@ -517,7 +585,11 @@ pub fn run_shots(
     if ready.is_none()
         || !built.is_some_and(|b| {
             engine_character::same_build(&b.appearance, &shot.appearance)
-                && b.options == want_build.options()
+                && b.options
+                    == engine_character::build::BuildOptions {
+                        severed: b.options.severed,
+                        ..want_build.options()
+                    }
         })
     {
         plan.settled = 0;

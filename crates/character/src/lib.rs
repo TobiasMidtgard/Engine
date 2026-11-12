@@ -21,6 +21,7 @@ pub mod morph;
 pub mod mouth;
 pub mod pack;
 pub mod rig;
+pub mod sever;
 pub mod shoes;
 pub mod skin;
 pub mod skirt;
@@ -116,6 +117,7 @@ impl CharacterBuild {
             levels: self.levels.min(2),
             hair: self.hair,
             face: self.levels > 0,
+            severed: 0,
         }
     }
 }
@@ -353,6 +355,7 @@ fn start_builds(
         Option<&CharacterQuality>,
         Option<&BuiltCharacter>,
         Has<PendingBuild>,
+        Option<&engine_world::combat::BodyInjuries>,
     )>,
 ) {
     let Some(assets) = assets else {
@@ -361,11 +364,13 @@ fn start_builds(
     let (Some(pack), Some(regions)) = (assets.pack.clone(), assets.regions.clone()) else {
         return;
     };
-    for (entity, appearance, build, quality, built, pending) in &q {
-        let opts = build
+    for (entity, appearance, build, quality, built, pending, injuries) in &q {
+        let mut opts = build
             .copied()
             .unwrap_or_else(|| CharacterBuild::for_quality(quality.copied().unwrap_or_default()))
             .options();
+        // A severed limb is cut off the mesh (wounds are drawn live).
+        opts.severed = injuries.map_or(0, sever::severed_mask);
         if pending
             || built.is_some_and(|b| same_build(&b.appearance, appearance) && b.options == opts)
         {

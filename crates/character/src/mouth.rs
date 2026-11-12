@@ -33,6 +33,8 @@ pub enum MouthPart {
     Tabard = 8,
     /// A mail coif over the head and shoulders, built as a snug hood (`crate::hood`).
     Coif = 9,
+    /// Where a limb was cut off (`crate::sever`).
+    Stump = 10,
 }
 
 /// Mouth geometry in the character's model space.
