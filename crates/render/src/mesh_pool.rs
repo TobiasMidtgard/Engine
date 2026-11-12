@@ -437,6 +437,40 @@ impl MeshPool {
         Some(first)
     }
 
+    /// Add vertices a mesh's levels of detail draw with besides its own, in its page (they are
+    /// drawn with their own base vertex); `None` when its vertex buffer may not grow that far
+    /// (the caller then moves the mesh to a page with room for both).
+    pub fn add_vertices(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        page: u16,
+        vertices: &[Vertex],
+    ) -> Option<u32> {
+        if vertices.is_empty() {
+            return None;
+        }
+        let p = self.pages.get_mut(page as usize)?.as_mut()?;
+        let count = vertices.len() as u32;
+        let base = p.alloc_vertices(device, queue, count, &mut self.vertex_growths)?;
+        self.packed.clear();
+        self.packed.extend(vertices.iter().map(PoolVertex::from));
+        queue.write_buffer(
+            &p.vertex,
+            base as u64 * VERTEX_BYTES,
+            bytemuck::cast_slice(&self.packed),
+        );
+        Some(base)
+    }
+
+    /// Give back vertices [`MeshPool::add_vertices`] took.
+    pub fn free_vertices(&mut self, page: u16, base: u32, count: u32) {
+        if let Some(p) = self.pages.get_mut(page as usize).and_then(Option::as_mut) {
+            p.vertices.release(base, count);
+        }
+        self.release_if_empty(page);
+    }
+
     pub fn free_indices(&mut self, page: u16, first: u32, count: u32) {
         if let Some(p) = self.pages.get_mut(page as usize).and_then(Option::as_mut) {
             p.indices.release(first, count);

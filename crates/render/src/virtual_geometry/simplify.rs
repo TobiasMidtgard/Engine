@@ -114,6 +114,10 @@ pub struct Welded<'a> {
     /// happen, and the callee notes what it needs to (which of a place's vertices each corner
     /// is drawn with from now on).
     pub moved: &'a mut Moved<'a>,
+    /// No collapse strays farther than this from the surface it replaces (root mean squared,
+    /// the positions' units): the simplification stops there short of its target, rather
+    /// than reaching it through collapses that change the picture.
+    pub max_error: f32,
 }
 
 /// [`simplify`] for triangles over welded positions (one vertex per place, so an edge used by
@@ -236,6 +240,9 @@ fn run(
     let mut candidates: Vec<(f64, u32, u32)> = Vec::new();
     let mut ring_u: Vec<u32> = Vec::new();
     let mut ring_v: Vec<u32> = Vec::new();
+    let most = welded
+        .as_ref()
+        .map_or(f64::INFINITY, |w| (w.max_error as f64).powi(2));
 
     while live > target {
         candidates.clear();
@@ -260,7 +267,7 @@ fn run(
         dirty.fill(false);
         let mut collapsed = 0;
         for &(cost, u, v) in &candidates {
-            if live <= target {
+            if live <= target || cost > most {
                 break;
             }
             let (ui, vi) = (u as usize, v as usize);

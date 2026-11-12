@@ -221,15 +221,18 @@ struct GpuMesh {
     still_from: u64,
     /// Coarser levels of detail, finest first (empty until built, or for small meshes).
     lods: Vec<GpuLod>,
+    /// The vertices its levels add to its own (first, count), in the same page.
+    lod_vertices: Option<(u32, u32)>,
     /// Once its levels are built: `mesh_lod::movable_shares` (1 without profiling).
     movable: Option<[f32; 3]>,
 }
 
-/// One level of detail of a [`GpuMesh`]: fewer triangles over the same vertices (indices in
-/// the same pool page).
+/// One level of detail of a [`GpuMesh`]: fewer triangles over the mesh's vertices and those
+/// its levels add (indices in the same pool page, from its own base vertex).
 struct GpuLod {
     first_index: u32,
     index_count: u32,
+    base_vertex: u32,
     /// How far its surface strays from the full mesh, meters in mesh space.
     error: f32,
 }
@@ -243,11 +246,27 @@ impl GpuMesh {
         }
     }
 
-    /// Give its ranges back to the pool.
-    fn free(&self, pool: &mut MeshPool) {
-        for l in &self.lods {
+    /// The base vertex level `lod` is drawn with.
+    fn base_vertex(&self, lod: u8) -> i32 {
+        match lod.checked_sub(1).and_then(|l| self.lods.get(l as usize)) {
+            Some(l) => l.base_vertex as i32,
+            None => self.pool.base_vertex as i32,
+        }
+    }
+
+    /// Give the ranges of its levels back to the pool.
+    fn free_lods(&mut self, pool: &mut MeshPool) {
+        for l in self.lods.drain(..) {
             pool.free_indices(self.pool.page, l.first_index, l.index_count);
         }
+        if let Some((first, count)) = self.lod_vertices.take() {
+            pool.free_vertices(self.pool.page, first, count);
+        }
+    }
+
+    /// Give its ranges back to the pool.
+    fn free(&mut self, pool: &mut MeshPool) {
+        self.free_lods(pool);
         pool.free(&self.pool);
     }
 
@@ -268,7 +287,7 @@ impl GpuMesh {
 struct LodJob {
     /// Each mesh's index and the version its build started from.
     meshes: Vec<(u32, u64)>,
-    job: std::thread::JoinHandle<Vec<(Vec<crate::mesh_lod::LodIndices>, [f32; 3])>>,
+    job: std::thread::JoinHandle<Vec<(crate::mesh_lod::Lods, [f32; 3])>>,
 }
 
 /// What a texture set binds in one slot.
@@ -1503,6 +1522,10 @@ pub struct MeshFeature {
     /// The indices of the meshes whose levels were built so far, and of those levels (for the
     /// profile log).
     lod_indices: [u64; 2],
+    /// The vertices of those meshes, and those their levels added.
+    lod_vertices: [u64; 2],
+    /// Meshes moved to another pool page to make room for the vertices their levels add.
+    lod_moves: u32,
     /// Meshes waiting for a free worker to build their levels.
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
@@ -2171,7 +2194,7 @@ impl MeshFeature {
     /// there (no triangles, or too large): it is then left off until it changes.
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) -> bool {
         let edit = self.meshes.contains_key(&index);
-        if let Some(old) = self.meshes.remove(&index) {
+        if let Some(mut old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
             // A mesh edited in place: static shadow images may show its old shape, but only
             // those drawn once it had been still long enough to join them (a mesh edited every
@@ -2214,6 +2237,7 @@ impl MeshFeature {
                         SPAWN_STILL_FRAMES
                     },
                 lods: Vec::new(),
+                lod_vertices: None,
                 movable: None,
             },
         );
@@ -2275,19 +2299,69 @@ impl MeshFeature {
                 // as one may be) is left out and the smaller ones after it still tried: they
                 // are what most far views draw.
                 let page = gpu_mesh.pool.page;
-                for l in gpu_mesh.lods.drain(..) {
-                    pool.free_indices(page, l.first_index, l.index_count);
-                }
+                gpu_mesh.free_lods(pool);
                 let count = levels.len();
                 self.lod_indices[0] += gpu_mesh.pool.index_count as u64;
-                self.lod_indices[1] += levels.iter().map(|l| l.indices.len() as u64).sum::<u64>();
+                self.lod_indices[1] += levels
+                    .levels
+                    .iter()
+                    .map(|l| l.indices.len() as u64)
+                    .sum::<u64>();
+                self.lod_vertices[0] += gpu_mesh.pool.vertex_count as u64;
+                self.lod_vertices[1] += levels.vertices.len() as u64;
                 gpu_mesh.movable = Some(movable);
+                // The levels are drawn from the lower of the two vertex ranges, their indices
+                // moved to count from there. Without room for the vertices they add, only
+                // levels that need none of them are kept.
+                let own = gpu_mesh.pool.vertex_count;
+                let mut page = page;
+                let mut made = pool.add_vertices(device, queue, page, &levels.vertices);
+                // A page too full for them: the mesh moves to one with room for its vertices
+                // and theirs in a row (draws look its place up every frame; a skinned mesh
+                // copies its rest pose again from a new place).
+                if made.is_none() && !levels.vertices.is_empty() {
+                    let handle = Handle::<Mesh>::from_index(index);
+                    if let Some(cpu) = meshes
+                        .get(handle)
+                        .filter(|_| meshes.version(handle) == version)
+                        && cpu.vertices.len() == own as usize
+                    {
+                        let mut all = cpu.vertices.clone();
+                        all.extend_from_slice(&levels.vertices);
+                        if let Some(moved) = pool.add(device, queue, &all, &cpu.indices) {
+                            pool.free(&gpu_mesh.pool);
+                            gpu_mesh.pool = PoolMesh {
+                                vertex_count: own,
+                                ..moved
+                            };
+                            page = moved.page;
+                            made = Some(moved.base_vertex + own);
+                            self.lod_moves += 1;
+                        }
+                    }
+                    if made.is_none() {
+                        pool.lods_refused += 1;
+                    }
+                }
+                gpu_mesh.lod_vertices = made.map(|first| (first, levels.vertices.len() as u32));
+                let base = gpu_mesh.pool.base_vertex;
+                let lod_base = made.map_or(base, |m| m.min(base));
+                let mut indices = Vec::new();
                 gpu_mesh.lods = levels
+                    .levels
                     .into_iter()
                     .filter_map(|l| {
+                        indices.clear();
+                        for &i in &l.indices {
+                            indices.push(match i.checked_sub(own) {
+                                None => base - lod_base + i,
+                                Some(k) => made? - lod_base + k,
+                            });
+                        }
                         Some(GpuLod {
-                            first_index: pool.add_indices(device, queue, page, &l.indices)?,
+                            first_index: pool.add_indices(device, queue, page, &indices)?,
                             index_count: l.indices.len() as u32,
+                            base_vertex: lod_base,
                             error: l.error,
                         })
                     })
@@ -2833,8 +2907,10 @@ impl MeshFeature {
         );
         let _ = writeln!(
             out,
-            "  the levels built hold {:.0}% of their meshes' own indices; the pool's index buffers grew {} times, its vertex buffers {}",
+            "  the levels built hold {:.0}% of their meshes' own indices and add {:.0}% to their vertices ({} meshes moved page for them); the pool's index buffers grew {} times, its vertex buffers {}",
             self.lod_indices[1] as f64 * 100.0 / self.lod_indices[0].max(1) as f64,
+            self.lod_vertices[1] as f64 * 100.0 / self.lod_vertices[0].max(1) as f64,
+            self.lod_moves,
             self.pool.index_growths,
             self.pool.vertex_growths,
         );
@@ -3157,7 +3233,7 @@ impl MeshFeature {
             let (first, count) = mesh.level(b.key.lod);
             pass.draw_indexed(
                 first..first + count,
-                mesh.pool.base_vertex as i32,
+                mesh.base_vertex(b.key.lod),
                 b.first..b.first + b.count,
             );
         }
@@ -3209,7 +3285,7 @@ impl MeshFeature {
                         index_count,
                         instance_count: b.count,
                         first_index,
-                        base_vertex: m.pool.base_vertex as i32,
+                        base_vertex: m.base_vertex(b.key.lod),
                         first_instance: b.first,
                     });
                     (args.len() - 1) as u32

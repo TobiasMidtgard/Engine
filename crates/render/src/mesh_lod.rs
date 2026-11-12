@@ -6,7 +6,7 @@
 
 use engine_core::math::{Vec2, Vec3, Vec4};
 
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, Vertex};
 use crate::virtual_geometry::simplify::{Welded, simplify, simplify_welded};
 
 /// Meshes with fewer triangles get no levels (drawing them is cheap anyway).
@@ -19,18 +19,62 @@ const FLOOR_TRIANGLES: usize = 48;
 const STEP: f32 = 0.35;
 /// A level that keeps more than this share of the one above isn't worth one.
 const MIN_GAIN: f32 = 0.8;
-/// One level of a mesh: its triangles as indices into the mesh's vertices, and how far its
-/// surface strays from the full mesh (meters in mesh space).
+/// How far the first level of a welded mesh may stray, as a share of the mesh's size (its
+/// bounding box's diagonal; 5 mm on a 10 m house): each level may stray [`ERROR_GROWTH`] times
+/// as far as the one above, and a level that would gain too little ([`MIN_GAIN`]) is tried
+/// again with a budget that much larger, up to [`MOST_ERROR`]. Without a budget a level took
+/// whatever collapses reached its triangle target: a house's first level, a third of its
+/// triangles, strayed 10 to 30 cm (its last collapses), so it was due only beyond 300 m at
+/// 1440p, where the house shows its far mesh or nothing.
+const FIRST_ERROR: f32 = 0.0005;
+const ERROR_GROWTH: f32 = 3.0;
+const MOST_ERROR: f32 = 0.2;
+/// One level of a mesh: its triangles as indices into the mesh's vertices followed by the
+/// chain's own ([`Lods::vertices`]), and how far its surface strays from the full mesh
+/// (meters in mesh space).
 #[derive(Debug, Clone)]
 pub struct LodIndices {
     pub indices: Vec<u32>,
     pub error: f32,
 }
 
-/// A corner leaving a seam may only move to a place that has a vertex whose texture
+/// The levels of a mesh, finest first, and the vertices they add to the mesh's own: index
+/// `mesh.vertices.len() + i` is `vertices[i]`.
+#[derive(Debug, Clone, Default)]
+pub struct Lods {
+    pub levels: Vec<LodIndices>,
+    pub vertices: Vec<Vertex>,
+}
+
+impl Lods {
+    pub fn len(&self) -> usize {
+        self.levels.len()
+    }
+}
+
+/// A corner moves onto a vertex already at its new place when that vertex's texture
 /// coordinate is where the corner's triangle expects it, within this share of how far the
-/// corner moves in texture space: so a triangle never ends up spanning the seam.
-const UV_SLACK: f32 = 0.5;
+/// corner moves in texture space; otherwise onto a vertex of the chain's own with the texture
+/// coordinate expected. So a triangle never ends up spanning a seam, and one that moves
+/// across a hard edge keeps its texture where it was (generated props project their texture
+/// onto every face on its own: each of their edges is a seam, and a chamfer could not
+/// collapse into the face beside it while moves had to land on a vertex the mesh has).
+const UV_SLACK: f32 = 0.1;
+
+/// Where a hard edge runs through a corner's new place, the vertex there nearest the corner's
+/// own in normal is on the corner's side of it when their normals are this close (cosine);
+/// otherwise the corner is drawn with a vertex of its own normal and color (a flat face stays
+/// flat across the chamfer it swallows).
+const SAME_SIDE_COS: f32 = 0.85;
+
+/// No collapse may turn a triangle farther than this from the way its corners' normals face
+/// (cosine), or further than it already was: the simplifier itself lets a triangle turn by up
+/// to 78°, and thin overlapping pieces (a roof's tiles) then ended up drawn edge-on or upside
+/// down with their tops' normals, a roof a third darker.
+const FACING_COS: f32 = 0.9;
+
+/// ... where "further" is by more than this (cosine, by area).
+const FACING_SLACK: f32 = 0.05;
 
 /// Two triangles that meet at an edge fold back onto each other past this (cosine between
 /// their normals): the two sides of a leaf card, not a surface going on.
@@ -42,15 +86,13 @@ const FOLD_COS: f32 = -0.9;
 /// all. So vertices that sit at one position count as one place where the surface goes on
 /// across them (an edge there has exactly one triangle on either side), the levels are
 /// simplified over the places, and every corner of every triangle remembers which of its
-/// place's vertices it is drawn with. Surfaces that only touch, or lie back to back, stay
+/// place's vertices (or of the chain's own there, [`Made`]) it is drawn with. Surfaces that only touch, or lie back to back, stay
 /// apart as they are indexed.
 struct Weld {
     /// The first vertex of each vertex's place.
     place: Vec<u32>,
     /// The next vertex of the same place (a ring through them).
     next: Vec<u32>,
-    /// By place: its vertices differ in texture coordinate (a seam runs through it).
-    seam: Vec<bool>,
 }
 
 impl Weld {
@@ -110,34 +152,32 @@ impl Weld {
         }
         let place: Vec<u32> = (0..n as u32).map(|v| find(&mut parent, v)).collect();
         let mut next: Vec<u32> = (0..n as u32).collect();
-        let mut seam = vec![false; n];
         for (i, &p) in place.iter().enumerate() {
             if p != i as u32 {
                 next[i] = next[p as usize];
                 next[p as usize] = i as u32;
-                seam[p as usize] |= mesh.vertices[p as usize].uv != mesh.vertices[i].uv;
             }
         }
-        Self { place, next, seam }
+        Self { place, next }
     }
 
     /// The vertex at place `at` for a corner drawn with `was` so far, in a triangle whose
-    /// other two corners are drawn with `b` and `c`: of the vertices there whose texture
-    /// coordinate is nearest to where the triangle's own mapping puts that place, the one
-    /// closest to `was` in normal and color (the same side of a hard edge, the same face's
-    /// tint). `None` for a corner leaving a seam for a place that has no vertex on the
-    /// corner's side of it: it must not move there, or its triangle would span the seam.
-    fn vertex(&self, mesh: &Mesh, at: u32, was: u32, b: u32, c: u32) -> Option<u32> {
-        let v = |i: u32| &mesh.vertices[i as usize];
+    /// other two corners are drawn with `b` and `c`: the vertex there on the corner's side of
+    /// any hard edge ([`SAME_SIDE_COS`]) whose texture coordinate is where the triangle's own
+    /// mapping puts that place ([`UV_SLACK`]); when there is none, a vertex of the chain's own
+    /// there with that texture coordinate, and that side's normal and color (or the corner's
+    /// own).
+    fn vertex(&self, verts: &mut Made, at: u32, was: u32, b: u32, c: u32) -> u32 {
+        let (vw, vb, vc) = (*verts.get(was), *verts.get(b), *verts.get(c));
         let (p0, p1, p2) = (
-            Vec3::from(v(was).position),
-            Vec3::from(v(b).position),
-            Vec3::from(v(c).position),
+            Vec3::from(vw.position),
+            Vec3::from(vb.position),
+            Vec3::from(vc.position),
         );
-        let uv = |i: u32| Vec2::from(v(i).uv);
-        let (t0, t1, t2) = (uv(was), uv(b), uv(c));
+        let (t0, t1, t2) = (Vec2::from(vw.uv), Vec2::from(vb.uv), Vec2::from(vc.uv));
+        let target = verts.mesh[at as usize];
         // The triangle's texture mapping, carried on to the new place.
-        let (e1, e2, d) = (p1 - p0, p2 - p0, Vec3::from(v(at).position) - p0);
+        let (e1, e2, d) = (p1 - p0, p2 - p0, Vec3::from(target.position) - p0);
         let (d00, d01, d11) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
         let det = d00 * d11 - d01 * d01;
         let expected = if det > 1e-12 * d00 * d11 {
@@ -147,6 +187,7 @@ impl Weld {
         } else {
             t0
         };
+        let mesh = verts.mesh;
         let ring = |f: &mut dyn FnMut(u32)| {
             let mut i = at;
             loop {
@@ -157,46 +198,164 @@ impl Weld {
                 }
             }
         };
-        let mut nearest = f32::INFINITY;
-        ring(&mut |i| nearest = nearest.min((uv(i) - expected).length_squared()));
-        // (Off by a share of how far the corner travels in the texture: a move along the
-        // seam lands on its vertex there, a move across it misses by the texture's width.)
-        if self.seam[self.place[was as usize] as usize]
-            && nearest > (expected - t0).length_squared() * UV_SLACK * UV_SLACK + 1e-10
-        {
-            return None;
-        }
-        let (normal, color) = (Vec3::from(v(was).normal), Vec4::from(v(was).color));
-        let mut best: Option<(f32, u32)> = None;
+        let uv = |i: u32| Vec2::from(mesh[i as usize].uv);
+        let n = |i: u32| Vec3::from(mesh[i as usize].normal);
+        let (normal, color) = (Vec3::from(vw.normal), Vec4::from(vw.color));
+        let off = |i: u32| {
+            1.0 - normal.dot(n(i)) + (Vec4::from(mesh[i as usize].color) - color).length_squared()
+        };
+        // The vertex there on the corner's side of a hard edge: nearest the corner's own in
+        // normal and color. None when the place has a hard edge and no vertex on that side
+        // (a face's corner moving onto a chamfer's edge): the corner keeps its own normal.
+        let mut side: Option<(f32, u32)> = None;
+        let mut hard = false;
         ring(&mut |i| {
-            if (uv(i) - expected).length_squared() <= nearest * 1.001 + 1e-10 {
-                let off = 1.0 - normal.dot(Vec3::from(v(i).normal))
-                    + (Vec4::from(v(i).color) - color).length_squared();
-                if best.is_none_or(|(o, _)| off < o) {
-                    best = Some((off, i));
-                }
+            let o = off(i);
+            hard |= n(i).dot(n(at)) < 0.999;
+            if side.is_none_or(|(b, _)| o < b) {
+                side = Some((o, i));
             }
         });
-        best.map(|(_, i)| i)
+        let side = side
+            .map(|(_, i)| i)
+            .filter(|&i| !hard || normal.dot(n(i)) >= SAME_SIDE_COS);
+        let (side_normal, side_color) = side.map_or((vw.normal, vw.color), |i| {
+            (mesh[i as usize].normal, mesh[i as usize].color)
+        });
+        // Of the vertices on that side (one normal and color: a texture seam may still run
+        // through them), the one whose texture coordinate is where the triangle expects it
+        // ([`UV_SLACK`]: off by a share of how far the corner travels in the texture, so a
+        // move along a seam lands on its vertex there, a move across it misses by the
+        // texture's width).
+        let slack = (expected - t0).length_squared() * UV_SLACK * UV_SLACK + 1e-10;
+        let mut best: Option<(f32, u32)> = None;
+        if side.is_some() {
+            ring(&mut |i| {
+                let v = &mesh[i as usize];
+                if v.normal == side_normal && v.color == side_color {
+                    let d = (uv(i) - expected).length_squared();
+                    if d <= slack && best.is_none_or(|(b, _)| d < b) {
+                        best = Some((d, i));
+                    }
+                }
+            });
+        }
+        if let Some((_, i)) = best {
+            return i;
+        }
+        let mut made = target;
+        made.uv = expected.to_array();
+        made.normal = side_normal;
+        made.color = side_color;
+        verts.make(made)
+    }
+}
+
+/// How triangles face, summed by area: how far each faces the way its corners' normals say
+/// (the cosine between its own normal and theirs on average; 1 for a flat-shaded face), and
+/// where those normals point on the whole.
+#[derive(Default)]
+struct Facing {
+    area: f32,
+    cos: f32,
+    normal: Vec3,
+}
+
+/// A level faces as the mesh does when its facing (cosine, by area) is within this much of
+/// the mesh's. A six-sided rope hanging in waves loses about 0.035 as its segments get longer;
+/// a roof of overlapping tiles lost 0.16 in a level that stayed within its error, and the roof
+/// looked darker.
+const LEVEL_FACING: f32 = 0.06;
+
+/// ... and when its normals' sum by area, as a share of the area, moved at most this far.
+/// Boxes that lose their chamfers move about 0.045; that roof moved 0.18.
+const LEVEL_NORMALS: f32 = 0.08;
+
+impl Facing {
+    fn add(&mut self, verts: &Made, tri: [u32; 3]) {
+        let [a, b, c] = tri.map(|i| *verts.get(i));
+        let p = |v: Vertex| Vec3::from(v.position);
+        let cross = (p(b) - p(a)).cross(p(c) - p(a));
+        let area = cross.length() * 0.5;
+        let theirs = Vec3::from(a.normal) + Vec3::from(b.normal) + Vec3::from(c.normal);
+        self.area += area;
+        self.cos += area * cross.normalize_or_zero().dot(theirs.normalize_or_zero());
+        self.normal += theirs * (area / 3.0);
+    }
+
+    fn cos(&self) -> f32 {
+        if self.area > 0.0 {
+            self.cos / self.area
+        } else {
+            1.0
+        }
+    }
+
+    fn like(&self, whole: &Facing) -> bool {
+        let share = |f: &Facing| f.normal / f.area.max(1e-12);
+        self.cos() >= whole.cos() - LEVEL_FACING
+            && (share(self) - share(whole)).length() <= LEVEL_NORMALS
+    }
+}
+
+/// The mesh's vertices and those the chain of levels made, which a level's corners may be
+/// drawn with too (one copy of each).
+struct Made<'a> {
+    mesh: &'a [Vertex],
+    made: Vec<Vertex>,
+    index: std::collections::HashMap<[u32; 12], u32>,
+}
+
+impl<'a> Made<'a> {
+    fn new(mesh: &'a [Vertex]) -> Self {
+        Self {
+            mesh,
+            made: Vec::new(),
+            index: std::collections::HashMap::new(),
+        }
+    }
+
+    fn get(&self, i: u32) -> &Vertex {
+        let n = self.mesh.len();
+        match (i as usize).checked_sub(n) {
+            Some(k) => &self.made[k],
+            None => &self.mesh[i as usize],
+        }
+    }
+
+    fn make(&mut self, v: Vertex) -> u32 {
+        let b = |x: &[f32]| x.iter().map(|c| (c + 0.0).to_bits()).collect::<Vec<u32>>();
+        let key: [u32; 12] = [b(&v.position), b(&v.normal), b(&v.uv), b(&v.color)]
+            .concat()
+            .try_into()
+            .unwrap_or([0; 12]);
+        let (n, made) = (self.mesh.len() as u32, &mut self.made);
+        *self.index.entry(key).or_insert_with(|| {
+            made.push(v);
+            n + made.len() as u32 - 1
+        })
     }
 }
 
 /// The levels of `mesh`, finest first (empty for a mesh too small or too ragged to simplify).
 /// `ENGINE_MESH_LOD_WELD=0` in the environment builds them as before 2026-11 (over the
 /// vertices as indexed, borders fixed), to compare.
-pub fn build(mesh: &Mesh) -> Vec<LodIndices> {
+pub fn build(mesh: &Mesh) -> Lods {
     static WELD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let weld = *WELD.get_or_init(|| std::env::var("ENGINE_MESH_LOD_WELD").is_ok_and(|v| v == "0"));
     build_as(mesh, !weld)
 }
 
-fn build_as(mesh: &Mesh, welded: bool) -> Vec<LodIndices> {
+fn build_as(mesh: &Mesh, welded: bool) -> Lods {
     let corners = mesh.indices.as_chunks::<3>().0;
     if corners.len() < MIN_TRIANGLES {
-        return Vec::new();
+        return Lods::default();
     }
     if !welded {
-        return build_as_indexed(mesh);
+        return Lods {
+            levels: build_as_indexed(mesh),
+            vertices: Vec::new(),
+        };
     }
     let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| v.position.into()).collect();
     let weld = Weld::new(mesh);
@@ -233,20 +392,42 @@ fn build_as(mesh: &Mesh, welded: bool) -> Vec<LodIndices> {
     let locked = vec![false; positions.len()];
     let mut levels = Vec::new();
     let mut error = 0.0f32;
+    let mut made = Made::new(&mesh.vertices);
     let mut staged: Vec<u32> = Vec::new();
+    let size = {
+        let (lo, hi) = positions.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+        );
+        (hi - lo).length().max(1e-6)
+    };
+    let mut budget = size * FIRST_ERROR;
+    let mut whole = Facing::default();
+    for tri in corners {
+        whole.add(&made, *tri);
+    }
     while levels.len() < MAX_LEVELS && current.len() > FLOOR_TRIANGLES * 2 {
         let target = ((current.len() as f32 * STEP) as usize).max(FLOOR_TRIANGLES);
-        // A collapse happens only if every corner it moves finds a vertex to be drawn with
-        // at its new place.
+        let before = drawn.clone();
+        // Every corner a collapse moves is drawn with a vertex at its new place from then on.
+        // A collapse happens only if every triangle it moves still faces the way its corners'
+        // normals say ([`FACING_COS`]).
         let mut moved = |moves: &[(u32, u8)], to: u32| {
             staged.clear();
+            let (mut was, mut now) = (Facing::default(), Facing::default());
             for &(t, k) in moves {
                 let d = drawn[t as usize];
                 let k = k as usize;
-                match weld.vertex(mesh, to, d[k], d[(k + 1) % 3], d[(k + 2) % 3]) {
-                    Some(v) => staged.push(v),
-                    None => return false,
-                }
+                let v = weld.vertex(&mut made, to, d[k], d[(k + 1) % 3], d[(k + 2) % 3]);
+                let mut after = d;
+                after[k] = v;
+                was.add(&made, d);
+                now.add(&made, after);
+                staged.push(v);
+            }
+            // (By area: a chamfer's last sliver may lie in the face it joins.)
+            if now.cos() < FACING_COS.min(was.cos() - FACING_SLACK) {
+                return false;
             }
             for (&(t, k), &v) in moves.iter().zip(&staged) {
                 drawn[t as usize][k as usize] = v;
@@ -262,11 +443,25 @@ fn build_as(mesh: &Mesh, welded: bool) -> Vec<LodIndices> {
                 part: &part,
                 part_area: &part_area,
                 moved: &mut moved,
+                max_error: budget,
             },
         );
+        budget *= ERROR_GROWTH;
+        // A level must face as the mesh does, by area ([`LEVEL_FACING`], [`LEVEL_NORMALS`]).
+        let mut level = Facing::default();
+        for &k in &out.kept {
+            level.add(&made, drawn[k as usize]);
+        }
+        if !level.like(&whole) {
+            break;
+        }
         if out.triangles.is_empty() || out.triangles.len() as f32 > current.len() as f32 * MIN_GAIN
         {
-            break;
+            if budget > size * MOST_ERROR {
+                break;
+            }
+            drawn = before;
+            continue;
         }
         // Errors add up along the chain (each level is measured against the one above).
         error += out.error;
@@ -277,7 +472,22 @@ fn build_as(mesh: &Mesh, welded: bool) -> Vec<LodIndices> {
         });
         current = out.triangles;
     }
-    levels
+    // Only the vertices some level still draws with.
+    let mut keep = vec![u32::MAX; made.made.len()];
+    let mut vertices = Vec::new();
+    let n = mesh.vertices.len() as u32;
+    for l in &mut levels {
+        for i in &mut l.indices {
+            if let Some(k) = i.checked_sub(n) {
+                if keep[k as usize] == u32::MAX {
+                    keep[k as usize] = n + vertices.len() as u32;
+                    vertices.push(made.made[k as usize]);
+                }
+                *i = keep[k as usize];
+            }
+        }
+    }
+    Lods { levels, vertices }
 }
 
 /// The levels over the vertices as the mesh is indexed: every hard edge and seam is a border,
@@ -380,11 +590,20 @@ mod tests {
 
     use crate::rock::rock;
 
+    /// The levels of `mesh`, and the mesh with the vertices they made added to its own (what
+    /// their indices point into).
+    fn built(mesh: &Mesh) -> (Mesh, Vec<LodIndices>) {
+        let lods = build(mesh);
+        let mut all = mesh.clone();
+        all.vertices.extend_from_slice(&lods.vertices);
+        (all, lods.levels)
+    }
+
     #[test]
     fn a_dense_stone_gets_a_chain_of_ever_coarser_levels() {
         let mesh = rock(Vec3::new(0.4, 0.25, 0.3), 7, 5);
         let full = mesh.indices.len() / 3;
-        let levels = build(&mesh);
+        let (mesh, levels) = built(&mesh);
         assert!(levels.len() >= 3, "{} levels", levels.len());
         let mut last = full;
         let mut last_error = 0.0;
@@ -438,7 +657,7 @@ mod tests {
         let smooth = rock(Vec3::new(0.4, 0.25, 0.3), 7, 5);
         let mesh = faceted(&smooth);
         let full = mesh.indices.len() / 3;
-        let levels = build(&mesh);
+        let (mesh, levels) = built(&mesh);
         assert!(levels.len() >= 3, "{} levels", levels.len());
         let coarsest = levels.last().unwrap();
         assert!(
@@ -467,8 +686,12 @@ mod tests {
     fn as_indexed_a_flat_shaded_stone_gets_no_levels() {
         // What the switch goes back to: every edge a border.
         let mesh = faceted(&rock(Vec3::new(0.4, 0.25, 0.3), 7, 5));
-        assert!(build_as(&mesh, false).is_empty());
-        assert!(!build_as(&rock(Vec3::new(0.4, 0.25, 0.3), 7, 5), false).is_empty());
+        assert!(build_as(&mesh, false).levels.is_empty());
+        assert!(
+            !build_as(&rock(Vec3::new(0.4, 0.25, 0.3), 7, 5), false)
+                .levels
+                .is_empty()
+        );
     }
 
     /// An open tube along y, swaying `wave` to the sides: `rings` rings of `sides` vertices
@@ -514,7 +737,7 @@ mod tests {
     fn a_tube_gets_levels_and_no_triangle_spans_its_seam() {
         let mesh = tube(48, 16, 0.5, 6.0, 0.0);
         let full = mesh.indices.len() / 3;
-        let levels = build(&mesh);
+        let (mesh, levels) = built(&mesh);
         assert!(!levels.is_empty(), "no levels");
         let last = levels.last().unwrap();
         assert!(
@@ -551,15 +774,35 @@ mod tests {
         // straightening it does, and it must not flatten.
         let mesh = tube(120, 6, 0.005, 20.0, 0.3);
         let full = mesh.indices.len() / 3;
-        let levels = build(&mesh);
+        let (mesh, levels) = built(&mesh);
         assert!(!levels.is_empty(), "no levels");
         let last = levels.last().unwrap();
+        // (Halving it took flattening it: its shading then agreed with its normals by 0.72
+        // instead of 0.94.)
         assert!(
-            last.indices.len() / 3 <= full / 2,
+            last.indices.len() / 3 <= full * 3 / 5,
             "{full} down to {}",
             last.indices.len() / 3
         );
+        let facing = |indices: &[u32]| {
+            let (mut area, mut cos) = (0.0, 0.0);
+            for t in indices.as_chunks::<3>().0 {
+                let [a, b, c] = t.map(|i| mesh.vertices[i as usize]);
+                let p = |v: crate::mesh::Vertex| Vec3::from(v.position);
+                let cross = (p(b) - p(a)).cross(p(c) - p(a));
+                let n = Vec3::from(a.normal) + Vec3::from(b.normal) + Vec3::from(c.normal);
+                area += cross.length();
+                cos += cross.length() * cross.normalize_or_zero().dot(n.normalize_or_zero());
+            }
+            cos / area
+        };
         for l in &levels {
+            assert!(
+                facing(&l.indices) > facing(&mesh.indices) - 0.06,
+                "the rope flattened: facing {} of {}",
+                facing(&l.indices),
+                facing(&mesh.indices)
+            );
             assert!(
                 area(&mesh, &l.indices) > 0.7 * area(&mesh, &mesh.indices),
                 "the rope lost {:.0}% of its surface",
@@ -587,7 +830,7 @@ mod tests {
                 mesh.indices.extend([i, i + 2, i + 1, i + 1, i + 2, i + 3]);
             }
         }
-        let levels = build(&mesh);
+        let (mesh, levels) = built(&mesh);
         assert!(!levels.is_empty(), "no levels");
         // Two triangles a plank at the end, and every plank as large as it was.
         let last = levels.last().unwrap();
@@ -636,7 +879,7 @@ mod tests {
         }
         assert!(mesh.indices.len() / 3 >= MIN_TRIANGLES);
         let full = area(&mesh, &mesh.indices);
-        for l in build(&mesh) {
+        for l in built(&mesh).1 {
             let kept = area(&mesh, &l.indices) / full;
             assert!(
                 (0.85..1.2).contains(&kept),
@@ -663,7 +906,143 @@ mod tests {
             mesh.indices.extend(quad.map(|k| first + k));
         }
         assert!(mesh.indices.len() / 3 >= MIN_TRIANGLES);
-        assert!(build(&mesh).is_empty());
+        assert!(build(&mesh).levels.is_empty());
+    }
+
+    /// Boxes with every edge chamfered by `c`, each face with vertices of its own and its
+    /// texture projected onto it in meters (as the showcase's houses build their timbers and
+    /// stones), `n` of them in a row.
+    fn chamfered_boxes(n: u32, h: Vec3, c: f32) -> Mesh {
+        let mut mesh = Mesh::new(Vec::new(), Vec::new());
+        let mut face = |pts: &[Vec3], facing: Vec3| {
+            let f = facing.normalize();
+            let t = (Vec3::X - f * f.x).normalize_or(Vec3::Z);
+            let t = if t.length_squared() < 0.04 {
+                Vec3::Z
+            } else {
+                t
+            };
+            let bt = f.cross(t);
+            let first = mesh.vertices.len() as u32;
+            for p in pts {
+                mesh.vertices.push(crate::mesh::Vertex::new(
+                    *p,
+                    f,
+                    Vec2::new(p.dot(t), p.dot(bt)),
+                ));
+            }
+            let normal = (pts[1] - pts[0]).cross(pts[2] - pts[0]);
+            for i in 1..pts.len() as u32 - 1 {
+                if normal.dot(f) > 0.0 {
+                    mesh.indices.extend([first, first + i, first + i + 1]);
+                } else {
+                    mesh.indices.extend([first, first + i + 1, first + i]);
+                }
+            }
+        };
+        for b in 0..n {
+            let at = Vec3::new(b as f32 * h.x * 3.0, 0.0, 0.0);
+            // Corner `s` of the face square to axis `i` (the others pulled in by the chamfer).
+            let pt = |i: usize, s: [f32; 3]| {
+                let mut p = at;
+                for m in 0..3 {
+                    p[m] += if m == i { h[m] } else { h[m] - c } * s[m];
+                }
+                p
+            };
+            let quad = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+            for i in 0..3 {
+                let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+                for si in [-1.0f32, 1.0] {
+                    let pts: Vec<Vec3> = quad
+                        .iter()
+                        .map(|&(sj, sk)| {
+                            let mut s = [0.0; 3];
+                            (s[i], s[j], s[k]) = (si, sj, sk);
+                            pt(i, s)
+                        })
+                        .collect();
+                    let mut facing = Vec3::ZERO;
+                    facing[i] = si;
+                    face(&pts, facing);
+                }
+                for si in [-1.0f32, 1.0] {
+                    for sj in [-1.0f32, 1.0] {
+                        let s = |sk: f32| {
+                            let mut s = [0.0; 3];
+                            (s[i], s[j], s[k]) = (si, sj, sk);
+                            s
+                        };
+                        let pts = [pt(i, s(-1.0)), pt(i, s(1.0)), pt(j, s(1.0)), pt(j, s(-1.0))];
+                        let mut facing = Vec3::ZERO;
+                        (facing[i], facing[j]) = (si, sj);
+                        face(&pts, facing);
+                    }
+                }
+            }
+            for s0 in [-1.0f32, 1.0] {
+                for s1 in [-1.0f32, 1.0] {
+                    for s2 in [-1.0f32, 1.0] {
+                        let s = [s0, s1, s2];
+                        face(&[pt(0, s), pt(1, s), pt(2, s)], Vec3::from(s));
+                    }
+                }
+            }
+        }
+        mesh
+    }
+
+    #[test]
+    fn chamfered_boxes_lose_their_chamfers_and_keep_their_texture_in_place() {
+        // Timbers of a house: 1 m by 20 by 16 cm, chamfered by 2 cm. Every edge is a texture
+        // seam, so no chamfer could collapse into the face beside it while corners had to land
+        // on a vertex the mesh has: such meshes got no levels.
+        let c = 0.02;
+        let mesh = chamfered_boxes(24, Vec3::new(0.5, 0.1, 0.08), c);
+        let full = mesh.indices.len() / 3;
+        assert_eq!(full, 24 * 44);
+        let (mesh, levels) = built(&mesh);
+        assert!(!levels.is_empty(), "no levels");
+        // Half the chamfers go where they are under a pixel, then the rest: plain boxes.
+        let (first, last) = (&levels[0], levels.last().unwrap());
+        assert!(
+            first.indices.len() / 3 <= full * 6 / 10 && first.error <= c,
+            "{full} down to {} straying {} m",
+            first.indices.len() / 3,
+            first.error
+        );
+        assert_eq!(last.indices.len() / 3, 24 * 12);
+        assert!(last.error <= 2.0 * c, "error {} m", last.error);
+        // Texture in meters on every face, as it was: no triangle stretches it (a corner that
+        // had to land on a vertex the mesh has would take another face's texture coordinate,
+        // a tenth of a meter off). And the faces keep their normals, by area.
+        for l in &levels {
+            let (mut facing, mut total) = (0.0, 0.0);
+            for tri in l.indices.as_chunks::<3>().0 {
+                let v = tri.map(|i| mesh.vertices[i as usize]);
+                for k in 0..3 {
+                    let (a, b) = (v[k], v[(k + 1) % 3]);
+                    let along = Vec3::from(a.position).distance(Vec3::from(b.position));
+                    let in_texture = Vec2::from(a.uv).distance(Vec2::from(b.uv));
+                    // (Within a quarter of a chamfer: a chamfer half gone leaves slivers.)
+                    assert!(
+                        (in_texture - along).abs() <= 0.15 * along + 0.25 * c,
+                        "an edge of {along} m spans {in_texture} m of texture"
+                    );
+                }
+                let [p0, p1, p2] = v.map(|v| Vec3::from(v.position));
+                let cross = (p1 - p0).cross(p2 - p0);
+                for v in v {
+                    facing += cross.normalize_or_zero().dot(Vec3::from(v.normal)) * cross.length();
+                    total += cross.length();
+                }
+            }
+            assert!(
+                facing / total > 0.97,
+                "normals {} off the faces",
+                facing / total
+            );
+        }
     }
 
     #[test]
