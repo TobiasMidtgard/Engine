@@ -312,6 +312,10 @@ pub(crate) fn drive_fighters(mut q: Query<Fighter>, places: Query<&GlobalTransfo
         if attacker.zone != zone {
             attacker.zone = zone;
         }
+        let point = targets.and_then(|t| t.point);
+        if attacker.point != point {
+            attacker.point = point;
+        }
         let skill = skills.map_or(CombatSkills::DEFAULT_SKILL, |s| s.skill(armed.loadout.main));
         if attacker.skill != skill {
             attacker.skill = skill;

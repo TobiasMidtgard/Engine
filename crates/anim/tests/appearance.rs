@@ -1,5 +1,6 @@
 //! People a character module draws: while `AppearanceBodies` exists, a person with an
-//! `Appearance` keeps the humanoid `SkeletonPose` but hides this module's mesh, and its face
+//! `Appearance` keeps the humanoid `SkeletonPose` but hides this module's mesh once the
+//! character module has fitted its own (`BodyFit`), and its face
 //! writes `FaceControls` (ARKit weights and gaze) that blink and look where it looks. Without
 //! a character module nothing changes. Runs with or without the fetched models.
 
@@ -10,7 +11,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
 use engine_world::animation::{BodyRequest, SkeletonPose};
-use engine_world::character::{Appearance, FaceControls, arkit, draws_appearances};
+use engine_world::character::{Appearance, BodyFit, FaceControls, arkit, draws_appearances};
 
 const STEP: f64 = 1.0 / 60.0;
 
@@ -76,6 +77,14 @@ fn a_drawn_person_is_posed_and_faced_but_not_drawn() {
     );
     let pose = app.world.get::<SkeletonPose>(e).unwrap();
     assert!(pose.index_of("head").is_some() && pose.index_of("foot_l").is_some());
+    // Until the character module has built and fitted its body, the generated one stands in.
+    let renderer = app.world.get::<SkinnedMeshRenderer>(e).unwrap();
+    assert!(
+        renderer.visible,
+        "nothing drew the person before its body was built"
+    );
+    app.world.entity_mut(e).insert(BodyFit::default());
+    app.update();
     let renderer = app.world.get::<SkinnedMeshRenderer>(e).unwrap();
     assert!(
         !renderer.visible,

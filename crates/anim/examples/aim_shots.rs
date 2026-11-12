@@ -424,6 +424,74 @@ fn main() {
                 s.step();
             }
         }
-        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states, bow, rifle, wounds"),
+        "scatter" => {
+            // The same aimed cut with the point the rules scattered it to: none (the zone's
+            // middle), the belly's left and right edges, and high on the chest. A red bead
+            // marks the point, shown at the frame the blow lands.
+            let shots: [(&str, BodyZone, Option<Vec3>); 4] = [
+                ("middle", BodyZone::Belly, None),
+                ("left", BodyZone::Belly, Some(Vec3::new(-0.16, 1.05, -0.1))),
+                ("right", BodyZone::Belly, Some(Vec3::new(0.16, 1.05, -0.1))),
+                (
+                    "chest_high",
+                    BodyZone::Chest,
+                    Some(Vec3::new(0.1, 1.38, -0.1)),
+                ),
+            ];
+            // From in front of the struck body, off to the striker's side.
+            let over = (Vec3::new(-0.2, 1.35, 1.9), Vec3::new(0.45, 1.05, 0.0));
+            for (name, zone, point) in shots {
+                let mut s = stage(width, height, false, false);
+                let bead = s
+                    .app
+                    .world
+                    .spawn((
+                        Transform::from_xyz(0.0, -5.0, 0.0),
+                        MeshRenderer::new(
+                            Shape::Sphere {
+                                radius: 0.035,
+                                segments: 16,
+                            },
+                            StandardMaterial::hex(0xd01818).with_emissive([1.0, 0.1, 0.1], 4.0),
+                        ),
+                    ))
+                    .id();
+                {
+                    let mut st = s.app.world.get_mut::<StrikeTargets>(s.a).unwrap();
+                    st.zone = Some(zone);
+                    st.point = point;
+                }
+                s.shoot(&out.join("warm_up.png"), over.0, over.1);
+                s.press();
+                let mut taken = false;
+                for _ in 0..90 {
+                    s.step();
+                    if s.attacker().hits > 0 {
+                        // The bead on the point, where the struck body is now.
+                        if let Some(p) = point {
+                            let gt = *s.app.world.get::<GlobalTransform>(s.b).unwrap();
+                            let at = engine_anim::ik::to_world(&gt, p);
+                            let t = Transform::from_translation(at);
+                            s.app
+                                .world
+                                .entity_mut(bead)
+                                .insert((t, GlobalTransform::from(t)));
+                        }
+                        let path = out.join(format!("{name}.png"));
+                        s.shoot(&path, over.0, over.1);
+                        s.shoot(&out.join(format!("{name}_side.png")), SIDE.0, SIDE.1);
+                        s.shoot(&path, over.0, over.1);
+                        taken = true;
+                        break;
+                    }
+                }
+                if !taken {
+                    eprintln!("{name}: never landed");
+                }
+            }
+        }
+        _ => {
+            eprintln!("modes: aim, combo6, combo, knee_strip, states, bow, rifle, wounds, scatter")
+        }
     }
 }

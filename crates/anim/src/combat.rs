@@ -1247,6 +1247,10 @@ pub struct Attacker {
     /// with one set, a light press in a set with aimed lines picks the cut or stab for it.
     #[serde(skip)]
     pub zone: Option<BodyZone>,
+    /// Where in that zone (from `StrikeTargets.point`, the target's model space): the rules'
+    /// skill-scattered point, so a rookie's blade wanders off the middle.
+    #[serde(skip)]
+    pub point: Option<Vec3>,
     /// How good it is with what it holds, 0..1: a rookie knows three lines, a master all
     /// eight (see [`known_lines`]).
     pub skill: f32,
@@ -1257,6 +1261,22 @@ pub struct Attacker {
     /// The zone the aimed strike playing was picked for.
     #[serde(skip)]
     pub aimed: Option<BodyZone>,
+    /// The point in that zone it was picked for (target model space).
+    #[serde(skip)]
+    pub aimed_point: Option<Vec3>,
+    /// A blade being steered through that point this frame (see [`aim_strikes`]).
+    #[serde(skip)]
+    pub(crate) blade_aim: Option<BladeAim>,
+}
+
+/// A blade steered through an aimed point: the hand holding it, the blade in that hand's
+/// frame, the point (world) and how much of the way (0..1).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BladeAim {
+    bone: String,
+    striker: Striker,
+    point: DVec3,
+    weight: f32,
 }
 
 impl Default for Attacker {
@@ -1290,9 +1310,12 @@ impl Default for Attacker {
             aim: None,
             swept: None,
             zone: None,
+            point: None,
             skill: 0.5,
             recent: Vec::new(),
             aimed: None,
+            aimed_point: None,
+            blade_aim: None,
         }
     }
 }
@@ -1563,6 +1586,10 @@ fn fist_of(animator: &Animator, gt: &GlobalTransform, hand: usize) -> DVec3 {
 /// Pull striking hands onto their aim (`AnimSet::Ik`), weighted by the `strike` curve.
 pub(crate) fn aim_strikes(mut q: Query<(&mut Animator, &Attacker, &GlobalTransform)>) {
     for (mut animator, attacker, gt) in &mut q {
+        if let Some(blade) = &attacker.blade_aim {
+            steer_blade(&mut animator, gt, blade);
+            continue;
+        }
         let Some((bone, aim)) = &attacker.aim else {
             continue;
         };
@@ -1605,6 +1632,66 @@ pub(crate) fn aim_strikes(mut q: Query<(&mut Animator, &Attacker, &GlobalTransfo
     }
 }
 
+/// How long before a blade's hit window it starts steering toward the aimed point, s.
+const BLADE_AIM_LEAD: f32 = 0.2;
+/// How long after the window the steer lets go, s.
+const BLADE_AIM_FADE: f32 = 0.2;
+/// Farthest the hand moves to put the blade through the point, m: past it the cut lands
+/// where the swing takes it.
+const BLADE_AIM_REACH: f32 = 0.3;
+
+fn smooth(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// Move the hand holding a blade, keeping its turn, so the blade passes through the aimed
+/// point: the part of the blade nearest the point (from a third of the way out to the tip)
+/// is brought onto it.
+fn steer_blade(animator: &mut Animator, gt: &GlobalTransform, blade: &BladeAim) {
+    if !animator.posed() {
+        return;
+    }
+    let s = animator.skeleton.clone();
+    let Some(end) = s.index_of(&blade.bone) else {
+        return;
+    };
+    let parent = |b: usize| s.parents[b].map(usize::from);
+    let (Some(lower), Some(upper)) = (parent(end), parent(end).and_then(parent)) else {
+        return;
+    };
+    animator.refresh_model();
+    let hand = animator.model[end];
+    let point = to_model(gt, blade.point);
+    let (from, to) = (
+        hand.transform_point(blade.striker.from),
+        hand.transform_point(blade.striker.to),
+    );
+    let ab = to - from;
+    let along = ((point - from).dot(ab) / ab.length_squared().max(1e-8)).clamp(0.33, 1.0);
+    let on_blade = from + ab * along;
+    let shift = (point - on_blade).clamp_length_max(BLADE_AIM_REACH);
+    let (a, b, c) = (
+        animator.model[upper].t,
+        animator.model[lower].t,
+        animator.model[end].t,
+    );
+    let pole = b - (a + c) * 0.5;
+    crate::ik::two_bone_live(
+        &mut animator.edit(),
+        upper,
+        lower,
+        end,
+        c + shift,
+        crate::ik::Limb {
+            weight: blade.weight.min(1.0),
+            soft: true,
+            end_rotation: Some((hand.r, 1.0)),
+            ..crate::ik::Limb::animated(pole)
+        },
+    );
+}
+
 /// A landed blow, applied after the attackers have moved: freeze both (hitstop), and push
 /// a blocked attacker back (world, m).
 pub(crate) struct Landed {
@@ -1645,6 +1732,11 @@ struct Target {
     pair_with: Option<Entity>,
     /// The middle of each body zone (world), by [`BodyZone::index`].
     zones: [DVec3; 16],
+    /// Its own frame, for points given in its model space.
+    frame: GlobalTransform,
+    /// Its parts as capsules (world), for where a blade goes in, and its knee joints.
+    capsules: Vec<Capsule>,
+    knees: [DVec3; 2],
     /// Which way it faces (flat).
     forward: DVec3,
     /// Recovering from a strike of its own, or staggered by a blow.
@@ -1661,6 +1753,16 @@ struct Guard {
 }
 
 impl Target {
+    /// Where an aimed strike at `zone` goes: the given point (its model space) when there is
+    /// one, held to [`POINT_STRAY`] of the zone's middle, else the middle.
+    fn aim_at(&self, zone: BodyZone, point: Option<Vec3>) -> DVec3 {
+        let middle = self.zones[zone.index()];
+        point.map_or(middle, |p| {
+            let at = crate::ik::to_world(&self.frame, p);
+            middle + (at - middle).clamp_length_max(POINT_STRAY)
+        })
+    }
+
     /// The middle of what a strike aims at.
     fn aim(&self, high: bool, liver: bool) -> DVec3 {
         if liver {
@@ -1870,6 +1972,9 @@ pub(crate) fn run_attacks(
                 t,
                 Target {
                     zones,
+                    frame: *gt,
+                    capsules: capsules(&at, gt.translation()),
+                    knees: [at("lower_leg_l", 0.5), at("lower_leg_r", 0.5)],
                     forward: (gt.rotation() * Vec3::NEG_Z)
                         .with_y(0.0)
                         .normalize_or_zero()
@@ -1905,6 +2010,7 @@ pub(crate) fn run_attacks(
         let attacker = &mut *attacker;
         attacker.warp_delta = Vec3::ZERO;
         attacker.aim = None;
+        attacker.blade_aim = None;
         // Presses: the newest one waits in the buffer.
         let mut pressed = None;
         let mut feint = false;
@@ -2119,6 +2225,7 @@ pub(crate) fn run_attacks(
             attacker.swept = None;
             attacker.struck = attacker.target;
             attacker.aimed = m.line.and(attacker.zone);
+            attacker.aimed_point = attacker.aimed.and(attacker.point);
             if let Some(line) = m.line {
                 attacker.recent.push(line);
                 let extra = attacker.recent.len().saturating_sub(RECENT_LINES);
@@ -2176,7 +2283,11 @@ pub(crate) fn run_attacks(
         let mut blocked_at = None;
         if let Some((_, tg)) = target
             && let Some(WindowKind::Hit {
-                bone, high, liver, ..
+                bone,
+                high,
+                liver,
+                striker,
+                ..
             }) = m
                 .windows
                 .iter()
@@ -2184,7 +2295,7 @@ pub(crate) fn run_attacks(
                 .find(|k| matches!(k, WindowKind::Hit { .. }))
         {
             let mid = match attacker.aimed {
-                Some(zone) => tg.zones[zone.index()],
+                Some(zone) => tg.aim_at(zone, attacker.aimed_point),
                 None => tg.aim(*high, *liver),
             };
             let mut back = gt.translation() - mid;
@@ -2209,9 +2320,28 @@ pub(crate) fn run_attacks(
                 aim = *attacker.committed.get_or_insert(aim);
             }
             attacker.aim = Some((bone.clone(), aim));
+            // An aimed blade is steered through the point the rules picked (or the aimed
+            // part's middle) over the stroke: in over the last of the wind-up, held while it
+            // can land, out after.
+            if let (Some(st), Some(_), None) = (striker, attacker.aimed, &blocked_at) {
+                let weight = if t < first_hit {
+                    smooth(1.0 - (first_hit - t) / BLADE_AIM_LEAD)
+                } else if t <= last_hit {
+                    1.0
+                } else {
+                    smooth(1.0 - (t - last_hit) / BLADE_AIM_FADE)
+                };
+                attacker.blade_aim = (weight > 0.0).then(|| BladeAim {
+                    bone: bone.clone(),
+                    striker: *st,
+                    point: mid,
+                    weight,
+                });
+            }
         }
         let mut sweeping = false;
         let aimed = attacker.aimed;
+        let aimed_point = attacker.aimed_point;
         for (k, w) in m.windows.iter().enumerate() {
             // A hit window a long frame stepped right over still lands (the fist is still
             // close, its aim fading out); the others act only while they are open.
@@ -2299,7 +2429,7 @@ pub(crate) fn run_attacks(
                         Some((guard, Some((radius, _)))) => (*guard, reach.max(radius * 0.8)),
                         Some((guard, None)) => (*guard, *reach),
                         None => match aimed {
-                            Some(zone) => (tg.zones[zone.index()], *reach),
+                            Some(zone) => (tg.aim_at(zone, aimed_point), *reach),
                             None => (tg.aim(*high, *liver), *reach),
                         },
                     };
@@ -2322,7 +2452,7 @@ pub(crate) fn run_attacks(
                             // on the blade beside what it was aimed at.
                             let mut edge = None;
                             if blocked_at.is_none() {
-                                let (at, zone, dir) = entry(&tg.zones, aim, was, now);
+                                let (at, zone, dir) = entry(&tg.capsules, tg.knees, aim, was, now);
                                 point = at;
                                 // Landing on the window's first frame the blade has no motion
                                 // yet: a stab goes in along the blade, a cut at them.
@@ -2547,30 +2677,189 @@ pub(crate) fn run_attacks(
 /// The closest a segment swept from `was` to `now` comes to `p`, and the point on it.
 /// Where a blade swept from `was` to `now` entered the body: on the surface of the zone it
 /// passed nearest (`zones`: their middles, world space, [`BodyZone::ALL`] order), toward the
-/// blade.
+/// A body part as a capsule (world): the zone, the ends of its axis and its radius.
+#[derive(Debug, Clone, Copy)]
+struct Capsule {
+    zone: BodyZone,
+    a: DVec3,
+    b: DVec3,
+    radius: f64,
+    /// How far out from the axis the skin is, where a blade goes in (the radius, but for a
+    /// knee: the region round the joint is wider than the leg).
+    skin: f64,
+}
+
+/// Bones each zone's capsules run between, and their radius for a 1.75 m person (as the
+/// combat module's zone capsules have them).
+const CAPSULES: &[(BodyZone, &str, &str, f64)] = &[
+    (BodyZone::Neck, "neck", "head", 0.06),
+    (BodyZone::Chest, "chest", "neck", 0.15),
+    (BodyZone::Chest, "upper_arm_l", "upper_arm_r", 0.1),
+    (BodyZone::Belly, "hips", "chest", 0.15),
+    (BodyZone::UpperArmL, "upper_arm_l", "lower_arm_l", 0.055),
+    (BodyZone::UpperArmR, "upper_arm_r", "lower_arm_r", 0.055),
+    (BodyZone::ForearmL, "lower_arm_l", "hand_l", 0.045),
+    (BodyZone::ForearmR, "lower_arm_r", "hand_r", 0.045),
+    (BodyZone::ThighL, "upper_leg_l", "lower_leg_l", 0.08),
+    (BodyZone::ThighR, "upper_leg_r", "lower_leg_r", 0.08),
+    (BodyZone::ShinL, "lower_leg_l", "foot_l", 0.055),
+    (BodyZone::ShinR, "lower_leg_r", "foot_r", 0.055),
+    (BodyZone::ShinL, "foot_l", "toe_l", 0.045),
+    (BodyZone::ShinR, "foot_r", "toe_r", 0.045),
+];
+
+/// A body's capsules from where its bones are (world; `feet` is its origin): the skull on
+/// past the head bone, the hands past the wrists.
+fn capsules(at: &dyn Fn(&str, f64) -> DVec3, feet: DVec3) -> Vec<Capsule> {
+    let head = at("head", 1.55);
+    let scale = ((head.y - feet.y + 0.13) / 1.75).clamp(0.3, 2.0);
+    let mut out: Vec<Capsule> = CAPSULES
+        .iter()
+        .map(|&(zone, from, to, r)| {
+            let (a, mut b) = (at(from, 1.0), at(to, 1.0));
+            // The chest stops below the neck's base rather than swallowing it.
+            if zone == BodyZone::Chest && to == "neck" {
+                b -= (b - a).normalize_or_zero() * r * scale * 0.8;
+            }
+            Capsule {
+                zone,
+                a,
+                b,
+                radius: r * scale,
+                skin: r * scale,
+            }
+        })
+        .collect();
+    let up = (head - at("neck", 1.5)).normalize_or(DVec3::Y);
+    out.push(Capsule {
+        zone: BodyZone::Head,
+        a: head + up * 0.04 * scale,
+        b: head + up * 0.15 * scale,
+        radius: 0.1 * scale,
+        skin: 0.1 * scale,
+    });
+    for (zone, elbow, wrist) in [
+        (BodyZone::HandL, "lower_arm_l", "hand_l"),
+        (BodyZone::HandR, "lower_arm_r", "hand_r"),
+    ] {
+        let (e, w) = (at(elbow, 1.1), at(wrist, 1.0));
+        let along = (w - e).normalize_or(DVec3::NEG_Y);
+        out.push(Capsule {
+            zone,
+            a: w + along * 0.03 * scale,
+            b: w + along * 0.1 * scale,
+            radius: 0.045 * scale,
+            skin: 0.045 * scale,
+        });
+    }
+    // The knees: the region round each joint (the contract's), on a leg of the shin's girth.
+    for (zone, joint) in [
+        (BodyZone::KneeL, "lower_leg_l"),
+        (BodyZone::KneeR, "lower_leg_r"),
+    ] {
+        let j = at(joint, 0.5);
+        out.push(Capsule {
+            zone,
+            a: j,
+            b: j,
+            radius: BodyZone::KNEE_RADIUS_M as f64 * scale,
+            skin: 0.06 * scale,
+        });
+    }
+    out
+}
+
+/// How close a blade must come to the part it was aimed at to go in there, m.
+const AIMED_NEAR_MISS: f64 = 0.06;
+
+/// The closest points of segments `p0..p1` and `q0..q1`.
+fn closest_between(p0: DVec3, p1: DVec3, q0: DVec3, q1: DVec3) -> (DVec3, DVec3) {
+    let (d1, d2, r) = (p1 - p0, q1 - q0, p0 - q0);
+    let (a, e, f) = (d1.length_squared(), d2.length_squared(), d2.dot(r));
+    let (s, t) = if a <= 1e-12 && e <= 1e-12 {
+        (0.0, 0.0)
+    } else if a <= 1e-12 {
+        (0.0, (f / e).clamp(0.0, 1.0))
+    } else {
+        let c = d1.dot(r);
+        if e <= 1e-12 {
+            ((-c / a).clamp(0.0, 1.0), 0.0)
+        } else {
+            let b = d1.dot(d2);
+            let denom = a * e - b * b;
+            let mut s = if denom > 1e-12 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mut t = (b * s + f) / e;
+            if t < 0.0 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if t > 1.0 {
+                t = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            }
+            (s, t)
+        }
+    };
+    (p0 + d1 * s, q0 + d2 * t)
+}
+
+/// Where a blade swept from `was` to `now` (hilt, tip; world) went into the body, the part it
+/// went into and which way that bit of blade was moving. Of the parts it passed through, the
+/// one nearest the aim (the aimed part itself, when the blade crossed it); through none, the
+/// one it came closest to. A thigh or shin struck within the knee's radius of the joint is the
+/// knee.
 fn entry(
-    zones: &[DVec3; 16],
+    capsules: &[Capsule],
+    knees: [DVec3; 2],
     aim: DVec3,
     was: (DVec3, DVec3),
     now: (DVec3, DVec3),
 ) -> (DVec3, BodyZone, Option<Vec3>) {
-    // Of the parts the blade passed through, the one nearest what it was aimed at (a cut
-    // across the chest also crosses an arm or a thigh); through none, the one it came
-    // nearest to.
-    let gaps = BodyZone::ALL.iter().map(|z| {
-        let (d, on_blade) = sweep(was, now, zones[z.index()]);
-        (*z, d - zone_radius(*z), on_blade)
-    });
-    let through = gaps.clone().filter(|g| g.1 <= 0.0).min_by(|a, b| {
-        zones[a.0.index()]
-            .distance(aim)
-            .total_cmp(&zones[b.0.index()].distance(aim))
-    });
-    let (zone, _, on_blade) = through
-        .or_else(|| gaps.min_by(|a, b| a.1.total_cmp(&b.1)))
-        .unwrap_or((BodyZone::Chest, 0.0, zones[BodyZone::Chest.index()]));
-    let middle = zones[zone.index()];
-    let at = middle + (on_blade - middle).clamp_length_max(zone_radius(zone));
+    const STEPS: usize = 6;
+    // Per capsule: the gap to its surface, and where the blade went in (or came closest,
+    // on its surface) with the bit of blade there.
+    let gaps: Vec<(Capsule, f64, DVec3, DVec3)> = capsules
+        .iter()
+        .map(|c| {
+            (0..=STEPS)
+                .map(|k| {
+                    let u = k as f64 / STEPS as f64;
+                    let (h, t) = (was.0.lerp(now.0, u), was.1.lerp(now.1, u));
+                    let (on_blade, on_axis) = closest_between(h, t, c.a, c.b);
+                    let at = on_axis + (on_blade - on_axis).clamp_length_max(c.skin);
+                    (*c, on_blade.distance(on_axis) - c.radius, at, on_blade)
+                })
+                .min_by(|x, y| x.1.total_cmp(&y.1))
+                .unwrap_or((*c, f64::INFINITY, c.a, c.a))
+        })
+        .collect();
+    // How far the aim is outside a part (0 inside), and then how far from the aim the
+    // blade went in: the part aimed at wins where the blade crossed it, and of a thigh and
+    // shin both holding an aimed knee, the one it went into nearer the knee.
+    let off_aim =
+        |c: &Capsule| (closest_between(aim, aim, c.a, c.b).1.distance(aim) - c.radius).max(0.0);
+    let rank = |g: &(Capsule, f64, DVec3, DVec3)| off_aim(&g.0) + 0.25 * g.2.distance(aim);
+    // The part aimed at counts a near miss as through: the swing carries on into it.
+    let through = gaps
+        .iter()
+        .filter(|g| g.1 <= 0.0 || (g.1 <= AIMED_NEAR_MISS && off_aim(&g.0) <= 0.0))
+        .min_by(|x, y| rank(x).total_cmp(&rank(y)));
+    let Some(&(capsule, _, at, on_blade)) =
+        through.or_else(|| gaps.iter().min_by(|x, y| x.1.total_cmp(&y.1)))
+    else {
+        return (aim, BodyZone::Chest, None);
+    };
+    let zone = match (capsule.zone, capsule.zone.side()) {
+        (BodyZone::ThighL | BodyZone::ShinL | BodyZone::ThighR | BodyZone::ShinR, Some(k))
+            if at.distance(knees[k]) <= BodyZone::KNEE_RADIUS_M as f64 =>
+        {
+            [BodyZone::KneeL, BodyZone::KneeR][k]
+        }
+        (zone, _) => zone,
+    };
     // How that point of the blade moved over the frame: hilt and tip motion, mixed by how
     // far along the blade it is.
     let blade = now.1 - now.0;
@@ -2623,21 +2912,9 @@ fn striking_item(
     (if item == ItemClass::None { guess } else { item }, off_hand)
 }
 
-/// About how thick a zone is round its middle (its capsule's radius), m.
-fn zone_radius(zone: BodyZone) -> f64 {
-    use BodyZone::*;
-    match zone {
-        Head => 0.1,
-        Neck => 0.06,
-        Chest => 0.14,
-        Belly => 0.13,
-        UpperArmL | UpperArmR => 0.05,
-        ForearmL | ForearmR | HandL | HandR => 0.04,
-        ThighL | ThighR => 0.08,
-        KneeL | KneeR => 0.06,
-        ShinL | ShinR => 0.05,
-    }
-}
+/// Farthest an aimed point may sit from its zone's middle, m: a scattered point can take
+/// the blade off the part, onto its neighbour or past it, but not across the body.
+const POINT_STRAY: f64 = 0.35;
 
 fn sweep(was: (DVec3, DVec3), now: (DVec3, DVec3), p: DVec3) -> (f64, DVec3) {
     const STEPS: usize = 6;

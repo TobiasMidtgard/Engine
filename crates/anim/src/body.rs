@@ -16,8 +16,9 @@
 //!
 //! While a character module draws every [`Appearance`] (`AppearanceBodies` exists), people
 //! with an appearance (or asking for one) keep the generated humanoid skeleton, posed as
-//! always, but none of this module's meshes: the character module skins its own body to their
-//! `SkeletonPose`.
+//! always, but none of this module's meshes once the character module has fitted its own body
+//! to them (`BodyFit`): it skins that body to their `SkeletonPose`. Until then the generated
+//! mesh stands in.
 //!
 //! People also get [`HandControls`]: how closed each hand is, from the clips' `grip`, `flex`
 //! and `fist` curves and what the hand holds ([`HandGrip`]), so a character module curls the
@@ -171,10 +172,12 @@ fn drawn_elsewhere(world: &World, entity: Entity) -> bool {
             .is_ok_and(|e| e.contains::<Appearance>() || e.contains::<AppearanceRequest>())
 }
 
-/// Hide this module's mesh on people a character module draws.
+/// Hide this module's mesh on people a character module draws, once it does: its first
+/// build takes a few seconds, and until it has fitted the body ([`BodyFit`]) the generated
+/// mesh stands in, so nobody shows as a floating sword.
 pub(crate) fn hide_drawn_bodies(
     bodies: Option<Res<AppearanceBodies>>,
-    mut q: Query<&mut SkinnedMeshRenderer, With<Appearance>>,
+    mut q: Query<&mut SkinnedMeshRenderer, (With<Appearance>, With<BodyFit>)>,
 ) {
     if bodies.is_none() {
         return;

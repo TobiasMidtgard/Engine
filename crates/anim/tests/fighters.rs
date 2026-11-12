@@ -684,3 +684,153 @@ fn wounds_show_a_knee_gone_an_arm_hanging_and_a_hand_cut_off() {
     assert!(at(&app, "hips").translation.y > 0.85);
     assert!(at(&app, "hand_l").scale.min_element() > 0.99);
 }
+
+/// Where blows landed, world.
+#[derive(Resource, Default)]
+struct Blows(Vec<(Entity, DVec3)>);
+
+fn record_blows(mut damage: MessageReader<engine_world::DamageEvent>, mut blows: ResMut<Blows>) {
+    blows.0.extend(damage.read().map(|d| (d.target, d.point)));
+}
+
+#[test]
+fn an_aimed_cut_goes_where_the_rules_scattered_its_point() {
+    // The same chest cut aimed at the chest's left and then its right edge lands on that side.
+    let mut sides = Vec::new();
+    for side in [-1.0f32, 1.0] {
+        let (mut app, a, b) = duel();
+        app.init_resource::<Blows>()
+            .add_systems(PostUpdate, record_blows);
+        {
+            let mut st = app.world.get_mut::<StrikeTargets>(a).unwrap();
+            st.zone = Some(BodyZone::Belly);
+            st.point = Some(Vec3::new(0.16 * side, 1.05, -0.1));
+        }
+        app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Melee);
+        app.update();
+        app.world.get_mut::<MoveIntent>(a).unwrap().attack = None;
+        for _ in 0..(1.5 / STEP) as usize {
+            app.update();
+        }
+        let gt = *app.world.get::<GlobalTransform>(b).unwrap();
+        let blows: Vec<Vec3> = app
+            .world
+            .resource::<Blows>()
+            .0
+            .iter()
+            .filter(|(t, _)| *t == b)
+            .map(|(_, p)| {
+                let local = gt.rotation().inverse() * (*p - gt.translation()).as_vec3();
+                local / gt.scale()
+            })
+            .collect();
+        assert!(!blows.is_empty(), "the cut at side {side} missed");
+        sides.push(blows[0]);
+    }
+    let [left, right] = [sides[0], sides[1]];
+    assert!(
+        left.x < -0.04 && right.x > 0.04,
+        "landed at {left:?} and {right:?} (target model space)"
+    );
+}
+
+/// Contacts sent to a melee judge.
+#[derive(Resource, Default)]
+struct Contacts(Vec<engine_world::MeleeContact>);
+
+fn record_contacts(
+    mut contacts: MessageReader<engine_world::MeleeContact>,
+    mut seen: ResMut<Contacts>,
+) {
+    seen.0.extend(contacts.read().cloned());
+}
+
+/// Press light strikes at `zone` until `n` have been thrown; the contacts sent.
+fn aimed_presses(zone: BodyZone, loadout: Loadout, n: usize) -> Vec<engine_world::MeleeContact> {
+    let (mut app, a, b) = duel();
+    app.world.insert_resource(engine_world::MeleeJudge {
+        judged_by: "test".into(),
+    });
+    app.init_resource::<Contacts>()
+        .add_systems(PostUpdate, record_contacts);
+    app.world.entity_mut(a).insert(loadout);
+    for _ in 0..20 {
+        app.update();
+    }
+    app.world.get_mut::<StrikeTargets>(a).unwrap().zone = Some(zone);
+    let mut moved = [DVec3::ZERO; 2];
+    let (mut thrown, mut pressing) = (0, false);
+    let mut last: Option<String> = None;
+    for _ in 0..(12.0 / STEP) as usize {
+        let at = app.world.get::<Attacker>(a).unwrap().clone();
+        let ready = at.current.is_none() || at.cancel_open;
+        let intent = if thrown < n && ready && !pressing {
+            pressing = true;
+            Some(AttackKind::Melee)
+        } else {
+            pressing = false;
+            None
+        };
+        app.world.get_mut::<MoveIntent>(a).unwrap().attack = intent;
+        app.update();
+        take_steps(&mut app, [a, b], &mut moved);
+        let now = app.world.get::<Attacker>(a).unwrap();
+        if now.current.is_some() && now.current != last {
+            thrown += 1;
+            last = now.current.clone();
+        }
+        if now.current.is_none() {
+            last = None;
+            if thrown >= n {
+                break;
+            }
+        }
+    }
+    app.world.resource::<Contacts>().0.clone()
+}
+
+#[test]
+fn cuts_aimed_at_a_forearm_or_a_knee_go_in_there() {
+    // A raised forearm sits by the face, a knee between thigh and shin: the blade goes in
+    // at the part it was aimed at when it crosses it.
+    let greatsword = Loadout {
+        main: ItemClass::TwoHandedBlade,
+        off: ItemClass::None,
+        two_handed: true,
+    };
+    // (zone, loadout, the bones it goes in at, share of cuts that must)
+    for (zone, loadout, bones, share) in [
+        (
+            BodyZone::ForearmR,
+            greatsword,
+            &["lower_arm_r", "hand_r"][..],
+            0.75,
+        ),
+        // A cut down at the knee lands the frame it comes in reach, sometimes on the thigh
+        // just above: always on that leg.
+        (
+            BodyZone::KneeR,
+            greatsword,
+            &["lower_leg_r", "upper_leg_r"][..],
+            1.0,
+        ),
+        (
+            BodyZone::ForearmR,
+            sword_and_shield(),
+            &["lower_arm_r", "hand_r"][..],
+            0.75,
+        ),
+    ] {
+        let contacts = aimed_presses(zone, loadout, 4);
+        let entered: Vec<Option<String>> = contacts.iter().map(|c| c.bone.clone()).collect();
+        let on = entered
+            .iter()
+            .filter(|b| b.as_deref().is_some_and(|b| bones.contains(&b)))
+            .count();
+        assert!(
+            contacts.len() >= 3 && on as f32 >= contacts.len() as f32 * share,
+            "{zone:?} with {:?}: went in at {entered:?}",
+            loadout.main
+        );
+    }
+}
