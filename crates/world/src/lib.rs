@@ -62,8 +62,9 @@ pub use character::{
     HandPose, HandShape, Outfit, draws_appearances, draws_fur_coats,
 };
 pub use combat::{
-    Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass,
-    Knockback, Loadout, MeleeContact, MeleeJudge, ZoneInjury, judges_melee,
+    Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatDifficulty,
+    CombatSkills, DifficultyTier, ItemClass, Knockback, Loadout, MeleeContact, MeleeJudge,
+    ZoneInjury, judges_melee,
 };
 pub use cover::{CoverCell, CoverKind, GroundCover};
 pub use environment::*;

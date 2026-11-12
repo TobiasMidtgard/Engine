@@ -15,6 +15,9 @@
 //!   cancel), written by the animation module so gameplay reads windows instead of keeping its
 //!   own timelines.
 //!
+//! * [`CombatDifficulty`] (with [`DifficultyTier`]): which tactics enemies may use and how well,
+//!   set by the UI's difficulty slider and scripts, read by NPC AI.
+//!
 //! [`StrikeTargets`](crate::animation::StrikeTargets) carries the aimed zone and point.
 
 use std::collections::BTreeMap;
@@ -394,7 +397,49 @@ pub fn judges_melee(app: &mut App, name: &str) {
     }
 }
 
+/// How hard enemies fight: the tier decides which tactics they may use at all
+/// (engine-design/npc-difficulty.md 4.1).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+pub enum DifficultyTier {
+    Easy,
+    #[default]
+    Medium,
+    Hard,
+    VeryHard,
+    Extreme,
+}
+
+/// Which tactics enemies may use (the tier) and how well they use them (skill). Written by the
+/// UI's difficulty setting and scripts; read by NPC AI.
+#[derive(Resource, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CombatDifficulty {
+    pub tier: DifficultyTier,
+    /// 0..1, how advanced enemies are within the tier; `None` leaves each NPC its own skills.
+    pub skill: Option<f32>,
+    /// Per-faction overrides, keyed by `Faction.0`: tier and skill as above.
+    pub factions: BTreeMap<u32, (DifficultyTier, Option<f32>)>,
+}
+
+impl CombatDifficulty {
+    /// The tier and skill for one faction: its override, else the global setting.
+    pub fn for_faction(&self, faction: u32) -> (DifficultyTier, Option<f32>) {
+        self.factions
+            .get(&faction)
+            .copied()
+            .unwrap_or((self.tier, self.skill))
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
+    app.init_resource::<CombatDifficulty>()
+        .register_resource::<CombatDifficulty>(
+            "Enemy difficulty: tier (Easy, Medium, Hard, VeryHard, Extreme: which tactics enemies \
+             may use), skill (0..1 within the tier, null keeps each NPC's own skills), factions \
+             (faction id -> [tier, skill] overrides).",
+        );
     app.add_message::<BodyHit>()
         .add_message::<MeleeContact>()
         .register_component::<Loadout>(
@@ -433,6 +478,21 @@ mod tests {
             app.world.resource::<MeleeJudge>().judged_by,
             "engine_combat"
         );
+    }
+
+    #[test]
+    fn a_faction_override_wins_and_round_trips() {
+        let mut d = CombatDifficulty {
+            tier: DifficultyTier::Hard,
+            skill: Some(0.4),
+            ..Default::default()
+        };
+        d.factions.insert(7, (DifficultyTier::Easy, None));
+        assert_eq!(d.for_faction(7), (DifficultyTier::Easy, None));
+        assert_eq!(d.for_faction(1), (DifficultyTier::Hard, Some(0.4)));
+        let back: CombatDifficulty =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
     }
 
     #[test]
