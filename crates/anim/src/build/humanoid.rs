@@ -50,6 +50,27 @@ pub const SIDE_RUN_SPEED: f32 = 3.0;
 pub const BACK_RUN_SPEED: f32 = 2.6;
 pub const RUN_SPEED: f32 = 3.8;
 pub const SPRINT_SPEED: f32 = 7.0;
+/// Crouched speeds, m/s: a careful walk, a hurried run bent low, and stepping back or to the
+/// side.
+pub const CROUCH_WALK_SPEED: f32 = 1.1;
+pub const CROUCH_RUN_SPEED: f32 = 2.5;
+pub const CROUCH_SIDE_SPEED: f32 = 0.8;
+pub const CROUCH_BACK_SPEED: f32 = 0.8;
+/// A crouch: how far the hips sink below a stand (m), tip forward (degrees, negative is
+/// forward) and the trunk leans on over them (degrees). Low enough that the head of a
+/// person crouched behind a waist-high wall is under its top.
+pub const CROUCH_SINK: f32 = 0.34;
+pub const CROUCH_PITCH: f32 = -16.0;
+pub const CROUCH_LEAN: f32 = 32.0;
+/// How far a crouched foot behind the hips rises onto its ball, degrees.
+const CROUCH_HEEL: f32 = 38.0;
+/// The animation parameter the graph crouches by (0..1): the module eases it toward the
+/// contract's `crouch` (or a mover's [`MoveIntent::crouch`] or crouched
+/// [`LocomotionMode`]), which callers set as 0 or 1.
+///
+/// [`MoveIntent::crouch`]: engine_world::MoveIntent::crouch
+/// [`LocomotionMode`]: engine_world::LocomotionMode
+pub const CROUCHED: &str = "crouched";
 /// Height of the hips at rest, m (the clips' positions are for this size of body and scale
 /// with the hips of a fitted skeleton).
 pub const HIPS_HEIGHT: f32 = 0.98;
@@ -961,6 +982,70 @@ fn sidestep_right(s: &Skeleton) -> AnimationClip {
     )
 }
 
+/// Crouched still: weight low on bent knees, the left foot a little ahead, hands up in front
+/// and the head up, breathing.
+fn crouch_idle(s: &Skeleton) -> AnimationClip {
+    step_cycle(
+        s,
+        "crouch_idle",
+        Gait {
+            secs: 3.2,
+            lean: CROUCH_LEAN,
+            pitch: CROUCH_PITCH,
+            sink: CROUCH_SINK + 0.03,
+            stagger: 0.17,
+            ..Gait::STILL
+        },
+    )
+}
+
+fn crouch_walk(s: &Skeleton) -> AnimationClip {
+    step_cycle(
+        s,
+        "crouch_walk",
+        Gait::crouch(Vec2::Y, CROUCH_WALK_SPEED, 0.88),
+    )
+}
+
+/// Hurrying bent low between cover: longer, quicker steps, the hips a little higher.
+fn crouch_run(s: &Skeleton) -> AnimationClip {
+    step_cycle(
+        s,
+        "crouch_run",
+        Gait {
+            stance: 0.52,
+            lift: 0.11,
+            lean: CROUCH_LEAN + 8.0,
+            sink: CROUCH_SINK * 0.8,
+            ..Gait::crouch(Vec2::Y, CROUCH_RUN_SPEED, 0.7)
+        },
+    )
+}
+
+fn crouch_back(s: &Skeleton) -> AnimationClip {
+    step_cycle(
+        s,
+        "crouch_back",
+        Gait::crouch(-Vec2::Y, CROUCH_BACK_SPEED, 1.0),
+    )
+}
+
+fn crouch_left(s: &Skeleton) -> AnimationClip {
+    step_cycle(
+        s,
+        "crouch_left",
+        Gait::crouch(Vec2::X, CROUCH_SIDE_SPEED, 1.0),
+    )
+}
+
+fn crouch_right(s: &Skeleton) -> AnimationClip {
+    step_cycle(
+        s,
+        "crouch_right",
+        Gait::crouch(-Vec2::X, CROUCH_SIDE_SPEED, 1.0),
+    )
+}
+
 fn backpedal(s: &Skeleton) -> AnimationClip {
     step_cycle(s, "backpedal", Gait::walk(-Vec2::Y, BACKPEDAL_SPEED, 0.9))
 }
@@ -1057,6 +1142,12 @@ fn walk_with(s: &Skeleton, name: &str, secs: f32, stride: f32) -> AnimationClip 
     .with_event(0.52, "footstep", Some("foot_l"))
 }
 
+/// 0 below 0, 1 above 1, eased between.
+fn smooth01(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
 /// How a [`step_cycle`] moves: `dir` is (left, ahead) relative to facing, at `speed` m/s,
 /// one stride per `secs`; each foot stands for `stance` of the cycle (under a half: a run,
 /// with both feet off the ground between steps) and lifts `lift` m as it swings.
@@ -1071,6 +1162,12 @@ struct Gait {
     turn_in: f32,
     /// Forward lean of the trunk, degrees.
     lean: f32,
+    /// How far the hips tip forward (degrees) and sink below where the legs reach (m): a
+    /// crouch.
+    pitch: f32,
+    sink: f32,
+    /// How far the left foot stands ahead of the right (and the right behind), m.
+    stagger: f32,
 }
 
 impl Gait {
@@ -1084,6 +1181,7 @@ impl Gait {
             lift: 0.08,
             turn_in: 0.0,
             lean: 2.0,
+            ..Self::STILL
         }
     }
 
@@ -1098,6 +1196,7 @@ impl Gait {
             lift: 0.12,
             turn_in: 20.0,
             lean: 4.0,
+            ..Self::STILL
         }
     }
 
@@ -1112,6 +1211,37 @@ impl Gait {
             lift: 0.2,
             turn_in: 50.0,
             lean: 7.0,
+            ..Self::STILL
+        }
+    }
+
+    const STILL: Self = Self {
+        dir: Vec2::ZERO,
+        speed: 0.0,
+        secs: 1.0,
+        stance: 0.62,
+        lift: 0.0,
+        turn_in: 0.0,
+        lean: 0.0,
+        pitch: 0.0,
+        sink: 0.0,
+        stagger: 0.0,
+    };
+
+    /// Crouched steps: knees deep, the hips low and tipped forward, short careful strides
+    /// with the feet kept low, the hands up in front ([`CROUCH_SINK`] below a stand).
+    fn crouch(dir: Vec2, speed: f32, secs: f32) -> Self {
+        Self {
+            dir,
+            speed,
+            secs,
+            stance: 0.64,
+            lift: 0.07,
+            lean: CROUCH_LEAN,
+            pitch: CROUCH_PITCH,
+            // (A little higher than crouched still, so the trailing knee clears the ground.)
+            sink: CROUCH_SINK * 0.9,
+            ..Self::STILL
         }
     }
 }
@@ -1129,6 +1259,9 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
         secs,
         stance,
         lift,
+        pitch,
+        sink,
+        stagger,
         ..
     } = gait;
     let rest = |b: &str| {
@@ -1137,9 +1270,12 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
         model[s.bone(b)].t
     };
     let hip = rest(UPPER_LEG[1]);
+    let hips_at = rest("hips");
     let thigh = (rest(LOWER_LEG[1]) - hip).length();
     let shin = (rest(FOOT[1]) - rest(LOWER_LEG[1])).length();
     let ankle_y = rest(FOOT[1]).y;
+    // From the ankle to the ball of the foot, which a raised heel pivots on.
+    let ball = (rest(TOE[1]) - rest(FOOT[1])).with_y(0.0).length();
     // Movement in model space (forward is −Z, left is −X).
     let dir = dir.normalize_or_zero();
     let m = Vec3::new(-dir.x, 0.0, -dir.y);
@@ -1147,24 +1283,35 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
     // about the turned hips.
     let yaw = (gait.turn_in * dir.x).to_radians();
     let turn = Quat::from_rotation_y(yaw);
+    // A crouch tips the hips forward: the legs are solved in the tipped frame.
+    let tilt = Quat::from_rotation_x(pitch.to_radians());
+    let frame = tilt * turn;
+    // How crouched (0 standing, 1 a full crouch).
+    let low = (sink / CROUCH_SINK).clamp(0.0, 1.0);
     // Each foot travels 2·half while it stands.
     let half = speed * stance * secs * 0.5;
     // Walking sidesteps widen the stance so the feet never cross; a run has one foot down
     // at a time, so its feet may.
     let across = (turn.conjugate() * m).x.abs();
+    // (Crouched, the feet stand a little wider for balance.)
     let width = if stance > 0.5 {
-        hip.x.abs() + across * (half + 0.06 - hip.x.abs()).max(0.0)
+        hip.x.abs() + across * (half + 0.06 - hip.x.abs()).max(0.0) + 0.05 * low
     } else {
         hip.x.abs() * 0.8
     };
     let reach = 0.985 * (thigh + shin);
     // Walking sideways is an athlete's shuffle: knees bent, trunk a little forward, hands up
     // and out, and the hips carried over whichever foot holds the weight.
-    let athletic = if stance > 0.5 { dir.x.abs() } else { 0.0 };
+    let athletic = if stance > 0.5 {
+        dir.x.abs() * (1.0 - low)
+    } else {
+        0.0
+    };
     // Where each foot is (model space, relative to the hips' rest place) at `q` phase since
     // it planted, and how far it is through its swing (0 while it stands).
     let foot = |side: usize, q: f32| {
-        let base = turn * Vec3::new(S[side] * width, 0.0, 0.0) + Vec3::Y * ankle_y;
+        let ahead = if side == 0 { -stagger } else { stagger };
+        let base = turn * Vec3::new(S[side] * width, 0.0, ahead) + Vec3::Y * ankle_y;
         if q < stance {
             let u = q / stance;
             (base + m * half * (1.0 - 2.0 * u), 0.0)
@@ -1175,11 +1322,18 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
             (at + Vec3::Y * lift * (std::f32::consts::PI * u).sin(), u)
         }
     };
-    AnimationClip::from_fn(name, secs, 41, true, move |ph| {
+    let clip = AnimationClip::from_fn(name, secs, 41, true, move |ph| {
         let mut p = PoseBuilder::new(s);
         let feet = [0, 1].map(|side| {
             let q = (ph + if side == 1 { 0.0 } else { 0.5 }).rem_euclid(1.0);
-            foot(side, q)
+            let (mut at, swing) = foot(side, q);
+            // Crouched, a foot behind the hips rises onto its ball (so the knee stays off
+            // the ground) and lifts off from there.
+            let behind = smooth01((at.z - 0.02) / 0.3);
+            let leaving = 1.0 - smooth01(swing / 0.4);
+            let heel = (CROUCH_HEEL * low).to_radians() * behind * leaving;
+            at.y += ball * heel.sin();
+            (at, swing, heel.to_degrees())
         });
         // The hips sink until both feet are in reach (knees soft), and dip a little as each
         // foot takes the weight.
@@ -1187,28 +1341,41 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
         let over: f32 = feet
             .iter()
             .enumerate()
-            .map(|(side, (_, swing))| -S[side] * (std::f32::consts::PI * swing).sin())
+            .map(|(side, (_, swing, _))| -S[side] * (std::f32::consts::PI * swing).sin())
             .sum();
         let shift = Vec3::X * 0.035 * athletic * over;
         let joint_at = |side: usize, drop: f32| {
-            turn * Vec3::new(S[side] * hip.x.abs(), 0.0, hip.z) + shift + Vec3::Y * (hip.y - drop)
+            // About the hips' pivot, which the tip turns the hip joints round.
+            let from_hips =
+                turn * Vec3::new(S[side] * hip.x.abs(), hip.y - hips_at.y, hip.z - hips_at.z);
+            turn * Vec3::new(S[side] * hip.x.abs(), 0.0, hip.z)
+                + shift
+                + Vec3::Y * (hip.y - drop)
+                + (tilt * from_hips - from_hips)
         };
-        for (side, (at, _)) in feet.iter().enumerate() {
+        for (side, (at, ..)) in feet.iter().enumerate() {
             let joint = joint_at(side, 0.0);
             let flat = (*at - joint).with_y(0.0).length();
             let below = (reach * reach - flat * flat).max(0.0).sqrt();
             drop = drop.max(joint.y - at.y - below);
         }
-        drop += 0.012 * (1.0 - cycle(ph * 2.0)) * 0.5 + 0.06 * athletic;
+        drop += 0.012 * (1.0 - cycle(ph * 2.0)) * 0.5 + 0.06 * athletic + sink;
         // A stoop (more running), leaning into a sidestep with the head kept level; the
         // spine turns the shoulders back to face ahead over hips turned into a run.
         let roll = 3.0 * dir.x;
         let lean = gait.lean + 6.0 * athletic;
         let yaw_deg = yaw.to_degrees();
-        p.rot_move("hips", shift - Vec3::Y * drop, 0.0, yaw_deg, 0.0);
+        p.rot_move("hips", shift - Vec3::Y * drop, pitch, yaw_deg, 0.0);
+        // Crouched, the neck lifts the head to look ahead over the tipped trunk.
+        let look_up = -pitch * 0.5 * low;
         spine(
             &mut p,
-            [-lean * 0.6, -lean * 0.4, 1.5 + lean * 0.4, 0.5 + lean * 0.3],
+            [
+                -lean * 0.6,
+                -lean * 0.4,
+                1.5 + lean * 0.4 + look_up,
+                0.5 + lean * 0.3 + look_up,
+            ],
             [
                 -yaw_deg * 0.4,
                 -yaw_deg * 0.35,
@@ -1217,11 +1384,11 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
             ],
             [roll, roll * 0.5, -roll * 0.7, -roll * 0.8],
         );
-        for (side, &(at, swing)) in feet.iter().enumerate() {
+        for (side, &(at, swing, heel)) in feet.iter().enumerate() {
             let sign = S[side];
             let joint = joint_at(side, drop);
             // The leg is solved in the hips' turned frame.
-            let d = turn.conjugate() * (at - joint);
+            let d = frame.conjugate() * (at - joint);
             // Abduction swings the leg's plane out about the forward axis; flexion and the
             // knee reach within it.
             let out = d.x * sign;
@@ -1240,32 +1407,50 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
             let toe_up = 12.0 * (std::f32::consts::PI * swing).sin();
             p.rot(UPPER_LEG[side], flex, 0.0, abduct * sign)
                 .rot(LOWER_LEG[side], -knee, 0.0, 0.0)
-                .rot(FOOT[side], knee - flex + toe_up, 0.0, -abduct * sign)
-                .rot(TOE[side], 0.0, 0.0, 0.0);
+                .rot(
+                    FOOT[side],
+                    knee - flex - pitch + toe_up - heel,
+                    0.0,
+                    -abduct * sign,
+                )
+                .rot(TOE[side], heel, 0.0, 0.0);
             // Arms swing against the opposite leg's travel (pumping, elbows bent, in a run),
             // and open a little stepping sideways.
             let other = feet[1 - side].0;
             let ahead_of_hips = turn * Vec3::NEG_Z;
             let swing_arm = (other.dot(ahead_of_hips) / half.max(0.05)).clamp(-1.0, 1.0);
-            let walk_swing = swing_arm * dir.y;
+            let walk_swing = swing_arm * dir.y * (1.0 - 0.6 * low);
             let running = if stance < 0.5 { 1.0 } else { 0.0 };
+            // Crouched, the hands come up in front, ready, and swing little.
             arm(
                 &mut p,
                 side,
                 Arm {
                     flex: 2.0 + 12.0 * walk_swing * (1.0 - running) - 30.0 * swing_arm * running
-                        + 14.0 * athletic,
-                    elbow: 18.0 + 6.0 * walk_swing.abs() + 62.0 * running + 30.0 * athletic,
-                    abduct: -15.0 - 6.0 * dir.x.abs() * (1.0 - running) + 12.0 * athletic,
-                    wrist: 6.0 * athletic,
+                        + 14.0 * athletic
+                        + 22.0 * low,
+                    elbow: 18.0
+                        + 6.0 * walk_swing.abs()
+                        + 62.0 * running
+                        + 30.0 * athletic
+                        + 52.0 * low,
+                    abduct: -15.0 - 6.0 * dir.x.abs() * (1.0 - running)
+                        + 12.0 * athletic
+                        + 5.0 * low,
+                    wrist: 6.0 * athletic + 10.0 * low,
+                    protract: 6.0 * low,
                     ..Arm::HANG
                 },
             );
         }
         p.take()
-    })
-    .with_event(0.0, "footstep", Some("foot_r"))
-    .with_event(0.5, "footstep", Some("foot_l"))
+    });
+    if speed > 0.0 {
+        clip.with_event(0.0, "footstep", Some("foot_r"))
+            .with_event(0.5, "footstep", Some("foot_l"))
+    } else {
+        clip
+    }
 }
 
 fn run(s: &Skeleton) -> AnimationClip {
@@ -4088,6 +4273,12 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         run_left(s),
         run_right(s),
         run_back(s),
+        crouch_idle(s),
+        crouch_walk(s),
+        crouch_run(s),
+        crouch_back(s),
+        crouch_left(s),
+        crouch_right(s),
         lean(s, "lean_left", 1.0),
         lean(s, "lean_right", -1.0),
         lean_pitch(s, "lean_forward", 1.0),
@@ -4271,6 +4462,67 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             },
         )
     };
+    // Crouched (by [`CROUCHED`]), the same way round: still, walking, hurrying low, back and
+    // to either side.
+    let crouching = || {
+        let side = |clip: &str| by_speed(&[(0.0, "crouch_idle"), (CROUCH_SIDE_SPEED, clip)]);
+        let back = || by_speed(&[(0.0, "crouch_idle"), (CROUCH_BACK_SPEED, "crouch_back")]);
+        NodeDef::Blend1d {
+            param: "heading".into(),
+            children: [
+                (-pi, back()),
+                (-pi / 2.0, side("crouch_right")),
+                (
+                    0.0,
+                    by_speed(&[
+                        (0.0, "crouch_idle"),
+                        (CROUCH_WALK_SPEED, "crouch_walk"),
+                        (CROUCH_RUN_SPEED, "crouch_run"),
+                    ]),
+                ),
+                (pi / 2.0, side("crouch_left")),
+                (pi, back()),
+            ]
+            .into_iter()
+            .map(|(at, node)| Blend1dChild { at, node })
+            .collect(),
+            sync: true,
+            match_speed: false,
+        }
+    };
+    let locomotion = NodeDef::Blend1d {
+        param: CROUCHED.into(),
+        children: vec![
+            Blend1dChild {
+                at: 0.0,
+                node: locomotion,
+            },
+            Blend1dChild {
+                at: 1.0,
+                node: crouching(),
+            },
+        ],
+        sync: true,
+        match_speed: false,
+    };
+    // Holding a bow drawn, aiming, blocking or on guard crouched: the hips and legs crouch
+    // (and step) under the upper body.
+    let crouched_legs = |node: NodeDef| NodeDef::Layer {
+        base: Box::new(node),
+        overlay: Box::new(crouching()),
+        mask: BoneMaskDef {
+            bones: std::iter::once("hips")
+                .chain(UPPER_LEG)
+                .chain(LOWER_LEG)
+                .chain(FOOT)
+                .chain(TOE)
+                .map(String::from)
+                .collect(),
+            include_children: false,
+        },
+        weight: Weight::param(CROUCHED),
+        additive: false,
+    };
     let leaning = NodeDef::Additive {
         base: Box::new(locomotion),
         additive: Box::new(NodeDef::Blend1d {
@@ -4375,7 +4627,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         children: vec![
             Blend1dChild {
                 at: 0.0,
-                node: NodeDef::clip(name),
+                node: crouched_legs(NodeDef::clip(name)),
             },
             Blend1dChild {
                 at: STANCE_STEPPING,
@@ -4413,9 +4665,9 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             states: vec![
                 state("move", leaning),
                 state("heavy_swing", NodeDef::one_shot("heavy_swing")),
-                state("block", NodeDef::clip("block")),
-                state("hammer_block", NodeDef::clip("hammer_block")),
-                state("guard", NodeDef::clip("guard")),
+                state("block", crouched_legs(NodeDef::clip("block"))),
+                state("hammer_block", crouched_legs(NodeDef::clip("hammer_block"))),
+                state("guard", crouched_legs(NodeDef::clip("guard"))),
                 state("reach", NodeDef::one_shot("reach")),
                 state("flex", NodeDef::one_shot("flex")),
                 state("wince", NodeDef::one_shot("wince")),
@@ -4431,14 +4683,14 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 // brings the hand to the jaw before it looses.
                 StateDef {
                     speed_param: Some("draw_speed".into()),
-                    ..state(BOW_DRAW, NodeDef::one_shot(BOW_DRAW))
+                    ..state(BOW_DRAW, crouched_legs(NodeDef::one_shot(BOW_DRAW)))
                 },
-                state(BOW_HOLD, NodeDef::clip(BOW_HOLD)),
-                state(BOW_LOOSE, NodeDef::one_shot(BOW_LOOSE)),
-                state(BOW_LOWER, NodeDef::one_shot(BOW_LOWER)),
+                state(BOW_HOLD, crouched_legs(NodeDef::clip(BOW_HOLD))),
+                state(BOW_LOOSE, crouched_legs(NodeDef::one_shot(BOW_LOOSE))),
+                state(BOW_LOWER, crouched_legs(NodeDef::one_shot(BOW_LOWER))),
                 state(RIFLE_AIM, rifle_aim),
-                state(RIFLE_FIRE, NodeDef::one_shot(RIFLE_FIRE)),
-                state(RIFLE_RELOAD, NodeDef::one_shot(RIFLE_RELOAD)),
+                state(RIFLE_FIRE, crouched_legs(NodeDef::one_shot(RIFLE_FIRE))),
+                state(RIFLE_RELOAD, crouched_legs(NodeDef::one_shot(RIFLE_RELOAD))),
                 state("sword_stance", sword_stance),
                 state("shield_guard", shield_guard),
                 state("greatsword_stance", greatsword_stance),

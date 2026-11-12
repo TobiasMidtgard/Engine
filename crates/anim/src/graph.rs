@@ -927,6 +927,8 @@ impl GraphInstance {
                     Args {
                         weight: args.weight * w,
                         sample: args.sample && w > 0.0,
+                        // (Nor fires its clips' events.)
+                        emit: args.emit && w > 0.0,
                         ..args
                     },
                 );
@@ -954,6 +956,8 @@ impl GraphInstance {
                     Args {
                         weight: args.weight * w,
                         sample: args.sample && w > 0.0,
+                        // (Nor fires its clips' events.)
+                        emit: args.emit && w > 0.0,
                         ..args
                     },
                 );

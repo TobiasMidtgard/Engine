@@ -35,11 +35,11 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use engine_core::prelude::*;
-use engine_world::LocomotionState;
 use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose};
 use engine_world::character::{
     Appearance, AppearanceBodies, AppearanceRequest, BodyFit, HandControls, HandPose, HandShape,
 };
+use engine_world::{LocomotionMode, LocomotionState, MoveIntent};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::build::dog;
@@ -115,7 +115,10 @@ pub struct BodyMotion {
     /// How steeply it climbs (+) or descends (−) as it goes: rise per meter traveled
     /// (smoothed).
     pub grade: f32,
-    owners: [Owner; 7],
+    /// How far crouched, 0..1 (eased toward the contract's `crouch`, a crouching
+    /// [`MoveIntent`] or a crouched [`LocomotionMode`]).
+    pub crouch: f32,
+    owners: [Owner; PARAMS.len()],
 }
 
 /// Who sets one of a person's animation parameters.
@@ -130,7 +133,7 @@ enum Owner {
     Others,
 }
 
-const PARAMS: [&str; 7] = [
+const PARAMS: [&str; 8] = [
     "speed",
     "turn",
     "move_effort",
@@ -138,7 +141,11 @@ const PARAMS: [&str; 7] = [
     "heading",
     "accel",
     "grade",
+    humanoid::CROUCHED,
 ];
+
+/// How quickly a person drops into a crouch or rises from one, s (time constant).
+const CROUCH_EASE: f32 = 0.14;
 
 /// Build bodies for new or changed requests. A normal system that only queues world work
 /// when a request changed, so on most frames it runs beside everything else instead of as
@@ -230,10 +237,11 @@ pub(crate) fn drive_bodies(
         &mut BodyMotion,
         &mut AnimationParams,
         Option<&LocomotionState>,
+        Option<&MoveIntent>,
         Option<&LocalTimeScale>,
     )>,
 ) {
-    for (body, gt, mut motion, mut params, locomotion, local) in &mut q {
+    for (body, gt, mut motion, mut params, locomotion, intent, local) in &mut q {
         let dt = time.delta_for(local);
         let p = gt.translation();
         let f = gt.rotation() * Vec3::NEG_Z;
@@ -284,6 +292,15 @@ pub(crate) fn drive_bodies(
         if body.kind != BodyKind::Human {
             continue;
         }
+        // Callers say crouch or not (0 or 1); the body sinks into it and rises out of it.
+        let crouching = params.get("crouch") > 0.5
+            || intent.is_some_and(|i| i.crouch)
+            || locomotion.is_some_and(|l| l.mode == LocomotionMode::Crouch);
+        let target = if crouching { 1.0 } else { 0.0 };
+        motion.crouch += (target - motion.crouch) * smoothing(dt, CROUCH_EASE);
+        if (motion.crouch - target).abs() < 1e-3 {
+            motion.crouch = target;
+        }
         let values = [
             Some(motion.speed),
             Some((motion.yaw_rate / 1.2).clamp(-1.0, 1.0)),
@@ -293,6 +310,7 @@ pub(crate) fn drive_bodies(
             Some(motion.heading),
             Some(accel_param(motion.accel)),
             Some(grade_param(motion.grade)),
+            Some(motion.crouch),
         ];
         for (i, (name, value)) in PARAMS.iter().zip(values).enumerate() {
             let Some(value) = value else {
