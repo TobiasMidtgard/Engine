@@ -22,6 +22,13 @@
 //!                                                                  → frame binding 19
 //! ```
 //!
+//! Only the froxels something on screen can look into are lit and integrated
+//! (`trial_cut_more::FOG_REACH`): three small passes first note, per column, how many slices
+//! lie in front of the farthest surface the depth prepass drew under the column and the tiles
+//! around it (every slice where the sky shows). At 2560x1440 the grid is 320 x 180 x 128 =
+//! 7.4 M froxels; behind the ground, walls and trunks lies about half of it outdoors at head
+//! height, more among trees and houses.
+//!
 //! `apply_fog` (lib_frame.wgsl) reads it for every surface within the range, opaque or
 //! transparent, and continues with the analytic height fog beyond it; the sky pass is fogged up
 //! to the range. The lookup (`volumetric_fog_at`) blends the four columns around the pixel and
@@ -36,7 +43,7 @@ use crate::components::{FogShape, FogVolume};
 use crate::features::{GpuShared, GrowBuffer};
 use crate::frame::ViewData;
 use crate::renderer::layout_entry;
-use crate::settings::{RenderSettings, VolumetricQuality};
+use crate::settings::{RenderSettings, VolumetricQuality, shade_skip, trial_cut_more};
 use crate::targets::Targets;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -180,8 +187,13 @@ struct FroxelUniform {
     grid: [u32; 4],
     /// Sample position inside the froxel (0..1) xyz, history weight (0 = no history).
     jitter: [f32; 4],
-    /// History scale (this frame's pre-exposure / the history's), unused.
+    /// History scale (this frame's pre-exposure / the history's); 1 = only the froxels in
+    /// reach are lit; 1 = last frame's were too (its list of columns holds); 1 = mark the
+    /// froxels out of reach.
     params: [f32; 4],
+    /// Where the lists start in the grid's `reach` buffer: the tiles, this frame's columns,
+    /// last frame's columns, the blocks.
+    reach: [u32; 4],
 }
 
 struct Volume {
@@ -199,13 +211,33 @@ struct Grid {
     integrated: Volume,
     /// The sky occlusion map's visibility at every block corner (`cs_sky_corners`).
     sky_corners: wgpu::Buffer,
+    /// Slices in reach (`fog_reach` in the shader): per column under its own tile, per column
+    /// this frame and last (alternating, as the scatter volumes do), per block.
+    reach: wgpu::Buffer,
     /// Indexed by the scatter volume written this frame.
     scatter_groups: [wgpu::BindGroup; 2],
     integrate_groups: [wgpu::BindGroup; 2],
 }
 
+/// How many froxels a frame lit, read back for `render.stats` (with
+/// `shade_skip::COUNT_MESH_RUNS`): the frame's list of columns in reach, copied out.
+struct ReachCount {
+    buffer: wgpu::Buffer,
+    /// `COUNT_*` below.
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    columns: u32,
+    /// This frame's commands copy the list into the buffer: map it once they are submitted.
+    written: bool,
+}
+
+const COUNT_FREE: u8 = 0;
+const COUNT_MAPPING: u8 = 1;
+const COUNT_MAPPED: u8 = 2;
+const COUNT_FAILED: u8 = 3;
+
 /// GPU resources and temporal state of the volumetric fog.
 pub(crate) struct Volumetrics {
+    reach_pipelines: [wgpu::ComputePipeline; 3],
     sky_corners_pipeline: wgpu::ComputePipeline,
     scatter_pipeline: wgpu::ComputePipeline,
     integrate_pipeline: wgpu::ComputePipeline,
@@ -231,6 +263,14 @@ pub(crate) struct Volumetrics {
     history_params: [f32; 4],
     /// Whether the passes run this frame.
     active: bool,
+    /// Only the froxels in reach are lit this frame (`trial_cut_more::FOG_REACH`), and whether
+    /// last frame's were (the list of columns it left says which).
+    reach: bool,
+    reach_history: bool,
+    /// Count the froxels lit (`shade_skip::COUNT_MESH_RUNS`), and the latest count.
+    counting: bool,
+    count: Option<ReachCount>,
+    lit: Option<u64>,
     /// The haze and atmosphere beyond, per screen column (frame binding 24).
     pub aerial: crate::aerial::AerialTable,
 }
@@ -270,6 +310,17 @@ impl Volumetrics {
                 },
             )
         };
+        let storage = |binding| {
+            layout_entry(
+                binding,
+                S::COMPUTE,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            )
+        };
         let scatter_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("volumetric fog scatter"),
             entries: &[
@@ -303,20 +354,13 @@ impl Volumetrics {
                         multisampled: false,
                     },
                 ),
-                layout_entry(
-                    8,
-                    S::COMPUTE,
-                    wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
+                storage(8),
+                storage(9),
             ],
         });
         let integrate_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("volumetric fog integrate"),
-            entries: &[uniform, volume_texture(4), volume_output(5)],
+            entries: &[uniform, volume_texture(4), volume_output(5), storage(9)],
         });
         let module = shared.shader(
             "volumetric fog",
@@ -338,6 +382,23 @@ impl Volumetrics {
                 cache: None,
             })
         };
+        let reach_pipelines = [
+            pipeline(
+                "volumetric fog reach tiles",
+                "cs_reach_tiles",
+                &scatter_layout,
+            ),
+            pipeline(
+                "volumetric fog reach columns",
+                "cs_reach_columns",
+                &scatter_layout,
+            ),
+            pipeline(
+                "volumetric fog reach blocks",
+                "cs_reach_blocks",
+                &scatter_layout,
+            ),
+        ];
         let sky_corners_pipeline = pipeline(
             "volumetric fog sky corners",
             "cs_sky_corners",
@@ -395,6 +456,7 @@ impl Volumetrics {
         let stand_in = stand_in.create_view(&Default::default());
 
         Self {
+            reach_pipelines,
             sky_corners_pipeline,
             scatter_pipeline,
             integrate_pipeline,
@@ -416,6 +478,11 @@ impl Volumetrics {
             history_exposure: 0.0,
             history_params: [0.0; 4],
             active: false,
+            reach: false,
+            reach_history: false,
+            counting: false,
+            count: None,
+            lit: None,
             aerial: crate::aerial::AerialTable::new(shared),
         }
     }
@@ -440,7 +507,8 @@ impl Volumetrics {
             targets.prepass_normal.view.clone(),
         ];
         if let Some(mut grid) = self.grid.take() {
-            grid.scatter_groups = self.scatter_groups(shared, &grid.scatter, &grid.sky_corners);
+            grid.scatter_groups =
+                self.scatter_groups(shared, &grid.scatter, &grid.sky_corners, &grid.reach);
             self.grid = Some(grid);
         }
     }
@@ -468,6 +536,7 @@ impl Volumetrics {
             self.grid = Some(self.create_grid(shared, size));
             self.current = 0;
             self.history_ready = false;
+            self.reach_history = false;
             regroup = true;
         }
         if params != self.history_params {
@@ -513,11 +582,16 @@ impl Volumetrics {
         ) && let Some(mut grid) = self.grid.take()
         {
             // The storage buffer was recreated: rebind it.
-            grid.scatter_groups = self.scatter_groups(shared, &grid.scatter, &grid.sky_corners);
+            grid.scatter_groups =
+                self.scatter_groups(shared, &grid.scatter, &grid.sky_corners, &grid.reach);
             self.grid = Some(grid);
         }
 
         let history = self.history_ready && view.history_valid && self.history_exposure > 0.0;
+        self.reach = settings.trial_cuts_more & trial_cut_more::FOG_REACH != 0;
+        let columns = size[0] * size[1];
+        self.counting = self.reach && settings.debug_skip & shade_skip::COUNT_MESH_RUNS != 0;
+        self.take_count(shared, columns);
         let i = view.frame_index % JITTER_SAMPLES + 1;
         let u = FroxelUniform {
             grid: [size[0], size[1], size[2], count],
@@ -533,9 +607,16 @@ impl Volumetrics {
                 } else {
                     1.0
                 },
-                0.0,
-                0.0,
-                0.0,
+                self.reach as u32 as f32,
+                (self.reach_history && history) as u32 as f32,
+                (self.reach && settings.debug_skip & shade_skip::MARK_FOG_OUT_OF_REACH != 0) as u32
+                    as f32,
+            ],
+            reach: [
+                0,
+                columns * (1 + self.current as u32),
+                columns * (2 - self.current as u32),
+                columns * 3,
             ],
         };
         shared
@@ -558,6 +639,15 @@ impl Volumetrics {
         });
         pass.set_bind_group(0, frame_group, &[]);
         pass.set_bind_group(1, &grid.scatter_groups[self.current], &[]);
+        if self.reach {
+            let [tiles, columns, blocks] = &self.reach_pipelines;
+            pass.set_pipeline(tiles);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+            pass.set_pipeline(columns);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+            pass.set_pipeline(blocks);
+            pass.dispatch_workgroups(w.div_ceil(BLOCK * 8), h.div_ceil(BLOCK * 8), 1);
+        }
         pass.set_pipeline(&self.sky_corners_pipeline);
         pass.dispatch_workgroups(sky_corners(grid.size).div_ceil(64), 1, 1);
         pass.set_pipeline(&self.scatter_pipeline);
@@ -565,8 +655,90 @@ impl Volumetrics {
         pass.set_pipeline(&self.integrate_pipeline);
         pass.set_bind_group(1, &grid.integrate_groups[self.current], &[]);
         pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        drop(pass);
+        if let Some(count) = self.count.as_mut().filter(|c| {
+            !c.written && c.state.load(std::sync::atomic::Ordering::Acquire) == COUNT_FREE
+        }) {
+            let bytes = u64::from(count.columns) * 4;
+            encoder.copy_buffer_to_buffer(
+                &grid.reach,
+                bytes * (1 + self.current as u64),
+                &count.buffer,
+                0,
+                bytes,
+            );
+            count.written = true;
+        }
         self.current = 1 - self.current;
         self.history_ready = true;
+        self.reach_history = self.reach;
+    }
+
+    /// Take in the count of lit froxels that arrived, ask for the one last frame's commands
+    /// copied out, and keep a buffer for this frame's while counting.
+    fn take_count(&mut self, shared: &GpuShared, columns: u32) {
+        use std::sync::atomic::Ordering;
+        if !self.counting || self.count.as_ref().is_some_and(|c| c.columns != columns) {
+            // A buffer still being mapped ends alone.
+            self.count = None;
+            self.lit = None;
+        }
+        if !self.counting {
+            return;
+        }
+        let count = self.count.get_or_insert_with(|| ReachCount {
+            buffer: shared.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("volumetric fog reach readback"),
+                size: u64::from(columns) * 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            state: Default::default(),
+            columns,
+            written: false,
+        });
+        if std::mem::take(&mut count.written) {
+            count.state.store(COUNT_MAPPING, Ordering::Release);
+            let state = count.state.clone();
+            count
+                .buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    let to = if r.is_ok() {
+                        COUNT_MAPPED
+                    } else {
+                        COUNT_FAILED
+                    };
+                    state.store(to, Ordering::Release);
+                });
+        }
+        match count.state.load(Ordering::Acquire) {
+            COUNT_MAPPED => {
+                if let Ok(view) = count.buffer.slice(..).get_mapped_range() {
+                    let slices: &[u32] = bytemuck::cast_slice(&view);
+                    self.lit = Some(slices.iter().map(|s| u64::from(*s)).sum());
+                }
+                count.buffer.unmap();
+                count.state.store(COUNT_FREE, Ordering::Release);
+            }
+            COUNT_FAILED => {
+                count.buffer.unmap();
+                count.state.store(COUNT_FREE, Ordering::Release);
+            }
+            _ => {}
+        }
+    }
+
+    /// For `render.stats`: the grid, and with `shade_skip::COUNT_MESH_RUNS` how many of its
+    /// froxels the latest frame read back lit.
+    pub fn describe(&self) -> serde_json::Value {
+        let size = self.grid.as_ref().filter(|_| self.active).map(|g| g.size);
+        serde_json::json!({
+            "grid": size,
+            "froxels": size.map(|[w, h, d]| u64::from(w) * u64::from(h) * u64::from(d)),
+            "only_in_reach": self.reach,
+            "froxels_lit": self.lit,
+        })
     }
 
     fn create_grid(&self, shared: &GpuShared, size: [u32; 3]) -> Grid {
@@ -600,7 +772,14 @@ impl Volumetrics {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let scatter_groups = self.scatter_groups(shared, &scatter, &sky_corners);
+        let blocks = size[0].div_ceil(BLOCK) * size[1].div_ceil(BLOCK);
+        let reach = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volumetric fog reach"),
+            size: (size[0] * size[1] * 3 + blocks) as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let scatter_groups = self.scatter_groups(shared, &scatter, &sky_corners, &reach);
         let integrate_groups = [0, 1].map(|current| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("volumetric fog integrate"),
@@ -618,6 +797,10 @@ impl Volumetrics {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(&integrated.view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: reach.as_entire_binding(),
+                    },
                 ],
             })
         });
@@ -626,6 +809,7 @@ impl Volumetrics {
             scatter,
             integrated,
             sky_corners,
+            reach,
             scatter_groups,
             integrate_groups,
         }
@@ -637,6 +821,7 @@ impl Volumetrics {
         shared: &GpuShared,
         scatter: &[Volume; 2],
         sky_corners: &wgpu::Buffer,
+        reach: &wgpu::Buffer,
     ) -> [wgpu::BindGroup; 2] {
         [0, 1].map(|current| {
             shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -670,6 +855,10 @@ impl Volumetrics {
                     wgpu::BindGroupEntry {
                         binding: 8,
                         resource: sky_corners.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: reach.as_entire_binding(),
                     },
                 ],
             })

@@ -217,6 +217,9 @@ pub mod shade_skip {
     /// costs in `shadows` and `sky occlusion` (the whole copies of every frame, with
     /// `trial_cut_more::SHADOW_TILES` off).
     pub const SHADOW_COPIES: u32 = 1048576;
+    /// The fog volume's froxels that are out of reach (`trial_cut_more::FOG_REACH`) glow
+    /// magenta: anything on screen that reads one shows it. Nothing should.
+    pub const MARK_FOG_OUT_OF_REACH: u32 = 2097152;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the picture (lib_frame.wgsl
@@ -372,7 +375,7 @@ pub mod trial_cut {
 /// Bits of [`RenderSettings::trial_cuts_more`]: cuts past the 24 of [`trial_cut`].
 pub mod trial_cut_more {
     /// Those that are how the frame is drawn (see [`super::trial_cut::DEFAULT`]).
-    pub const DEFAULT: u32 = AERIAL_STEPWISE | GROUND_STILL | SHADOW_TILES;
+    pub const DEFAULT: u32 = AERIAL_STEPWISE | GROUND_STILL | SHADOW_TILES | FOG_REACH;
     /// The haze table (aerial.rs) carries the atmosphere on from depth slice to depth slice,
     /// one step across each slice, where it marched every slice's whole ray from the camera
     /// in 8 steps: 64 atmosphere steps a column, not 512. Both are estimates of the same
@@ -396,6 +399,13 @@ pub mod trial_cut_more {
     /// image is copied every frame, as it was until 11 Nov (six layers, 335 MB of depth with
     /// maps of 4096²), whether anything moved or not.
     pub const SHADOW_TILES: u32 = 4;
+    /// The fog volume (volumetrics.rs) lights and integrates only the froxels something on
+    /// screen can look into: those in front of the farthest surface the depth prepass drew
+    /// under a column and the tiles around it, every slice where the sky shows. Off: all of
+    /// the grid every frame (7.4 M froxels at 2560x1440 on Ultra), also behind the ground,
+    /// walls and trunks, as it was until 12 Nov. A froxel that comes into reach starts
+    /// without history, as one that enters at the screen's edge does.
+    pub const FOG_REACH: u32 = 8;
 }
 
 /// What the screen shows.

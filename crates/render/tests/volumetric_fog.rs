@@ -414,6 +414,88 @@ fn fog_volumes_keep_their_fog_inside() {
     }
 }
 
+/// Only the froxels in front of what the picture shows are lit (`trial_cut_more::FOG_REACH`):
+/// the picture is the one with the whole grid lit, fewer froxels are lit for it, and nothing on
+/// screen reads one that was left out (marked, they would glow).
+#[test]
+fn froxels_nothing_looks_into_are_left_out() {
+    use engine_render::settings::{shade_skip, trial_cut_more};
+    let shot = |name: &str, configure: fn(&mut RenderSettings)| {
+        let mut app = shaft_app(configure);
+        let img = render(&mut app, 40, name)?;
+        let fog = app.world.resource::<Renderer>().describe()["volumetric_fog"].clone();
+        Some((img, fog))
+    };
+    let Some((whole, _)) = shot("volumetric_reach_off", |s| {
+        s.trial_cuts_more &= !trial_cut_more::FOG_REACH
+    }) else {
+        return;
+    };
+    let (reach, fog) = shot("volumetric_reach_on", |s| {
+        s.debug_skip |= shade_skip::COUNT_MESH_RUNS
+    })
+    .unwrap();
+    let (marked, _) = shot("volumetric_reach_marked", |s| {
+        s.debug_skip |= shade_skip::MARK_FOG_OUT_OF_REACH
+    })
+    .unwrap();
+
+    // The backdrop stands 20 m off and the range is 256 m: most of every column that ends on
+    // it lies behind it. The sky beside it keeps its columns whole.
+    let (all, lit) = (
+        fog["froxels"].as_u64().unwrap(),
+        fog["froxels_lit"]
+            .as_u64()
+            .expect("the count of lit froxels"),
+    );
+    eprintln!("froxels: {lit} of {all} lit");
+    assert!(
+        lit > all / 10 && lit < all * 3 / 4,
+        "{lit} of {all} froxels lit"
+    );
+
+    // The largest difference between two pictures' 8x8 blocks, in 8-bit steps of their mean
+    // color (the display's dither differs from run to run; blocks average it out).
+    let apart = |a: &RgbaImage, b: &RgbaImage| {
+        let mut most = 0.0f32;
+        for by in (0..H - 7).step_by(8) {
+            for bx in (0..W - 7).step_by(8) {
+                let mut sum = [0i32; 3];
+                for y in by..by + 8 {
+                    for x in bx..bx + 8 {
+                        let (p, q) = (a.get_pixel(x, y), b.get_pixel(x, y));
+                        for c in 0..3 {
+                            sum[c] += p[c] as i32 - q[c] as i32;
+                        }
+                    }
+                }
+                for s in sum {
+                    most = most.max(s.abs() as f32 / 64.0);
+                }
+            }
+        }
+        most
+    };
+    let (again, _) = shot("volumetric_reach_off_again", |s| {
+        s.trial_cuts_more &= !trial_cut_more::FOG_REACH
+    })
+    .unwrap();
+    let noise = apart(&again, &whole);
+    let changed = apart(&reach, &whole);
+    let read = apart(&marked, &reach);
+    eprintln!(
+        "largest block apart: two runs of the whole grid {noise:.3}, in reach against the whole grid {changed:.3}, out of reach marked {read:.3}"
+    );
+    assert!(
+        changed < noise + 0.5,
+        "lighting only the froxels in reach changed the picture: a block by {changed} (two runs differ by {noise})"
+    );
+    assert!(
+        read < noise + 0.5,
+        "something on screen reads froxels out of reach: a block changed by {read}"
+    );
+}
+
 #[test]
 fn fog_holds_still_with_a_still_camera() {
     let mut app = shaft_app(|_| {});

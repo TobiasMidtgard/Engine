@@ -447,6 +447,12 @@ fn variants() -> Vec<Variant> {
             json!({"trial_cuts_more": 4}),
             "a shadow map is put back to its still image only in the tiles where something moved the frame before; the six layers were copied whole every frame (335 MB of depth at 4096)",
         ),
+        v(
+            "cut_fog_reach",
+            r,
+            json!({"trial_cuts_more": 8}),
+            "the fog volume lights only the cells in front of what the picture shows (all 7.4 M of them every frame at 2560x1440 before)",
+        ),
         // Other modules' own switches, each a trade its owner left off until it is judged from
         // pictures.
         v(
@@ -634,8 +640,9 @@ fn variants() -> Vec<Variant> {
             // brighter) and rock's single lookup (1048576).
             // With 2097152: thin sheets read the sun's shadows themselves under the pass.
             // `trial_cuts_more` 1: the haze table in one sweep; 2: the ground in the shadow
-            // maps' still images; 4: the maps put back by tile.
-            json!({"trial_cuts": 3_137_211, "trial_cuts_more": 7, "shadow_refresh_secs": 0.25}),
+            // maps' still images; 4: the maps put back by tile; 8: the fog volume's cells in
+            // reach only.
+            json!({"trial_cuts": 3_137_211, "trial_cuts_more": 15, "shadow_refresh_secs": 0.25}),
             "every same-picture cut in RenderSettings at once (lighting but for the deep-shadow shortcut and the reflection taps, ground textures but for rock's single lookup, ground lines, ground and objects once a pixel, depth first, holes first, nearest first, far shadow refresh): the frame if all of them pass",
         ),
         x(
@@ -653,7 +660,7 @@ fn variants() -> Vec<Variant> {
             "cut_all_no_screen_pass",
             r,
             // `cut_all` without 512, 2048 and 2097152.
-            json!({"trial_cuts": 1_037_499, "trial_cuts_more": 7, "shadow_refresh_secs": 0.25}),
+            json!({"trial_cuts": 1_037_499, "trial_cuts_more": 15, "shadow_refresh_secs": 0.25}),
             "cut_all without the screen pass (light and fog once per pixel): with ground and objects already shaded once a pixel, does the pass still pay?",
         ),
         v(

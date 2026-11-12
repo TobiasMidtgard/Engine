@@ -4072,6 +4072,7 @@ impl Renderer {
             })
             .collect();
         json!({
+            "volumetric_fog": self.volumetrics.describe(),
             "shadow_maps": {
                 "tiles_on_top": self.shadow.on_top.map(|t| t.count()),
                 "moving_tiles": moving,

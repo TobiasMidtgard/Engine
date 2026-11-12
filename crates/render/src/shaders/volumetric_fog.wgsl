@@ -21,11 +21,19 @@
 // cs_integrate, one thread per column: marches the slices front to back with the energy
 // conserving integral of each slice. Output: in-scattered light (pre-exposed) and transmittance
 // from the camera to the far edge of every slice, which `apply_fog` reads.
+//
+// Only the froxels something on screen can look into are lit and integrated (`fog_reach`,
+// filled by cs_reach_tiles, cs_reach_columns and cs_reach_blocks before the others): a surface
+// is fogged up to its own depth and no further, so the part of a column behind the ground, a
+// wall or a trunk is read by nobody. The sky is fogged up to the range: its columns are lit
+// whole. With the camera at head height that leaves out about half of the grid outdoors and
+// more among trees and houses.
 
 struct Froxels {
     grid: vec4<u32>,   // columns, rows, depth slices, fog volume count
     jitter: vec4<f32>, // sample position inside the froxel this frame (0..1) xyz, w: history weight (0 = none)
-    params: vec4<f32>, // history scale (this frame's pre-exposure / the history's), unused, unused, unused
+    params: vec4<f32>, // history scale (this frame's pre-exposure / the history's), 1 = only the froxels in reach are lit, 1 = so were last frame's, 1 = mark the others (to see who reads them)
+    reach: vec4<u32>,  // where in `fog_reach`: the tiles, this frame's columns, last frame's columns, the blocks
 };
 
 // A `FogVolume` (GpuFogVolume in volumetrics.rs).
@@ -51,6 +59,12 @@ struct FogVolume {
 @group(1) @binding(7) var scene_normal: texture_2d<f32>;
 // cs_sky_corners writes, cs_scatter reads.
 @group(1) @binding(8) var<storage, read_write> sky_corners: array<f32>;
+// How many slices of the grid are in reach, front to back (`Froxels::reach` says where each
+// list starts): per column from the depth prepass under its own tile of pixels (cs_reach_tiles);
+// per column for whatever may read it, which is the pixels up to a tile away, since a lookup
+// blends the four columns around its pixel (cs_reach_columns: this frame's and last frame's,
+// which says what of the history was lit); per block of 4x4 columns (cs_reach_blocks).
+@group(1) @binding(9) var<storage, read_write> fog_reach: array<u32>;
 
 const BLOCK: u32 = 4u;            // cs_scatter workgroups are blocks of 4x4x4 froxels
 const MAX_FOG_LIGHTS: u32 = 256u; // point lights considered (the nearest: the buffer is sorted)
@@ -68,6 +82,45 @@ var<workgroup> volume_mask: array<atomic<u32>, 2>; // fog volumes overlapping th
 fn slice_depth(s: f32) -> f32 {
     let v = frame.volumetrics;
     return (exp2(s / (v.w * v.z)) - 1.0) / v.y;
+}
+
+// Slices of column `col` in reach this frame (all of them with the reach off).
+fn column_reach(col: vec2<u32>) -> u32 {
+    if (froxels.params.y < 0.5) { return froxels.grid.z; }
+    return fog_reach[froxels.reach.y + col.x + froxels.grid.x * col.y];
+}
+
+// The most slices in reach among the columns of block `b` (4x4 columns).
+fn block_reach(b: vec2<u32>) -> u32 {
+    if (froxels.params.y < 0.5) { return froxels.grid.z; }
+    let blocks = (froxels.grid.xy + BLOCK - 1u) / BLOCK;
+    let c = min(b, blocks - 1u);
+    return fog_reach[froxels.reach.w + c.x + blocks.x * c.y];
+}
+
+// Whether last frame lit every froxel a filtered lookup of the history at `uv` (0..1 across the
+// grid) and `w` (0..1 through its slices) blends in. The froxels out of reach keep what they
+// held when they were last lit, with the camera somewhere else.
+fn history_holds(uv: vec2<f32>, w: f32) -> bool {
+    if (froxels.params.z < 0.5) { return true; }
+    let grid = froxels.grid.xyz;
+    let g = uv * vec2<f32>(grid.xy) - 0.5;
+    let i0 = floor(g);
+    let f = g - i0;
+    let gz = max(w * f32(grid.z) - 0.5, 0.0);
+    let k0 = floor(gz);
+    // The farthest slice blended in (a share under a hundredth doesn't count: a still camera's
+    // lookups land on the froxels' centers give or take a rounding).
+    let top = min(u32(k0) + select(0u, 1u, gz - k0 > 0.01), grid.z - 1u);
+    for (var j = 0u; j < 4u; j++) {
+        let o = vec2<f32>(f32(j & 1u), f32(j >> 1u));
+        let weight = mix(1.0 - f.x, f.x, o.x) * mix(1.0 - f.y, f.y, o.y);
+        if (weight > 0.01) {
+            let cell = vec2<u32>(clamp(i0 + o, vec2<f32>(0.0), vec2<f32>(grid.xy) - 1.0));
+            if (top >= fog_reach[froxels.reach.z + cell.x + grid.x * cell.y]) { return false; }
+        }
+    }
+    return true;
 }
 
 // Camera-relative position at froxel coordinates `c` (column, row, slice; continuous). The grid
@@ -166,12 +219,86 @@ fn sky_corner_dims() -> vec3<u32> {
     return (froxels.grid.xyz + BLOCK - 1u) / BLOCK + 1u;
 }
 
+// One thread per column: the slices up to the farthest surface the depth prepass drew in the
+// column's own tile of pixels, and one more (the prepass is drawn with this frame's jitter, the
+// lookups are not); every slice where a pixel shows the sky, or a surface beyond the range.
+@compute @workgroup_size(8, 8, 1)
+fn cs_reach_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
+    let grid = froxels.grid.xy;
+    if (any(id.xy >= grid)) { return; }
+    let size = textureDimensions(scene_depth);
+    let lo = id.xy * size / grid;
+    let hi = min(((id.xy + 1u) * size + grid - 1u) / grid, size);
+    var z = 1.0; // reverse-Z: the smallest is the farthest, 0 is nothing
+    for (var y = lo.y; y < hi.y; y++) {
+        for (var x = lo.x; x < hi.x; x++) {
+            z = min(z, textureLoad(scene_depth, vec2<i32>(vec2<u32>(x, y)), 0));
+        }
+    }
+    let slices = froxels.grid.z;
+    var count = slices;
+    if (z > 0.0) {
+        let uv = vec2<f32>(lo + hi) * 0.5 / vec2<f32>(size);
+        let v = frame.volumetrics;
+        let depth = scene_linear_depth(uv, z);
+        if (depth < v.x) {
+            // The slice a lookup at that depth falls in (`volumetric_fog_at`), which it reads
+            // with the one before it.
+            let s = v.w * log2(1.0 + max(depth, 0.0) * v.y) * v.z;
+            count = min(u32(s) + 2u, slices);
+        }
+    }
+    fog_reach[froxels.reach.x + id.x + grid.x * id.y] = count;
+}
+
+// One thread per column: the most of its own tile and the eight around it.
+@compute @workgroup_size(8, 8, 1)
+fn cs_reach_columns(@builtin(global_invocation_id) id: vec3<u32>) {
+    let grid = froxels.grid.xy;
+    if (any(id.xy >= grid)) { return; }
+    let lo = max(id.xy, vec2<u32>(1u)) - 1u;
+    let hi = min(id.xy + 1u, grid - 1u);
+    var count = 0u;
+    for (var y = lo.y; y <= hi.y; y++) {
+        for (var x = lo.x; x <= hi.x; x++) {
+            count = max(count, fog_reach[froxels.reach.x + x + grid.x * y]);
+        }
+    }
+    fog_reach[froxels.reach.y + id.x + grid.x * id.y] = count;
+}
+
+// One thread per block of 4x4 columns: the most of its columns.
+@compute @workgroup_size(8, 8, 1)
+fn cs_reach_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
+    let grid = froxels.grid.xy;
+    let blocks = (grid + BLOCK - 1u) / BLOCK;
+    if (any(id.xy >= blocks)) { return; }
+    let lo = id.xy * BLOCK;
+    let hi = min(lo + BLOCK, grid);
+    var count = 0u;
+    for (var y = lo.y; y < hi.y; y++) {
+        for (var x = lo.x; x < hi.x; x++) {
+            count = max(count, fog_reach[froxels.reach.y + x + grid.x * y]);
+        }
+    }
+    fog_reach[froxels.reach.w + id.x + blocks.x * id.y] = count;
+}
+
 @compute @workgroup_size(64)
 fn cs_sky_corners(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = sky_corner_dims();
     let i = id.x;
     if (i >= dims.x * dims.y * dims.z) { return; }
     let corner = vec3<u32>(i % dims.x, (i / dims.x) % dims.y, i / (dims.x * dims.y));
+    // A corner serves the blocks that meet at it; the nearest of them start a block before it.
+    if (corner.z >= 2u) {
+        let b0 = max(corner.xy, vec2<u32>(1u)) - 1u;
+        let most = max(
+            max(block_reach(b0), block_reach(vec2<u32>(corner.x, b0.y))),
+            max(block_reach(vec2<u32>(b0.x, corner.y)), block_reach(corner.xy)),
+        );
+        if (most <= (corner.z - 1u) * BLOCK) { return; }
+    }
     let c = vec3<f32>(corner * BLOCK);
     sky_corners[i] = sky_map_visibility(lit_point(c, froxel_position(c)), vec3<f32>(0.0, 1.0, 0.0));
 }
@@ -183,41 +310,47 @@ fn cs_scatter(
     @builtin(workgroup_id) block: vec3<u32>,
 ) {
     let grid = froxels.grid.xyz;
+    // A block wholly out of reach only passes the barriers (every thread of a group must).
+    let live = block_reach(block.xy) > block.z * BLOCK;
     // The block's corners, and the sky visibility there. The occlusion map lookup is the most
     // expensive part of lighting a froxel and changes slowly, so it is interpolated.
-    if (local < 8u) {
-        let corner = block + vec3<u32>(local & 1u, (local >> 1u) & 1u, local >> 2u);
-        let c = vec3<f32>(corner * BLOCK);
-        block_corners[local] = froxel_position(c);
-        let dims = sky_corner_dims();
-        block_sky[local] = sky_corners[corner.x + dims.x * (corner.y + dims.y * corner.z)];
-        atomicStore(&light_mask[local], 0u);
-        if (local < 2u) { atomicStore(&volume_mask[local], 0u); }
-    } else if (local == 8u) {
-        block_sky_light = fog_sky_light();
+    if (live) {
+        if (local < 8u) {
+            let corner = block + vec3<u32>(local & 1u, (local >> 1u) & 1u, local >> 2u);
+            let c = vec3<f32>(corner * BLOCK);
+            block_corners[local] = froxel_position(c);
+            let dims = sky_corner_dims();
+            block_sky[local] = sky_corners[corner.x + dims.x * (corner.y + dims.y * corner.z)];
+            atomicStore(&light_mask[local], 0u);
+            if (local < 2u) { atomicStore(&volume_mask[local], 0u); }
+        } else if (local == 8u) {
+            block_sky_light = fog_sky_light();
+        }
     }
     workgroupBarrier();
 
     // Point lights and fog volumes that reach the block (its bounding sphere).
-    var center = vec3<f32>(0.0);
-    for (var i = 0u; i < 8u; i++) { center += block_corners[i] * 0.125; }
-    var radius = 0.0;
-    for (var i = 0u; i < 8u; i++) { radius = max(radius, distance(block_corners[i], center)); }
-    let lights = min(frame.counts.x, MAX_FOG_LIGHTS);
-    for (var i = local; i < lights; i += BLOCK * BLOCK * BLOCK) {
-        let l = point_lights[i].position_range;
-        if (distance(l.xyz, center) < l.w + radius) {
-            atomicOr(&light_mask[i / 32u], 1u << (i % 32u));
+    if (live) {
+        var center = vec3<f32>(0.0);
+        for (var i = 0u; i < 8u; i++) { center += block_corners[i] * 0.125; }
+        var radius = 0.0;
+        for (var i = 0u; i < 8u; i++) { radius = max(radius, distance(block_corners[i], center)); }
+        let lights = min(frame.counts.x, MAX_FOG_LIGHTS);
+        for (var i = local; i < lights; i += BLOCK * BLOCK * BLOCK) {
+            let l = point_lights[i].position_range;
+            if (distance(l.xyz, center) < l.w + radius) {
+                atomicOr(&light_mask[i / 32u], 1u << (i % 32u));
+            }
         }
-    }
-    if (local < min(froxels.grid.w, MAX_FOG_VOLUMES)) {
-        let b = fog_volumes[local].bounds;
-        if (distance(b.xyz, center) < b.w + radius) {
-            atomicOr(&volume_mask[local / 32u], 1u << (local % 32u));
+        if (local < min(froxels.grid.w, MAX_FOG_VOLUMES)) {
+            let b = fog_volumes[local].bounds;
+            if (distance(b.xyz, center) < b.w + radius) {
+                atomicOr(&volume_mask[local / 32u], 1u << (local % 32u));
+            }
         }
     }
     workgroupBarrier();
-    if (any(id >= grid)) { return; }
+    if (!live || any(id >= grid) || id.z >= column_reach(id.xy)) { return; }
 
     // This frame's sample point in the froxel. The depth offset also varies between columns, so
     // sharp edges (a fog volume's face) dither across slices instead of banding.
@@ -312,7 +445,7 @@ fn cs_scatter(
             let uv = clip.xy / clip.w * vec2<f32>(0.5, -0.5) + 0.5;
             let v = frame.volumetrics;
             let w = log2(1.0 + clip.w * v.y) * v.z;
-            if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)) && w <= 1.0) {
+            if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)) && w <= 1.0 && history_holds(uv, w)) {
                 let h = textureSampleLevel(scatter_history, linear_clamp, vec3<f32>(uv, w), 0.0);
                 value = mix(value, vec4<f32>(h.rgb * froxels.params.x, h.a), froxels.jitter.w);
             }
@@ -331,7 +464,14 @@ fn cs_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     var light = vec3<f32>(0.0);
     var transmittance = 1.0;
     var near = 0.0;
-    for (var z = 0u; z < grid.z; z++) {
+    let reach = column_reach(id.xy);
+    if (froxels.params.w > 0.5) {
+        // Looking for readers of what is out of reach: it glows.
+        for (var z = reach; z < grid.z; z++) {
+            textureStore(integrated_out, vec3<i32>(vec3<u32>(id.xy, z)), vec4<f32>(60000.0, 0.0, 60000.0, 0.0));
+        }
+    }
+    for (var z = 0u; z < reach; z++) {
         let far = slice_depth(f32(z + 1u));
         let len = (far - near) * stretch;
         near = far;
