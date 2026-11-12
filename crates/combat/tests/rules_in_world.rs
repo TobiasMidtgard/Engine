@@ -369,3 +369,39 @@ fn an_open_wound_bleeds_without_flinching_and_clots() {
     // No body part was struck again by the bleeding.
     assert_eq!(app.world.resource::<CombatLog>().total, 1);
 }
+
+#[test]
+fn a_contact_that_says_where_the_edge_went_in_is_judged_there() {
+    use engine_world::MeleeContact;
+    let mut app = app();
+    let (a, b) = pair(&mut app, 1.0, false);
+    // Aimed at the neck, but the edge went into the right thigh.
+    app.world.get_mut::<StrikeTargets>(a).unwrap().zone = Some(BodyZone::Neck);
+    let point = on(&app, b, Vec3::new(0.0, 1.3, 0.0));
+    let entry = on(&app, b, Vec3::new(0.12, 0.62, -0.06));
+    app.world.write_message(MeleeContact {
+        blow: DamageEvent {
+            target: b,
+            amount: 20.0,
+            kind: DamageKind::Slash,
+            point,
+            impulse: Vec3::X * 40.0,
+            source: Some(a),
+        },
+        item: ItemClass::TwoHandedBlade,
+        off_hand: false,
+        entry: Some(entry),
+        edge_dir: Some(Vec3::NEG_X),
+        bone: Some("thigh_r".into()),
+    });
+    app.update();
+    let r = app
+        .world
+        .resource::<CombatLog>()
+        .records
+        .back()
+        .unwrap()
+        .clone();
+    assert_eq!(r.struck, BodyZone::ThighR, "{r:?}");
+    assert!(!r.blocked);
+}

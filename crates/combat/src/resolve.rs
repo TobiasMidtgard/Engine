@@ -172,7 +172,14 @@ pub(crate) enum Judged {
 impl Judge<'_, '_> {
     /// Judge one melee blow in place. `item` is the striking item's class when the blow says
     /// it (a `MeleeContact`), otherwise the attacker's main hand.
-    pub(crate) fn judge(&mut self, blow: &mut DamageEvent, item: Option<ItemClass>) -> Judged {
+    /// `entry` is where the edge went in (world space) and the bone there, when the
+    /// animation module tells (a `MeleeContact`): the struck part is then found from it.
+    pub(crate) fn judge(
+        &mut self,
+        blow: &mut DamageEvent,
+        item: Option<ItemClass>,
+        entry: Option<(DVec3, Option<&str>)>,
+    ) -> Judged {
         if !matches!(
             blow.kind,
             DamageKind::Slash | DamageKind::Pierce | DamageKind::Blunt
@@ -231,15 +238,22 @@ impl Judge<'_, '_> {
         let aimed = aim
             .filter(|a| a.target == Some(blow.target))
             .and_then(|a| a.zone);
-        let blocked = gap > HELD_ITEM_GAP_M * caps.scale;
-        // The animation module swings an aimed blow's line at its part and reports the blade's
-        // point nearest the body's middle, not where the edge went in: an aimed blow struck
-        // its part (skill then decides whether it stays there), an unaimed one the part
-        // nearest its point.
-        let struck = aimed.unwrap_or(nearest);
-        let point = match aimed {
-            Some(z) => caps.center(z).unwrap_or(local),
-            None => local,
+        // Where the edge went in, when told: that part was struck, and the blade is in the
+        // body, not on a guard.
+        let entered = entry.and_then(|(p, bone)| {
+            let at = to_model(tgt, p);
+            caps.zone_at(at)
+                .or_else(|| bone.and_then(BodyZone::of_bone))
+                .map(|z| (z, at))
+        });
+        let blocked = entered.is_none() && gap > HELD_ITEM_GAP_M * caps.scale;
+        // Without it, the blade's point nearest the body's middle is all there is: an aimed
+        // blow struck its part (skill then decides whether it stays there), an unaimed one the
+        // part nearest its point.
+        let (struck, point) = match (entered, aimed) {
+            (Some((z, at)), _) => (z, at),
+            (None, Some(z)) => (z, caps.center(z).unwrap_or(local)),
+            (None, None) => (nearest, local),
         };
         let s = salt(blow.point, blow.amount);
         let rolls = [
@@ -353,7 +367,7 @@ pub(crate) fn judge_blows(mut judge: Judge, mut blows: MessageMutator<DamageEven
         if own.contains(&id.id) {
             continue;
         }
-        if judge.judge(blow, None) != Judged::Untouched {
+        if judge.judge(blow, None, None) != Judged::Untouched {
             judged += 1;
         }
     }
@@ -371,7 +385,8 @@ pub(crate) fn judge_contacts(
     let mut judged = 0u32;
     for c in contacts.read() {
         let mut blow = c.blow.clone();
-        if judge.judge(&mut blow, Some(c.item)) != Judged::Untouched {
+        let entry = c.entry.map(|p| (p, c.bone.as_deref()));
+        if judge.judge(&mut blow, Some(c.item), entry) != Judged::Untouched {
             judged += 1;
         }
         let id = damage.write(blow);
