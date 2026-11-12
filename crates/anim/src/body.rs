@@ -11,6 +11,13 @@
 //! * `dog`: a furred Labrador-type dog built at the requested withers height (0.56 m when
 //!   none is given); its gait picks walk, trot, canter and rotary gallop from the motion.
 //! * `spider`: eight procedural legs.
+//! * `deer` (or `stag`, `doe`, `fawn`), `wolf`, `boar`, `rabbit` (or `hare`): the wild animals
+//!   ([`crate::build::wild`]) at the requested shoulder height (a typical adult when none is
+//!   given: 1.2, 0.8, 0.85 and 0.2 m). A deer taller than the typical adult is a stag with
+//!   antlers; one under 70% of it a spotted fawn. Their gaits pick walk, trot, canter and
+//!   gallop (a rabbit hops and bounds) from the motion; the parameters `graze`, `lie` (or
+//!   `rest`), `alert` and `downed` hold a pose, and the triggers `flinch`, `rear` (deer) and
+//!   `howl` (wolf) play once ([`crate::actions`]).
 //!
 //! Other kinds get no body (one warning per kind), so the requester's stand-in stays.
 //!
@@ -86,6 +93,7 @@ pub enum BodyKind {
     Horse,
     Dog,
     Spider,
+    Wild(crate::build::wild::Wild),
 }
 
 /// How a body's entity has been moving, and which animation parameters this module writes.
@@ -493,13 +501,16 @@ fn build(world: &mut World, entity: Entity, request: BodyRequest) {
         "horse" => BodyKind::Horse,
         "dog" => BodyKind::Dog,
         "spider" => BodyKind::Spider,
+        other if crate::build::wild::Wild::of_kind(other).is_some() => {
+            BodyKind::Wild(crate::build::wild::Wild::of_kind(other).expect("a wild kind"))
+        }
         other => {
             static WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
             let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
             if warned.get_or_insert_default().insert(other.to_string()) {
                 tracing::warn!(
-                    "body request: no {other:?} body yet (human, horse, dog and spider are \
-                     built); the stand-in stays"
+                    "body request: no {other:?} body yet (human, horse, dog, spider, deer, \
+                     wolf, boar and rabbit are built); the stand-in stays"
                 );
             }
             return;
@@ -533,6 +544,14 @@ fn build(world: &mut World, entity: Entity, request: BodyRequest) {
         }
         BodyKind::Spider => {
             give_spider_body(world, entity);
+            None
+        }
+        BodyKind::Wild(wild) => {
+            let scale = request
+                .height
+                .map_or(1.0, |h| crate::build::wild::scale_for_height(wild, h));
+            let look = crate::build::wild::Look::of(wild, &request.kind, scale, request.seed);
+            crate::demo::give_wild_body(world, entity, wild, scale, look);
             None
         }
     };

@@ -38,7 +38,7 @@ use serde_json::{Value, json};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::attach::{BoneAttachment, Hang};
-use crate::build::{car, dog, horse, humanoid, rock, spider};
+use crate::build::{car, dog, horse, humanoid, rock, spider, wild};
 use crate::character::HumanModel;
 use crate::hit::HitReaction;
 use crate::horse_model::HorseModel;
@@ -458,6 +458,13 @@ pub(crate) fn register(app: &mut App) {
             lib.add_clip(clip);
         }
         lib.add_graph(dog::graph());
+        for kind in wild::ALL {
+            let s = lib.add_skeleton(wild::skeleton(kind, 1.0));
+            for clip in wild::clips(kind, &s) {
+                lib.add_clip(clip);
+            }
+            lib.add_graph(wild::graph(kind));
+        }
         let sp = lib.add_skeleton(spider::skeleton());
         for clip in spider::clips(&sp) {
             lib.add_clip(clip);
@@ -1509,6 +1516,49 @@ pub fn give_dog_body(world: &mut World, dog: Entity, scale: f32) {
         MuscleRig::new(dog::muscles()),
         dog::gait(scale),
         SpringChains::new(dog::springs(scale)),
+    ));
+}
+
+/// Give an entity that already has its place a wild animal of `kind` at `scale` (1 = its
+/// typical adult) looking as `look` says: its mesh, coat, gait, muscles, springs and actions.
+pub fn give_wild_body(
+    world: &mut World,
+    e: Entity,
+    kind: wild::Wild,
+    scale: f32,
+    look: wild::Look,
+) {
+    let skeleton = wild::skeleton_name(kind, scale);
+    {
+        let mut lib = world.resource_mut::<AnimationLibrary>();
+        let first = format!("{}_graze", kind.name());
+        if !lib
+            .clips
+            .contains_key(&crate::build::quadruped::sized_name(&first, &skeleton))
+        {
+            let s = if let Some(s) = lib.skeletons.get(&skeleton) {
+                s.clone()
+            } else {
+                lib.add_skeleton(wild::skeleton(kind, scale))
+            };
+            for clip in wild::action_clips(kind, &s, scale) {
+                lib.add_clip(clip);
+            }
+        }
+    }
+    let key = format!("anim/{skeleton}/{}", look.key());
+    let handle = mesh_handle(world, &key, || wild::mesh(kind, scale, look));
+    let graph = kind.graph_name();
+    let anim = animator(world, &skeleton, &graph);
+    let morphs = morphs(world, handle);
+    world.entity_mut(e).insert((
+        AnimatorSettings::new(&skeleton, &graph),
+        anim,
+        SkinnedMeshRenderer::new(handle, wild::material(kind, scale)),
+        morphs,
+        MuscleRig::new(dog::muscles()),
+        wild::gait(kind, scale),
+        SpringChains::new(wild::springs(kind, scale)),
     ));
 }
 

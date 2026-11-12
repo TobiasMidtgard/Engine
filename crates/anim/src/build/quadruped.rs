@@ -105,7 +105,7 @@ fn rest_leg(s: &Skeleton, chain: &[&str]) -> (Vec3, Vec3) {
 
 /// The pose and the release weights at `t` seconds through `keys` (sorted), eased in and out
 /// of each key; lengths in the keys are at scale 1 and multiplied by `scale`.
-fn sample(
+pub(crate) fn sample(
     rig: &Rig,
     s: &Skeleton,
     scale: f32,

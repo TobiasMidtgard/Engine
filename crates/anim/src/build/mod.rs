@@ -16,6 +16,7 @@ pub mod rock;
 pub mod sdf;
 pub mod spider;
 pub mod weapons;
+pub mod wild;
 
 use engine_core::math::{EulerRot, Quat, Vec3};
 

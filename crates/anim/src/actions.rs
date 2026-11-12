@@ -18,6 +18,13 @@
 //!
 //! An idle picker plays one of the animal's idle actions (deterministic by seed) when it has
 //! stood still a while.
+//!
+//! The wild animals ([`crate::build::wild`]: deer, wolf, boar, rabbit) also *hold* actions
+//! while a parameter is up: `downed` (it falls on its side), `lie` or `rest`, `alert` and
+//! `graze`, in that order of precedence. The clip plays to its held pose and stays there; when
+//! the parameter falls it plays on to its end (the animal gets up, lifts its head). A higher
+//! one cuts in at once only for `downed`; the others wait for the one playing to finish. The
+//! triggers `flinch`, `rear` and `howl` cut in at once and, like a fall, play on the move.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +33,7 @@ use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
 
 use crate::build::quadruped::sized_name;
-use crate::build::{dog, horse};
+use crate::build::{dog, horse, wild};
 use crate::xform::rotation_between;
 use crate::{AnimationLibrary, Animator};
 
@@ -43,6 +50,10 @@ const FADE_MAX: f32 = 0.6;
 /// Seconds of fade per body height of pose distance.
 const FADE_PER_HEIGHT: f32 = 3.0;
 const FADE_OUT: f32 = 0.4;
+/// How long an animal must have stood before a held action (other than a fall) starts, s.
+const HOLD_SETTLE: f32 = 0.25;
+/// The longest fade into an action that cuts in (a flinch, a fall), s.
+const FADE_URGENT: f32 = 0.12;
 /// The most each neck bone turns toward a spot's point, degrees.
 const REACH_PER_BONE: f32 = 25.0;
 
@@ -52,6 +63,8 @@ pub enum AnimalKind {
     #[default]
     Horse,
     Dog,
+    /// A deer, wolf, boar or rabbit.
+    Wild(wild::Wild),
 }
 
 /// One action an animal has.
@@ -63,6 +76,23 @@ struct ActionDef {
     chain_from: Option<f32>,
     /// Played by the idle picker.
     idle: bool,
+    /// Seconds into it where it holds while its parameter is up (wild animals' held actions).
+    hold: Option<f32>,
+    /// Plays on while the animal moves (a flinch, a deer rearing as it bolts, a fall).
+    moving_ok: bool,
+}
+
+impl ActionDef {
+    const fn new(name: &'static str, entries: &'static [&'static str], idle: bool) -> Self {
+        Self {
+            name,
+            entries,
+            chain_from: None,
+            idle,
+            hold: None,
+            moving_ok: false,
+        }
+    }
 }
 
 const HORSE_ACTIONS: &[ActionDef] = &[
@@ -71,30 +101,40 @@ const HORSE_ACTIONS: &[ActionDef] = &[
         entries: &["horse_graze"],
         chain_from: Some(4.0),
         idle: true,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "drink",
         entries: &["horse_drink"],
         chain_from: Some(3.8),
         idle: false,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "rear",
         entries: &["horse_rear"],
         chain_from: None,
         idle: false,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "shake",
         entries: &["horse_shake"],
         chain_from: None,
         idle: true,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "paw",
         entries: &["horse_paw"],
         chain_from: None,
         idle: true,
+        hold: None,
+        moving_ok: false,
     },
 ];
 
@@ -104,32 +144,110 @@ const DOG_ACTIONS: &[ActionDef] = &[
         entries: &["dog_sit"],
         chain_from: Some(1.4),
         idle: true,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "lie",
         entries: &["dog_lie", "dog_lie_from_sit"],
         chain_from: None,
         idle: true,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "play_bow",
         entries: &["dog_play_bow"],
         chain_from: None,
         idle: true,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "shake_off",
         entries: &["dog_shake_off"],
         chain_from: None,
         idle: false,
+        hold: None,
+        moving_ok: false,
     },
     ActionDef {
         name: "sniff",
         entries: &["dog_sniff"],
         chain_from: None,
         idle: true,
+        hold: None,
+        moving_ok: false,
     },
 ];
+
+/// A wild animal's held action.
+const fn held(name: &'static str, entries: &'static [&'static str], hold: f32) -> ActionDef {
+    ActionDef {
+        hold: Some(hold),
+        ..ActionDef::new(name, entries, false)
+    }
+}
+
+/// A one-shot that cuts in and plays on the move.
+const fn jolt(name: &'static str, entries: &'static [&'static str]) -> ActionDef {
+    ActionDef {
+        moving_ok: true,
+        ..ActionDef::new(name, entries, false)
+    }
+}
+
+/// A wild animal's fall: held, and played on the move.
+const fn fall(entries: &'static [&'static str]) -> ActionDef {
+    ActionDef {
+        hold: Some(wild::FALL_HOLD),
+        moving_ok: true,
+        ..ActionDef::new("fall", entries, false)
+    }
+}
+
+const DEER_ACTIONS: &[ActionDef] = &[
+    held("graze", &["deer_graze"], wild::GRAZE_HOLD),
+    held("lie", &["deer_lie"], wild::LIE_HOLD),
+    held("alert", &["deer_alert"], wild::ALERT_HOLD),
+    fall(&["deer_fall"]),
+    jolt("flinch", &["deer_flinch"]),
+    jolt("rear", &["deer_rear"]),
+];
+const WOLF_ACTIONS: &[ActionDef] = &[
+    held("graze", &["wolf_graze"], wild::GRAZE_HOLD),
+    held("lie", &["wolf_lie"], wild::LIE_HOLD),
+    held("alert", &["wolf_alert"], wild::ALERT_HOLD),
+    fall(&["wolf_fall"]),
+    jolt("flinch", &["wolf_flinch"]),
+    ActionDef::new("howl", &["wolf_howl"], false),
+];
+const BOAR_ACTIONS: &[ActionDef] = &[
+    held("graze", &["boar_graze"], wild::GRAZE_HOLD),
+    held("lie", &["boar_lie"], wild::LIE_HOLD),
+    held("alert", &["boar_alert"], wild::ALERT_HOLD),
+    fall(&["boar_fall"]),
+    jolt("flinch", &["boar_flinch"]),
+];
+const RABBIT_ACTIONS: &[ActionDef] = &[
+    held("graze", &["rabbit_graze"], wild::GRAZE_HOLD),
+    held("lie", &["rabbit_lie"], wild::LIE_HOLD),
+    held("alert", &["rabbit_alert"], wild::ALERT_HOLD),
+    fall(&["rabbit_fall"]),
+    jolt("flinch", &["rabbit_flinch"]),
+];
+
+/// Held actions by the parameter that holds them, first the one that wins.
+const HELD_BY: [(&str, &str); 5] = [
+    ("downed", "fall"),
+    ("lie", "lie"),
+    ("rest", "lie"),
+    ("alert", "alert"),
+    ("graze", "graze"),
+];
+
+/// Triggers that play a wild animal's action at once.
+const TRIGGERED: [&str; 3] = ["flinch", "rear", "howl"];
 
 impl AnimalKind {
     /// The animal a skeleton is, if it is one with actions.
@@ -139,7 +257,7 @@ impl AnimalKind {
         } else if name == dog::SKELETON || name.starts_with("dog@") {
             Some(AnimalKind::Dog)
         } else {
-            None
+            wild::Wild::of_skeleton(name).map(AnimalKind::Wild)
         }
     }
 
@@ -147,7 +265,15 @@ impl AnimalKind {
         match self {
             AnimalKind::Horse => HORSE_ACTIONS,
             AnimalKind::Dog => DOG_ACTIONS,
+            AnimalKind::Wild(wild::Wild::Deer) => DEER_ACTIONS,
+            AnimalKind::Wild(wild::Wild::Wolf) => WOLF_ACTIONS,
+            AnimalKind::Wild(wild::Wild::Boar) => BOAR_ACTIONS,
+            AnimalKind::Wild(wild::Wild::Rabbit) => RABBIT_ACTIONS,
         }
+    }
+
+    fn def(self, action: &str) -> Option<&'static ActionDef> {
+        self.actions().iter().find(|a| a.name == action)
     }
 
     /// The action names it has.
@@ -158,7 +284,7 @@ impl AnimalKind {
     fn neck(self) -> &'static [&'static str] {
         match self {
             AnimalKind::Horse => &["neck_1", "neck_2", "neck_3", "head"],
-            AnimalKind::Dog => &["neck_1", "neck_2", "head"],
+            AnimalKind::Dog | AnimalKind::Wild(_) => &["neck_1", "neck_2", "head"],
         }
     }
 
@@ -167,6 +293,7 @@ impl AnimalKind {
         match self {
             AnimalKind::Horse => (horse::MUZZLE, 0.0),
             AnimalKind::Dog => (dog::MUZZLE, 0.69),
+            AnimalKind::Wild(w) => wild::muzzle(w),
         }
     }
 }
@@ -215,6 +342,9 @@ pub struct AnimalActions {
     spotted: bool,
     #[serde(skip)]
     spot_action: Option<String>,
+    /// An action to start at once (a trigger, a fall).
+    #[serde(skip)]
+    urgent: Option<String>,
 }
 
 impl Default for AnimalActions {
@@ -238,6 +368,7 @@ impl AnimalActions {
             raised: Vec::new(),
             spotted: false,
             spot_action: None,
+            urgent: None,
         }
     }
 
@@ -382,7 +513,12 @@ pub(crate) fn run_animal_actions(
             actions.playing = None;
             actions.still = 0.0;
         }
-        if actions.playing.is_some() && speed > MOVING_SPEED * size {
+        let moving_ok = actions
+            .playing
+            .as_ref()
+            .and_then(|p| kind.def(&p.action))
+            .is_some_and(|d| d.moving_ok);
+        if actions.playing.is_some() && !moving_ok && speed > MOVING_SPEED * size {
             animator.stop_overlay(0.3);
             actions.playing = None;
             actions.queue.clear();
@@ -400,6 +536,50 @@ pub(crate) fn run_animal_actions(
                 } else if !up && was {
                     actions.raised.retain(|r| *r != key);
                 }
+            }
+        }
+
+        // Held actions: the parameter that wins holds its action at its held pose; the one
+        // under way plays on once its parameter falls (or another wins), and a fall cuts in.
+        if let Some(params) = params {
+            let want = HELD_BY
+                .iter()
+                .find(|(param, action)| params.get(param) > 0.5 && kind.def(action).is_some())
+                .map(|(_, action)| *action);
+            if let Some(p) = &actions.playing
+                && let Some(hold) = kind.def(&p.action).and_then(|d| d.hold)
+            {
+                let keep = want == Some(p.action.as_str());
+                animator.set_overlay_rate(if keep && p.time >= hold { 0.0 } else { 1.0 });
+            }
+            if let Some(want) = want {
+                let playing = actions.playing.as_ref().is_some_and(|p| p.action == want);
+                let asked = actions.queue.iter().any(|q| q == want)
+                    || actions.urgent.as_deref() == Some(want);
+                let def = kind.def(want);
+                if !playing && !asked {
+                    if def.is_some_and(|d| d.moving_ok) {
+                        actions.urgent = Some(want.to_string());
+                    } else if actions.still > HOLD_SETTLE {
+                        actions.queue.insert(0, want.to_string());
+                    }
+                }
+            }
+        }
+
+        // Triggers that cut in (not while it lies fallen).
+        let fallen = actions.playing.as_ref().is_some_and(|p| p.action == "fall")
+            || actions.urgent.as_deref() == Some("fall");
+        let pulled: Vec<String> = animator
+            .triggers
+            .iter()
+            .map(|t| t.0.clone())
+            .filter(|t| TRIGGERED.contains(&t.as_str()) && kind.def(t).is_some())
+            .collect();
+        if !pulled.is_empty() {
+            animator.triggers.retain(|t| !pulled.contains(&t.0));
+            if !fallen {
+                actions.urgent = pulled.last().cloned();
             }
         }
 
@@ -439,10 +619,31 @@ pub(crate) fn run_animal_actions(
                 .filter(|a| a.idle)
                 .map(|a| a.name)
                 .collect();
-            let pick = pool[hash(actions.seed, actions.picks) as usize % pool.len()];
-            actions.picks += 1;
-            actions.still = 0.0;
-            actions.request(pick);
+            if !pool.is_empty() {
+                let pick = pool[hash(actions.seed, actions.picks) as usize % pool.len()];
+                actions.picks += 1;
+                actions.still = 0.0;
+                actions.request(pick);
+            }
+        }
+
+        // What cuts in starts now, from whatever is shown.
+        if let Some(name) = actions.urgent.take()
+            && let Some(def) = kind.def(&name)
+            && let Some((clip, distance)) = choose_entry(def, &animator, &library, &mut cache)
+        {
+            actions.queue.retain(|q| *q != name);
+            actions.reach_to = None;
+            let fade_in = fade_for(distance, height).min(FADE_URGENT);
+            actions.playing = Some(PlayingAction {
+                action: name,
+                clip: clip.name.clone(),
+                time: 0.0,
+                distance,
+                fade_in,
+            });
+            animator.play_over(clip, fade_in, FADE_OUT);
+            continue;
         }
 
         // Start the next action asked for, cutting in at the playing one's chain point.
@@ -534,7 +735,7 @@ pub(crate) fn reach_heads(mut q: Query<(&GlobalTransform, &mut Animator, &Animal
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{dog, horse};
+    use crate::build::{dog, horse, wild};
 
     #[test]
     fn a_far_pose_fades_in_longer_within_bounds() {
@@ -582,6 +783,25 @@ mod tests {
                 for e in def.entries {
                     let want = sized_name(e, &s.name);
                     assert!(names.contains(&want), "{want}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wild_animals_hold_their_poses_clear_of_the_fade_out() {
+        for kind in wild::ALL {
+            for scale in [1.0, 0.5] {
+                let s = wild::skeleton(kind, scale);
+                let clips = wild::action_clips(kind, &s, scale);
+                for def in AnimalKind::Wild(kind).actions() {
+                    for e in def.entries {
+                        let want = sized_name(e, &s.name);
+                        let clip = clips.iter().find(|c| c.name == want).expect(&want);
+                        if let Some(hold) = def.hold {
+                            assert!(hold + FADE_OUT <= clip.duration, "{want} holds in its fade");
+                        }
+                    }
                 }
             }
         }
