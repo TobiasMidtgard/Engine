@@ -532,8 +532,8 @@ fn girth(kind: Wild) -> Girth {
             arm: (0.085, 0.065),
             forearm: (0.05, 0.03),
             front_cannon: (0.022, 0.02),
-            haunch: v(0.085, 0.17, 0.15),
-            thigh: (0.1, 0.07),
+            haunch: v(0.06, 0.15, 0.15),
+            thigh: (0.088, 0.066),
             gaskin: (0.06, 0.028),
             hind_cannon: (0.022, 0.02),
         },
@@ -915,154 +915,191 @@ fn eyes(g: &mut Grow, p: Vec3, r: f32, iris: [f32; 3]) {
 }
 
 fn deer_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
-    // Trunk: a deep, narrow rib cage, the withers, brisket, loin, tucked belly and croup.
+    // Trunk: a deep, narrow rib cage, deepest just behind the elbows, the belly rising to a
+    // tucked-up flank; the withers, a broad brisket ahead of the front legs, and the croup
+    // running level into the hams rather than standing up as a ball. The pale underside only
+    // under the belly, not up the flanks.
     g.el(
         "body",
-        v(0.0, 0.98, -0.22),
-        v(0.19, 0.25, 0.4),
+        v(0.0, 0.96, -0.28),
+        v(0.175, 0.255, 0.37),
         c.side,
-        0.07,
+        0.08,
     )
     .el(
         "body",
-        v(0.0, 1.09, -0.4),
-        v(0.14, 0.13, 0.16),
+        v(0.0, 1.09, -0.42),
+        v(0.12, 0.12, 0.17),
         c.back,
         0.06,
     )
     .el(
         "body",
-        v(0.0, 0.9, -0.55),
-        v(0.12, 0.15, 0.11),
-        c.under,
-        0.05,
+        v(0.0, 0.88, -0.54),
+        v(0.125, 0.17, 0.12),
+        c.side,
+        0.06,
     )
     .el(
         "body",
-        v(0.0, 0.8, -0.25),
-        v(0.13, 0.08, 0.24),
-        c.under,
-        0.06,
-    )
-    .el(
-        "loin",
-        v(0.0, 1.03, 0.12),
-        v(0.16, 0.16, 0.26),
-        c.side,
-        0.07,
-    )
-    .el("loin", v(0.0, 1.1, 0.12), v(0.11, 0.08, 0.24), c.back, 0.05)
-    .el(
-        "loin",
-        v(0.0, 0.88, 0.05),
-        v(0.13, 0.09, 0.2),
+        v(0.0, 0.735, -0.3),
+        v(0.085, 0.045, 0.22),
         c.under,
         0.05,
     )
     .el(
         "loin",
-        v(0.0, 1.03, 0.47),
-        v(0.165, 0.16, 0.17),
+        v(0.0, 0.97, 0.12),
+        v(0.168, 0.165, 0.27),
         c.side,
-        0.06,
+        0.08,
+    )
+    .el("loin", v(0.0, 1.09, 0.15), v(0.1, 0.06, 0.26), c.back, 0.05)
+    .el("loin", v(0.0, 0.83, 0.0), v(0.08, 0.05, 0.2), c.under, 0.05)
+    .el(
+        "loin",
+        v(0.0, 1.0, 0.45),
+        v(0.168, 0.145, 0.2),
+        c.side,
+        0.08,
     )
     // The buff rump patch around the tail.
     .el(
         "loin",
-        v(0.0, 0.99, 0.6),
-        v(0.12, 0.15, 0.07),
+        v(0.0, 0.97, 0.6),
+        v(0.11, 0.15, 0.07),
         c.under,
         0.04,
     );
-    // Neck: long and slender, a paler throat.
-    let n = f.neck;
-    g.cap(
+    // The hams: a deep, flat thigh from the croup down to the buttock and the gaskin, and
+    // the fold of skin from the flank to the stifle, so the hind leg grows out of the body.
+    for side in 0..2 {
+        let hip = name("hind", "upper", side);
+        g.el(
+            &hip,
+            sided(v(0.09, 0.87, 0.47), side),
+            v(0.072, 0.16, 0.15),
+            c.side,
+            0.07,
+        )
+        .el(
+            &hip,
+            sided(v(0.1, 0.83, 0.27), side),
+            v(0.06, 0.075, 0.1),
+            c.side,
+            0.07,
+        );
+    }
+    // Neck: deeper than it is wide, broad where it joins the chest and slimming to the
+    // throat; a stag's thicker, with a dark mane under it.
+    let rut = look.antlers;
+    let along = Quat::from_rotation_x(-0.46);
+    let thick = 1.0 + 0.3 * rut;
+    g.el_rot(
         "neck_1",
-        v(0.0, 1.06, -0.5),
-        n[1],
-        0.13,
-        0.085,
+        v(0.0, 1.08, -0.59),
+        v(0.088 * thick, 0.2, 0.125 * thick),
+        along,
         c.side,
-        0.06,
-    )
-    .el(
-        "neck_1",
-        v(0.0, 1.08, -0.68),
-        v(0.06, 0.1, 0.06),
-        c.under,
-        0.04,
-    )
-    .cap(
-        "neck_2",
-        n[1],
-        n[2] + v(0.0, 0.0, -0.03),
-        0.085,
         0.07,
+    )
+    .el_rot(
+        "neck_2",
+        v(0.0, 1.36, -0.74),
+        v(0.064 * (1.0 + 0.15 * rut), 0.16, 0.082 * (1.0 + 0.15 * rut)),
+        along,
         c.side,
-        0.04,
+        0.05,
     )
     .el(
         "neck_2",
-        v(0.0, 1.36, -0.82),
-        v(0.05, 0.08, 0.04),
+        v(0.0, 1.34, -0.775),
+        v(0.04, 0.08, 0.03),
         c.under,
         0.03,
     );
-    // Head: a long face sloping to a dark, moist muzzle.
+    if rut > 0.0 {
+        let mane = Paint::fur([0.07, 0.04, 0.025], 1.3 + 1.0 * rut);
+        g.el_rot(
+            "neck_1",
+            v(0.0, 1.1, -0.7),
+            v(0.065 * thick, 0.2, 0.06 * thick),
+            along,
+            mane,
+            0.06,
+        )
+        .el_rot(
+            "neck_2",
+            v(0.0, 1.3, -0.79),
+            v(0.05, 0.1, 0.04),
+            along,
+            mane,
+            0.05,
+        );
+    }
+    // Head: a long wedge, broad across the brow and eyes, narrowing to a slim muzzle and a
+    // black nose; a deep jaw under the eyes closing up under the face, with no gap between.
     g.el(
         "head",
-        v(0.0, 1.555, -0.84),
-        v(0.068, 0.065, 0.09),
+        v(0.0, 1.56, -0.845),
+        v(0.07, 0.068, 0.085),
+        c.face,
+        0.03,
+    )
+    .el(
+        "head",
+        v(0.0, 1.535, -0.92),
+        v(0.072, 0.055, 0.06),
         c.face,
         0.03,
     )
     .cap(
         "head",
-        v(0.0, 1.51, -0.9),
-        v(0.0, 1.39, -1.07),
-        0.058,
-        0.038,
+        v(0.0, 1.525, -0.93),
+        v(0.0, 1.405, -1.085),
+        0.055,
+        0.031,
         c.face,
         0.03,
     )
     .el(
         "head",
-        v(0.0, 1.47, -0.86),
-        v(0.06, 0.05, 0.07),
-        c.face,
-        0.02,
-    )
-    .el(
-        "head",
-        v(0.0, 1.37, -1.1),
+        v(0.0, 1.385, -1.1),
         v(0.034, 0.033, 0.04),
         c.muzzle,
         0.015,
     )
     .el(
         "head",
-        v(0.0, 1.373, -1.13),
-        v(0.025, 0.02, 0.016),
+        v(0.0, 1.392, -1.132),
+        v(0.026, 0.021, 0.015),
         BLACK,
         0.008,
     )
+    .el(
+        "jaw",
+        v(0.0, 1.465, -0.885),
+        v(0.056, 0.062, 0.07),
+        c.face,
+        0.03,
+    )
     .cap(
         "jaw",
-        f.jaw,
-        v(0.0, 1.34, -1.06),
-        0.034,
-        0.024,
+        v(0.0, 1.445, -0.925),
+        v(0.0, 1.358, -1.08),
+        0.044,
+        0.027,
         c.face,
-        0.012,
+        0.025,
     )
     .el(
         "jaw",
-        v(0.0, 1.335, -1.07),
-        v(0.026, 0.016, 0.03),
+        v(0.0, 1.348, -1.06),
+        v(0.022, 0.014, 0.026),
         c.under,
-        0.008,
+        0.01,
     );
-    eyes(g, v(0.056, 1.55, -0.93), 0.017, [0.03, 0.018, 0.01]);
+    eyes(g, v(0.064, 1.552, -0.925), 0.018, [0.03, 0.018, 0.01]);
     // Preorbital glands: dark slits ahead of the eyes.
     for side in 0..2 {
         g.cap(
@@ -1115,24 +1152,56 @@ fn deer_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
     if look.antlers > 0.0 {
         antlers(g, f, look.antlers);
     }
-    if look.spots {
-        // A fawn's dapples: rows of white spots along the back and flanks.
-        let spot = Paint::fur([0.74, 0.68, 0.58], 0.6);
-        for row in 0..3 {
-            for k in 0..7 {
-                let z = -0.45 + 0.15 * k as f32 + 0.05 * row as f32;
-                let y = 1.2 - 0.07 * row as f32 - 0.02 * ((k * 3 + row) % 2) as f32;
-                let x = 0.05 + 0.06 * row as f32;
-                let bone = if z > 0.05 { "loin" } else { "body" };
-                for side in 0..2 {
-                    g.el(
-                        bone,
-                        sided(v(x, y, z), side),
-                        Vec3::splat(0.022),
-                        spot,
-                        0.004,
-                    );
+}
+
+/// A fawn's dapples: rows of white spots either side of the spine and down the flanks, set
+/// just under the coat's surface (found by bisection) so they colour it without standing up.
+fn fawn_spots(g: &mut Grow) {
+    let spot = Paint::fur([0.74, 0.68, 0.58], 0.6);
+    let r = 0.02;
+    // (angle up from level, m; first z, spots)
+    for (row, (up, from, n)) in [
+        (1.25f32, -0.42f32, 7),
+        (0.95, -0.38, 7),
+        (0.62, -0.3, 6),
+        (0.3, -0.24, 5),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = |side: usize| sided(v(up.cos(), up.sin(), 0.0), side);
+        for k in 0..n {
+            let z = from + 0.14 * k as f32 + 0.05 * (row % 2) as f32;
+            for side in 0..2 {
+                let at = |t: f32| v(0.0, 0.97, z) + dir(side) * t;
+                if g.b.distance(at(0.0) * g.s) >= 0.0 {
+                    continue;
                 }
+                let (mut lo, mut hi) = (0.0, 0.5);
+                for _ in 0..24 {
+                    let mid = 0.5 * (lo + hi);
+                    if g.b.distance(at(mid) * g.s) < 0.0 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let bone = if z < -0.4 {
+                    name("front", "scapula", side)
+                } else if z > 0.36 {
+                    name("hind", "upper", side)
+                } else if z < 0.0 {
+                    "body".to_string()
+                } else {
+                    "loin".to_string()
+                };
+                g.el(
+                    &bone,
+                    at((lo - r - 0.002).max(0.0)),
+                    Vec3::splat(r),
+                    spot,
+                    0.004,
+                );
             }
         }
     }
@@ -1811,6 +1880,9 @@ pub fn body(kind: Wild, scale: f32, look: Look) -> Body {
     // (Over the shoulders and hams too, so after the legs.)
     if kind == Wild::Boar && look.stripes {
         piglet_stripes(&mut g);
+    }
+    if kind == Wild::Deer && look.spots {
+        fawn_spots(&mut g);
     }
     b
 }
@@ -2911,6 +2983,67 @@ mod tests {
         assert_eq!(
             skeleton_name(Wild::Rabbit, scale_for_height(Wild::Rabbit, 0.1)),
             "rabbit@100mm"
+        );
+    }
+
+    #[test]
+    fn a_deer_has_a_deep_chest_a_tucked_up_flank_and_its_fawn_spots_lie_in_the_coat() {
+        let hind = Look::of(Wild::Deer, "deer", 1.0, 3);
+        let m = mesh(Wild::Deer, 1.0, hind);
+        // The underline of the trunk (between the legs, off the legs themselves) at a z.
+        let under = |z: f32| {
+            m.vertices
+                .iter()
+                .filter(|v| (v.position.z - z).abs() < 0.03 && v.position.x.abs() < 0.04)
+                .fold(f32::MAX, |a, v| a.min(v.position.y))
+        };
+        let (girth, flank) = (under(-0.3), under(0.18));
+        assert!(
+            girth < 0.74 && flank > girth + 0.05,
+            "belly at {girth} behind the elbows, {flank} at the flank"
+        );
+        // The hams no wider than the croup and barrel around them carry.
+        let widest = |z0: f32, z1: f32| {
+            m.vertices
+                .iter()
+                .filter(|v| v.position.z > z0 && v.position.z < z1 && v.position.y > 0.85)
+                .fold(0.0f32, |a, v| a.max(v.position.x.abs()))
+        };
+        let (barrel, hams) = (widest(-0.3, 0.1), widest(0.35, 0.6));
+        assert!(
+            hams < barrel + 0.035,
+            "hams {hams} m out, the barrel {barrel} m"
+        );
+        // A fawn's spots colour the coat without standing up from the back.
+        let scale = 0.5;
+        let fawn = Look::of(Wild::Deer, "deer", scale, 5);
+        assert!(fawn.spots);
+        let top = |look: Look| {
+            let m = mesh(Wild::Deer, scale, look);
+            let pale = m
+                .vertices
+                .iter()
+                .filter(|v| v.position.z.abs() < 0.4 * scale && v.color.x > 0.45)
+                .count();
+            let back = m
+                .vertices
+                .iter()
+                .filter(|v| v.position.z.abs() < 0.4 * scale)
+                .fold(f32::MIN, |a, v| a.max(v.position.y));
+            (pale, back)
+        };
+        let (spotted, back) = top(fawn);
+        let (plain, bare) = top(Look {
+            spots: false,
+            ..fawn
+        });
+        assert!(
+            spotted > plain + 50,
+            "{spotted} pale vertices, {plain} plain"
+        );
+        assert!(
+            back < bare + 0.004 * scale,
+            "the spotted back at {back}, plain {bare}"
         );
     }
 

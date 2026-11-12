@@ -1,11 +1,11 @@
 //! Renders the wild animals (deer, wolf, boar, rabbit) offscreen, asked for as NPC AI asks.
 //!
 //! ```text
-//! cargo run -p engine_anim --example wild_shots --release -- <lineup|close|actions|gaits> [out_dir] [width] [height]
+//! cargo run -p engine_anim --example wild_shots --release -- <lineup|close|actions|gaits> [out_dir] [width] [height] [only]
 //! ```
 //!
 //! * `lineup`: a stag, a hind, a fawn, a wolf, a boar, a piglet and a rabbit side by side.
-//! * `close`: each one close up, three-quarter on.
+//! * `close`: each one close up, three-quarter on (`only`: a comma-separated list, as `stag,hind`).
 //! * `actions`: the held poses and the one-shots (graze, lie, alert, rear, howl, fallen).
 //! * `gaits`: frames of each one walking, trotting and running past.
 //!
@@ -177,6 +177,7 @@ fn main() {
     let out = std::path::PathBuf::from(args.next().unwrap_or_else(|| "wild_shots".into()));
     let width = args.next().and_then(|a| a.parse().ok()).unwrap_or(1280);
     let height = args.next().and_then(|a| a.parse().ok()).unwrap_or(720);
+    let only = args.next();
     std::fs::create_dir_all(&out).expect("output directory");
     let mut s = stage(width, height);
     match mode.as_str() {
@@ -194,6 +195,12 @@ fn main() {
         }
         "close" => {
             for (i, (name, kind, h, seed, back, look)) in CAST.iter().enumerate() {
+                if only
+                    .as_ref()
+                    .is_some_and(|o| !o.split(',').any(|n| n == *name))
+                {
+                    continue;
+                }
                 let at = DVec3::new(30.0 * i as f64, 0.0, 0.0);
                 s.animal(kind, *h, *seed, at, -60.0);
                 s.run(1.2);
