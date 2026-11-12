@@ -5,14 +5,17 @@ pub mod aim;
 pub mod animal_body;
 mod api;
 pub mod art;
+pub mod besiege;
 pub mod brain;
 pub mod combat;
 pub mod demo;
+pub mod difficulty;
 pub mod faction;
 pub mod features;
 pub mod grenade;
 pub mod intent_body;
 pub mod learning;
+pub mod lob;
 pub mod locomotion;
 pub mod minds;
 pub mod nav;
@@ -89,6 +92,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<ReviveClaims>()
             .init_resource::<smoke::SmokeClouds>()
             .init_resource::<grenade::Grenades>()
+            .init_resource::<lob::Lobs>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()
             .init_resource::<seed::SeedsGiven>()
@@ -198,6 +202,7 @@ impl Plugin for NpcPlugin {
                     (
                         locomotion::fallback_move,
                         combat::resolve_attacks,
+                        lob::fly_lobs,
                         combat::apply_damage,
                         features::explosives,
                         grenade::fly_grenades,

@@ -268,6 +268,9 @@ impl Perceivables {
     }
 }
 
+/// How much of its standing height a crouching body is.
+pub const CROUCH_HEIGHT: f32 = 0.62;
+
 /// Body height of an animal or other faction member without a controller (meters). Set by the
 /// wildlife module through this component.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -347,6 +350,12 @@ pub(crate) fn collect_perceivables(
             .or(body.map(|b| b.0))
             .unwrap_or(1.7);
         let loco = loco.copied().unwrap_or_default();
+        // Crouching, it is that much lower: behind waist-high cover, out of sight.
+        let height = if loco.mode == LocomotionMode::Crouch {
+            height * CROUCH_HEIGHT
+        } else {
+            height
+        };
         let i = out.list.len() as u32;
         out.list.push(Perceivable {
             entity: e,

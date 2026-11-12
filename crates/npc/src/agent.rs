@@ -371,10 +371,14 @@ pub enum NpcAction {
     Revive,
     /// Run from what a fear spell made it dread (`minds`), heedless of everything else.
     Flee,
+    /// Get at an enemy gone to ground behind cover, as the difficulty tier allows
+    /// (`besiege`): close in round it, shoot at its edge, or hold a draw on where it will
+    /// show and lob over it.
+    Besiege,
 }
 
 impl NpcAction {
-    pub const ALL: [NpcAction; 14] = [
+    pub const ALL: [NpcAction; 15] = [
         NpcAction::Idle,
         NpcAction::Patrol,
         NpcAction::Investigate,
@@ -389,6 +393,7 @@ impl NpcAction {
         NpcAction::Down,
         NpcAction::Revive,
         NpcAction::Flee,
+        NpcAction::Besiege,
     ];
 
     pub fn name(self) -> &'static str {
@@ -407,6 +412,7 @@ impl NpcAction {
             NpcAction::Down => "down",
             NpcAction::Revive => "revive",
             NpcAction::Flee => "flee",
+            NpcAction::Besiege => "besiege",
         }
     }
 }
@@ -514,6 +520,9 @@ pub struct NpcBrain {
     pub flank_route: Vec<DVec3>,
     pub flank_goal: Option<DVec3>,
     pub in_position: bool,
+    /// Besieging an enemy behind cover (with [`NpcAction::Besiege`]): where it hides, where it
+    /// would show, and what this one does about it (`besiege`).
+    pub siege: Option<crate::besiege::Siege>,
 }
 
 impl NpcBrain {
@@ -640,6 +649,9 @@ pub struct NpcCombat {
     /// It can't stand on a leg (`wounds`): it fights from where it is, on one knee, without
     /// stepping, circling or waiting to counter.
     pub lame: bool,
+    /// The shot it is winding up is lobbed with this velocity (`besiege`, `lob.rs`), not
+    /// shot straight.
+    pub lob: Option<DVec3>,
 }
 
 impl NpcCombat {

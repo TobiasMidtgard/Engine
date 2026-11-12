@@ -399,7 +399,7 @@ pub(crate) fn resolve_attacks(
     mut traces: MessageWriter<ProjectileTrace>,
     (mut noise, mut triggers): (MessageWriter<NoiseEvent>, MessageWriter<AnimationTrigger>),
     mut strikes: Local<Vec<Strike>>,
-    seeds: Query<&Seed>,
+    (seeds, mut lobs, time): (Query<&Seed>, ResMut<crate::lob::Lobs>, Res<Time>),
 ) {
     strikes.clear();
     for (me, t, clock, skills, weapon, mut combat, _, intent) in &mut q {
@@ -444,6 +444,22 @@ pub(crate) fn resolve_attacks(
         };
         combat.ready_at = now + weapon.cooldown as f64;
         tokens.release(me);
+        // Lobbed over cover (`besiege`): it flies its arc in `lob.rs`.
+        if let Some(velocity) = combat.lob.take()
+            && weapon.style == WeaponStyle::Ranged
+        {
+            combat.stats.shots += 1;
+            lobs.flights.push(crate::lob::Lob {
+                from: t.translation + DVec3::Y * 1.45,
+                velocity,
+                loosed: time.elapsed_secs_f64(),
+                flown: 0.0,
+                shooter: me,
+                target,
+                damage: weapon.damage,
+            });
+            continue;
+        }
         let fwd = t.forward();
         strikes.push(Strike {
             attacker: me,
@@ -784,7 +800,7 @@ fn resolve_shot(
 }
 
 /// Closest approach between a ray and a segment: (distance along the ray, gap).
-fn ray_segment(o: DVec3, d: Vec3, a: DVec3, b: DVec3) -> (f32, f32) {
+pub(crate) fn ray_segment(o: DVec3, d: Vec3, a: DVec3, b: DVec3) -> (f32, f32) {
     let d = d.as_dvec3();
     let u = b - a;
     let w = o - a;

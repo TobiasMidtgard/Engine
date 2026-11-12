@@ -26,7 +26,9 @@ use crate::agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
     NpcOrder, NpcRole, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
 };
+use crate::besiege;
 use crate::combat::{Downed, Lie, begin_attack};
+use crate::difficulty::Tactic;
 use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
 use crate::grenade;
@@ -59,6 +61,8 @@ pub(crate) struct BrainWorld<'w, 's> {
     tokens: ResMut<'w, AttackTokens>,
     models: Res<'w, OpponentModels>,
     focus: Res<'w, FocusPoints>,
+    /// The tier the fight is played at (`difficulty`).
+    difficulty: Option<Res<'w, engine_world::CombatDifficulty>>,
     time: Res<'w, Time>,
     config: Option<Res<'w, EngineConfig>>,
     smoke: ResMut<'w, SmokeClouds>,
@@ -462,6 +466,7 @@ pub(crate) fn think_and_act(
                 | NpcAction::Flank
                 | NpcAction::SeekHighGround
                 | NpcAction::Retreat
+                | NpcAction::Besiege
         ) || (brain.action == NpcAction::Engage
             && weapon.style == WeaponStyle::Ranged);
         if positional && now >= brain.next_position && s.picks < PICKS_PER_STEP {
@@ -648,6 +653,48 @@ fn think(
         && lost_secs > 1.5
     {
         add(NpcAction::Search, 0.42 + 0.2 * k.awareness);
+    }
+    // A foe gone to ground behind cover (`besiege`): its tier and skill pick how it gets at
+    // it. A squad's own plan (pin it and go round, cover a mate) comes first.
+    let tier = w.difficulty.as_ref().map_or_else(Default::default, |d| {
+        crate::difficulty::tier_of(d, *faction)
+    });
+    // (Sure of it to begin, and kept at while it remembers it there: unseen, a foe fades from
+    // mind.)
+    let sure = threat.as_ref().is_some_and(|k| {
+        let besieged = brain.siege.is_some_and(|s| s.target == k.entity);
+        k.awareness
+            >= if besieged {
+                besiege::KEEP_AWARENESS
+            } else {
+                0.8
+            }
+    });
+    let besieging = ranged
+        && sure
+        && !frenzied
+        && fear.is_none()
+        && brain.role.is_empty()
+        && threat.as_ref().is_some_and(|k| {
+            let sight = Sight {
+                world: &w.world,
+                physics: physics_backend(&w.backend, &w.physics),
+                ground: &w.ground,
+                obscurance: Some(&w.obscurance),
+            };
+            besiege::update(
+                &mut brain.siege,
+                k,
+                lost_secs,
+                now,
+                (tier, skills, weapon),
+                &sight,
+                me,
+                cover_front,
+            )
+        });
+    if besieging {
+        add(NpcAction::Besiege, besiege::SCORE + 0.1 * skills.aggression);
     }
     // Pinning an enemy in cover or going round it, the squad keeps at it for a while without
     // seeing it.
@@ -1467,7 +1514,12 @@ fn pick_spot(
     let Some(k) = memory.get(target) else {
         return;
     };
-    let target_pos = k.last_position;
+    // Besieging it behind its cover: the spot is weighed against where it would show (or,
+    // closing in, where it hides).
+    let siege = brain
+        .siege
+        .filter(|s| brain.action == NpcAction::Besiege && s.target == target);
+    let target_pos = siege.map_or(k.last_position, |s| s.aim_feet());
     let target_forward = k.history.back().map(|h| h.forward).unwrap_or_else(|| {
         Vec3::new(
             (pos.x - target_pos.x) as f32,
@@ -1482,11 +1534,14 @@ fn pick_spot(
     } else {
         0.0
     };
-    // A rookie with a gun doesn't weigh positions: it rushes straight at the enemy.
-    if brain.action == NpcAction::Engage
+    // A rookie with a gun doesn't weigh positions: it rushes straight at the enemy (closing on
+    // one behind cover too, `besiege`).
+    let closing = siege.is_some_and(|s| s.tactic == Tactic::CloseOnHidden);
+    if (brain.action == NpcAction::Engage || closing)
         && weapon.style == WeaponStyle::Ranged
         && skills.logic < RUSH_LOGIC
     {
+        let target_pos = k.last_position;
         let mut ctx = w.nav.ctx(&w.world, &w.ground, &w.water);
         let back = DVec3::new(pos.x - target_pos.x, 0.0, pos.z - target_pos.z);
         let back = back.normalize_or(DVec3::Z) * RUSH_GAP.min(back.length());
@@ -1500,6 +1555,10 @@ fn pick_spot(
     }
     let going_round = brain.action == NpcAction::Flank && brain.role == "flank";
     let ideal = match brain.action {
+        NpcAction::Besiege if let Some(s) = siege => {
+            let off = DVec2::new(pos.x - target_pos.x, pos.z - target_pos.z).length() as f32;
+            besiege::range_for(s.tactic, off, weapon.ideal_range())
+        }
         NpcAction::Retreat => weapon.ideal_range().max(8.0) * 2.2,
         NpcAction::Flank => weapon.ideal_range().clamp(6.0, 14.0),
         _ => weapon.ideal_range() + back,
@@ -1557,9 +1616,17 @@ fn pick_spot(
         ally_angles,
         front: None,
         ideal_range: ideal,
-        current_destination: brain.destination,
+        // (Not a spot picked for something else.)
+        current_destination: brain.destination.filter(|_| {
+            siege.is_none()
+                || Tactic::ALL
+                    .iter()
+                    .any(|t| t.name() == brain.destination_reason)
+        }),
         logic: skills.logic,
-        weights: if brain.role == "suppress" {
+        weights: if let Some(s) = siege {
+            besiege::weights(s.tactic, skills.logic)
+        } else if brain.role == "suppress" {
             // Pinning: a spot to fire on the enemy's cover from and stay at, not a way round
             // to a shot at the enemy itself (that's the flankers' job).
             let w = PositionWeights::for_action(brain.action, skills.logic);
@@ -1713,6 +1780,7 @@ fn pick_spot(
             NpcAction::Flank => "flank",
             NpcAction::SeekHighGround => "high ground",
             NpcAction::Retreat => "fall back",
+            NpcAction::Besiege => siege.map_or(spot.reason, |s| s.tactic.name()),
             _ => spot.reason,
         };
         brain.in_cover = spot.covered;
@@ -1755,7 +1823,7 @@ fn pick_spot(
 
 /// Which way the cover the enemy at `at` is behind faces (XZ, from it), if it is behind any:
 /// the mean of the ways round it that are blocked within [`COVER_PROBE`] m at chest height.
-fn cover_front(sight: &Sight, at: DVec3, ignore: &[Entity]) -> Option<Vec3> {
+pub(crate) fn cover_front(sight: &Sight, at: DVec3, ignore: &[Entity]) -> Option<Vec3> {
     let chest = at + DVec3::Y * 1.0;
     let mut sum = Vec3::ZERO;
     let mut blocked = 0;
@@ -2036,6 +2104,11 @@ fn drive(
         }
         _ => {}
     }
+    // Holding a draw on where a foe in cover will show (`besiege`): loosed when it shows,
+    // lobbed over when it doesn't, lowered when the arms tire.
+    if brain.action == NpcAction::Besiege && matches!(combat.phase, AttackPhase::Windup { .. }) {
+        hold_draw(me, pos, known, skills, weapon, clock, brain, combat, w);
+    }
     // Mid-attack: commit.
     if let AttackPhase::Windup { aim, heavy, .. } = combat.phase {
         let d = Vec3::new((aim.x - pos.x) as f32, 0.0, (aim.z - pos.z) as f32).normalize_or(fwd);
@@ -2259,6 +2332,103 @@ fn drive(
                 brain.next_think = now;
             }
         }
+        NpcAction::Besiege => match (
+            brain.siege.filter(|s| brain.target == Some(s.target)),
+            known,
+        ) {
+            (Some(mut siege), Some(k)) => {
+                let hold = siege.tactic == Tactic::CoverAndHold;
+                let mut arrived = true;
+                if let Some(dest) = brain.destination {
+                    let urgency = if hold { 1.0 } else { JOG };
+                    arrived = follow(pos, dest, urgency, nav, now, w, s, &mut out);
+                }
+                let there = arrived
+                    || brain
+                        .destination
+                        .is_some_and(|d| DVec2::new(d.x - pos.x, d.z - pos.z).length() < 1.5);
+                // Closing in, the shot is from the spot itself (a step short of it, the
+                // cover's corner may still be in the way).
+                if siege.tactic == Tactic::CloseOnHidden
+                    && arrived
+                    && !k.visible
+                    && let Some(d) = brain.destination
+                {
+                    let to = Vec3::new((d.x - pos.x) as f32, 0.0, (d.z - pos.z) as f32);
+                    if to.length() > 0.15 {
+                        out.direction = to.normalize() * WALK;
+                    }
+                }
+                // Not winding a shot up (that returned above): no draw held.
+                siege.drawn_since = None;
+                if k.visible {
+                    // It shows: a shot at it (a draw held on it was loosed above).
+                    ranged_fire(
+                        me,
+                        pos,
+                        k,
+                        perceived.as_ref(),
+                        skills,
+                        weapon,
+                        clock,
+                        ready,
+                        brain,
+                        combat,
+                        w,
+                        &s.claims,
+                        &mut out,
+                    );
+                } else {
+                    out.look = Some(
+                        Vec3::new(
+                            (siege.watch.x - pos.x) as f32,
+                            0.0,
+                            (siege.watch.z - pos.z) as f32,
+                        )
+                        .normalize_or(fwd),
+                    );
+                    let shoot = match siege.tactic {
+                        Tactic::HarassEdge if now >= siege.next_shot => {
+                            let wait = besiege::HARASS_EVERY * (1.0 + 0.5 * brain.random() as f64);
+                            siege.next_shot = now + wait;
+                            true
+                        }
+                        Tactic::CoverAndHold => {
+                            siege.drawn_since = Some(now);
+                            true
+                        }
+                        _ => false,
+                    };
+                    if ready && there && shoot {
+                        begin_attack(
+                            me,
+                            combat,
+                            weapon,
+                            skills,
+                            clock,
+                            Some(k.entity),
+                            siege.watch,
+                            false,
+                            false,
+                            false,
+                            &mut w.attacks,
+                            &mut w.triggers,
+                        );
+                    } else if !(ready && there) {
+                        // (No shot yet: the edge's timer waits for it.)
+                        if siege.tactic == Tactic::HarassEdge && shoot {
+                            siege.next_shot = now;
+                        }
+                        siege.drawn_since = None;
+                        if there && brain.low_cover && brain.in_cover {
+                            out.crouch = true;
+                        }
+                    }
+                }
+                brain.siege = Some(siege);
+            }
+            _ => brain.next_think = now,
+        },
         NpcAction::Obey => match brain.order {
             Some(NpcOrder::Hold { at }) | Some(NpcOrder::MoveTo { at }) => {
                 let arrived = follow(pos, at, JOG, nav, now, w, s, &mut out);
@@ -2680,12 +2850,7 @@ fn ranged_fire(
         return;
     }
     let aim = if k.visible {
-        let p = perceived
-            .map(|p| (p.position, p.velocity))
-            .unwrap_or((k.last_position, k.last_velocity));
-        // Lead moving targets (smart shooters).
-        let flight = dist / weapon.projectile_speed.max(1.0) + weapon.windup;
-        p.0 + DVec3::Y * 1.15 + (p.1 * flight * skills.logic).as_dvec3()
+        shot_at(me, pos, k, perceived, skills, weapon, w)
     } else if now - k.last_seen < suppress_secs(brain) {
         // Pin it behind its cover.
         k.last_position + DVec3::Y * 1.0
@@ -2728,6 +2893,140 @@ fn ranged_fire(
         &mut w.attacks,
         &mut w.triggers,
     );
+}
+
+/// Where a shot at a foe in sight goes: its chest (led when it moves, by smart shooters; its
+/// middle when it crouches), or its head when that is all that shows over its cover.
+fn shot_at(
+    me: Entity,
+    pos: DVec3,
+    k: &Known,
+    perceived: Option<&Snapshot>,
+    skills: &NpcSkills,
+    weapon: &NpcWeapon,
+    w: &BrainWorld,
+) -> DVec3 {
+    let dist = k.last_position.distance(pos) as f32;
+    let (at, vel) = perceived
+        .map(|p| (p.position, p.velocity))
+        .unwrap_or((k.last_position, k.last_velocity));
+    let flight = dist / weapon.projectile_speed.max(1.0) + weapon.windup;
+    let lead = (vel * flight * skills.logic).as_dvec3();
+    // (Lower on one crouching.)
+    let height = w.seen.get(k.entity).map_or(1.7, |p| p.height as f64);
+    let chest = at + DVec3::Y * (0.68 * height).min(1.15) + lead;
+    let head = at + DVec3::Y * (height * 0.88) + lead;
+    if head.y <= chest.y + 0.1 {
+        return chest;
+    }
+    let sight = Sight {
+        world: &w.world,
+        physics: physics_backend(&w.backend, &w.physics),
+        ground: &w.ground,
+        obscurance: None,
+    };
+    let muzzle = pos + DVec3::Y * 1.45;
+    let ignore = [me, k.entity];
+    if !sight.clear(muzzle, chest, &ignore) && sight.clear(muzzle, head, &ignore) {
+        head
+    } else {
+        chest
+    }
+}
+
+/// A draw held on where a foe behind cover will show (`besiege`, [`Tactic::CoverAndHold`]):
+/// kept at full draw while it stays hidden; loosed [`besiege::LOOSE_SECS`] after it is seen
+/// to show (its reaction time on); lobbed over the cover after [`besiege::LOB_AFTER`] without
+/// a show, by an archer good enough; lowered after [`besiege::HOLD_MAX`].
+#[allow(clippy::too_many_arguments)]
+fn hold_draw(
+    me: Entity,
+    pos: DVec3,
+    known: Option<&Known>,
+    skills: &NpcSkills,
+    weapon: &NpcWeapon,
+    clock: &NpcClock,
+    brain: &mut NpcBrain,
+    combat: &mut NpcCombat,
+    w: &BrainWorld,
+) {
+    let now = clock.now;
+    let Some(mut siege) = brain.siege else {
+        return;
+    };
+    let AttackPhase::Windup {
+        target,
+        mut hit_at,
+        heavy,
+        feint,
+        mut aim,
+    } = combat.phase
+    else {
+        return;
+    };
+    if siege.tactic != Tactic::CoverAndHold || combat.lob.is_some() {
+        return;
+    }
+    let Some(since) = siege.drawn_since else {
+        // A shot it started at the foe in sight: it flies as it was aimed.
+        return;
+    };
+    let k = known.filter(|k| k.entity == siege.target);
+    let shown =
+        k.filter(|k| besiege::shown_for(k, now).is_some_and(|s| s >= skills.reaction_time as f64));
+    if let Some(k) = shown {
+        let perceived = k.perceived(now, skills.reaction_time);
+        aim = shot_at(me, pos, k, perceived, skills, weapon, w);
+        let full = since + crate::combat::ranged_windup(weapon, skills) as f64;
+        hit_at = full.max(now + besiege::LOOSE_SECS);
+        siege.drawn_since = None;
+    } else if now - since > besiege::HOLD_MAX {
+        // Arms tired: it lowers, and draws again in a moment.
+        combat.phase = AttackPhase::Ready;
+        combat.ready_at = now + 0.6;
+        siege.drawn_since = None;
+        brain.siege = Some(siege);
+        return;
+    } else if siege.lobs && now - since > besiege::LOB_AFTER && now >= siege.next_lob {
+        siege.next_lob = now + besiege::LOB_EVERY;
+        // Onto the hiding spot, as near as its skill puts it.
+        let a = brain.random() * TAU;
+        let r = 0.15 + 1.2 * (1.0 - skills.accuracy.clamp(0.0, 1.0)) * brain.random().sqrt();
+        let land = siege.at + DVec3::new((a.cos() * r) as f64, 0.9, (a.sin() * r) as f64);
+        let eye = pos + DVec3::Y * 1.45;
+        let over = siege.top.unwrap_or(siege.at.y + 2.0);
+        let sight = Sight {
+            world: &w.world,
+            physics: physics_backend(&w.backend, &w.physics),
+            ground: &w.ground,
+            obscurance: None,
+        };
+        let ignore = [me, siege.target];
+        if let Some(v) = crate::lob::aim(
+            eye,
+            land,
+            over,
+            weapon.projectile_speed,
+            crate::lob::arc_clear(&sight, &ignore),
+        ) {
+            combat.lob = Some(v);
+            aim = eye + v.normalize() * 20.0;
+            hit_at = now;
+            siege.drawn_since = None;
+        } else {
+            hit_at = hit_at.max(now + besiege::HOLD_SLACK);
+        }
+    } else {
+        hit_at = hit_at.max(now + besiege::HOLD_SLACK);
+    }
+    combat.phase = AttackPhase::Windup {
+        target,
+        hit_at,
+        heavy,
+        feint,
+        aim,
+    };
+    brain.siege = Some(siege);
 }
 
 #[cfg(test)]
