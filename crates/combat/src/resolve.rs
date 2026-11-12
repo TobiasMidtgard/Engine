@@ -85,6 +85,23 @@ impl Dice {
 /// A blade this far (m, for a 1.75 m body) off every part met something held, not the body.
 pub const HELD_ITEM_GAP_M: f32 = 0.12;
 
+/// How far along its motion either side of where it went in an edge's path counts for
+/// reaching an aimed part, m (a body's scale).
+pub const EDGE_PATH_M: f32 = 0.45;
+
+/// An edge that went in this close to the aimed part (m, a body's scale) counts as on it.
+pub const AIM_SLACK_M: f32 = 0.3;
+
+/// Where and how an edge went into a body, as a `MeleeContact` tells it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Entry<'a> {
+    /// World space.
+    pub point: DVec3,
+    /// World direction the edge moved, unit.
+    pub dir: Option<Vec3>,
+    pub bone: Option<&'a str>,
+}
+
 /// The humanoid bone a zone is named after (for `BodyHit::bone`).
 pub fn bone_of(zone: BodyZone) -> &'static str {
     use BodyZone::*;
@@ -177,7 +194,7 @@ impl Judge<'_, '_> {
         &mut self,
         blow: &mut DamageEvent,
         item: ItemClass,
-        entry: Option<(DVec3, Option<&str>)>,
+        entry: Option<Entry<'_>>,
     ) -> Judged {
         if !matches!(
             blow.kind,
@@ -238,11 +255,40 @@ impl Judge<'_, '_> {
             .and_then(|a| a.zone);
         // Where the edge went in, when told: that part was struck, and the blade is in the
         // body, not on a guard.
-        let entered = entry.and_then(|(p, bone)| {
-            let at = to_model(tgt, p);
-            caps.zone_at(at)
-                .or_else(|| bone.and_then(BodyZone::of_bone))
-                .map(|z| (z, at))
+        let entered = entry.and_then(|e| {
+            let at = to_model(tgt, e.point);
+            let zone = caps
+                .zone_at(at)
+                .or_else(|| e.bone.and_then(BodyZone::of_bone))?;
+            // The edge went in at one part, but its path ran on through the aimed one too
+            // (a cut at a raised forearm that also catches the head): the aimed part.
+            let dir = e
+                .dir
+                .map(|d| (tgt.rotation().inverse() * d).normalize_or_zero());
+            // Or it went in close beside the aimed part: until the animation module's strike
+            // IK puts the edge on the aimed point, a swing aimed at a raised forearm lands a
+            // hand's width off it, and the aim decides.
+            let near = |a: BodyZone| {
+                caps.of_zone(a)
+                    .map(|c| (c.distance(at), c))
+                    .min_by(|x, y| x.0.total_cmp(&y.0))
+                    .filter(|(d, _)| *d <= AIM_SLACK_M * caps.scale)
+                    .map(|(_, c)| {
+                        let (q, _) = crate::body::closest_on_segment(c.a, c.b, at);
+                        q + (at - q).clamp_length_max(c.radius)
+                    })
+            };
+            Some(match aimed.filter(|a| *a != zone) {
+                Some(a) => match dir
+                    .filter(|d| *d != Vec3::ZERO)
+                    .and_then(|d| crate::body::path_reaches(&caps, a, at, d, EDGE_PATH_M))
+                    .or_else(|| near(a))
+                {
+                    Some(on) => (a, on),
+                    None => (zone, at),
+                },
+                None => (zone, at),
+            })
         });
         let blocked = entered.is_none() && gap > HELD_ITEM_GAP_M * caps.scale;
         // Without it, the blade's point nearest the body's middle is all there is: an aimed
@@ -359,7 +405,11 @@ pub(crate) fn judge_contacts(
     let mut judged = 0u32;
     for c in contacts.read() {
         let mut blow = c.blow.clone();
-        let entry = c.entry.map(|p| (p, c.bone.as_deref()));
+        let entry = c.entry.map(|point| Entry {
+            point,
+            dir: c.edge_dir,
+            bone: c.bone.as_deref(),
+        });
         if judge.judge(&mut blow, c.item, entry) != Judged::Untouched {
             judged += 1;
         }

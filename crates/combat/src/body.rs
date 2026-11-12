@@ -282,6 +282,28 @@ pub fn closest_on_segment(a: Vec3, b: Vec3, p: Vec3) -> (Vec3, f32) {
     (a + ab * t, t)
 }
 
+/// Whether an edge's path, the line through `at` along unit `dir` out to `reach` m (a body's
+/// scale) either side, passes through `zone`'s capsules: the point on the zone where it does.
+pub fn path_reaches(
+    caps: &BodyCapsules,
+    zone: BodyZone,
+    at: Vec3,
+    dir: Vec3,
+    reach: f32,
+) -> Option<Vec3> {
+    let reach = reach * caps.scale;
+    let o = at - dir * reach;
+    caps.of_zone(zone)
+        .filter_map(|c| {
+            let (t, on_path, on_axis) = ray_segment(o, dir, c.a, c.b);
+            let d = on_path.distance(on_axis);
+            (t >= 0.0 && t <= 2.0 * reach && d <= c.radius)
+                .then(|| (d, on_axis + (on_path - on_axis).clamp_length_max(c.radius)))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, p)| p)
+}
+
 /// Closest approach of a ray (`o`, unit `d`) and a segment: the ray parameter, the point on the
 /// ray and the point on the segment.
 pub fn ray_segment(o: Vec3, d: Vec3, a: Vec3, b: Vec3) -> (f32, Vec3, Vec3) {
@@ -336,6 +358,15 @@ mod tests {
             b.zone_at(Vec3::new(-0.1, 0.25, -0.05)),
             Some(BodyZone::ShinL)
         );
+    }
+
+    #[test]
+    fn an_edge_path_reaches_a_part_it_runs_through() {
+        let caps = BodyCapsules::standing(1.75);
+        let head = caps.center(BodyZone::Head).unwrap();
+        // Moving straight down from the head it reaches the neck, never the shin.
+        assert!(path_reaches(&caps, BodyZone::Neck, head, Vec3::NEG_Y, 0.45).is_some());
+        assert!(path_reaches(&caps, BodyZone::ShinL, head, Vec3::NEG_Y, 0.45).is_none());
     }
 
     #[test]

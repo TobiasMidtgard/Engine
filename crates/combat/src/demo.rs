@@ -14,6 +14,7 @@
 
 use engine_core::prelude::*;
 use engine_world::animation::{BodyRequest, Ragdoll, StrikeTargets};
+use engine_world::character::AppearanceRequest;
 use engine_world::combat::{
     AttackWindow, BodyInjuries, BodyZone, CombatSkills, ItemClass, Knockback, Loadout,
 };
@@ -211,6 +212,14 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                     t,
                     GlobalTransform::from(t),
                     BodyRequest::human(seed),
+                    // Drawn by a character module where there is one: real people, whose
+                    // wounds bleed and whose cut-off parts leave stumps.
+                    AppearanceRequest {
+                        seed,
+                        age: Some([22.0, 40.0]),
+                        headgear: Some("none".into()),
+                        ..Default::default()
+                    },
                     loadout,
                     skills(loadout.main, skill),
                     MoveIntent::default(),
