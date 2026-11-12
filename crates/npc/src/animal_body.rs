@@ -2,9 +2,10 @@
 //! rabbits ask it for a body (a `BodyRequest` of their kind, with their seed and, for the young
 //! and for big males, their shoulder height). The animal brain moves them as before (their
 //! `Transform`, the animation module picks the gait from the speed). It also tells the body
-//! what the animal is doing: `alert` (head up, ears forward), `graze` (head down feeding) and
-//! `lie` (lying down) as `AnimationParams`, and `flinch` (hurt), `rear` (a deer bolting from
-//! something close) and `howl` (a wolf) as triggers.
+//! what the animal is doing: `alert` (head up, ears forward), `graze` (head down feeding),
+//! `lie` (lying down) and `downed` (killed: it falls and stays down) as `AnimationParams`,
+//! and `flinch` (hurt), `rear` (a deer bolting from something close) and `howl` (a wolf) as
+//! triggers.
 //!
 //! While no module answers (no `SkeletonPose` appears), the sculpted stand-in body
 //! (`visuals/animal.rs`) is drawn and posed as before. Once one does, the stand-in and its fur

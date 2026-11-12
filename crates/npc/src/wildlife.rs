@@ -1132,7 +1132,7 @@ pub(crate) fn animal_think(
         mut vitals,
         mut nav,
         bird,
-        anim,
+        mut anim,
     ) in &mut q
     {
         let dt = clock.dt;
@@ -1150,6 +1150,13 @@ pub(crate) fn animal_think(
             .unwrap_or(&[]);
         *intent = MoveIntent::default();
         let was = mind.state;
+        // Killed, the animation module's body falls and stays down (`animal_body.rs`).
+        if let Some(a) = anim.as_mut() {
+            let downed = if was == AnimalState::Dead { 1.0 } else { 0.0 };
+            if a.get("downed") != downed {
+                a.set("downed", downed);
+            }
+        }
 
         // ------------------------------------------------------------ dead: wait, then respawn
         if mind.state == AnimalState::Dead {

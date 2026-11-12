@@ -149,7 +149,7 @@ fn the_body_is_told_when_the_animal_grazes_and_lies_down() {
 }
 
 #[test]
-fn a_hurt_animal_flinches_but_not_from_a_bleed_or_a_killing_blow() {
+fn a_hurt_animal_flinches_and_a_killed_one_is_downed() {
     let mut app = app();
     let deer = animal(&mut app, Species::Deer, 0.0);
     run(&mut app, 0.5);
@@ -185,6 +185,22 @@ fn a_hurt_animal_flinches_but_not_from_a_bleed_or_a_killing_blow() {
         app.world.get::<AnimalMind>(deer).unwrap().state,
         AnimalState::Dead
     );
+    app.update();
+    let down = |app: &App| {
+        app.world
+            .get::<AnimationParams>(deer)
+            .unwrap()
+            .get("downed")
+    };
+    assert_eq!(down(&app), 1.0, "its body is told it is down");
+    // Back from the dead (respawned): up again.
+    app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.5;
+    run(&mut app, 1.0);
+    assert_ne!(
+        app.world.get::<AnimalMind>(deer).unwrap().state,
+        AnimalState::Dead
+    );
+    assert_eq!(down(&app), 0.0);
 }
 
 #[test]
