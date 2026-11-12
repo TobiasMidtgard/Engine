@@ -9,7 +9,7 @@ use engine_render::Camera;
 use engine_world::WorldPlugin;
 use engine_world::animation::StrikeTargets;
 use engine_world::combat::{BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass, Loadout};
-use engine_world::{DamageEvent, DamageKind, Interactor};
+use engine_world::{DamageEvent, DamageKind, Interactor, MeleeContact};
 
 fn app() -> App {
     let mut app = App::new();
@@ -64,16 +64,40 @@ fn on(app: &App, b: Entity, local: Vec3) -> DVec3 {
     gt.translation() + (gt.rotation() * local).as_dvec3()
 }
 
+/// A blow as the animation module sends it to the judge: the blade's point, no entry.
+fn contact(
+    source: Entity,
+    target: Entity,
+    item: ItemClass,
+    point: DVec3,
+    amount: f32,
+    kind: DamageKind,
+) -> MeleeContact {
+    MeleeContact {
+        blow: DamageEvent {
+            target,
+            amount,
+            kind,
+            point,
+            impulse: Vec3::X * 40.0,
+            source: Some(source),
+        },
+        item,
+        off_hand: false,
+        entry: None,
+        edge_dir: None,
+        bone: None,
+    }
+}
+
 fn blow(app: &mut App, a: Entity, b: Entity, local: Vec3, amount: f32, kind: DamageKind) {
     let point = on(app, b, local);
-    app.world.write_message(DamageEvent {
-        target: b,
-        amount,
-        kind,
-        point,
-        impulse: Vec3::X * 40.0,
-        source: Some(a),
-    });
+    let item = app
+        .world
+        .get::<Loadout>(a)
+        .map_or(ItemClass::None, |l| l.main);
+    app.world
+        .write_message(contact(a, b, item, point, amount, kind));
     app.update();
 }
 
@@ -166,14 +190,15 @@ fn cuts_behind_the_knees_take_the_legs_and_hard_cuts_take_the_head() {
         .get(BodyZone::KneeL);
     assert!(knee.wound >= engine_combat::rules::LEG_GIVES_OUT);
     // A master's heavy two-handed cut through the neck kills.
-    let mut hard = DamageEvent {
-        target: b,
-        amount: 32.0,
-        kind: DamageKind::Slash,
-        point: on(&app, b, Vec3::new(0.0, 1.52, 0.05)),
-        impulse: Vec3::X * 90.0,
-        source: Some(a),
-    };
+    let mut hard = contact(
+        a,
+        b,
+        ItemClass::TwoHandedBlade,
+        on(&app, b, Vec3::new(0.0, 1.52, 0.05)),
+        32.0,
+        DamageKind::Slash,
+    );
+    hard.blow.impulse = Vec3::X * 90.0;
     app.world.write_message(hard.clone());
     app.update();
     let neck = *app
@@ -186,9 +211,9 @@ fn cuts_behind_the_knees_take_the_legs_and_hard_cuts_take_the_head() {
     // With gore limited to limbs, heads stay on.
     let (a2, b2) = pair(&mut app, 1.0, true);
     app.world.resource_mut::<CombatSettings>().gore = engine_combat::Gore::Limbs;
-    hard.target = b2;
-    hard.source = Some(a2);
-    hard.point = on(&app, b2, Vec3::new(0.0, 1.52, 0.05));
+    hard.blow.target = b2;
+    hard.blow.source = Some(a2);
+    hard.blow.point = on(&app, b2, Vec3::new(0.0, 1.52, 0.05));
     app.world.write_message(hard);
     app.update();
     assert!(
@@ -237,14 +262,14 @@ fn blows_without_an_armed_attacker_or_on_things_are_left_alone() {
         impulse: Vec3::ZERO,
         source: None,
     });
-    app.world.write_message(DamageEvent {
-        target: rock,
-        amount: 15.0,
-        kind: DamageKind::Slash,
-        point: DVec3::ZERO,
-        impulse: Vec3::ZERO,
-        source: Some(b),
-    });
+    app.world.write_message(contact(
+        b,
+        rock,
+        ItemClass::OneHandedBlade,
+        DVec3::ZERO,
+        15.0,
+        DamageKind::Slash,
+    ));
     app.update();
     assert!(hits(&app).is_empty());
     assert_eq!(judged(&app), vec![15.0, 15.0]);
@@ -299,7 +324,7 @@ fn the_player_aims_where_the_camera_looks() {
 
 #[test]
 fn a_melee_contact_becomes_one_judged_damage_event() {
-    use engine_world::{MeleeContact, MeleeJudge};
+    use engine_world::MeleeJudge;
     let mut app = app();
     assert_eq!(
         app.world.resource::<MeleeJudge>().judged_by,
@@ -372,7 +397,6 @@ fn an_open_wound_bleeds_without_flinching_and_clots() {
 
 #[test]
 fn a_contact_that_says_where_the_edge_went_in_is_judged_there() {
-    use engine_world::MeleeContact;
     let mut app = app();
     let (a, b) = pair(&mut app, 1.0, false);
     // Aimed at the neck, but the edge went into the right thigh.

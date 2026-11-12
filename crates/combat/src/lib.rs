@@ -9,12 +9,13 @@
 //!   [`StrikeTargets`](engine_world::animation::StrikeTargets) `zone` and `point` come from the
 //!   camera ray against the target's zone capsules ([`body`]), near misses snapping to the
 //!   nearest part, the pick held a moment so it doesn't flicker between thigh and knee.
-//! * **Rules on every blow** ([`resolve`]): each melee `DamageEvent` (Slash, Pierce, Blunt from
-//!   a body with a [`Loadout`](engine_world::combat::Loadout)) is judged on the zone it struck
+//! * **Rules on every blow** ([`resolve`]): each `MeleeContact` (Slash, Pierce, Blunt from an
+//!   item or from a body with a [`Loadout`](engine_world::combat::Loadout)) is judged on the zone it struck
 //!   ([`rules`]): the attacker's weapon skill decides whether an aimed blow lands on its part
 //!   and how clean the edge is, the defender's skill how often it covers its vital parts (head
 //!   and neck most), the zone, the side it came from and the armour how much it hurts. The
-//!   judged amount replaces the event's own, so every module that applies health agrees.
+//!   judged amount is the one `DamageEvent` sent for it, so every module that applies health
+//!   agrees.
 //! * **Wounds stay** ([`BodyInjuries`](engine_world::combat::BodyInjuries)): wounds build up
 //!   per part (keep cutting the same knee and it gives out), edged blows bleed, blunt ones lock
 //!   knees and elbows; a cut from behind at the knee is a hamstring. A clean, strong enough cut
@@ -29,8 +30,7 @@
 //!   flinch, no alarm) and clot slowly; a cut-off limb bleeds hardest and clots slowest.
 //! * **Judged before anyone reads it**: the plugin is the world's melee judge
 //!   (`engine_world::judges_melee`), so the animation module sends its blows as `MeleeContact`
-//!   and every reader of `DamageEvent` sees only the judged amount. Blows still sent straight
-//!   as `DamageEvent` are judged in place.
+//!   and every reader of `DamageEvent` sees only the judged amount.
 //! * Every judged blow goes out as a [`BodyHit`](engine_world::combat::BodyHit) and into the
 //!   [`CombatLog`] (`combat.log`).
 //! * **Pictures** ([`hint`]): a thin outline on the part a look-aimed strike would hit, and
@@ -109,7 +109,6 @@ impl Plugin for CombatPlugin {
         app.world.init_resource::<CombatSettings>();
         app.world.init_resource::<CombatLog>();
         app.world.init_resource::<resolve::Dice>();
-        app.world.init_resource::<resolve::OwnDamage>();
         // Animation sends its blows to us as MeleeContact, and we write their damage.
         engine_world::judges_melee(app, "engine_combat");
         app.add_message::<engine_world::DamageEvent>()
@@ -133,7 +132,6 @@ impl Plugin for CombatPlugin {
             (
                 look::look_aim,
                 resolve::judge_contacts,
-                resolve::judge_blows,
                 bleed::bleed,
                 resolve::disarm,
                 hint::draw_hint,

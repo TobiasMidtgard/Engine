@@ -349,17 +349,21 @@ pub(crate) fn carry(
     let dt = time.delta_secs();
     let now = time.elapsed_secs_f64();
     for (mut y, mut t, window, push, mut hurt, mut ragdoll, mut loadout) in &mut q {
-        // Down: the head off, or a leg given out (the yard plays what a game would do
-        // with those wounds: lay the body out, and stand it up again for the next round).
+        // Out of the round: the head off (the body is laid out) or a leg given out (the
+        // animation module drops it onto that knee). The yard stands it up again for the next
+        // round after a while.
         let legs = [BodyZone::KneeL, BodyZone::KneeR]
             .iter()
             .any(|k| hurt.get(*k).wound >= crate::rules::LEG_GIVES_OUT);
-        let headless = hurt.get(BodyZone::Neck).severed || legs;
-        match (headless, y.down_since) {
+        let headless = hurt.get(BodyZone::Neck).severed;
+        match (headless || legs, y.down_since) {
             (true, None) => {
                 y.down_since = Some(now);
-                ragdoll.weight = 1.0;
+                if headless {
+                    ragdoll.weight = 1.0;
+                }
             }
+            (true, Some(_)) if headless && ragdoll.weight < 1.0 => ragdoll.weight = 1.0,
             (_, Some(since)) if now - since > 4.0 => {
                 y.down_since = None;
                 ragdoll.weight = 0.0;
@@ -371,7 +375,7 @@ pub(crate) fn carry(
             }
             _ => {}
         }
-        if ragdoll.weight > 0.5 {
+        if ragdoll.weight > 0.5 || y.down_since.is_some() {
             continue;
         }
         let mut step = window.map_or(Vec3::ZERO, |w| w.warp_delta);

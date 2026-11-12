@@ -1,5 +1,6 @@
-//! Judging blows: every melee `DamageEvent` from an armed body is found on the struck body's
-//! parts, judged by [`rules::judge`], its amount replaced by the verdict's, a [`BodyHit`] sent
+//! Judging blows: every `MeleeContact` is found on the struck body's parts (where its edge
+//! went in, when told), judged by [`rules::judge`] and sent on as one `DamageEvent` with the
+//! verdict's amount, a [`BodyHit`] sent
 //! and the wound kept in [`BodyInjuries`]. Then [`disarm`] empties a ruined weapon hand.
 
 use std::collections::{HashMap, VecDeque};
@@ -153,7 +154,6 @@ pub(crate) struct Judge<'w, 's> {
     bodies: Query<'w, 's, BodyItem<'static>>,
     injuries: Query<'w, 's, &'static mut BodyInjuries>,
     fresh: Local<'s, HashMap<Entity, BodyInjuries>>,
-    own: ResMut<'w, OwnDamage>,
     commands: Commands<'w, 's>,
     metrics: Res<'w, Metrics>,
 }
@@ -170,14 +170,13 @@ pub(crate) enum Judged {
 }
 
 impl Judge<'_, '_> {
-    /// Judge one melee blow in place. `item` is the striking item's class when the blow says
-    /// it (a `MeleeContact`), otherwise the attacker's main hand.
+    /// Judge one melee blow in place; `item` is the striking item's class.
     /// `entry` is where the edge went in (world space) and the bone there, when the
     /// animation module tells (a `MeleeContact`): the struck part is then found from it.
     pub(crate) fn judge(
         &mut self,
         blow: &mut DamageEvent,
-        item: Option<ItemClass>,
+        item: ItemClass,
         entry: Option<(DVec3, Option<&str>)>,
     ) -> Judged {
         if !matches!(
@@ -194,11 +193,10 @@ impl Judge<'_, '_> {
             return Judged::Untouched;
         };
         // Armed bodies (and their fists once disarmed), or any blow that names its weapon.
-        let class = match (item, aload) {
-            (Some(c), _) if c != ItemClass::None || aload.is_some() => c,
-            (None, Some(l)) => l.main,
-            _ => return Judged::Untouched,
-        };
+        if item == ItemClass::None && aload.is_none() {
+            return Judged::Untouched;
+        }
+        let class = item;
         let Ok((tgt, pose, tload, tskills, _, twindow, armor, ragdoll, tstatus)) =
             self.bodies.get(blow.target)
         else {
@@ -350,30 +348,6 @@ impl Judge<'_, '_> {
     }
 }
 
-/// The `DamageEvent`s [`judge_contacts`] wrote this frame, already judged: the in-place path
-/// must not judge them again.
-#[derive(Resource, Debug, Default)]
-pub(crate) struct OwnDamage {
-    ids: Vec<usize>,
-}
-
-/// Judge this frame's melee `DamageEvent`s in place (Update, after the animation module has
-/// landed them). The path for blows sent straight as damage, while the animation module
-/// still does that; [`judge_contacts`] is the one for `MeleeContact`s.
-pub(crate) fn judge_blows(mut judge: Judge, mut blows: MessageMutator<DamageEvent>) {
-    let mut judged = 0u32;
-    let own = std::mem::take(&mut judge.own.ids);
-    for (blow, id) in blows.read_with_id() {
-        if own.contains(&id.id) {
-            continue;
-        }
-        if judge.judge(blow, None, None) != Judged::Untouched {
-            judged += 1;
-        }
-    }
-    judge.finish(judged);
-}
-
 /// Turn this frame's melee contacts into damage: each is judged and goes out as exactly one
 /// `DamageEvent` (the judged amount; a blade caught on a guard keeps the swing's own, a
 /// contact the rules don't judge goes out as it came).
@@ -386,11 +360,10 @@ pub(crate) fn judge_contacts(
     for c in contacts.read() {
         let mut blow = c.blow.clone();
         let entry = c.entry.map(|p| (p, c.bone.as_deref()));
-        if judge.judge(&mut blow, Some(c.item), entry) != Judged::Untouched {
+        if judge.judge(&mut blow, c.item, entry) != Judged::Untouched {
             judged += 1;
         }
-        let id = damage.write(blow);
-        judge.own.ids.push(id.id);
+        damage.write(blow);
     }
     judge.finish(judged);
 }
