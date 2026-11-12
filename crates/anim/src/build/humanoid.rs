@@ -3427,6 +3427,18 @@ pub const LEG_OUT: [&str; 2] = ["leg_out_l", "leg_out_r"];
 /// Both arms hanging dead from the shoulders, for a ruined arm ([`crate::wounds`] takes one
 /// side from it).
 pub const ARMS_LIMP: &str = "arms_limp";
+/// Moving on with a leg out: hauling the knee along behind the good foot, one hitch a
+/// [`LEG_DRAG_STRIDE`] (left knee down, right knee down).
+pub const LEG_DRAG: [&str; 2] = ["leg_drag_l", "leg_drag_r"];
+/// How far the body goes in one hitch of [`LEG_DRAG`], m.
+pub const LEG_DRAG_STRIDE: f32 = 0.35;
+/// Both legs out: upright on both knees.
+pub const KNEES_DOWN: &str = "knees_down";
+/// Both legs out and moving: walking on the knees, one knee a step, a pair of steps every
+/// [`KNEE_WALK_STRIDE`].
+pub const KNEE_WALK: &str = "knee_walk";
+/// How far the body goes in one cycle (two steps) of [`KNEE_WALK`], m.
+pub const KNEE_WALK_STRIDE: f32 = 0.4;
 
 fn leg_out(s: &Skeleton, side: usize) -> AnimationClip {
     let other = 1 - side;
@@ -3462,6 +3474,149 @@ fn leg_out(s: &Skeleton, side: usize) -> AnimationClip {
     })
     .with_curve("effort", 2, |_| 0.5)
     .with_curve("floor", 2, |_| 1.0)
+}
+
+/// [`leg_out`] on the move: the good foot plants ahead and slides back under the body as it
+/// goes, the knee on the floor stays behind, then the body pushes up off the good foot and
+/// hauls the knee in after it while that foot steps on.
+fn leg_drag(s: &Skeleton, side: usize) -> AnimationClip {
+    let other = 1 - side;
+    let x = [-0.12, 0.12];
+    let stride = LEG_DRAG_STRIDE;
+    let mut leg = [[0.0; 4]; 2];
+    leg[side] = [-6.0, 4.0, 98.0, -40.0];
+    leg[other] = [88.0, 6.0, 88.0, 2.0];
+    let mut knee = [Vec3::NEG_Z; 2];
+    knee[side] = Vec3::new(0.0, -1.0, -0.4);
+    // (phase, hips height and lean ahead, pitch, kneeling ankle back and up, good foot
+    // back and up)
+    let key = |at: f32, hips: (f32, f32), pitch: f32, ankle: (f32, f32), foot: (f32, f32)| {
+        let mut plant = [None; 4];
+        plant[2 + side] = Some(Vec3::new(x[side], 0.13 + ankle.1, 0.44 + ankle.0));
+        plant[2 + other] = Some(Vec3::new(x[other], 0.08 + foot.1, -0.4 + foot.0));
+        Key {
+            at,
+            hips: Vec3::new(0.0, 0.58 + hips.0, -hips.1),
+            pitch,
+            yaw: 0.0,
+            roll: [3.0, -3.0][side],
+            spine: [-6.0, -3.0, 2.0, -2.0],
+            arm: [Arm::HANG; 2],
+            leg,
+            plant,
+            knee,
+            effort: 0.8,
+        }
+    };
+    let keys = [
+        key(0.0, (0.0, 0.0), -8.0, (0.0, 0.0), (0.0, 0.0)),
+        // Weight onto the good foot as the body goes on past the knee.
+        key(
+            0.3,
+            (-0.02, 0.04),
+            -13.0,
+            (stride * 0.3, 0.0),
+            (stride * 0.3, 0.0),
+        ),
+        key(
+            0.5,
+            (0.01, 0.05),
+            -15.0,
+            (stride * 0.5, 0.0),
+            (stride * 0.5, 0.0),
+        ),
+        // Up off the foot, the knee hauled in off the floor.
+        key(
+            0.7,
+            (0.05, 0.02),
+            -11.0,
+            (stride * 0.25, 0.05),
+            (stride * 0.6, 0.0),
+        ),
+        // The good foot steps on.
+        key(
+            0.85,
+            (0.02, 0.0),
+            -9.0,
+            (stride * 0.05, 0.01),
+            (stride * 0.3, 0.12),
+        ),
+        key(1.0, (0.0, 0.0), -8.0, (0.0, 0.0), (0.0, 0.0)),
+    ];
+    let secs = 1.2;
+    let samples = (secs * 30.0) as usize + 1;
+    AnimationClip::from_fn(LEG_DRAG[side], secs, samples, true, |ph| {
+        Key::sample(s, &keys, ph).1
+    })
+    .with_curve("effort", 2, |_| 0.8)
+    .with_curve("floor", 2, |_| 1.0)
+}
+
+/// Both knees on the floor under the hips, the shins flat behind; with `walk`, a step of
+/// each knee in turn, the hips rocking over the knee that holds.
+fn knees_down(s: &Skeleton, walk: bool) -> AnimationClip {
+    let x = [-0.12, 0.12];
+    let leg = [[-6.0, 4.0, 98.0, -40.0]; 2];
+    let knee = [Vec3::new(0.0, -1.0, -0.4); 2];
+    let step = KNEE_WALK_STRIDE * 0.5;
+    // Where an ankle is at phase `ph` of the cycle, its step starting at `start`: held on the
+    // floor as the body goes on over it, then swung on, a little off the floor.
+    let ankle = |side: usize, ph: f32, start: f32| {
+        let at = (ph - start).rem_euclid(1.0);
+        let (back, up) = if !walk {
+            (0.0, 0.0)
+        } else if at < 0.5 {
+            // Held: the body moves on past it.
+            (step * (at / 0.5) - step * 0.5, 0.0)
+        } else {
+            // Swung on: back to the front of the step, lifted in the middle.
+            let u = (at - 0.5) / 0.5;
+            (
+                step * 0.5 - step * u,
+                0.05 * (u * std::f32::consts::PI).sin(),
+            )
+        };
+        Vec3::new(x[side], 0.13 + up, 0.44 + back)
+    };
+    let key = |at: f32| {
+        let mut plant = [None; 4];
+        plant[2] = Some(ankle(0, at, 0.5));
+        plant[3] = Some(ankle(1, at, 0.0));
+        // Over the knee that holds (the right one first half), down a little between steps.
+        let sway = if walk {
+            (at * std::f32::consts::TAU).sin()
+        } else {
+            0.0
+        };
+        let bob = if walk {
+            0.012 * (at * 2.0 * std::f32::consts::TAU).cos()
+        } else {
+            0.0
+        };
+        Key {
+            at,
+            hips: Vec3::new(0.025 * sway, 0.6 + bob, 0.0),
+            pitch: if walk { -10.0 } else { -4.0 },
+            yaw: 0.0,
+            roll: -4.0 * sway,
+            spine: [-4.0, -2.0, 2.0, -2.0],
+            arm: [Arm::HANG; 2],
+            leg,
+            plant,
+            knee,
+            effort: if walk { 0.7 } else { 0.4 },
+        }
+    };
+    let keys: Vec<Key> = (0..=8).map(|k| key(k as f32 / 8.0)).collect();
+    let (name, secs) = if walk {
+        (KNEE_WALK, 1.4)
+    } else {
+        (KNEES_DOWN, 2.0)
+    };
+    let samples = (secs * 30.0) as usize + 1;
+    AnimationClip::from_fn(name, secs, samples, true, |ph| Key::sample(s, &keys, ph).1)
+        .with_curve("effort", 2, |_| 0.6)
+        .with_curve("floor", 2, |_| 1.0)
 }
 
 fn arms_limp(s: &Skeleton) -> AnimationClip {
@@ -3963,6 +4118,10 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         leg_out(s, 0),
         leg_out(s, 1),
         arms_limp(s),
+        leg_drag(s, 0),
+        leg_drag(s, 1),
+        knees_down(s, false),
+        knees_down(s, true),
         evasion(s, Evasion::SlipLeft),
         evasion(s, Evasion::SlipRight),
         evasion(s, Evasion::Roll),

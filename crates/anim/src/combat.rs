@@ -1267,6 +1267,9 @@ pub struct Attacker {
     /// A blade being steered through that point this frame (see [`aim_strikes`]).
     #[serde(skip)]
     pub(crate) blade_aim: Option<BladeAim>,
+    /// The zone a blade's blow that is not an aimed line (a heavy, a lunge) is steered at.
+    #[serde(skip)]
+    pub steered: Option<BodyZone>,
 }
 
 /// A blade steered through an aimed point: the hand holding it, the blade in that hand's
@@ -1316,6 +1319,7 @@ impl Default for Attacker {
             aimed: None,
             aimed_point: None,
             blade_aim: None,
+            steered: None,
         }
     }
 }
@@ -2224,8 +2228,22 @@ pub(crate) fn run_attacks(
             attacker.committed = None;
             attacker.swept = None;
             attacker.struck = attacker.target;
+            // A blade's other blows (a heavy overhead, a lunge) keep their own line, but are
+            // steered toward the aimed part and go in there where they cross it.
+            let bladed = m.windows.iter().any(|w| {
+                matches!(
+                    w.kind,
+                    WindowKind::Hit {
+                        striker: Some(_),
+                        ..
+                    }
+                )
+            });
             attacker.aimed = m.line.and(attacker.zone);
-            attacker.aimed_point = attacker.aimed.and(attacker.point);
+            attacker.steered = (bladed && m.line.is_none())
+                .then_some(attacker.zone)
+                .flatten();
+            attacker.aimed_point = attacker.aimed.or(attacker.steered).and(attacker.point);
             if let Some(line) = m.line {
                 attacker.recent.push(line);
                 let extra = attacker.recent.len().saturating_sub(RECENT_LINES);
@@ -2323,7 +2341,12 @@ pub(crate) fn run_attacks(
             // An aimed blade is steered through the point the rules picked (or the aimed
             // part's middle) over the stroke: in over the last of the wind-up, held while it
             // can land, out after.
-            if let (Some(st), Some(_), None) = (striker, attacker.aimed, &blocked_at) {
+            let steer_to = match (attacker.aimed, attacker.steered) {
+                (Some(_), _) => Some(mid),
+                (None, Some(zone)) => Some(tg.aim_at(zone, attacker.aimed_point)),
+                _ => None,
+            };
+            if let (Some(st), Some(point), None) = (striker, steer_to, &blocked_at) {
                 let weight = if t < first_hit {
                     smooth(1.0 - (first_hit - t) / BLADE_AIM_LEAD)
                 } else if t <= last_hit {
@@ -2334,7 +2357,7 @@ pub(crate) fn run_attacks(
                 attacker.blade_aim = (weight > 0.0).then(|| BladeAim {
                     bone: bone.clone(),
                     striker: *st,
-                    point: mid,
+                    point,
                     weight,
                 });
             }
@@ -2342,6 +2365,7 @@ pub(crate) fn run_attacks(
         let mut sweeping = false;
         let aimed = attacker.aimed;
         let aimed_point = attacker.aimed_point;
+        let steered = attacker.steered;
         for (k, w) in m.windows.iter().enumerate() {
             // A hit window a long frame stepped right over still lands (the fist is still
             // close, its aim fading out); the others act only while they are open.
@@ -2452,7 +2476,11 @@ pub(crate) fn run_attacks(
                             // on the blade beside what it was aimed at.
                             let mut edge = None;
                             if blocked_at.is_none() {
-                                let (at, zone, dir) = entry(&tg.capsules, tg.knees, aim, was, now);
+                                // A steered blow goes in at the part it was steered at
+                                // where it crosses it.
+                                let toward = steered.map_or(aim, |z| tg.aim_at(z, aimed_point));
+                                let (at, zone, dir) =
+                                    entry(&tg.capsules, tg.knees, toward, was, now);
                                 point = at;
                                 // Landing on the window's first frame the blade has no motion
                                 // yet: a stab goes in along the blade, a cut at them.

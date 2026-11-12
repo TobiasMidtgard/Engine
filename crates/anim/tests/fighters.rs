@@ -747,7 +747,29 @@ fn record_contacts(
 
 /// Press light strikes at `zone` until `n` have been thrown; the contacts sent.
 fn aimed_presses(zone: BodyZone, loadout: Loadout, n: usize) -> Vec<engine_world::MeleeContact> {
+    aimed_presses_at(zone, loadout, sword_and_shield(), n)
+}
+
+/// [`aimed_presses`] at a foe holding `foe`.
+fn aimed_presses_at(
+    zone: BodyZone,
+    loadout: Loadout,
+    foe: Loadout,
+    n: usize,
+) -> Vec<engine_world::MeleeContact> {
+    aimed_presses_with(zone, loadout, foe, n, false)
+}
+
+/// [`aimed_presses_at`], pressing heavy strikes when `heavy`.
+fn aimed_presses_with(
+    zone: BodyZone,
+    loadout: Loadout,
+    foe: Loadout,
+    n: usize,
+    heavy: bool,
+) -> Vec<engine_world::MeleeContact> {
     let (mut app, a, b) = duel();
+    app.world.entity_mut(b).insert(foe);
     app.world.insert_resource(engine_world::MeleeJudge {
         judged_by: "test".into(),
     });
@@ -759,6 +781,19 @@ fn aimed_presses(zone: BodyZone, loadout: Loadout, n: usize) -> Vec<engine_world
     }
     app.world.get_mut::<StrikeTargets>(a).unwrap().zone = Some(zone);
     let mut moved = [DVec3::ZERO; 2];
+    if heavy {
+        // One heavy blow at a time, as the yard throws them.
+        for _ in 0..n {
+            app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Dash);
+            app.update();
+            app.world.get_mut::<MoveIntent>(a).unwrap().attack = None;
+            for _ in 0..(2.5 / STEP) as usize {
+                app.update();
+                take_steps(&mut app, [a, b], &mut moved);
+            }
+        }
+        return app.world.resource::<Contacts>().0.clone();
+    }
     let (mut thrown, mut pressing) = (0, false);
     let mut last: Option<String> = None;
     for _ in 0..(12.0 / STEP) as usize {
@@ -833,4 +868,165 @@ fn cuts_aimed_at_a_forearm_or_a_knee_go_in_there() {
             loadout.main
         );
     }
+}
+
+#[test]
+fn moving_on_a_ruined_knee_drags_along_on_it() {
+    use engine_world::combat::BodyInjuries;
+    let (mut app, a, _) = duel();
+    let mut inj = BodyInjuries::default();
+    inj.get_mut(BodyZone::KneeL).wound = 0.7;
+    app.world.entity_mut(a).insert(inj);
+    for _ in 0..(1.0 / STEP) as usize {
+        app.update();
+    }
+    let at = |app: &App, b: &str| {
+        let pose = app.world.get::<SkeletonPose>(a).unwrap();
+        pose.bones[pose.index_of(b).unwrap()].translation
+    };
+    // Still: the good foot stays put ahead.
+    let still = at(&app, "foot_r");
+    for _ in 0..30 {
+        app.update();
+    }
+    assert!(
+        at(&app, "foot_r").distance(still) < 0.03,
+        "the foot wandered kneeling still"
+    );
+    // Moving on at 0.3 m/s (the way it faces, −Z): the good foot plants ahead, slides back
+    // under the body and steps on again, the knee stays down and the body low.
+    let (mut near, mut far, mut knee_high, mut hips_high) = (f32::MAX, f32::MIN, 0.0f32, 0.0f32);
+    for _ in 0..(2.4 / STEP) as usize {
+        let mut t = app.world.get_mut::<Transform>(a).unwrap();
+        let ahead = t.rotation * Vec3::NEG_Z;
+        t.translation += (ahead * 0.3 * STEP as f32).as_dvec3();
+        app.update();
+        let foot = at(&app, "foot_r");
+        (near, far) = (near.min(foot.z), far.max(foot.z));
+        knee_high = knee_high.max(at(&app, "lower_leg_l").y);
+        hips_high = hips_high.max(at(&app, "hips").y);
+    }
+    assert!(
+        far - near > 0.15,
+        "the good foot only moved {:.2} m",
+        far - near
+    );
+    assert!(knee_high < 0.25, "the knee came up {knee_high:.2} m");
+    assert!(hips_high < 0.75, "the hips rose to {hips_high:.2} m");
+}
+
+/// Wound `zones` on the near fighter, settle a second, then move it ahead at `speed` for
+/// `secs`; each frame's pose (model space) after the settle.
+fn wounded_moving(
+    zones: &[BodyZone],
+    speed: f32,
+    secs: f64,
+) -> Vec<std::collections::HashMap<String, Vec3>> {
+    use engine_world::combat::BodyInjuries;
+    let (mut app, a, b) = duel();
+    // The other one out of the way.
+    app.world.get_mut::<Transform>(b).unwrap().translation.z = -40.0;
+    app.world.get_mut::<StrikeTargets>(a).unwrap().target = None;
+    let mut inj = BodyInjuries::default();
+    for z in zones {
+        inj.get_mut(*z).wound = 0.7;
+    }
+    app.world.entity_mut(a).insert(inj);
+    for _ in 0..(1.0 / STEP) as usize {
+        app.update();
+    }
+    let mut frames = Vec::new();
+    for _ in 0..(secs / STEP) as usize {
+        let mut t = app.world.get_mut::<Transform>(a).unwrap();
+        let ahead = t.rotation * Vec3::NEG_Z;
+        t.translation += (ahead * speed * STEP as f32).as_dvec3();
+        app.update();
+        let pose = app.world.get::<SkeletonPose>(a).unwrap();
+        frames.push(
+            [
+                "hips",
+                "head",
+                "foot_l",
+                "foot_r",
+                "lower_leg_l",
+                "lower_leg_r",
+            ]
+            .iter()
+            .map(|b| {
+                (
+                    b.to_string(),
+                    pose.bones[pose.index_of(b).unwrap()].translation,
+                )
+            })
+            .collect(),
+        );
+    }
+    frames
+}
+
+#[test]
+fn with_both_legs_out_it_kneels_on_both_and_walks_on_its_knees() {
+    let frames = wounded_moving(&[BodyZone::KneeL, BodyZone::KneeR], 0.3, 2.8);
+    let most =
+        |b: &str, f: fn(&Vec3) -> f32| frames.iter().map(|p| f(&p[b])).fold(f32::MIN, f32::max);
+    let least =
+        |b: &str, f: fn(&Vec3) -> f32| frames.iter().map(|p| f(&p[b])).fold(f32::MAX, f32::min);
+    for knee in ["lower_leg_l", "lower_leg_r"] {
+        assert!(
+            most(knee, |v| v.y) < 0.2,
+            "{knee} came up to {}",
+            most(knee, |v| v.y)
+        );
+    }
+    assert!(most("hips", |v| v.y) < 0.75);
+    assert!(least("head", |v| v.y) > 1.0, "upright on its knees");
+    // Each knee steps: its foot goes back and comes on again.
+    for foot in ["foot_l", "foot_r"] {
+        let span = most(foot, |v| v.z) - least(foot, |v| v.z);
+        assert!(span > 0.1, "{foot} moved {span:.2} m");
+    }
+}
+
+#[test]
+fn a_limping_body_sinks_and_leans_over_its_hurt_leg() {
+    let mean_x = |frames: &[std::collections::HashMap<String, Vec3>]| {
+        frames.iter().map(|p| p["head"].x).sum::<f32>() / frames.len() as f32
+    };
+    let sound = wounded_moving(&[], 1.2, 3.0);
+    let hurt = wounded_moving(&[BodyZone::ThighR], 1.2, 3.0);
+    // Its head leans out over the right (+X) leg as it walks, more than walking sound.
+    let lean = mean_x(&hurt) - mean_x(&sound);
+    assert!(lean > 0.01, "leaned {lean:.3} m toward the hurt leg");
+    // And it still walks upright on both feet.
+    assert!(hurt.iter().all(|p| p["hips"].y > 0.75));
+}
+
+#[test]
+fn a_great_sword_cuts_at_a_beginners_sword_arm_go_in_there() {
+    // The combat yard's sever pair: light cuts at the sword arm of a fighter without a
+    // shield go in at that arm, not the head. (Its heavy overhead keeps its own line and comes
+    // down on the head first.)
+    let greatsword = Loadout {
+        main: ItemClass::TwoHandedBlade,
+        off: ItemClass::None,
+        two_handed: true,
+    };
+    let sword = Loadout {
+        main: ItemClass::OneHandedBlade,
+        off: ItemClass::None,
+        two_handed: false,
+    };
+    let c = aimed_presses_at(BodyZone::ForearmR, greatsword, sword, 6);
+    let bones: Vec<_> = c.iter().map(|c| c.bone.clone()).collect();
+    let on = bones
+        .iter()
+        .filter(|b| matches!(b.as_deref(), Some("lower_arm_r" | "hand_r")))
+        .count();
+    assert!(
+        c.len() >= 4 && on * 4 >= c.len() * 3,
+        "went in at {bones:?}"
+    );
+    // Heavies still land, wherever their line takes them.
+    let heavy = aimed_presses_with(BodyZone::ForearmR, greatsword, sword, 3, true);
+    assert_eq!(heavy.len(), 3, "{heavy:?}");
 }

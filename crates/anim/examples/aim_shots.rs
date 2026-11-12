@@ -172,6 +172,14 @@ impl Stage {
         w.insert_resource(RenderDisabled("parked between shots".into()));
     }
 
+    /// Render from `eye` at `target`, both relative to the near fighter.
+    fn shoot_near(&mut self, path: &std::path::Path, eye: Vec3, target: Vec3) {
+        let at = |e| self.app.world.get::<Transform>(e).unwrap().translation;
+        let mid = (at(self.a) + at(self.b)) * 0.5;
+        let near = at(self.a) - mid;
+        self.shoot(path, eye + near.as_vec3(), target + near.as_vec3());
+    }
+
     /// Press a light strike for a frame.
     fn press(&mut self) {
         self.app.world.get_mut::<MoveIntent>(self.a).unwrap().attack = Some(AttackKind::Melee);
@@ -422,6 +430,52 @@ fn main() {
                     s.shoot(&path, front.0, front.1);
                 }
                 s.step();
+            }
+        }
+        "drag" | "knees" | "limp" => {
+            // The near fighter moving on with a wound: `drag`, the left knee gone, dragging
+            // itself along on it at 0.45 m/s; `knees`, both gone, walking on its knees at
+            // 0.3 m/s; `limp`, the right thigh cut, limping at 1.2 m/s (seen from behind).
+            // Every other frame (30 fps).
+            use engine_world::combat::BodyInjuries;
+            let mut s = stage(width, height, false, false);
+            // The other fighter out of the way.
+            s.app.world.get_mut::<Transform>(s.b).unwrap().translation.z = -40.0;
+            s.app.world.get_mut::<StrikeTargets>(s.a).unwrap().target = None;
+            let mut inj = BodyInjuries::default();
+            let (zones, speed, view): (&[BodyZone], f32, (Vec3, Vec3)) = match mode.as_str() {
+                "drag" => (
+                    &[BodyZone::KneeL],
+                    0.45,
+                    (Vec3::new(0.3, 1.0, 3.4), Vec3::new(0.3, 0.72, 0.0)),
+                ),
+                "knees" => (
+                    &[BodyZone::KneeL, BodyZone::KneeR],
+                    0.3,
+                    (Vec3::new(0.3, 1.0, 3.4), Vec3::new(0.3, 0.72, 0.0)),
+                ),
+                _ => (
+                    &[BodyZone::ThighR],
+                    1.2,
+                    (Vec3::new(-3.8, 1.2, 0.5), Vec3::new(0.0, 0.85, 0.0)),
+                ),
+            };
+            for z in zones {
+                inj.get_mut(*z).wound = 0.7;
+            }
+            s.app.world.entity_mut(s.a).insert(inj);
+            s.shoot_near(&out.join("warm_up.png"), view.0, view.1);
+            for k in 0..(4.5 / STEP) as usize {
+                if k as f64 * STEP > 1.0 {
+                    let t = *s.app.world.get::<Transform>(s.a).unwrap();
+                    let ahead = t.rotation * Vec3::NEG_Z;
+                    s.app.world.get_mut::<Transform>(s.a).unwrap().translation +=
+                        (ahead * speed * STEP as f32).as_dvec3();
+                }
+                s.step();
+                if k % 2 == 0 {
+                    s.shoot_near(&out.join(format!("{:05}.png", k / 2)), view.0, view.1);
+                }
             }
         }
         "scatter" => {
