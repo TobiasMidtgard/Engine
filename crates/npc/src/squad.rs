@@ -232,6 +232,8 @@ pub(crate) struct Plans {
     maneuvers: HashMap<(Squad, Entity), Maneuver>,
     /// Against a foe behind cover (`besiege::plan_push`).
     pushes: HashMap<(Squad, Entity), crate::besiege::Push>,
+    /// Two hand-to-hand fighters on one foe (`pair::plan_pair`).
+    pairs: HashMap<(Squad, Entity), crate::pair::Pair>,
 }
 
 /// The least logic a squad's smartest shooter needs, and the least teamwork the squad needs
@@ -280,6 +282,9 @@ pub(crate) fn plan_squads(
     // it (`besiege::plan_push`).
     let mut holders: Vec<(Squad, crate::besiege::Holder)> = Vec::new();
     let mut mates: Vec<(Squad, crate::besiege::Mate)> = Vec::new();
+    // Hand-to-hand members fighting a foe they see: squad, foe, and what `pair::plan_pair`
+    // needs.
+    let mut duelists: Vec<(Squad, Entity, crate::pair::Duelist)> = Vec::new();
     for (e, squad, faction, t, skills, weapon, (clock, npc), vitals, brain, memory) in q.iter() {
         if vitals.downed {
             down.push((*squad, t.translation));
@@ -325,6 +330,25 @@ pub(crate) fn plan_squads(
                     ));
                 }
                 _ => {}
+            }
+            if weapon.style == WeaponStyle::Melee && !medic && brain.action == NpcAction::Engage {
+                let foe = brain
+                    .target
+                    .and_then(|f| memory.known.iter().find(|k| k.entity == f && k.visible));
+                if let Some(k) = foe {
+                    duelists.push((
+                        *squad,
+                        k.entity,
+                        crate::pair::Duelist {
+                            e,
+                            pos: t.translation,
+                            skills: *skills,
+                            tier,
+                            foe_pos: k.last_position,
+                            foe_forward: k.history.back().map_or(Vec3::Z, |o| o.forward),
+                        },
+                    ));
+                }
             }
         }
         members.push(Member {
@@ -595,9 +619,51 @@ pub(crate) fn plan_squads(
         pushes.insert(key, push);
     }
     plans.pushes = pushes;
+    // Two hand-to-hand mates on one foe: on Very hard and up one pins it, the other goes round
+    // behind it (see `pair`).
+    let mut paired: HashMap<Entity, crate::pair::PairRole> = HashMap::new();
+    let mut keys: Vec<(Squad, Entity)> = duelists.iter().map(|d| (d.0, d.1)).collect();
+    keys.sort_by_key(|k| (k.0.0, k.1));
+    keys.dedup();
+    let mut pairs = HashMap::new();
+    for key in keys {
+        let these: Vec<_> = duelists
+            .iter()
+            .filter(|d| (d.0, d.1) == key)
+            .map(|d| d.2)
+            .filter(|d| !guards.contains_key(&d.e) && !orders.contains_key(&d.e))
+            .collect();
+        let had = plans.pairs.remove(&key);
+        let Some((pair, given, bark)) = crate::pair::plan_pair(&these, key.1, had, world_now)
+        else {
+            // (Kept a moment: one of them may only have lost sight of it.)
+            if let Some(p) = had.filter(|p| world_now - p.at < crate::pair::PAIR_KEEP) {
+                pairs.insert(key, p);
+            }
+            continue;
+        };
+        for (e, role) in given {
+            roles.insert(e, role.name());
+            paired.insert(e, role);
+        }
+        if let Some((who, line)) = bark
+            && let Some(d) = these.iter().find(|d| d.e == who)
+        {
+            barks.say(world_now, who, line, d.pos, &mut noise);
+        }
+        pairs.insert(key, pair);
+    }
+    // (Pairs on a foe nobody fights hand to hand this pass: kept a moment too.)
+    for (key, p) in plans.pairs.drain() {
+        if world_now - p.at < crate::pair::PAIR_KEEP {
+            pairs.entry(key).or_insert(p);
+        }
+    }
+    plans.pairs = pairs;
     for (e, _, _, _, _, _, _, _, mut brain, _) in q.iter_mut() {
         let role = roles.get(&e).copied().unwrap_or("");
         brain.push_order = orders.get(&e).copied();
+        brain.pair = paired.get(&e).copied();
         let reviving = brain.action == NpcAction::Revive;
         brain.role = if reviving { "" } else { role };
         brain.guard = guards.get(&e).copied().filter(|_| !reviving);

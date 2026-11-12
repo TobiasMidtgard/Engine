@@ -20,6 +20,7 @@ pub mod lob;
 pub mod locomotion;
 pub mod minds;
 pub mod nav;
+pub mod pair;
 pub mod perception;
 pub mod rest;
 pub mod seed;
@@ -96,6 +97,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<lob::Lobs>()
             .init_resource::<bark::Barks>()
             .init_resource::<besiege::Volleys>()
+            .init_resource::<pair::Beats>()
             .init_resource::<squad::ShotTokens>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()

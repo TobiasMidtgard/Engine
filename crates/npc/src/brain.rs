@@ -36,6 +36,7 @@ use crate::features::ExplosiveProp;
 use crate::grenade;
 use crate::learning::OpponentModels;
 use crate::nav::{NavAgent, NavGrid, PathPlan, PathSearch, PathStatus};
+use crate::pair::{self, PairRole};
 use crate::perception::{Known, NpcMemory, Opening, Perceivables, Snapshot, segment_distance};
 use crate::skills::NpcSkills;
 use crate::smoke::SmokeClouds;
@@ -72,6 +73,8 @@ pub(crate) struct BrainWorld<'w, 's> {
     smoke: ResMut<'w, SmokeClouds>,
     /// Archers loosing together at a foe behind cover (`besiege`).
     volleys: ResMut<'w, besiege::Volleys>,
+    /// When pairs' pins swing (`pair`).
+    beats: ResMut<'w, pair::Beats>,
     grenades: ResMut<'w, grenade::Grenades>,
     props: Query<'w, 's, (Entity, &'static Transform, &'static ExplosiveProp)>,
     attacks: MessageWriter<'w, AttackEvent>,
@@ -2750,6 +2753,17 @@ fn aim_at(
     combat.zone = Some(crate::aim::pick_zone(p, skills, a));
 }
 
+/// A pair's flanker goes round its foe this far out past its own spacing (m), this much of a
+/// turn round the foe at a time (rad).
+const PAIR_WIDE: f32 = 0.8;
+const PAIR_STEP: f32 = 0.9;
+/// Once in, how long either of a pair keeps going in (s).
+const PAIR_COMMIT: f64 = 0.8;
+/// How often a pin on Extreme baits with a feint (s), and how long it has to step in and make
+/// it.
+const BAIT_EVERY: f64 = 2.5;
+const BAIT_SECS: f64 = 1.0;
+
 /// Melee: keep the right distance, circle, take turns, strike at openings, punish mistakes.
 #[allow(clippy::too_many_arguments)]
 fn melee(
@@ -2804,11 +2818,105 @@ fn melee(
     if ready && opening && (dist < reach + motor.dash_distance + 0.5 || (long && dist < 12.0)) {
         brain.committed_until = now + 1.0;
     }
-    let committed = has_turn && now < brain.committed_until;
+    let mut committed = has_turn && now < brain.committed_until;
+    // One of a pair on this foe (`pair`, Very hard and up). Whichever of the two the foe faces
+    // more holds it; the other cuts in from where it isn't looking. (So the roles swap as it
+    // turns: it can only face one of them.)
+    let pair = brain.pair.filter(|r| r.foe() == k.entity);
+    let front = {
+        let v = (pos - p.position).as_vec3();
+        p.forward.dot(Vec3::new(v.x, 0.0, v.z).normalize_or_zero())
+    };
+    let mut cutting = false;
+    if let Some(role) = pair {
+        let (foe, mate) = (role.foe(), role.mate());
+        w.beats.front.insert(me, (world_now, front, ready));
+        let mate_note = w
+            .beats
+            .front
+            .get(&mate)
+            .filter(|f| world_now - f.0 < pair::FRESH_SECS)
+            .copied();
+        let mate_front = mate_note.map(|f| f.1);
+        let holds = mate_front.map_or(matches!(role, PairRole::Pin { .. }), |m| front >= m);
+        let latch = |brain: &mut NpcBrain, committed: &mut bool| {
+            if has_turn {
+                brain.committed_until = brain.committed_until.max(now + PAIR_COMMIT);
+                *committed = true;
+            }
+        };
+        if holds {
+            // In its face: it keeps the foe busy, just out of its reach. On Extreme, with its mate
+            // placed to cut in, it steps in with a feint to draw the foe's guard (the feint's
+            // beat is its mate's cue).
+            brain.destination_reason = "pin";
+            let bait = Tactic::Bait.allowed(brain.tier, skills);
+            let mate_placed = mate_note.is_some_and(|m| m.1 < pair::CUT_FRONT + 0.3 && m.2);
+            if bait && mate_placed && has_turn && !opening && now >= brain.next_bait {
+                brain.next_bait = now + BAIT_EVERY;
+                brain.bait_until = now + BAIT_SECS;
+            }
+            if now < brain.bait_until {
+                brain.destination_reason = "bait";
+                committed |= has_turn;
+            } else if mate_front.is_some_and(|m| m < pair::CUT_FRONT) && !opening {
+                // (Its mate is going in: it doesn't crowd the foe's face with a second cut.)
+                committed = false;
+            }
+        } else {
+            cutting = true;
+            let beat = w
+                .beats
+                .at
+                .get(&foe)
+                .is_some_and(|&at| at >= world_now && at - world_now < pair::BEAT_SECS);
+            if front < pair::CUT_FRONT || (beat && front < 0.0) || (p.attacking && front < 0.3) {
+                // Behind it, its mate's cut is coming, or it is swinging at its mate: in, and on
+                // in as the foe turns.
+                latch(brain, &mut committed);
+                if !committed && !(ready && opening) {
+                    // Waiting its turn: it keeps to the foe's back as it turns.
+                    let spot = p.position - (p.forward * (reach + 0.6)).as_dvec3();
+                    let v = (spot - pos).as_vec3();
+                    brain.destination_reason = "behind";
+                    out.direction = Vec3::new(v.x, 0.0, v.z).clamp_length_max(1.0) * 0.8;
+                    return;
+                }
+            } else if !committed && !(ready && opening) {
+                // Round it, wider than its mate (so the foe keeps its eyes on that one), the short
+                // way to its back.
+                let side = Vec3::new(-dir.x, 0.0, -dir.z).normalize_or(Vec3::Z);
+                let back = -p.forward;
+                let turn = if side.x * back.z - side.z * back.x >= 0.0 {
+                    PAIR_STEP
+                } else {
+                    -PAIR_STEP
+                };
+                let mut ctx = w.nav.ctx(&w.world, &w.ground, &w.water);
+                let way = |a: f32| {
+                    let (s, c) = a.sin_cos();
+                    let round = Vec3::new(side.x * c - side.z * s, 0.0, side.x * s + side.z * c);
+                    let spot = p.position + (round * (space + PAIR_WIDE)).as_dvec3();
+                    let v = (spot - pos).as_vec3();
+                    Vec3::new(v.x, 0.0, v.z)
+                };
+                let mut go = way(turn);
+                if !ctx.walkable(pos + (go.normalize_or_zero() * 1.0).as_dvec3()) {
+                    go = way(-turn);
+                }
+                brain.destination_reason = "behind";
+                out.direction = go.normalize_or_zero();
+                out.sprint = go.length() > 4.0;
+                return;
+            }
+        }
+    }
     // Elites and masters fight on the counter: never swing into an attack they can parry.
-    // They let it come, parry or slip it, and punish the opening it leaves.
+    // They let it come, parry or slip it, and punish the opening it leaves. (Not one behind
+    // a foe swinging at its mate.)
     let counter = p.attacking
         && !opening
+        && !cutting
         && weapon.can_block
         && !combat.lame
         && skills.logic * skills.defense > COUNTER_FIGHTER;
@@ -2817,6 +2925,7 @@ fn melee(
             let gap = dist - reach * 0.7;
             // (Into an opening, from any way out: the window is short.)
             if (opening || skills.agility >= 1.1)
+                && now >= brain.bait_until
                 && skills.agility >= 1.0
                 && !combat.lame
                 && (dist > reach + 0.8 || opening)
@@ -2851,13 +2960,15 @@ fn melee(
             let model = w.models.get(k.entity);
             let learned = skills.learning * model.confidence();
             let blocks_a_lot = model.block_rate * learned;
-            let heavy = p.blocking && brain.random() < 0.25 + 0.6 * blocks_a_lot;
+            let baiting = now < brain.bait_until;
+            let heavy = !baiting && p.blocking && brain.random() < 0.25 + 0.6 * blocks_a_lot;
             // (On Easy it walks straight in and swings: no feints.)
-            let feint = !heavy
-                && !opening
-                && brain.tier > DifficultyTier::Easy
-                && skills.logic > 0.45
-                && brain.random() < 0.08 + 0.55 * blocks_a_lot;
+            let feint = baiting
+                || !heavy
+                    && !opening
+                    && brain.tier > DifficultyTier::Easy
+                    && skills.logic > 0.45
+                    && brain.random() < 0.08 + 0.55 * blocks_a_lot;
             if opening {
                 combat.stats.punishes += 1;
             }
@@ -2877,6 +2988,14 @@ fn melee(
             );
             aim_at(p, skills, pos, heavy, false, brain, combat);
             brain.committed_until = 0.0;
+            brain.bait_until = 0.0;
+        }
+        // (A pin's swing, for its mate to time its own by.)
+        if let (Some(PairRole::Pin { foe, .. }), AttackPhase::Windup { hit_at, .. }) =
+            (pair, combat.phase)
+        {
+            let rate = clock.rate.max(1e-3) as f64;
+            w.beats.at.insert(foe, world_now + (hit_at - now) / rate);
         }
         return;
     }

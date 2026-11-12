@@ -24,6 +24,8 @@ pub enum BarkLine {
     Lob,
     /// "Fall back!": a push that failed pulls back to try again.
     FallBack,
+    /// "Get behind them!": one of a pair of fighters sends the other round behind its foe.
+    Flank,
 }
 
 impl BarkLine {
@@ -34,6 +36,7 @@ impl BarkLine {
             BarkLine::Volley => "volley",
             BarkLine::Lob => "lob",
             BarkLine::FallBack => "fall_back",
+            BarkLine::Flank => "flank",
         }
     }
 }

@@ -15,6 +15,14 @@
 //! | [`Tactic::Volley`] | Very hard | teamwork 0.5 | the squad's archers loose together |
 //! | [`Tactic::CoordinatedPush`] | Extreme | logic 0.7 | the flusher waits out of sight until the holders are drawn, then goes, and pulls back to try again if it fails |
 //!
+//! The fighter ladder, two hand-to-hand squad mates on one foe (`pair.rs`; below Very hard
+//! each fights on its own: Easy walks straight in, Medium circles, Hard feints):
+//!
+//! | Tactic | Tier | Skill | What it does |
+//! |---|---|---|---|
+//! | [`Tactic::PinAndFlank`] | Very hard | teamwork 0.4 | one keeps the foe busy from the front, the other goes round behind it |
+//! | [`Tactic::Bait`] | Extreme | logic 0.6 | the one in front feints as its mate cuts in from behind |
+//!
 //! [`Tokens`] cap how many of a squad act on one foe at once, by tier (Doom's attack tokens):
 //! hand-to-hand attackers 1 / 2 / 2 / 3 / 3, shooters loosing at it 2 / 3 / 4 / 5 / 6 and
 //! flushers sent round its cover 0 / 0 / 0 / 1 / 2.
@@ -34,10 +42,12 @@ pub enum Tactic {
     CallFlusher,
     Volley,
     CoordinatedPush,
+    PinAndFlank,
+    Bait,
 }
 
 impl Tactic {
-    pub const ALL: [Tactic; 7] = [
+    pub const ALL: [Tactic; 9] = [
         Tactic::CloseOnHidden,
         Tactic::HarassEdge,
         Tactic::CoverAndHold,
@@ -45,6 +55,8 @@ impl Tactic {
         Tactic::CallFlusher,
         Tactic::Volley,
         Tactic::CoordinatedPush,
+        Tactic::PinAndFlank,
+        Tactic::Bait,
     ];
 
     pub fn name(self) -> &'static str {
@@ -56,6 +68,8 @@ impl Tactic {
             Tactic::CallFlusher => "call_flusher",
             Tactic::Volley => "volley",
             Tactic::CoordinatedPush => "coordinated_push",
+            Tactic::PinAndFlank => "pin_and_flank",
+            Tactic::Bait => "bait",
         }
     }
 
@@ -65,8 +79,8 @@ impl Tactic {
             Tactic::CloseOnHidden => DifficultyTier::Easy,
             Tactic::HarassEdge => DifficultyTier::Medium,
             Tactic::CoverAndHold | Tactic::LobOver => DifficultyTier::Hard,
-            Tactic::CallFlusher | Tactic::Volley => DifficultyTier::VeryHard,
-            Tactic::CoordinatedPush => DifficultyTier::Extreme,
+            Tactic::CallFlusher | Tactic::Volley | Tactic::PinAndFlank => DifficultyTier::VeryHard,
+            Tactic::CoordinatedPush | Tactic::Bait => DifficultyTier::Extreme,
         }
     }
 
@@ -79,6 +93,8 @@ impl Tactic {
             Tactic::LobOver => skills.accuracy >= 0.6,
             Tactic::CallFlusher | Tactic::Volley => skills.teamwork >= 0.5,
             Tactic::CoordinatedPush => skills.logic >= 0.7,
+            Tactic::PinAndFlank => skills.teamwork >= 0.4,
+            Tactic::Bait => skills.logic >= 0.6,
             _ => true,
         }
     }
@@ -136,7 +152,7 @@ mod tests {
             .iter()
             .map(|&t| count(t, &master))
             .collect();
-        assert_eq!(ladder, [1, 2, 4, 6, 7]);
+        assert_eq!(ladder, [1, 2, 4, 7, 9]);
         assert!(
             !Tactic::LobOver.allowed(Hard, &rookie),
             "a rookie doesn't lob"

@@ -527,6 +527,13 @@ pub struct NpcBrain {
     /// the cover to flush it out, waiting for the go, falling back, or holding on the side it
     /// will break to.
     pub push_order: Option<crate::besiege::Order>,
+    /// Its part in a pair of fighters on one foe (`pair`, Very hard and up), from the squad
+    /// coordinator.
+    pub pair: Option<crate::pair::PairRole>,
+    /// NPC clock time it may next bait its pair's foe with a feint (`pair`, Extreme).
+    pub next_bait: f64,
+    /// Until when (NPC clock) it is stepping in to make that feint.
+    pub bait_until: f64,
     /// The tier it fights at (`difficulty`), as of its last think.
     pub tier: engine_world::DifficultyTier,
 }
