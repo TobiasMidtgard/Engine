@@ -787,10 +787,19 @@ fn aimed_presses_with(
             app.world.get_mut::<MoveIntent>(a).unwrap().attack = Some(AttackKind::Dash);
             app.update();
             app.world.get_mut::<MoveIntent>(a).unwrap().attack = None;
+            let mut played = None;
             for _ in 0..(2.5 / STEP) as usize {
                 app.update();
                 take_steps(&mut app, [a, b], &mut moved);
+                played = played.or(app.world.get::<Attacker>(a).unwrap().current.clone());
             }
+            // A heavy press at a part plays that part's line, committed harder.
+            let played = played.expect("a heavy blow");
+            assert!(
+                played.ends_with("_heavy")
+                    && (played.contains("_line_") || played.contains("_stab_")),
+                "{played}"
+            );
         }
         return app.world.resource::<Contacts>().0.clone();
     }
@@ -1002,10 +1011,10 @@ fn a_limping_body_sinks_and_leans_over_its_hurt_leg() {
 }
 
 #[test]
-fn a_great_sword_cuts_at_a_beginners_sword_arm_go_in_there() {
-    // The combat yard's sever pair: light cuts at the sword arm of a fighter without a
-    // shield go in at that arm, not the head. (Its heavy overhead keeps its own line and comes
-    // down on the head first.)
+fn a_great_sword_cuts_at_a_beginners_sword_arm_light_or_heavy_go_in_there() {
+    // The combat yard's sever pair: cuts at the sword arm of a fighter without a shield go
+    // in at that arm, not the head; a heavy press plays the same aimed line committed harder
+    // (named `…_heavy`, which the rules read as a heavy).
     let greatsword = Loadout {
         main: ItemClass::TwoHandedBlade,
         off: ItemClass::None,
@@ -1016,17 +1025,16 @@ fn a_great_sword_cuts_at_a_beginners_sword_arm_go_in_there() {
         off: ItemClass::None,
         two_handed: false,
     };
-    let c = aimed_presses_at(BodyZone::ForearmR, greatsword, sword, 6);
-    let bones: Vec<_> = c.iter().map(|c| c.bone.clone()).collect();
-    let on = bones
-        .iter()
-        .filter(|b| matches!(b.as_deref(), Some("lower_arm_r" | "hand_r")))
-        .count();
-    assert!(
-        c.len() >= 4 && on * 4 >= c.len() * 3,
-        "went in at {bones:?}"
-    );
-    // Heavies still land, wherever their line takes them.
-    let heavy = aimed_presses_with(BodyZone::ForearmR, greatsword, sword, 3, true);
-    assert_eq!(heavy.len(), 3, "{heavy:?}");
+    for heavy in [false, true] {
+        let c = aimed_presses_with(BodyZone::ForearmR, greatsword, sword, 4, heavy);
+        let bones: Vec<_> = c.iter().map(|c| c.bone.clone()).collect();
+        let on = bones
+            .iter()
+            .filter(|b| matches!(b.as_deref(), Some("lower_arm_r" | "hand_r")))
+            .count();
+        assert!(
+            c.len() >= 3 && on * 4 >= c.len() * 3,
+            "heavy {heavy}: went in at {bones:?}"
+        );
+    }
 }

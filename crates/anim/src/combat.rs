@@ -1068,7 +1068,38 @@ fn line_moves(two_handed: bool) -> Vec<AttackMove> {
                 }])
         })
         .map(|line| line_move(two_handed, line))
+        .flat_map(|m| {
+            let heavy = heavy_line(&m);
+            [m, heavy]
+        })
         .collect()
+}
+
+/// What a heavy press at an aimed part plays: its line committed harder, named `…_heavy`
+/// (the rules read that as a heavy). More damage and push, a longer freeze on contact, and it
+/// breaks a guard it lands on.
+pub const HEAVY_LINE: (f32, f32, f32) = (1.5, 1.4, 1.25);
+
+fn heavy_line(m: &AttackMove) -> AttackMove {
+    let (more, push, freeze) = HEAVY_LINE;
+    let mut heavy = m.clone();
+    heavy.name = format!("{}_heavy", m.name);
+    for w in &mut heavy.windows {
+        if let WindowKind::Hit {
+            damage,
+            impulse,
+            hitstop,
+            breaks_guard,
+            ..
+        } = &mut w.kind
+        {
+            *damage *= more;
+            *impulse *= push;
+            *hitstop *= freeze;
+            *breaks_guard = true;
+        }
+    }
+    heavy
 }
 
 /// An approach move on the humanoid's lunge or leap: the warp eases the body to just outside
@@ -1490,6 +1521,7 @@ pub fn pick_line<'a>(
     skill: f32,
     recent: &[Line],
     foe: &Foe,
+    heavy: bool,
 ) -> Option<&'a AttackMove> {
     let height = zone_height(zone);
     let known = known_lines(skill);
@@ -1498,6 +1530,7 @@ pub fn pick_line<'a>(
     moves
         .moves
         .iter()
+        .filter(|m| m.name.ends_with("_heavy") == heavy)
         .filter(|m| {
             m.line.is_some_and(|l| {
                 l.height == height && (l.stab || known.iter().any(|a| (a - l.angle).abs() < 1.0))
@@ -2131,7 +2164,9 @@ pub(crate) fn run_attacks(
         };
         // A light press with a zone aimed at, in a set with lines: the cut or stab for it.
         let aimed = |input: &str| {
-            let zone = attacker.zone.filter(|_| input == "attack_light")?;
+            // A light press picks an aimed line, a heavy one the same line committed harder.
+            let heavy = input == "attack_heavy";
+            let zone = attacker.zone.filter(|_| heavy || input == "attack_light")?;
             let foe = attacker
                 .target
                 .and_then(|e| targets.get(&e))
@@ -2149,7 +2184,8 @@ pub(crate) fn run_attacks(
                     distance: f32::INFINITY,
                     ..Foe::default()
                 });
-            pick_line(moves, zone, attacker.skill, &attacker.recent, &foe).map(|m| m.name.clone())
+            pick_line(moves, zone, attacker.skill, &attacker.recent, &foe, heavy)
+                .map(|m| m.name.clone())
         };
         let neutral = |input: &str| {
             riposte(input)
@@ -3137,7 +3173,7 @@ mod aimed {
         let mut recent: Vec<Line> = Vec::new();
         let mut all = Vec::new();
         for _ in 0..n {
-            let m = pick_line(set, zone, skill, &recent, &foe).expect("a line");
+            let m = pick_line(set, zone, skill, &recent, &foe, false).expect("a line");
             let line = m.line.unwrap();
             all.push(line);
             recent.push(line);
