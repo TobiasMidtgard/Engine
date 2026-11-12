@@ -627,3 +627,60 @@ fn draw_speed_paces_the_bow_draw() {
     assert!((0.7..0.9).contains(&normal), "unset: {normal}");
     assert!((0.33..0.48).contains(&quick), "draw_speed 2: {quick}");
 }
+
+#[test]
+fn wounds_show_a_knee_gone_an_arm_hanging_and_a_hand_cut_off() {
+    use engine_world::combat::BodyInjuries;
+    let (mut app, a, _) = duel();
+    let mut inj = BodyInjuries::default();
+    inj.get_mut(BodyZone::KneeL).wound = 0.7;
+    inj.get_mut(BodyZone::ForearmR).wound = 0.65;
+    app.world.entity_mut(a).insert(inj);
+    for _ in 0..(1.0 / STEP) as usize {
+        app.update();
+    }
+    let at = |app: &App, b: &str| {
+        let pose = app.world.get::<SkeletonPose>(a).unwrap();
+        pose.bones[pose.index_of(b).unwrap_or_else(|| panic!("no {b}"))]
+    };
+    // Down on the left knee, the right foot on the floor ahead, still upright.
+    assert!(
+        at(&app, "hips").translation.y < 0.7,
+        "hips {}",
+        at(&app, "hips").translation
+    );
+    assert!(
+        at(&app, "foot_l").translation.y < 0.2 && at(&app, "lower_leg_l").translation.y < 0.15,
+        "left knee {}",
+        at(&app, "lower_leg_l").translation
+    );
+    assert!(at(&app, "foot_r").translation.y < 0.15);
+    assert!(at(&app, "head").translation.y > 1.0, "upright");
+    // The right arm hangs: the hand below the elbow, the elbow below the shoulder.
+    let (sh, el, ha) = (
+        at(&app, "upper_arm_r").translation,
+        at(&app, "lower_arm_r").translation,
+        at(&app, "hand_r").translation,
+    );
+    assert!(
+        el.y < sh.y - 0.2 && ha.y < el.y - 0.15,
+        "arm {sh} {el} {ha}"
+    );
+    // A hand cut off at the wrist: gone (everything it carries shrinks with it).
+    app.world
+        .get_mut::<BodyInjuries>(a)
+        .unwrap()
+        .get_mut(BodyZone::HandL)
+        .severed = true;
+    app.update();
+    app.update();
+    let hand = at(&app, "hand_l");
+    assert!(hand.scale.max_element() < 0.01, "hand scale {}", hand.scale);
+    // Healed (say, by magic), it stands again with both hands.
+    app.world.entity_mut(a).insert(BodyInjuries::default());
+    for _ in 0..(1.0 / STEP) as usize {
+        app.update();
+    }
+    assert!(at(&app, "hips").translation.y > 0.85);
+    assert!(at(&app, "hand_l").scale.min_element() > 0.99);
+}

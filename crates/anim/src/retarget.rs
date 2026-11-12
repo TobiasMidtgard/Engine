@@ -31,6 +31,10 @@ use crate::grip::{PALM, STANDARD_RADIUS};
 use crate::skeleton::Skeleton;
 use crate::xform::{Xf, rotation_between};
 
+/// A source bone scaled below this is a severed part ([`crate::wounds`]): the model's bone
+/// keeps the scale, and so do the bones it carries.
+const COLLAPSED: f32 = 0.01;
+
 /// Which target bones follow which logic bones, and how hands close.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -410,6 +414,10 @@ impl Retargeter {
                 && let Some(s) = source_model.get(*source as usize)
             {
                 out[b] = Xf::from_tr(s.t, (s.r * *correction).normalize());
+                // A part cut off (crate::wounds) is gone on the model too.
+                if s.s.max_element() < COLLAPSED {
+                    out[b].s = s.s;
+                }
                 done[b] = true;
             }
         }
@@ -452,7 +460,10 @@ impl Retargeter {
                 let db = if da.dot(db) < 0.0 { -db } else { db };
                 x.r = (da.slerp(db, t) * target.rest_model[b].r).normalize();
             }
-            x.s = Vec3::ONE;
+            x.s = match parent {
+                Some(p) if p.s.max_element() < COLLAPSED => p.s,
+                _ => Vec3::ONE,
+            };
             out[b] = x;
             done[b] = true;
         }

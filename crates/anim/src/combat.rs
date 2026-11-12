@@ -45,7 +45,7 @@ use std::collections::{HashMap, HashSet};
 
 use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
-use engine_world::combat::BodyZone;
+use engine_world::combat::{BodyZone, ItemClass, Loadout, MeleeContact, MeleeJudge};
 use engine_world::{DamageEvent, DamageKind};
 
 use crate::Animator;
@@ -1742,6 +1742,11 @@ pub(crate) fn run_attacks(
         )>,
     )>,
     mut damage: MessageWriter<DamageEvent>,
+    (judge, mut contacts, loadouts): (
+        Option<Res<MeleeJudge>>,
+        MessageWriter<MeleeContact>,
+        Query<&Loadout>,
+    ),
     mut landed: Local<Vec<Landed>>,
     mut pairs: Local<Vec<(Entity, Entity, Pairing)>>,
     mut commands: Commands,
@@ -2302,7 +2307,7 @@ pub(crate) fn run_attacks(
                     // How close it came, where it lands on them and which way it pushes: a
                     // striker swept over the frame pushes along its motion (and on into
                     // them), a fist straight in.
-                    let (close, point, push) = match striker {
+                    let (close, point, push, edge) = match striker {
                         Some(st) => {
                             sweeping = true;
                             let m = animator.model[b];
@@ -2311,18 +2316,35 @@ pub(crate) fn run_attacks(
                                 crate::ik::to_world(gt, m.transform_point(st.to)),
                             );
                             let was = attacker.swept.replace(now).unwrap_or(now);
-                            let (close, point) = sweep(was, now, aim);
+                            let (close, mut point) = sweep(was, now, aim);
+                            // On the body, the blade lands where it entered: on the surface
+                            // of the part it passed nearest (for the rules to judge by), not
+                            // on the blade beside what it was aimed at.
+                            let mut edge = None;
+                            if blocked_at.is_none() {
+                                let (at, zone, dir) = entry(&tg.zones, aim, was, now);
+                                point = at;
+                                // Landing on the window's first frame the blade has no motion
+                                // yet: a stab goes in along the blade, a cut at them.
+                                let along = (now.1 - now.0).normalize_or(to_target);
+                                let dir = dir.unwrap_or(match st.kind {
+                                    DamageKind::Pierce => along.as_vec3(),
+                                    _ => (aim - at).normalize_or(to_target).as_vec3(),
+                                });
+                                edge = Some((at, dir, zone));
+                            }
                             let motion = (now.1 - was.1).with_y(0.0).normalize_or_zero();
                             (
                                 close,
                                 point,
                                 (motion + to_target * 0.6).normalize_or(to_target),
+                                edge,
                             )
                         }
                         None => {
                             let fist = fist_of(&animator, gt, b);
                             let point = attacker.aim.as_ref().map_or(fist, |a| a.1);
-                            (fist.distance(aim), point, to_target)
+                            (fist.distance(aim), point, to_target, None)
                         }
                     };
                     // A paired blow lands on its keyed frame: the two are lined up for it.
@@ -2381,7 +2403,7 @@ pub(crate) fn run_attacks(
                         }
                     };
                     if outcome != Outcome::Deflected {
-                        damage.write(DamageEvent {
+                        let blow = DamageEvent {
                             target: victim,
                             amount: *amount * share.0,
                             kind: striker.map_or(DamageKind::Blunt, |s| s.kind),
@@ -2390,7 +2412,22 @@ pub(crate) fn run_attacks(
                             point,
                             impulse: push * *impulse * share.1,
                             source: Some(entity),
-                        });
+                        };
+                        // With a rules module judging melee, it writes the damage.
+                        if judge.is_some() {
+                            let (item, off_hand) =
+                                striking_item(striker.as_ref(), bone, loadouts.get(entity).ok());
+                            contacts.write(MeleeContact {
+                                blow,
+                                item,
+                                off_hand,
+                                entry: edge.map(|e| e.0),
+                                edge_dir: edge.map(|e| e.1),
+                                bone: edge.map(|e| zone_bone(e.2)),
+                            });
+                        } else {
+                            damage.write(blow);
+                        }
                     }
                     landed.push(Landed {
                         attacker: entity,
@@ -2508,6 +2545,100 @@ pub(crate) fn run_attacks(
 }
 
 /// The closest a segment swept from `was` to `now` comes to `p`, and the point on it.
+/// Where a blade swept from `was` to `now` entered the body: on the surface of the zone it
+/// passed nearest (`zones`: their middles, world space, [`BodyZone::ALL`] order), toward the
+/// blade.
+fn entry(
+    zones: &[DVec3; 16],
+    aim: DVec3,
+    was: (DVec3, DVec3),
+    now: (DVec3, DVec3),
+) -> (DVec3, BodyZone, Option<Vec3>) {
+    // Of the parts the blade passed through, the one nearest what it was aimed at (a cut
+    // across the chest also crosses an arm or a thigh); through none, the one it came
+    // nearest to.
+    let gaps = BodyZone::ALL.iter().map(|z| {
+        let (d, on_blade) = sweep(was, now, zones[z.index()]);
+        (*z, d - zone_radius(*z), on_blade)
+    });
+    let through = gaps.clone().filter(|g| g.1 <= 0.0).min_by(|a, b| {
+        zones[a.0.index()]
+            .distance(aim)
+            .total_cmp(&zones[b.0.index()].distance(aim))
+    });
+    let (zone, _, on_blade) = through
+        .or_else(|| gaps.min_by(|a, b| a.1.total_cmp(&b.1)))
+        .unwrap_or((BodyZone::Chest, 0.0, zones[BodyZone::Chest.index()]));
+    let middle = zones[zone.index()];
+    let at = middle + (on_blade - middle).clamp_length_max(zone_radius(zone));
+    // How that point of the blade moved over the frame: hilt and tip motion, mixed by how
+    // far along the blade it is.
+    let blade = now.1 - now.0;
+    let along = ((on_blade - now.0).dot(blade) / blade.length_squared().max(1e-12)).clamp(0.0, 1.0);
+    let moved = (now.0 - was.0).lerp(now.1 - was.1, along);
+    let dir = (moved.length_squared() > 1e-10).then(|| moved.normalize().as_vec3());
+    (at, zone, dir)
+}
+
+/// The humanoid bone nearest a zone's middle.
+fn zone_bone(zone: BodyZone) -> String {
+    use BodyZone::*;
+    let side = |stem: &str| format!("{stem}_{}", ["l", "r"][zone.side().unwrap_or(0)]);
+    match zone {
+        Head => "head".into(),
+        Neck => "neck".into(),
+        Chest => "chest".into(),
+        Belly => "spine".into(),
+        UpperArmL | UpperArmR => side("upper_arm"),
+        ForearmL | ForearmR => side("lower_arm"),
+        HandL | HandR => side("hand"),
+        ThighL | ThighR => side("upper_leg"),
+        KneeL | KneeR | ShinL | ShinR => side("lower_leg"),
+    }
+}
+
+/// What struck and with which hand: a blade or shield on the left arm is the off hand's,
+/// a fist, elbow, knee or kick is no item. Without a [`Loadout`], a guess from the striker.
+fn striking_item(
+    striker: Option<&Striker>,
+    bone: &str,
+    loadout: Option<&Loadout>,
+) -> (ItemClass, bool) {
+    let Some(striker) = striker else {
+        return (ItemClass::None, false);
+    };
+    let off_hand = bone.ends_with("_l");
+    let guess = if *striker == Striker::shield() {
+        ItemClass::Shield
+    } else if striker.to == Striker::greatsword(striker.kind).to {
+        ItemClass::TwoHandedBlade
+    } else {
+        ItemClass::OneHandedBlade
+    };
+    let item = match loadout {
+        Some(l) if off_hand => l.off,
+        Some(l) => l.main,
+        None => guess,
+    };
+    (if item == ItemClass::None { guess } else { item }, off_hand)
+}
+
+/// About how thick a zone is round its middle (its capsule's radius), m.
+fn zone_radius(zone: BodyZone) -> f64 {
+    use BodyZone::*;
+    match zone {
+        Head => 0.1,
+        Neck => 0.06,
+        Chest => 0.14,
+        Belly => 0.13,
+        UpperArmL | UpperArmR => 0.05,
+        ForearmL | ForearmR | HandL | HandR => 0.04,
+        ThighL | ThighR => 0.08,
+        KneeL | KneeR => 0.06,
+        ShinL | ShinR => 0.05,
+    }
+}
+
 fn sweep(was: (DVec3, DVec3), now: (DVec3, DVec3), p: DVec3) -> (f64, DVec3) {
     const STEPS: usize = 6;
     (0..=STEPS)

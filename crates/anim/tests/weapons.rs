@@ -754,3 +754,74 @@ fn the_paddock_weapons_yard_plays_out() {
         );
     }
 }
+
+/// Melee contacts sent, with a rules module judging melee.
+#[derive(Resource, Default)]
+struct Contacts(Vec<engine_world::MeleeContact>);
+
+fn record_contacts(
+    mut contacts: MessageReader<engine_world::MeleeContact>,
+    mut seen: ResMut<Contacts>,
+) {
+    seen.0.extend(contacts.read().cloned());
+}
+
+#[test]
+fn with_a_melee_judge_the_blows_go_to_it_and_it_writes_the_damage() {
+    let (mut app, fighter, dummy) = duel("sword_shield", 1.6, false);
+    app.world.insert_resource(engine_world::MeleeJudge {
+        judged_by: "test".into(),
+    });
+    app.world.entity_mut(fighter).insert(engine_world::Loadout {
+        main: engine_world::combat::ItemClass::OneHandedBlade,
+        off: engine_world::combat::ItemClass::Shield,
+        two_handed: false,
+    });
+    app.init_resource::<Contacts>()
+        .add_systems(PostUpdate, record_contacts);
+    combo(
+        &mut app,
+        fighter,
+        &["attack_light", "attack_light", "attack_light"],
+    );
+    let contacts = &app.world.resource::<Contacts>().0;
+    assert_eq!(contacts.len(), 3, "{contacts:?}");
+    for c in contacts {
+        assert_eq!(c.blow.target, dummy);
+        assert_eq!(c.blow.source, Some(fighter));
+        assert!(c.blow.amount > 0.0);
+        assert_eq!(c.item, engine_world::combat::ItemClass::OneHandedBlade);
+        assert!(!c.off_hand);
+        // Where the edge went in, on the dummy's body, and which way it was going.
+        let entry = c.entry.expect("an entry point");
+        assert!((0.8..1.8).contains(&entry.y), "went in at {entry:?}");
+        assert!(c.edge_dir.is_some_and(|d| (d.length() - 1.0).abs() < 1e-3));
+        assert!(c.bone.is_some());
+    }
+    // Nothing went out unjudged.
+    assert!(landed(&app).is_empty(), "{:?}", landed(&app));
+}
+
+#[test]
+fn bleeding_takes_health_but_never_rocks_the_body() {
+    let (mut app, _fighter, dummy) = duel("sword_shield", 6.0, false);
+    for _ in 0..10 {
+        app.world.write_message(DamageEvent {
+            target: dummy,
+            amount: 2.0,
+            kind: DamageKind::Bleed,
+            point: DVec3::new(0.0, 1.2, 0.0),
+            impulse: Vec3::ZERO,
+            source: None,
+        });
+        app.update();
+        let r = app.world.get::<HitReaction>(dummy).unwrap();
+        let turn = r.state.iter().map(|(a, _)| a.length()).fold(0.0, f32::max);
+        assert!(
+            turn < 1e-4 && r.shove.0.length() < 1e-4,
+            "flinched at a bleed: {turn}"
+        );
+        let hurt = app.world.get::<engine_anim::Hurt>(dummy);
+        assert!(hurt.is_none_or(|h| !h.is_down()), "a bleed folded the body");
+    }
+}

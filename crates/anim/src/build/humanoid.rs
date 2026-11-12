@@ -3419,6 +3419,74 @@ pub const KNEEL_TEND: &str = "kneel_tend";
 /// this high, the patient lying across.
 pub const KNEEL_HANDS: Vec3 = Vec3::new(0.0, 0.27, -0.42);
 
+/// Down on one knee because that leg can't hold ([`crate::wounds`]): `leg_out_l` on the left
+/// knee, `leg_out_r` on the right, the other foot planted ahead, the trunk up to fight on.
+/// The wound pass takes the hips and legs from it; the upper body stays the graph's.
+pub const LEG_OUT: [&str; 2] = ["leg_out_l", "leg_out_r"];
+
+/// Both arms hanging dead from the shoulders, for a ruined arm ([`crate::wounds`] takes one
+/// side from it).
+pub const ARMS_LIMP: &str = "arms_limp";
+
+fn leg_out(s: &Skeleton, side: usize) -> AnimationClip {
+    let other = 1 - side;
+    let x = [-0.12, 0.12];
+    let mut leg = [[0.0; 4]; 2];
+    // The knee on the floor under the hip, the shin flat behind.
+    leg[side] = [-6.0, 4.0, 98.0, -40.0];
+    // The other foot ahead, the knee up.
+    leg[other] = [88.0, 6.0, 88.0, 2.0];
+    let mut plant = [None; 4];
+    plant[2 + side] = Some(Vec3::new(x[side], 0.13, 0.44));
+    plant[2 + other] = Some(Vec3::new(x[other], 0.08, -0.4));
+    let mut knee = [Vec3::NEG_Z; 2];
+    knee[side] = Vec3::new(0.0, -1.0, -0.4);
+    let at = |a: f32, breath: f32| Key {
+        at: a,
+        hips: Vec3::new(0.0, 0.58 - breath, 0.0),
+        pitch: -8.0,
+        yaw: 0.0,
+        roll: [3.0, -3.0][side],
+        spine: [-4.0 - 2.0 * breath / 0.01, -2.0, 2.0, -2.0],
+        arm: [Arm::HANG; 2],
+        leg,
+        plant,
+        knee,
+        effort: 0.5,
+    };
+    let keys = [at(0.0, 0.0), at(0.5, 0.012), at(1.0, 0.0)];
+    let secs = 2.0;
+    let samples = (secs * 30.0) as usize + 1;
+    AnimationClip::from_fn(LEG_OUT[side], secs, samples, true, |ph| {
+        Key::sample(s, &keys, ph).1
+    })
+    .with_curve("effort", 2, |_| 0.5)
+    .with_curve("floor", 2, |_| 1.0)
+}
+
+fn arms_limp(s: &Skeleton) -> AnimationClip {
+    let dead = Arm {
+        flex: 2.0,
+        abduct: -2.0,
+        elbow: 6.0,
+        wrist: 4.0,
+        ..Arm::HANG
+    };
+    let keys = [
+        Key {
+            at: 0.0,
+            arm: [dead; 2],
+            ..Key::STAND
+        },
+        Key {
+            at: 1.0,
+            arm: [dead; 2],
+            ..Key::STAND
+        },
+    ];
+    AnimationClip::from_fn(ARMS_LIMP, 1.0, 2, true, |ph| Key::sample(s, &keys, ph).1)
+}
+
 fn collapse_back(s: &Skeleton) -> AnimationClip {
     let secs = 1.6;
     let at = |t: f32| t / secs;
@@ -3892,6 +3960,9 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         collapse_back(s),
         downed_back(s),
         kneel_tend(s),
+        leg_out(s, 0),
+        leg_out(s, 1),
+        arms_limp(s),
         evasion(s, Evasion::SlipLeft),
         evasion(s, Evasion::SlipRight),
         evasion(s, Evasion::Roll),

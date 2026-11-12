@@ -210,6 +210,10 @@ pub(crate) fn take_hurts(
     )>,
 ) {
     for hit in hits.read() {
+        // Bleeding hurts health, not the body's balance.
+        if hit.kind == DamageKind::Bleed {
+            continue;
+        }
         let Ok((animator, gt, hurt, down)) = q.get_mut(hit.target) else {
             continue;
         };

@@ -40,6 +40,7 @@ pub mod skin;
 pub mod stunt;
 pub mod validate;
 pub mod warp;
+pub mod wounds;
 pub mod xform;
 
 pub use animator::{AnimationLibrary, Animator, AnimatorSettings, PoseEdit};
@@ -205,6 +206,7 @@ impl Plugin for AnimationPlugin {
                         procedural::vehicle::vehicle_rig_system,
                     ),
                     procedural::spring::spring_chain_system,
+                    wounds::wound_pose,
                     // Blows insert reactions (`HitReaction`, `Hurt`, `Knockdown`) the systems
                     // after them read this frame: one sync point for both; what knockdowns
                     // insert (ragdoll weight, tone, pushes) lands at the one before the IK.
@@ -247,6 +249,7 @@ impl Plugin for AnimationPlugin {
                 muscle::muscle_system.in_set(AnimSet::Muscles),
                 (
                     grip::apply_grip_presets,
+                    wounds::sever_parts,
                     animator::publish_pose,
                     retarget::retarget_poses,
                     validate::audit_poses,

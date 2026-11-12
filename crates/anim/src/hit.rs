@@ -276,6 +276,7 @@ enum Knock {
 pub(crate) fn take_hits(
     mut commands: Commands,
     mut hits: MessageReader<DamageEvent>,
+    mut body_hits: MessageReader<engine_world::combat::BodyHit>,
     backend: Option<Res<PhysicsBackend>>,
     mut q: Query<(
         &Animator,
@@ -286,10 +287,24 @@ pub(crate) fn take_hits(
         Option<&Knockdown>,
     )>,
 ) {
+    // Where the rules say a blow landed (the part it struck, target model space): the
+    // flinch starts there rather than where the weapon was.
+    let judged: Vec<(Entity, Option<Entity>, Vec3)> = body_hits
+        .read()
+        .map(|h| (h.target, h.attacker, h.point))
+        .collect();
     for hit in hits.read() {
+        // Bleeding lowers health only; the wound's own blow already rocked the body.
+        if hit.kind == engine_world::DamageKind::Bleed {
+            continue;
+        }
         let Ok((animator, gt, reaction, rig, physical, down)) = q.get_mut(hit.target) else {
             continue;
         };
+        let at = judged
+            .iter()
+            .find(|(t, by, _)| *t == hit.target && *by == hit.source)
+            .map(|j| j.2);
         let skeleton = &animator.skeleton;
         let Some(pelvis) = skeleton.index_of("hips") else {
             continue;
@@ -298,7 +313,7 @@ pub(crate) fn take_hits(
             continue;
         }
         let pelvis = animator.model[pelvis].t;
-        let point = to_model(gt, hit.point);
+        let point = at.unwrap_or_else(|| to_model(gt, hit.point));
         let push = if hit.impulse.length_squared() > 1e-6 {
             gt.rotation().conjugate() * hit.impulse
         } else {

@@ -3216,6 +3216,10 @@ fn demo_path_system(
 fn demo_script_system(
     time: Res<Time>,
     mut damage: MessageWriter<DamageEvent>,
+    (judge, mut contacts): (
+        Option<Res<engine_world::MeleeJudge>>,
+        MessageWriter<engine_world::MeleeContact>,
+    ),
     mut q: Query<(
         Entity,
         &mut DemoScript,
@@ -3263,14 +3267,29 @@ fn demo_script_system(
                 r.knock((home - t.translation - left).as_vec3(), HOME_SECS);
             }
             if let (Some((point, push)), Some(gt)) = (step.hit, gt) {
-                damage.write(DamageEvent {
+                let blow = DamageEvent {
                     target: entity,
                     amount: push.length() * 0.2,
                     kind: DamageKind::Blunt,
                     point: gt.translation() + (gt.rotation() * point).as_dvec3(),
                     impulse: gt.rotation() * push,
                     source: None,
-                });
+                };
+                // A scripted punch is a melee blow too: with a rules module judging melee,
+                // it writes the damage.
+                if judge.is_some() {
+                    contacts.write(engine_world::MeleeContact {
+                        entry: Some(blow.point),
+                        edge_dir: Some(blow.impulse.normalize_or_zero())
+                            .filter(|d| *d != Vec3::ZERO),
+                        blow,
+                        item: engine_world::combat::ItemClass::None,
+                        off_hand: false,
+                        bone: None,
+                    });
+                } else {
+                    damage.write(blow);
+                }
             }
         }
     }

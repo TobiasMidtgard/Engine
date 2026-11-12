@@ -172,7 +172,8 @@ pub(crate) fn pick_targets(
     let mut landed: HashMap<Entity, u32> = HashMap::new();
     let mut hurt: Vec<Entity> = Vec::new();
     for d in damage.read() {
-        if d.amount <= 0.0 {
+        // Bleeding is no blow: it neither feeds a combo nor breaks one.
+        if d.amount <= 0.0 || d.kind == engine_world::DamageKind::Bleed {
             continue;
         }
         if let Some(s) = d.source {

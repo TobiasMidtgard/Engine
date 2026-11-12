@@ -392,6 +392,38 @@ fn main() {
                 s.step();
             }
         }
-        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states, bow, rifle"),
+        "wounds" => {
+            // Combat's wounds on the near fighter: the left knee gives, the right forearm
+            // is ruined, then the left forearm comes off at the elbow.
+            use engine_world::combat::{BodyInjuries, BodyZone};
+            let mut s = stage(width, height, false, true);
+            s.app.world.entity_mut(s.a).insert(BodyInjuries::default());
+            let front = (Vec3::new(-0.3, 1.2, 3.0), Vec3::new(-0.6, 0.75, 0.0));
+            // From the near fighter's left, behind it.
+            let left = (Vec3::new(-2.0, 1.2, -1.9), Vec3::new(-0.7, 0.75, 0.0));
+            for k in 0..=200 {
+                let mut wound = |z: BodyZone, f: &dyn Fn(&mut engine_world::combat::ZoneInjury)| {
+                    let a = s.a;
+                    f(s.app.world.get_mut::<BodyInjuries>(a).unwrap().get_mut(z));
+                };
+                match k {
+                    20 => wound(BodyZone::KneeL, &|z| z.wound = 0.7),
+                    70 => wound(BodyZone::ForearmR, &|z| z.wound = 0.65),
+                    130 => wound(BodyZone::ForearmL, &|z| z.severed = true),
+                    _ => {}
+                }
+                if k == 0 {
+                    s.shoot(&out.join("warm_up.png"), front.0, front.1);
+                }
+                if [10, 28, 60, 110, 160].contains(&k) {
+                    let path = out.join(format!("w{k:03}.png"));
+                    s.shoot(&path, front.0, front.1);
+                    s.shoot(&out.join(format!("w{k:03}_left.png")), left.0, left.1);
+                    s.shoot(&path, front.0, front.1);
+                }
+                s.step();
+            }
+        }
+        _ => eprintln!("modes: aim, combo6, combo, knee_strip, states, bow, rifle, wounds"),
     }
 }

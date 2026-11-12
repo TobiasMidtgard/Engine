@@ -196,6 +196,18 @@ pub(crate) fn attachment_system(
         let (pos, rot) = animator_world(owner, socket);
         t.translation = pos;
         t.rotation = rot;
+        // On a part cut off ([`crate::wounds`]) it goes with the part; back to full size
+        // when the part is back.
+        let gone = animator
+            .skeleton
+            .index_of(&attach.bone)
+            .is_some_and(|i| animator.model[i].s.max_element() < 0.01);
+        let shrunk = Vec3::splat(crate::wounds::SEVERED_SCALE);
+        if gone {
+            t.scale = shrunk;
+        } else if t.scale == shrunk {
+            t.scale = Vec3::ONE;
+        }
         *gt = GlobalTransform::from(*t);
     }
 }
