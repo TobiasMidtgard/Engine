@@ -14,6 +14,10 @@
 //! | [`Tactic::CallFlusher`] | Very hard | teamwork 0.5 | calls a hand-to-hand squad mate round the cover to flush the foe, and holds on the side it will break to |
 //! | [`Tactic::Volley`] | Very hard | teamwork 0.5 | the squad's archers loose together |
 //! | [`Tactic::CoordinatedPush`] | Extreme | logic 0.7 | the flusher waits out of sight until the holders are drawn, then goes, and pulls back to try again if it fails |
+//!
+//! [`Tokens`] cap how many of a squad act on one foe at once, by tier (Doom's attack tokens):
+//! hand-to-hand attackers 1 / 2 / 2 / 3 / 3, shooters loosing at it 2 / 3 / 4 / 5 / 6 and
+//! flushers sent round its cover 0 / 0 / 0 / 1 / 2.
 
 use engine_world::{CombatDifficulty, DifficultyTier};
 
@@ -82,6 +86,34 @@ impl Tactic {
     /// Whether an NPC with `skills` may use it at `tier`.
     pub fn allowed(self, tier: DifficultyTier, skills: &NpcSkills) -> bool {
         tier >= self.min_tier() && self.skilled(skills)
+    }
+}
+
+/// How many of a squad may act on one foe at once (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tokens {
+    /// Hand-to-hand attackers at a time.
+    pub melee: u32,
+    /// Shooters loosing at it at a time.
+    pub shooters: u32,
+    /// Hand-to-hand mates sent round its cover to flush it out.
+    pub flushers: u32,
+}
+
+impl Tokens {
+    pub fn for_tier(tier: DifficultyTier) -> Self {
+        let (melee, shooters, flushers) = match tier {
+            DifficultyTier::Easy => (1, 2, 0),
+            DifficultyTier::Medium => (2, 3, 0),
+            DifficultyTier::Hard => (2, 4, 0),
+            DifficultyTier::VeryHard => (3, 5, 1),
+            DifficultyTier::Extreme => (3, 6, 2),
+        };
+        Self {
+            melee,
+            shooters,
+            flushers,
+        }
     }
 }
 

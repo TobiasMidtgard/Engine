@@ -399,7 +399,12 @@ pub(crate) fn resolve_attacks(
     mut traces: MessageWriter<ProjectileTrace>,
     (mut noise, mut triggers): (MessageWriter<NoiseEvent>, MessageWriter<AnimationTrigger>),
     mut strikes: Local<Vec<Strike>>,
-    (seeds, mut lobs, time): (Query<&Seed>, ResMut<crate::lob::Lobs>, Res<Time>),
+    (seeds, mut lobs, time, mut barks): (
+        Query<&Seed>,
+        ResMut<crate::lob::Lobs>,
+        Res<Time>,
+        ResMut<crate::bark::Barks>,
+    ),
 ) {
     strikes.clear();
     for (me, t, clock, skills, weapon, mut combat, _, intent) in &mut q {
@@ -458,6 +463,14 @@ pub(crate) fn resolve_attacks(
                 target,
                 damage: weapon.damage,
             });
+            // (Shouted, so whoever it falls on has a moment to move.)
+            barks.say(
+                time.elapsed_secs_f64(),
+                me,
+                crate::bark::BarkLine::Lob,
+                t.translation,
+                &mut noise,
+            );
             continue;
         }
         let fwd = t.forward();

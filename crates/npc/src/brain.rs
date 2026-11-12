@@ -20,7 +20,9 @@ use engine_world::animation::{AnimationTrigger, SkeletonPose};
 use engine_world::combat::{BodyInjuries, Loadout};
 use engine_world::locomotion::MoveIntent;
 use engine_world::physics::{PhysicsBackend, PhysicsQueries};
-use engine_world::{AttackEvent, FocusPoints, Ground, GroundWear, HeatField, Obscurance, Water};
+use engine_world::{
+    AttackEvent, DifficultyTier, FocusPoints, Ground, GroundWear, HeatField, Obscurance, Water,
+};
 
 use crate::agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
@@ -59,6 +61,8 @@ pub(crate) struct BrainWorld<'w, 's> {
     settings: Res<'w, NpcSettings>,
     squad: Res<'w, SquadSettings>,
     tokens: ResMut<'w, AttackTokens>,
+    /// Turns to shoot at one foe (`difficulty::Tokens::shooters`).
+    shots: ResMut<'w, crate::squad::ShotTokens>,
     models: Res<'w, OpponentModels>,
     focus: Res<'w, FocusPoints>,
     /// The tier the fight is played at (`difficulty`).
@@ -66,6 +70,8 @@ pub(crate) struct BrainWorld<'w, 's> {
     time: Res<'w, Time>,
     config: Option<Res<'w, EngineConfig>>,
     smoke: ResMut<'w, SmokeClouds>,
+    /// Archers loosing together at a foe behind cover (`besiege`).
+    volleys: ResMut<'w, besiege::Volleys>,
     grenades: ResMut<'w, grenade::Grenades>,
     props: Query<'w, 's, (Entity, &'static Transform, &'static ExplosiveProp)>,
     attacks: MessageWriter<'w, AttackEvent>,
@@ -484,7 +490,7 @@ pub(crate) fn think_and_act(
             weapon,
             motor,
             clock,
-            world_now,
+            (world_now, *faction),
             &mut brain,
             &memory,
             &mut combat,
@@ -659,6 +665,7 @@ fn think(
     let tier = w.difficulty.as_ref().map_or_else(Default::default, |d| {
         crate::difficulty::tier_of(d, *faction)
     });
+    brain.tier = tier;
     // (Sure of it to begin, and kept at while it remembers it there: unseen, a foe fades from
     // mind.)
     let sure = threat.as_ref().is_some_and(|k| {
@@ -695,10 +702,30 @@ fn think(
         });
     if besieging {
         add(NpcAction::Besiege, besiege::SCORE + 0.1 * skills.aggression);
+        // Its squad's mates coming round one edge: it holds on the other, where the foe
+        // breaks.
+        if let Some(besiege::Order::Hold {
+            foe,
+            watch: Some(watch),
+            ..
+        }) = brain.push_order
+            && let Some(s) = brain.siege.as_mut()
+            && s.target == foe
+        {
+            s.watch = watch;
+        }
     }
+    // Sent round a foe's cover by its squad's archers (or waiting for the go, or falling back
+    // from a push that failed): it keeps at the foe it no longer sees.
+    let sent = brain
+        .push_order
+        .filter(|o| threat.as_ref().is_some_and(|k| k.entity == o.foe()))
+        .filter(|o| !matches!(o, besiege::Order::Hold { .. }))
+        .filter(|_| lost_secs < besiege::BESIEGE_SECS);
     // Pinning an enemy in cover or going round it, the squad keeps at it for a while without
     // seeing it.
-    let maneuver = matches!(brain.role, "suppress" | "flank") && lost_secs < MANEUVER_SECS;
+    let maneuver =
+        matches!(brain.role, "suppress" | "flank") && lost_secs < MANEUVER_SECS || sent.is_some();
     if confirmed && (visible || lost_secs < 2.0 || maneuver) {
         let mut engage = if ranged {
             0.55 + 0.1 * skills.aggression - supp * (1.0 - skills.courage) * 0.5
@@ -716,6 +743,9 @@ fn think(
             .any(|f| revives.reviver(f.e, world_now) == Some(me));
         if matches!(brain.role, "cover" | "screen" | "clear") && !my_revive {
             engage += 0.1 + 0.15 * skills.teamwork;
+        }
+        if sent.is_some() {
+            engage += 0.3;
         }
         add(NpcAction::Engage, engage);
         // Cover: when pinned down, and smart shooters take it as soon as they're exposed.
@@ -1990,6 +2020,10 @@ const SCREEN_GAP: f64 = 2.0;
 const SCREEN_ENGAGE: f64 = 5.0;
 
 const WALK: f32 = 0.36;
+/// How long a turn to shoot at a foe lasts (s).
+const SHOT_TOKEN_SECS: f32 = 1.5;
+/// A flusher this near the edge it was sent round goes for the foe.
+const FLUSH_THERE: f64 = 1.2;
 const JOG: f32 = 0.7;
 /// `logic × defense` above which a melee fighter waits out an enemy's swing to counter it
 /// instead of trading blows (elites and masters; veterans still trade).
@@ -2004,7 +2038,7 @@ fn drive(
     weapon: &NpcWeapon,
     motor: &NpcMotor,
     clock: &NpcClock,
-    world_now: f64,
+    (world_now, faction): (f64, Faction),
     brain: &mut NpcBrain,
     memory: &NpcMemory,
     combat: &mut NpcCombat,
@@ -2107,7 +2141,17 @@ fn drive(
     // Holding a draw on where a foe in cover will show (`besiege`): loosed when it shows,
     // lobbed over when it doesn't, lowered when the arms tire.
     if brain.action == NpcAction::Besiege && matches!(combat.phase, AttackPhase::Windup { .. }) {
-        hold_draw(me, pos, known, skills, weapon, clock, brain, combat, w);
+        hold_draw(
+            me,
+            pos,
+            known,
+            skills,
+            weapon,
+            (clock, world_now, faction),
+            brain,
+            combat,
+            w,
+        );
     }
     // Mid-attack: commit.
     if let AttackPhase::Windup { aim, heavy, .. } = combat.phase {
@@ -2186,6 +2230,52 @@ fn drive(
                     let r = 3.0 + 5.0 * brain.random();
                     brain.destination =
                         Some(guess + DVec3::new((a.cos() * r) as f64, 0.0, (a.sin() * r) as f64));
+                }
+            }
+        }
+        NpcAction::Engage
+            if weapon.style == WeaponStyle::Melee
+                && known.is_some_and(|k| !k.visible)
+                && brain
+                    .push_order
+                    .is_some_and(|o| !matches!(o, besiege::Order::Hold { .. }))
+                && known.is_some_and(|k| brain.push_order.is_some_and(|o| o.foe() == k.entity)) =>
+        {
+            // Its squad's plan against a foe behind cover (`besiege`): round the edge it was
+            // sent to, then at the foe; or out of its sight until the go; or back to the
+            // archers.
+            let k = known.expect("known foe");
+            let to_foe = (k.last_position - pos).as_vec3();
+            let look = Vec3::new(to_foe.x, 0.0, to_foe.z).normalize_or(Vec3::NEG_Z);
+            match brain.push_order {
+                Some(besiege::Order::Flush { goal, .. }) => {
+                    let flat = |a: DVec3, b: DVec3| DVec2::new(a.x - b.x, a.z - b.z).length();
+                    if brain.destination_reason != "flush" {
+                        brain.destination = Some(goal);
+                        brain.destination_reason = "flush";
+                    }
+                    let dest = brain.destination.unwrap_or(goal);
+                    if follow(pos, dest, 1.0, nav, now, w, s, &mut out)
+                        || flat(pos, dest) < FLUSH_THERE
+                    {
+                        // Round the edge: at it.
+                        brain.destination = Some(k.last_position);
+                    }
+                }
+                Some(
+                    besiege::Order::FallBack { to, .. } | besiege::Order::Guard { at: to, .. },
+                ) => {
+                    brain.destination_reason = brain.role;
+                    if follow(pos, to, JOG, nav, now, w, s, &mut out) {
+                        out.direction = Vec3::ZERO;
+                    }
+                    out.look = Some(look);
+                }
+                _ => {
+                    // Waiting for the go, where it stands.
+                    brain.destination_reason = "wait";
+                    out.direction = Vec3::ZERO;
+                    out.look = Some(look);
                 }
             }
         }
@@ -2686,7 +2776,12 @@ fn melee(
     let reach = weapon.reach;
     let space = reach.max(2.0) + 0.7;
     let max_attackers = if skills.teamwork >= 0.3 {
-        w.squad.max_melee_attackers
+        // As many at a time as the tier lets swing at one foe.
+        if w.difficulty.is_some() {
+            crate::difficulty::Tokens::for_tier(brain.tier).melee
+        } else {
+            w.squad.max_melee_attackers
+        }
     } else {
         16
     };
@@ -2757,8 +2852,10 @@ fn melee(
             let learned = skills.learning * model.confidence();
             let blocks_a_lot = model.block_rate * learned;
             let heavy = p.blocking && brain.random() < 0.25 + 0.6 * blocks_a_lot;
+            // (On Easy it walks straight in and swings: no feints.)
             let feint = !heavy
                 && !opening
+                && brain.tier > DifficultyTier::Easy
                 && skills.logic > 0.45
                 && brain.random() < 0.08 + 0.55 * blocks_a_lot;
             if opening {
@@ -2808,7 +2905,13 @@ fn melee(
             };
         }
     }
-    let tangent = Vec3::new(-dir.z, 0.0, dir.x) * brain.strafe;
+    // (On Easy it doesn't circle.)
+    let circle = if brain.tier == DifficultyTier::Easy {
+        0.0
+    } else {
+        brain.strafe
+    };
+    let tangent = Vec3::new(-dir.z, 0.0, dir.x) * circle;
     let mut move_dir = dir * radial + tangent * 0.55;
     // Don't circle into walls.
     let ahead = pos + (move_dir.normalize_or_zero() * 1.0).as_dvec3();
@@ -2850,7 +2953,7 @@ fn ranged_fire(
         return;
     }
     let aim = if k.visible {
-        shot_at(me, pos, k, perceived, skills, weapon, w)
+        shot_at(me, pos, k, perceived, skills, weapon, None, w)
     } else if now - k.last_seen < suppress_secs(brain) {
         // Pin it behind its cover.
         k.last_position + DVec3::Y * 1.0
@@ -2869,6 +2972,19 @@ fn ranged_fire(
                 && segment_distance(c.pos + DVec3::Y * 0.8, muzzle, aim) < REVIVER_CLEARANCE
         });
         if in_line {
+            return;
+        }
+    }
+    // No more than the tier's shooters loose at one foe at a time (those with the teamwork to
+    // wait their turn).
+    if skills.teamwork >= 0.3 && w.difficulty.is_some() {
+        let max = crate::difficulty::Tokens::for_tier(brain.tier).shooters;
+        let world_now = w.time.elapsed_secs_f64();
+        if !w
+            .shots
+            .0
+            .request(k.entity, me, world_now, max, SHOT_TOKEN_SECS)
+        {
             return;
         }
     }
@@ -2897,6 +3013,7 @@ fn ranged_fire(
 
 /// Where a shot at a foe in sight goes: its chest (led when it moves, by smart shooters; its
 /// middle when it crouches), or its head when that is all that shows over its cover.
+#[allow(clippy::too_many_arguments)]
 fn shot_at(
     me: Entity,
     pos: DVec3,
@@ -2904,13 +3021,15 @@ fn shot_at(
     perceived: Option<&Snapshot>,
     skills: &NpcSkills,
     weapon: &NpcWeapon,
+    lead_secs: Option<f32>,
     w: &BrainWorld,
 ) -> DVec3 {
     let dist = k.last_position.distance(pos) as f32;
     let (at, vel) = perceived
         .map(|p| (p.position, p.velocity))
         .unwrap_or((k.last_position, k.last_velocity));
-    let flight = dist / weapon.projectile_speed.max(1.0) + weapon.windup;
+    // Led by its flight and the draw, or as given (a held draw).
+    let flight = lead_secs.unwrap_or(dist / weapon.projectile_speed.max(1.0) + weapon.windup);
     let lead = (vel * flight * skills.logic).as_dvec3();
     // (Lower on one crouching.)
     let height = w.seen.get(k.entity).map_or(1.7, |p| p.height as f64);
@@ -2945,10 +3064,10 @@ fn hold_draw(
     known: Option<&Known>,
     skills: &NpcSkills,
     weapon: &NpcWeapon,
-    clock: &NpcClock,
+    (clock, world_now, faction): (&NpcClock, f64, Faction),
     brain: &mut NpcBrain,
     combat: &mut NpcCombat,
-    w: &BrainWorld,
+    w: &mut BrainWorld,
 ) {
     let now = clock.now;
     let Some(mut siege) = brain.siege else {
@@ -2974,11 +3093,36 @@ fn hold_draw(
     let k = known.filter(|k| k.entity == siege.target);
     let shown =
         k.filter(|k| besiege::shown_for(k, now).is_some_and(|s| s >= skills.reaction_time as f64));
+    let volley = Tactic::Volley.allowed(brain.tier, skills);
+    let order = brain.push_order.filter(|o| o.foe() == siege.target);
+    let soften = matches!(order, Some(besiege::Order::Hold { soften: true, .. }));
+    let flushing = matches!(order, Some(besiege::Order::Hold { flushing: true, .. }));
+    let full = since + crate::combat::ranged_windup(weapon, skills) as f64;
+    // A mate's volley at it: loosed with it, at where it showed to that mate.
+    let joining = volley
+        .then(|| w.volleys.joining(siege.target, faction, world_now))
+        .flatten()
+        .filter(|_| shown.is_none());
     if let Some(k) = shown {
         let perceived = k.perceived(now, skills.reaction_time);
-        aim = shot_at(me, pos, k, perceived, skills, weapon, w);
-        let full = since + crate::combat::ranged_windup(weapon, skills) as f64;
+        // (Loosed in a moment from full draw: led only by what its reactions lag.)
+        let lag = skills.reaction_time + besiege::LOOSE_SECS as f32;
+        aim = shot_at(me, pos, k, perceived, skills, weapon, Some(lag), w);
         hit_at = full.max(now + besiege::LOOSE_SECS);
+        siege.drawn_since = None;
+        if volley
+            && w.volleys
+                .joining(siege.target, faction, world_now)
+                .is_none()
+        {
+            // "Loose!": the others holding on it loose with this one.
+            w.volleys
+                .called
+                .insert(siege.target, (world_now, faction, aim));
+        }
+    } else if let Some((at, when)) = joining {
+        aim = at;
+        hit_at = full.max(now + (when - world_now).max(0.0) + besiege::LOOSE_SECS);
         siege.drawn_since = None;
     } else if now - since > besiege::HOLD_MAX {
         // Arms tired: it lowers, and draws again in a moment.
@@ -2987,7 +3131,11 @@ fn hold_draw(
         siege.drawn_since = None;
         brain.siege = Some(siege);
         return;
-    } else if siege.lobs && now - since > besiege::LOB_AFTER && now >= siege.next_lob {
+    } else if siege.lobs
+        && !flushing
+        && ((now - since > besiege::LOB_AFTER && now >= siege.next_lob)
+            || (soften && now >= full && now >= siege.next_lob - 0.5 * besiege::LOB_EVERY))
+    {
         siege.next_lob = now + besiege::LOB_EVERY;
         // Onto the hiding spot, as near as its skill puts it.
         let a = brain.random() * TAU;

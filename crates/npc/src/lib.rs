@@ -5,6 +5,7 @@ pub mod aim;
 pub mod animal_body;
 mod api;
 pub mod art;
+pub mod bark;
 pub mod besiege;
 pub mod brain;
 pub mod combat;
@@ -93,6 +94,9 @@ impl Plugin for NpcPlugin {
             .init_resource::<smoke::SmokeClouds>()
             .init_resource::<grenade::Grenades>()
             .init_resource::<lob::Lobs>()
+            .init_resource::<bark::Barks>()
+            .init_resource::<besiege::Volleys>()
+            .init_resource::<squad::ShotTokens>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()
             .init_resource::<seed::SeedsGiven>()

@@ -523,6 +523,12 @@ pub struct NpcBrain {
     /// Besieging an enemy behind cover (with [`NpcAction::Besiege`]): where it hides, where it
     /// would show, and what this one does about it (`besiege`).
     pub siege: Option<crate::besiege::Siege>,
+    /// Its squad's plan against a foe behind cover (`besiege`, Very hard and up): sent round
+    /// the cover to flush it out, waiting for the go, falling back, or holding on the side it
+    /// will break to.
+    pub push_order: Option<crate::besiege::Order>,
+    /// The tier it fights at (`difficulty`), as of its last think.
+    pub tier: engine_world::DifficultyTier,
 }
 
 impl NpcBrain {

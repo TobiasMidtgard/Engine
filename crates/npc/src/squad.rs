@@ -52,6 +52,10 @@ struct Token {
     until: f64,
 }
 
+/// Turns to shoot at a target, as [`AttackTokens`] are to swing at it.
+#[derive(Resource, Debug, Default)]
+pub struct ShotTokens(pub AttackTokens);
+
 /// Melee attack turns per target ("tokens").
 #[derive(Resource, Debug, Default)]
 pub struct AttackTokens {
@@ -226,6 +230,8 @@ struct Maneuver {
 #[derive(Default)]
 pub(crate) struct Plans {
     maneuvers: HashMap<(Squad, Entity), Maneuver>,
+    /// Against a foe behind cover (`besiege::plan_push`).
+    pushes: HashMap<(Squad, Entity), crate::besiege::Push>,
 }
 
 /// The least logic a squad's smartest shooter needs, and the least teamwork the squad needs
@@ -250,6 +256,10 @@ pub(crate) fn plan_squads(
     mut noise: MessageWriter<NoiseEvent>,
     mut since: Local<f32>,
     mut plans: Local<Plans>,
+    (difficulty, mut barks): (
+        Option<Res<engine_world::CombatDifficulty>>,
+        ResMut<crate::bark::Barks>,
+    ),
 ) {
     *since += time.delta_secs();
     if *since < settings.plan_secs {
@@ -266,7 +276,11 @@ pub(crate) fn plan_squads(
     let mut strikers: Vec<(Squad, DVec3)> = Vec::new();
     // Downed squad members: squad, where they lie.
     let mut down: Vec<(Squad, DVec3)> = Vec::new();
-    for (e, squad, _, t, skills, weapon, (clock, npc), vitals, brain, memory) in q.iter() {
+    // Archers besieging a foe behind cover, and hand-to-hand members who could be sent round
+    // it (`besiege::plan_push`).
+    let mut holders: Vec<(Squad, crate::besiege::Holder)> = Vec::new();
+    let mut mates: Vec<(Squad, crate::besiege::Mate)> = Vec::new();
+    for (e, squad, faction, t, skills, weapon, (clock, npc), vitals, brain, memory) in q.iter() {
         if vitals.downed {
             down.push((*squad, t.translation));
             continue;
@@ -282,6 +296,36 @@ pub(crate) fn plan_squads(
                 brain.destination.unwrap_or(t.translation)
             };
             revivers.push((*squad, at, medic));
+        }
+        if acting {
+            let tier = difficulty.as_ref().map_or_else(Default::default, |d| {
+                crate::difficulty::tier_of(d, *faction)
+            });
+            match (weapon.style, brain.siege) {
+                (WeaponStyle::Ranged, Some(siege)) if brain.action == NpcAction::Besiege => {
+                    holders.push((
+                        *squad,
+                        crate::besiege::Holder {
+                            e,
+                            pos: t.translation,
+                            skills: *skills,
+                            tier,
+                            siege,
+                        },
+                    ));
+                }
+                (WeaponStyle::Melee, _) if !medic && skills.teamwork >= 0.3 => {
+                    mates.push((
+                        *squad,
+                        crate::besiege::Mate {
+                            e,
+                            pos: t.translation,
+                            health: vitals.health / vitals.max_health.max(1e-3),
+                        },
+                    ));
+                }
+                _ => {}
+            }
         }
         members.push(Member {
             e,
@@ -505,8 +549,55 @@ pub(crate) fn plan_squads(
             guards.insert(m.e, at);
         }
     }
+    // A foe gone to ground behind cover: on Very hard and up the archers call mates round it
+    // (see `besiege`).
+    let mut orders: HashMap<Entity, crate::besiege::Order> = HashMap::new();
+    let world_now = time.elapsed_secs_f64();
+    let mut foes: Vec<(Squad, Entity)> = holders.iter().map(|h| (h.0, h.1.siege.target)).collect();
+    foes.sort_by_key(|f| (f.0.0, f.1));
+    foes.dedup();
+    let mut pushes = HashMap::new();
+    for key in foes {
+        let these: Vec<_> = holders
+            .iter()
+            .filter(|h| h.0 == key.0 && h.1.siege.target == key.1)
+            .map(|h| h.1)
+            .collect();
+        let free: Vec<_> = mates
+            .iter()
+            .filter(|m| m.0 == key.0 && !guards.contains_key(&m.1.e))
+            .map(|m| m.1)
+            .filter(|m| !orders.contains_key(&m.e))
+            .collect();
+        let had = plans.pushes.remove(&key);
+        let Some((push, given, said)) = crate::besiege::plan_push(&these, &free, had, world_now)
+        else {
+            continue;
+        };
+        for (e, order) in given {
+            let role = match order {
+                crate::besiege::Order::Flush { .. } => "flush",
+                crate::besiege::Order::Wait { .. } => "wait",
+                crate::besiege::Order::FallBack { .. } => "fall_back",
+                crate::besiege::Order::Guard { .. } => "guard",
+                crate::besiege::Order::Hold { .. } => "",
+            };
+            if !role.is_empty() {
+                roles.insert(e, role);
+            }
+            orders.insert(e, order);
+        }
+        for (who, line) in said {
+            if let Some(m) = members.iter().find(|m| m.e == who) {
+                barks.say(world_now, who, line, m.pos, &mut noise);
+            }
+        }
+        pushes.insert(key, push);
+    }
+    plans.pushes = pushes;
     for (e, _, _, _, _, _, _, _, mut brain, _) in q.iter_mut() {
         let role = roles.get(&e).copied().unwrap_or("");
+        brain.push_order = orders.get(&e).copied();
         let reviving = brain.action == NpcAction::Revive;
         brain.role = if reviving { "" } else { role };
         brain.guard = guards.get(&e).copied().filter(|_| !reviving);
