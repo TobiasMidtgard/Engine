@@ -60,7 +60,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 21 | Chop a tree; new ones grow where water, sun and soil allow | `forest_clearing` (walk the trail: `forest_trail`, `forest_spring`, `forest_burn_scar`, `forest_dry_ridge`, `forest_bilberry`) | Foliage and ecology | ✅ a tree at the clearing's edge falls every 25 s and rots into the soil; the clear-cut regrows, the burn scar recovers, ferns crowd the spring, pines and heather hold the dry ridge, bilberry carpets the acid floor under spruce |
 | 22 | Plants that need other resources (mineral water) and glowing cave mushrooms | `cave`, `cave_fungi`, `cave_pool` | Foliage and ecology | ✅ glowcaps and lantern caps grow only where the mineral pool and seep reach, glow brighter the better fed they are, and light the cave |
 | 23 | Grass that moves in the wind | everywhere | Foliage and ecology (strands: Rendering and lighting) | 🟨 grass patches sway |
-| 24 | Dynamic fauna (wildlife that grazes, drinks, flees, flocks) | `meadow`, `meadow_herd` (by the lake shore) | Smart NPC AI | ✅ deer and rabbit herds graze, drink, rest and bolt; birds flock; a wolf pack stalks and hunts (stand-in bodies) |
+| 24 | Dynamic fauna (wildlife that grazes, drinks, flees, flocks) | `meadow`, `meadow_herd` (by the lake shore) | Smart NPC AI | ✅ deer and rabbit herds graze, drink, rest and bolt; birds flock; a wolf pack stalks and hunts (stand-in bodies); the difficulty tier changes their instincts (Easy lets you closer, Hard sends rabbits into tall grass and deer into woods and bunches an alert herd, Extreme has boars guard their piglets and wolves ring a boar at bay) |
 
 ## Characters and combat
 

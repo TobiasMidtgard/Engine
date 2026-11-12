@@ -20,6 +20,14 @@
 //!   alarm, and each of the others looks toward it before it bolts; the herd runs bunched),
 //!   alert deer warn the herd, and one bird taking off lifts the whole flock; a deer with a
 //!   wolf at its heels zigzags; wolves give a charging boar room.
+//!
+//! What they know to do depends on the difficulty tier of their faction ([`crate::instinct`]):
+//! on Easy they let you closer and run straight; on Hard they run for cover (rabbits into tall
+//! grass, where they keep still until you are almost on them; deer into the woods, where they
+//! stop to watch) and an alert herd bunches up, the young in the middle; on Extreme boars
+//! charge whatever comes near their young, wolves bay a boar they have ringed (sidestepping its
+//! rushes, biting from behind) and the one lying in wait picks tall grass. A boar ringed on all
+//! sides stands at bay on any tier.
 
 use bevy_platform::collections::HashMap;
 
@@ -28,12 +36,13 @@ use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{
-    DamageEvent, DamageKind, Ground, GroundWear, HeatField, NoiseEvent, ProjectileTrace, Water,
-    WeatherState, WindField, WorldImpulse,
+    CombatDifficulty, DamageEvent, DamageKind, DifficultyTier, Ground, GroundWear, HeatField,
+    NoiseEvent, Obscurance, ProjectileTrace, Water, WeatherState, WindField, WorldImpulse,
 };
 
 use crate::agent::{NpcClock, NpcMotor, NpcVitals};
 use crate::faction::Faction;
+use crate::instinct::{self, CoverKind, Instinct};
 use crate::locomotion::{FootKind, Footfall, MoverState, SelfPropelled};
 use crate::nav::{NavAgent, NavGrid, PathStatus};
 use crate::perception::{BodyHeight, Perceivables};
@@ -509,6 +518,31 @@ pub const ESCAPE_SECS: f64 = 2.0;
 pub const SCENT_REACH: f64 = 110.0;
 /// A deer chased by a wolf this close (m) cuts from side to side.
 pub const ZIGZAG_RANGE: f32 = 6.0;
+/// An alert herd on Hard bunches up until each is this close to its nearest neighbour (m).
+pub const HERD_CLOSE: f32 = 1.9;
+/// Extreme boars charge a threat this close to one of their young (m), from as far off as
+/// [`GUARD_REACH`].
+pub const GUARD_RANGE: f32 = 10.0;
+pub const GUARD_REACH: f32 = 30.0;
+/// Extreme wolves ring a quarry at bay at this distance (m).
+pub const RING_SAFE: f32 = 4.5;
+
+/// The cover a species runs for on Hard: rabbits tall grass, deer woods (or tall leaves).
+fn refuge_kind(species: Species) -> Option<CoverKind> {
+    match species {
+        Species::Rabbit => Some(CoverKind {
+            height: 0.25,
+            woods: false,
+            reach: 25.0,
+        }),
+        Species::Deer => Some(CoverKind {
+            height: 1.1,
+            woods: true,
+            reach: 45.0,
+        }),
+        _ => None,
+    }
+}
 /// A deer that raises the alarm stots this long (s) as it sets off.
 pub const STOT_SECS: f32 = 0.8;
 
@@ -555,6 +589,9 @@ pub enum AnimalState {
     Perched,
     /// Birds: in the air.
     Flying,
+    /// Rabbits on Hard: pressed flat in its cover, keeping still until the threat is almost on
+    /// it ([`instinct`]).
+    Hide,
 }
 
 impl AnimalState {
@@ -573,6 +610,7 @@ impl AnimalState {
             AnimalState::Dead => "dead",
             AnimalState::Perched => "perched",
             AnimalState::Flying => "flying",
+            AnimalState::Hide => "hide",
         }
     }
 }
@@ -659,6 +697,17 @@ pub struct AnimalMind {
     cornered_at: Option<f64>,
     slashed_at: Option<f64>,
     rally_at: f64,
+    /// The tier it plays at ([`instinct`]), from its faction's.
+    pub tier: DifficultyTier,
+    /// Hard: the cover it is running for, when it next looks for one (animal clock), and
+    /// whether it stands in cover now.
+    pub refuge: Option<DVec3>,
+    next_refuge: f64,
+    pub in_refuge: bool,
+    /// Extreme boars: the threat to its young it is charging, and since when (animal clock).
+    guard: Option<(Entity, f64)>,
+    /// Boars: when it last found itself ringed by threats on all sides (animal clock).
+    ringed_at: Option<f64>,
     rng: u64,
     initialized: bool,
 }
@@ -1011,6 +1060,8 @@ pub(crate) struct AnimalScratch {
     /// Each herd's living members: the sum of their positions and how many.
     centers: HashMap<u32, (DVec3, f64)>,
     near: Vec<u32>,
+    /// Obstacles near a spot it weighs as cover.
+    trunks: Vec<u32>,
 }
 
 /// The world as animals need it.
@@ -1027,6 +1078,10 @@ pub(crate) struct AnimalWorld<'w> {
     wind: Option<Res<'w, WindField>>,
     seen: Res<'w, Perceivables>,
     settings: Res<'w, WildlifeSettings>,
+    /// The tier each faction plays at: what instincts animals have ([`instinct`]).
+    difficulty: Res<'w, CombatDifficulty>,
+    /// Tall grass and leaves to hide in, and smoke that blinds.
+    obscurance: Res<'w, Obscurance>,
 }
 
 type AnimalItem<'a> = (
@@ -1062,6 +1117,7 @@ pub(crate) fn animal_think(
         herds,
         centers,
         near,
+        trunks,
     } = &mut *scratch;
     snaps.clear();
     herds.retain(|_, list| !list.is_empty());
@@ -1143,6 +1199,7 @@ pub(crate) fn animal_think(
         let pos = t.translation;
         let species = animal.species;
         let traits = species.traits();
+        mind.tier = crate::difficulty::tier_of(&w.difficulty, species.faction());
         let home = mind.home.unwrap_or(pos);
         let mates: &[Entity] = herd
             .and_then(|h| herds.get(&h.0))
@@ -1254,9 +1311,19 @@ pub(crate) fn animal_think(
                 .map(|wf| wf.sample(eye))
                 .unwrap_or(Vec3::ZERO);
             let range = sight.max(traits.smell).max(traits.flight * 3.0);
+            let no_haze = w.obscurance.names().next().is_none();
+            // Standing in cover (Hard): it lets threats closer, and a rabbit keeps still there.
+            let kind = refuge_kind(species).filter(|_| Instinct::Refuge.allowed(mind.tier));
+            mind.in_refuge = kind.is_some_and(|k| {
+                instinct::cover_at(k, pos, &w.obscurance, &w.world, trunks)
+                    >= instinct::REFUGE_COVER
+            });
             w.seen.near(pos, range as f64, near);
             let mut best: Option<(Entity, DVec3, f32)> = None;
             let mut escape = Vec3::ZERO;
+            // How hard it is pushed, all told, and by how many close by: hemmed in on all
+            // sides, the pushes cancel.
+            let (mut pushed, mut close) = (0.0f32, 0);
             for &i in near.iter() {
                 let p = &w.seen.list[i as usize];
                 if p.entity == e {
@@ -1276,9 +1343,14 @@ pub(crate) fn animal_think(
                         && going.length() > 1.0
                         && going.normalize().dot(to_me) > 0.5
                 });
+                // (Extreme: a wolf ringing that boar sidesteps its rush and stays on it.)
+                let baying = Instinct::Encircle.allowed(mind.tier)
+                    && mind.state == AnimalState::Chase
+                    && mind.prey == Some(p.entity);
                 let threat = match species {
                     Species::Wolf => {
-                        (p.faction != Faction::PREY && p.faction != Faction::PREDATOR) || charging
+                        (p.faction != Faction::PREY && p.faction != Faction::PREDATOR)
+                            || (charging && !baying)
                     }
                     _ => p.faction != Faction::PREY,
                 };
@@ -1307,10 +1379,18 @@ pub(crate) fn animal_think(
                 if p.attacking {
                     f *= 1.5;
                 }
+                // (In its cover it feels safe, and lets a threat come closer.)
+                let calm = if mind.in_refuge {
+                    instinct::REFUGE_CALM
+                } else {
+                    1.0
+                };
                 let flight = traits.flight
                     * animal.skittishness
                     * w.settings.skittishness
                     * f
+                    * instinct::flight_scale(mind.tier)
+                    * calm
                     * if asleep { 0.6 } else { 1.0 };
                 // Running flat out from a pack, it doesn't see a wolf lying low in wait ahead
                 // until it is almost on it (though it may smell it).
@@ -1322,7 +1402,9 @@ pub(crate) fn animal_think(
                     sensed = true;
                 } else if d < sight * f.max(0.6) && !(lying_low && d > AMBUSH_RANGE) {
                     let target = p.position + DVec3::Y * (p.height * 0.7) as f64;
-                    sensed = w.world.raycast(eye, target).is_none();
+                    // Not through a wall, nor through thick smoke or grass.
+                    sensed = w.world.raycast(eye, target).is_none()
+                        && (no_haze || w.obscurance.transmittance(eye, target) > 0.3);
                 }
                 // Scent drifts downwind: smell what's upwind.
                 let mut scale = 1.0;
@@ -1349,8 +1431,16 @@ pub(crate) fn animal_think(
                 // either side runs on between them rather than from one into the other).
                 let off = flat(pos - p.position);
                 if off.length() > 0.1 {
-                    escape += off.normalize() * danger.min(3.0) * (1.0 + 6.0 / d.max(1.0));
+                    let push = danger.min(3.0) * (1.0 + 6.0 / d.max(1.0));
+                    escape += off.normalize() * push;
+                    pushed += push;
+                    close += usize::from(d < 12.0 && danger >= 0.8);
                 }
+            }
+            // A boar ringed by threats has nowhere to run: it stands at bay.
+            if species == Species::Boar && close >= 2 && escape.length() < 0.55 * pushed {
+                mind.cornered_at = Some(now);
+                mind.ringed_at = Some(now);
             }
             let mut danger = 0.0;
             let mut danger_at = None;
@@ -1362,6 +1452,19 @@ pub(crate) fn animal_think(
                 mind.threat_seen = now;
                 mind.threat_pos = Some(tp);
                 mind.escape = (escape.length() > 0.2).then(|| escape.normalize());
+            }
+            // Extreme: a wolf baying a boar that gets a tusk in it springs back out of reach
+            // for a moment, and keeps on at it.
+            let baying = species == Species::Wolf
+                && Instinct::Encircle.allowed(mind.tier)
+                && mind.state == AnimalState::Chase
+                && mind
+                    .prey
+                    .and_then(|p| snaps.get(&p))
+                    .is_some_and(|p| p.species == Species::Boar && !p.young && !p.dead);
+            if baying && mind.hurt_from.take().is_some() {
+                mind.flee_until = now + 0.9;
+                mind.bite_ready = mind.bite_ready.max(now + 1.2);
             }
             // Being hurt: run, whatever it is.
             if let Some(from) = mind.hurt_from.take() {
@@ -1507,6 +1610,36 @@ pub(crate) fn animal_think(
                 &mut mind, species, e, pos, home, animal, mates, snaps, now, night, danger_at,
                 &mut w,
             );
+            // Hard: running, it makes for cover away from the threat (a deer that has reached
+            // the woods runs on through them).
+            if let Some(k) = kind
+                && mind.state == AnimalState::Flee
+            {
+                if (mind.refuge.is_none() || now >= mind.next_refuge)
+                    && let Some(tp) = mind.threat_pos
+                    && !(mind.in_refuge && species == Species::Deer)
+                {
+                    mind.next_refuge = now + 1.0;
+                    let (obscurance, world, ground) = (&*w.obscurance, &*w.world, &*w.ground);
+                    mind.refuge = instinct::find_refuge(
+                        pos,
+                        tp,
+                        k,
+                        |p| instinct::cover_at(k, p, obscurance, world, trunks),
+                        |p| {
+                            let foot = ground.height(p).unwrap_or(pos.y);
+                            !world.blocked_at(
+                                DVec3::new(p.x, pos.y.max(foot), p.z),
+                                motor.radius + 0.1,
+                                motor.height.min(1.2),
+                                None,
+                            )
+                        },
+                    );
+                }
+            } else if kind.is_some() {
+                mind.refuge = None;
+            }
             if species == Species::Deer
                 && raised
                 && mind.state == AnimalState::Flee
@@ -1650,6 +1783,39 @@ pub(crate) fn animal_think(
                         intent.direction = -d.normalize_or_zero() * walk * 1.5;
                     }
                 }
+                // Hard: the herd bunches up, each closing on its nearest neighbour, the young
+                // to the middle.
+                if matches!(species, Species::Deer | Species::Boar)
+                    && Instinct::SelfishHerd.allowed(mind.tier)
+                {
+                    let (mut sum, mut n, mut nearest) = (DVec3::ZERO, 0.0, None::<(DVec3, f64)>);
+                    for m in mates {
+                        let Some(s) = snaps.get(m).filter(|s| *m != e && !s.dead) else {
+                            continue;
+                        };
+                        let d = s.pos.distance(pos);
+                        if d > 30.0 {
+                            continue;
+                        }
+                        sum += s.pos;
+                        n += 1.0;
+                        if nearest.is_none_or(|b| d < b.1) {
+                            nearest = Some((s.pos, d));
+                        }
+                    }
+                    if let Some((near_at, _)) = nearest {
+                        let hurt = snaps.get(&e).map_or(0.0, |s| s.hurt);
+                        let step = instinct::selfish_step(
+                            pos,
+                            animal.young,
+                            hurt,
+                            sum / n,
+                            near_at,
+                            HERD_CLOSE,
+                        );
+                        intent.direction += step * walk * 0.8;
+                    }
+                }
             }
             AnimalState::Flee => {
                 let dir = flee_direction(
@@ -1673,6 +1839,19 @@ pub(crate) fn animal_think(
                 } else {
                     1.0
                 };
+                // Into its cover: a rabbit drops flat and keeps still; a deer runs on in, and
+                // stops to watch once the threat is far enough behind.
+                if let Some(r) = mind.refuge
+                    && flat(r - pos).length() < if species == Species::Deer { 2.5 } else { 0.9 }
+                {
+                    mind.refuge = None;
+                    mind.next_refuge = now + 3.0;
+                    if species == Species::Rabbit && mind.in_refuge {
+                        mind.set(AnimalState::Hide, now);
+                    } else {
+                        mind.flee_until = mind.flee_until.min(now + 0.8);
+                    }
+                }
                 // Stotting, it bounds high and goes on slowly.
                 let stot = mind.stot(now);
                 intent.direction = dir * (1.0 - 0.35 * hurt) * pace * (1.0 - 0.55 * stot);
@@ -1701,6 +1880,14 @@ pub(crate) fn animal_think(
                     &mut intent,
                     traits,
                 );
+            }
+            AnimalState::Hide => {
+                // Pressed flat, still, an eye on the threat.
+                nav.clear();
+                intent.crouch = true;
+                if let Some(tp) = mind.threat_pos {
+                    intent.look = flat(tp - pos).try_normalize();
+                }
             }
             AnimalState::Dead | AnimalState::Perched | AnimalState::Flying => {}
         }
@@ -1754,7 +1941,21 @@ pub(crate) fn animal_think(
                 0.0
             };
             a.set("rest", lying);
-            a.set("lie", lying);
+            // Hiding, it lies pressed flat too.
+            let flat_out = if mind.state == AnimalState::Hide {
+                1.0
+            } else {
+                lying
+            };
+            a.set("lie", flat_out);
+            a.set(
+                "hide",
+                if mind.state == AnimalState::Hide {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
             a.set(
                 "alert",
                 if mind.state == AnimalState::Alert {
@@ -1796,6 +1997,29 @@ fn decide(
     {
         return;
     }
+    // ---------------------------------------------------------------- hiding (Hard)
+    if mind.state == AnimalState::Hide {
+        let close = mind.threat_pos.map_or(f32::MAX, |t| flat(t - pos).length());
+        let hurt = mind.wounded.is_some_and(|(at, _, _)| now - at < 1.0);
+        if close < instinct::HIDE_BOLT || hurt || !mind.in_refuge {
+            // Almost trodden on: it bursts out and runs.
+            mind.set(AnimalState::Flee, now);
+            if let Some(at) = danger_at.or(mind.threat_pos) {
+                let away = flat(pos - at);
+                if away.length() > 0.1 {
+                    mind.flee_dir = away.normalize();
+                }
+            }
+            mind.flee_until = now + 3.5;
+            mind.next_refuge = now + 2.0;
+            return;
+        }
+        if danger < 0.3 && now - mind.last_danger > 6.0 {
+            mind.set(AnimalState::Alert, now);
+            mind.wait_until = now + 2.0 + 2.0 * mind.random() as f64;
+        }
+        return;
+    }
     // ---------------------------------------------------------------- danger first
     if danger >= 1.0 {
         if mind.state != AnimalState::Flee {
@@ -1807,16 +2031,31 @@ fn decide(
                 }
             }
         }
-        mind.flee_until = now + if species == Species::Wolf { 2.5 } else { 3.5 };
+        mind.flee_until = now
+            + if species == Species::Wolf {
+                2.5
+            } else if mind.in_refuge && Instinct::Refuge.allowed(mind.tier) {
+                1.0
+            } else {
+                3.5
+            };
         mind.prey = None;
         return;
     }
+    let wary = instinct::alert_scale(mind.tier);
     if mind.state == AnimalState::Flee {
-        if now < mind.flee_until || danger > 0.45 {
+        // In its cover (Hard), it stops to watch as soon as the threat is outside its (calmer)
+        // flight distance.
+        let hold = if mind.in_refuge && Instinct::Refuge.allowed(mind.tier) {
+            1.0
+        } else {
+            0.45
+        };
+        if now < mind.flee_until || danger > hold {
             return;
         }
         mind.set(AnimalState::Alert, now);
-        mind.wait_until = now + 3.0 + 3.0 * mind.random() as f64;
+        mind.wait_until = now + (3.0 + 3.0 * mind.random() as f64) * wary;
         return;
     }
     let hunting = matches!(mind.state, AnimalState::Stalk | AnimalState::Chase);
@@ -1824,7 +2063,7 @@ fn decide(
         if mind.state != AnimalState::Alert {
             mind.set(AnimalState::Alert, now);
         }
-        mind.wait_until = now + 2.5 + 2.0 * mind.random() as f64;
+        mind.wait_until = now + (2.5 + 2.0 * mind.random() as f64) * wary;
         return;
     }
     if mind.state == AnimalState::Alert && now < mind.wait_until {
@@ -2450,6 +2689,13 @@ fn flee_direction(
     }
     // Run with the herd, unless the pack is running it down.
     dir += with_herd(deer, deer && mind.pursuer.is_some(), me, pos, mates, snaps);
+    // Hard: for its cover above all (picked away from the threat).
+    if let Some(r) = mind.refuge {
+        let to = flat(r - pos);
+        if to.length() > 0.3 {
+            dir += to.normalize() * 5.0;
+        }
+    }
     // Don't run off the map: past twice the home range, curve back.
     let off = pos - home;
     let excess = off.length() as f32 - range * 2.0;
@@ -2462,13 +2708,14 @@ fn flee_direction(
     mind.flee_dir = dir;
     // Rabbits zig-zag; a deer cuts from side to side at sharp angles once a wolf is close
     // behind it.
-    if species == Species::Rabbit {
+    let jinks = Instinct::Jink.allowed(mind.tier);
+    if species == Species::Rabbit && jinks && mind.refuge.is_none() {
         if now >= mind.next_zig {
             mind.zig = if mind.zig > 0.0 { -1.0 } else { 1.0 };
             mind.next_zig = now + 0.35 + 0.4 * mind.random() as f64;
         }
         dir = Quat::from_rotation_y(mind.zig * 0.6) * dir;
-    } else if deer && heels.is_some_and(|p| p.1 < ZIGZAG_RANGE) {
+    } else if deer && jinks && heels.is_some_and(|p| p.1 < ZIGZAG_RANGE) {
         if now >= mind.next_zig {
             // Cuts the other way each time, unless that would take it at a wolf running out
             // on that side (a flanker): then it cuts away from it again.
@@ -2587,17 +2834,41 @@ fn boar_fights(
         mind.wait_until = mind.wait_until.max(now + 1.0);
         return true;
     }
+    // Extreme: whatever comes near its young, it charges, wherever it is itself.
+    if Instinct::GuardYoung.allowed(mind.tier)
+        && mind.state != AnimalState::Charge
+        && now >= mind.rally_at
+        && let Some(g) = guard_target(me, pos, mates, snaps, w)
+    {
+        mind.guard = Some((g, now));
+        mind.set(AnimalState::Charge, now);
+        return true;
+    }
+    // Ringed on all sides, it stands at bay, facing them, between short rushes.
+    let ringed = mind.ringed_at.is_some_and(|t| now - t < 1.0);
+    if ringed && mind.state == AnimalState::Alert && now < mind.rally_at {
+        return true;
+    }
     if mind.state == AnimalState::Charge {
         let struck = mind
             .slashed_at
             .is_some_and(|t| t >= mind.since && now - t > 0.35);
+        let rush = if ringed { 1.5 } else { 6.0 };
         if !struck
-            && now - mind.since < 6.0
+            && now - mind.since < rush
             && foe.is_some_and(|f| f.0.is_some() && flat(f.1) < 25.0)
         {
             return true;
         }
+        if ringed {
+            mind.guard = None;
+            mind.set(AnimalState::Alert, now);
+            mind.wait_until = now + 1.0;
+            mind.rally_at = now + 0.8 + 0.6 * mind.random() as f64;
+            return true;
+        }
         // Away for a moment.
+        mind.guard = None;
         mind.set(AnimalState::Flee, now);
         mind.flee_until = now + 2.0 + mind.random() as f64;
         mind.rally_at = now + 2.5 + 1.5 * mind.random() as f64;
@@ -2633,6 +2904,36 @@ fn boar_fights(
     false
 }
 
+/// Extreme boars: the threat nearest any of its sounder's young, if one is within
+/// [`GUARD_RANGE`] of them (and they within [`GUARD_REACH`] of it).
+fn guard_target(
+    me: Entity,
+    pos: DVec3,
+    mates: &[Entity],
+    snaps: &HashMap<Entity, Snap>,
+    w: &AnimalWorld,
+) -> Option<Entity> {
+    let mut best: Option<(Entity, f64)> = None;
+    for m in mates {
+        let Some(y) = snaps
+            .get(m)
+            .filter(|s| *m != me && s.young && !s.dead && s.pos.distance(pos) < GUARD_REACH as f64)
+        else {
+            continue;
+        };
+        for p in &w.seen.list {
+            if p.faction == Faction::PREY || snaps.get(&p.entity).is_some_and(|o| o.dead) {
+                continue;
+            }
+            let d = DVec2::new(p.position.x - y.pos.x, p.position.z - y.pos.z).length();
+            if d < GUARD_RANGE as f64 && best.is_none_or(|b| d < b.1) {
+                best = Some((p.entity, d));
+            }
+        }
+    }
+    best.map(|b| b.0)
+}
+
 /// How long a boar remembers who hurt it, and turns on them (s).
 const WOUND_SECS: f64 = 15.0;
 /// How long a boar hurt by something it can't find stands looking for it (s).
@@ -2644,6 +2945,13 @@ const SEARCH_SECS: f64 = 4.0;
 /// strike (if there is one), where it is and how it is moving.
 fn boar_foe(mind: &AnimalMind, now: f64, w: &AnimalWorld) -> Option<(Option<Entity>, DVec3, Vec3)> {
     let live = |e: Entity| w.seen.get(e).map(|p| (Some(e), p.position, p.velocity));
+    // Charging for its young: at the one it went for.
+    if let Some((g, at)) = mind.guard
+        && now - at < 6.0
+        && let Some(l) = live(g)
+    {
+        return Some(l);
+    }
     let wound = mind.wounded.filter(|(at, _, _)| now - at < WOUND_SECS);
     let sensed = mind
         .threat
@@ -2808,7 +3116,20 @@ fn hunt(
                     lying_in_wait = false;
                     (at(28.0 + ahead, (26.0 + wide(side)) * side), 1.0)
                 } else {
-                    (at(24.0 + ahead, 0.0), stalk * 2.2)
+                    let post = at(24.0 + ahead, 0.0);
+                    // Extreme: it picks the tall grass nearest its post to lie in.
+                    if Instinct::GrassAmbush.allowed(mind.tier) {
+                        if now >= mind.next_refuge {
+                            mind.next_refuge = now + 0.5;
+                            let o = &*w.obscurance;
+                            mind.refuge = instinct::nearest_cover(post, 9.0, |p| {
+                                instinct::grass_at(p, 0.45, o)
+                            });
+                        }
+                        (mind.refuge.unwrap_or(post), stalk * 2.2)
+                    } else {
+                        (post, stalk * 2.2)
+                    }
                 }
             }
             PackRole::Chaser => (at(-(10.0f32 + behind).max(14.0), 5.0 * spread), stalk * 1.6),
@@ -2820,6 +3141,20 @@ fn hunt(
             .iter()
             .any(|m| *m != me && snaps.get(m).is_some_and(|s| s.state == AnimalState::Chase));
         if mind.role == PackRole::Ambusher && charging && along_me > 4.0 {
+            // Extreme: with tall grass a few steps off, it creeps into it first.
+            if Instinct::GrassAmbush.allowed(mind.tier) {
+                let o = &*w.obscurance;
+                let hidden = |p: DVec3| instinct::grass_at(p, 0.45, o);
+                if hidden(pos) < instinct::REFUGE_COVER
+                    && let Some(g) = instinct::nearest_cover(pos, 6.0, hidden)
+                {
+                    walk_to(pos, g, stalk, nav, w, now, replans, out);
+                    out.crouch = true;
+                    out.look = flat(prey_pos - pos).try_normalize();
+                    mind.placed = false;
+                    return;
+                }
+            }
             nav.clear();
             out.direction = Vec3::ZERO;
             out.crouch = true;
@@ -2842,9 +3177,12 @@ fn hunt(
         let off = pos.distance(goal);
         let near_enough = match mind.role {
             PackRole::FlankLeft | PackRole::FlankRight => 4.0,
+            // (Right in the grass it picked.)
+            PackRole::Ambusher if mind.refuge.is_some() => 0.8,
             _ => 2.5,
         };
         mind.placed = off < near_enough && lying_in_wait;
+
         let look = flat(prey_pos - pos);
         if look.length() > 0.1 && off < 3.0 {
             out.look = Some(look.normalize());
@@ -2855,6 +3193,54 @@ fn hunt(
     // its sides, level with it, and cut in once they are; a sprung ambusher heads it off.
     nav.clear();
     let d = prey_pos.distance(pos) as f32;
+    // Extreme: a quarry at bay (a grown boar that stands and fights, or one too spent to
+    // run) is ringed (Muro's two rules: in to a safe distance, then apart from each other),
+    // and bitten from behind while it turns on another.
+    let at_bay = (p.species == Species::Boar && !p.young) || prey_vel.length() < 2.5;
+    if Instinct::Encircle.allowed(mind.tier) && at_bay && d < 30.0 {
+        let to_me = flat(pos - prey_pos).normalize_or_zero();
+        let turned_away =
+            p.state == AnimalState::Charge && prey_vel.normalize_or_zero().dot(to_me) < -0.2;
+        let others = mates
+            .iter()
+            .filter(|&&m| m != me)
+            .filter_map(|m| snaps.get(m))
+            .filter(|s| !s.dead && s.prey == mind.prey)
+            .map(|s| s.pos);
+        // (Round where the quarry will be a moment from now, keeping pace with it.)
+        let lead = prey_pos + (prey_vel * 0.4).as_dvec3();
+        let step = instinct::muro_step(pos, lead, RING_SAFE, others);
+        // Its rush coming at me: out of the way, sideways and back.
+        let rushed = p.state == AnimalState::Charge
+            && d < 7.0
+            && prey_vel.normalize_or_zero().dot(to_me) > 0.5;
+        let want = if now < mind.flee_until || (rushed && d < 3.0) {
+            // Stung, or the tusks right on it: back out of reach.
+            to_me * motor.sprint_speed
+        } else if rushed {
+            let across = left_of(prey_vel.normalize_or(Vec3::X));
+            let side = if across.dot(to_me) >= 0.0 { 1.0 } else { -1.0 };
+            (across * side * 1.5 + to_me).normalize_or_zero() * motor.sprint_speed
+        } else if turned_away {
+            flat(prey_pos - pos).normalize_or(Vec3::X) * motor.sprint_speed
+        } else {
+            prey_vel + step * if d > RING_SAFE + 3.0 { 9.0 } else { 3.5 }
+        };
+        let sprint = want.length() > motor.run_speed && mind.stamina > 0.15;
+        let top = if sprint {
+            motor.sprint_speed
+        } else {
+            motor.run_speed
+        };
+        out.direction = (want / top.max(0.1)).clamp_length_max(1.0);
+        out.look = flat(prey_pos - pos).try_normalize();
+        out.sprint = sprint;
+        if d < 1.6 && now >= mind.bite_ready && traits.bite > 0.0 {
+            mind.bite = mind.prey;
+            mind.bite_ready = now + 0.9 + 0.4 * mind.random() as f64;
+        }
+        return;
+    }
     let heading = if prey_vel.length() > 2.0 {
         prey_vel.normalize()
     } else {

@@ -14,6 +14,7 @@ pub mod difficulty;
 pub mod faction;
 pub mod features;
 pub mod grenade;
+pub mod instinct;
 pub mod intent_body;
 pub mod learning;
 pub mod lob;
