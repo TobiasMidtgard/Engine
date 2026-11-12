@@ -2287,6 +2287,40 @@ mod tests {
             }
         }
         assert!(checked >= 6, "{checked}");
+
+        // The standing layers hide what is in them from NPC sight (`crate::obscurance`).
+        app.update_n(40);
+        let obscurance = app.world.resource::<engine_world::Obscurance>().clone();
+        assert!(
+            obscurance.names().any(|n| n == crate::obscurance::SOURCE),
+            "no foliage obscurance"
+        );
+        let mut hidden = 0;
+        for (f, layer, gt) in q.iter(&app.world) {
+            if *layer != FloorLayer::Grass {
+                continue;
+            }
+            let [rx, rz] = f.resolution;
+            for k in (0..(rx * rz) as usize).step_by(97) {
+                if f.density[k] < 0.5 {
+                    continue;
+                }
+                let (i, j) = (k as u32 % rx, k as u32 / rx);
+                let x = (i as f32 / (rx - 1) as f32 - 0.5) * f.size[0];
+                let z = (j as f32 / (rz - 1) as f32 - 0.5) * f.size[1];
+                let low = gt.affine().transform_point3(DVec3::new(
+                    x as f64,
+                    f.heights[k] as f64 + 0.05,
+                    z as f64,
+                ));
+                assert!(
+                    obscurance.extinction(low) > 0.0,
+                    "clear inside grass at {low}"
+                );
+                hidden += 1;
+            }
+        }
+        assert!(hidden > 0, "no thick grass to look into");
     }
 
     #[test]

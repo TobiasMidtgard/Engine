@@ -18,6 +18,7 @@ pub mod lod_fade;
 pub mod meadow;
 pub mod meshgen;
 pub mod near_woods;
+pub mod obscurance;
 pub mod plant;
 pub mod scenery;
 pub mod scenery_tree;
@@ -227,7 +228,12 @@ impl Plugin for FoliagePlugin {
                     solids::stream_scenery_tree_solids,
                     demo::plant_edge_belts,
                     season::follow_weather_calendar,
-                    (grass::sync_region_grass, grass_wear::wear_grass).chain(),
+                    (
+                        grass::sync_region_grass,
+                        grass_wear::wear_grass,
+                        obscurance::publish_cover,
+                    )
+                        .chain(),
                     (walkers::bend_grass_for_walkers, walkers::leave_grass_wakes).chain(),
                     cover::paint_ground_cover
                         .after(grass_wear::wear_grass)
