@@ -597,12 +597,14 @@ pub(crate) fn request_appearances(
     mut ranked: Query<Ranked, (With<Npc>, Without<Animal>)>,
     mut next: Local<f64>,
     mut order: Local<Vec<(f64, Entity)>>,
-    (drawn, mut bodies): (
+    (drawn, mut bodies, animals): (
         Option<Res<AppearanceBodies>>,
         Query<crate::intent_body::Asking, crate::intent_body::AskingFilter>,
+        Query<crate::animal_body::Asking, Without<Npc>>,
     ),
 ) {
     crate::intent_body::give_bodies(&mut commands, &settings, drawn.is_some(), &mut bodies);
+    crate::animal_body::give_animal_bodies(&mut commands, &settings, &animals);
     if !settings.character_looks {
         return;
     }

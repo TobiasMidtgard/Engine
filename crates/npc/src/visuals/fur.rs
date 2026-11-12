@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
+use engine_world::animation::{BodyRequest, SkeletonPose};
 use engine_world::{FurCoat, FurCoatDrawer, FurStyle};
 
 use super::animal::{CROUP, GLOSS, LEG_FOOT, LEG_LOW, MANE, RUMP, TAIL_FAN, TAIL2, TUSKS};
@@ -162,7 +163,8 @@ pub(crate) fn export_wild_coats(
         (Entity, &StandInPart, &MeshRenderer, &ChildOf),
         (Without<FurCoat>, Without<NoCoat>),
     >,
-    animals: Query<&Animal>,
+    animals: Query<(&Animal, Has<SkeletonPose>, Has<BodyRequest>)>,
+    coated: Query<(Entity, &ChildOf), (With<StandInPart>, With<FurCoat>)>,
     meshes: Option<Res<Assets<Mesh>>>,
     drawer: Option<Res<FurCoatDrawer>>,
     mut made: Local<HashMap<(Handle<Mesh>, Part, [u32; 3]), Option<FurCoat>>>,
@@ -171,10 +173,25 @@ pub(crate) fn export_wild_coats(
     let (Some(meshes), Some(_)) = (meshes, drawer) else {
         return;
     };
+    // An animal the animation module draws (`animal_body.rs`) grows its coat there: its
+    // hidden stand-in wears none (and gets one back if that body goes away).
+    let answered = |owner: Entity| {
+        animals
+            .get(owner)
+            .is_ok_and(|(_, posed, asked)| posed && asked)
+    };
+    for (e, parent) in &coated {
+        if answered(parent.parent()) {
+            commands.entity(e).remove::<FurCoat>();
+        }
+    }
     for (e, part, renderer, parent) in &parts {
-        let Ok(animal) = animals.get(parent.parent()) else {
+        let Ok((animal, ..)) = animals.get(parent.parent()) else {
             continue;
         };
+        if answered(parent.parent()) {
+            continue;
+        }
         let (Some(style), Some(length), MeshRef::Handle(handle)) = (
             style(animal.species),
             length_of(animal.species, part.part),

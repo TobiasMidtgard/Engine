@@ -698,6 +698,7 @@ pub struct NpcSettings {
     /// Fighters who are people and fight hand to hand ask the animation module for their bodies
     /// (a `BodyRequest` with a `Loadout`) and are posed by it from their intent, their strikes
     /// landing through its windows (`intent_body.rs`); off, the stand-in's pose drives them.
+    /// Deer, wolves, boars and rabbits ask for theirs too (`animal_body.rs`).
     pub anim_bodies: bool,
     /// Fighters' path searches run beside the frame and are answered the next step (`Some(true)`)
     /// or at once (`Some(false)`). `None` decides by the run: beside in play, at once in tests

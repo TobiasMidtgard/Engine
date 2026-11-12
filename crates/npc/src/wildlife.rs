@@ -394,6 +394,9 @@ pub const GUNSHOT_REACH: f32 = 90.0;
 pub const GUNSHOT_BOLT: f32 = 30.0;
 /// Bullets faster than this (m/s) crack: slower projectiles (arrows, bolts) are not heard.
 const GUNSHOT_SPEED: f32 = 250.0;
+/// A deer that bolts from a threat this close (m) rears as it goes (`animal_body.rs`).
+const REAR_WITHIN: f64 = 8.0;
+
 /// An explosion (a `WorldImpulse` with energy or heat, or a strong one) is heard this far
 /// (m, times the animal's hearing), and everything that hears it bolts.
 pub const BLAST_REACH: f32 = 160.0;
@@ -849,6 +852,7 @@ pub(crate) fn animal_senses(
     mut traces: MessageReader<ProjectileTrace>,
     mut impulses: MessageReader<WorldImpulse>,
     mut hurts: MessageReader<DamageEvent>,
+    mut flinches: MessageWriter<AnimationTrigger>,
     positions: Query<&Transform>,
     packs: Query<&Herd>,
     mut q: Query<SenseItem, Without<crate::rest::Resting>>,
@@ -928,6 +932,12 @@ pub(crate) fn animal_senses(
             continue;
         }
         vitals.health -= h.amount;
+        if h.kind != DamageKind::Bleed && vitals.health > 0.0 {
+            flinches.write(AnimationTrigger {
+                entity: h.target,
+                name: "flinch".into(),
+            });
+        }
         // A bleeding wound lowers health only: the animal already knows it was hurt.
         if h.kind == DamageKind::Bleed {
             if vitals.health <= 0.0 {
@@ -1041,6 +1051,7 @@ pub(crate) fn animal_think(
     mut noise: MessageWriter<NoiseEvent>,
     mut scratch: Local<AnimalScratch>,
     seeds: Query<&crate::seed::Seed>,
+    mut triggers: MessageWriter<AnimationTrigger>,
 ) {
     if !w.settings.enabled {
         return;
@@ -1138,6 +1149,7 @@ pub(crate) fn animal_think(
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         *intent = MoveIntent::default();
+        let was = mind.state;
 
         // ------------------------------------------------------------ dead: wait, then respawn
         if mind.state == AnimalState::Dead {
@@ -1703,8 +1715,25 @@ pub(crate) fn animal_think(
                     radius: 220.0,
                     source: Some(e),
                 });
+                triggers.write(AnimationTrigger {
+                    entity: e,
+                    name: "howl".into(),
+                });
             }
             mind.next_howl = now + 40.0 + 60.0 * mind.random() as f64;
+        }
+        // A deer startled by something close rears as it bolts (`animal_body.rs`).
+        if species == Species::Deer
+            && was != AnimalState::Flee
+            && mind.state == AnimalState::Flee
+            && mind
+                .threat_pos
+                .is_some_and(|p| p.distance(pos) < REAR_WITHIN)
+        {
+            triggers.write(AnimationTrigger {
+                entity: e,
+                name: "rear".into(),
+            });
         }
         if let Some(mut a) = anim {
             let head_down = matches!(
@@ -1712,14 +1741,13 @@ pub(crate) fn animal_think(
                 AnimalState::Graze | AnimalState::Drink | AnimalState::Feed
             ) && intent.direction.length_squared() < 1e-4;
             a.set("graze", if head_down { 1.0 } else { 0.0 });
-            a.set(
-                "rest",
-                if mind.state == AnimalState::Rest {
-                    1.0
-                } else {
-                    0.0
-                },
-            );
+            let lying = if mind.state == AnimalState::Rest {
+                1.0
+            } else {
+                0.0
+            };
+            a.set("rest", lying);
+            a.set("lie", lying);
             a.set(
                 "alert",
                 if mind.state == AnimalState::Alert {

@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod aim;
+pub mod animal_body;
 mod api;
 pub mod art;
 pub mod brain;

@@ -575,6 +575,18 @@ pub(crate) fn pose_stand_ins(
             armed,
             holds,
         ) = animal;
+        // An animal the animation module has a body for (`animal_body.rs`): that body is drawn
+        // and posed there, so none of the stand-in shows.
+        if animal.is_some() && requested && pose.is_some() {
+            for &c in children {
+                if let Ok((_, _, mut r)) = parts.get_mut(c)
+                    && r.visible
+                {
+                    r.visible = false;
+                }
+            }
+            continue;
+        }
         let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks.is_some() || asks);
         // The animation module poses it and holds its weapons (`intent_body.rs`).
         let posed_elsewhere = drawn_elsewhere
