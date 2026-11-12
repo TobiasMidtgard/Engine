@@ -5,7 +5,8 @@
 //! Players and NPC AI start attacks the same way, through `MoveIntent::attack` (plus
 //! `dash_to` for a dash-strike). The movement module owns the timing, so it is also the one
 //! that sends the [`AttackEvent`] telegraph every defender, camera and slow-motion system
-//! reacts to, and the [`DamageEvent`] when the blade connects.
+//! reacts to, and the [`DamageEvent`] when the blade connects (a `MeleeContact` instead while a
+//! module judges melee, `MeleeJudge`: it sends the judged damage).
 //!
 //! All timings are in the fighter's own seconds: a fighter with `Tempo::speed = 2.5` winds up,
 //! strikes and recovers 2.5 times faster in world time.
@@ -15,6 +16,7 @@ use std::collections::VecDeque;
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationTrigger, Ragdoll};
+use engine_world::combat::{ItemClass, MeleeContact, MeleeJudge};
 use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::CharacterController;
 use engine_world::{AttackEvent, AttackKind, DamageEvent, DamageKind, NoiseEvent};
@@ -603,11 +605,13 @@ fn swing_lunge(carry: Vec3, to_target: Option<(Vec3, f32)>, f: &Fighter, close_i
 }
 
 /// Advance attacks and land strikes. Runs after the locomotion step.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn resolve_attacks(
     time: Res<Time>,
     mut snaps: Local<Vec<Snap>>,
     mut damage: MessageWriter<DamageEvent>,
+    mut contacts: MessageWriter<MeleeContact>,
+    judge: Option<Res<MeleeJudge>>,
     mut noise: MessageWriter<NoiseEvent>,
     mut log: ResMut<CombatLog>,
     mut q: Query<(
@@ -671,6 +675,7 @@ pub(crate) fn resolve_attacks(
                             &snaps,
                             &time,
                             &mut damage,
+                            judge.is_some().then_some(&mut contacts),
                             &mut log,
                             &mut effects,
                         );
@@ -722,6 +727,7 @@ fn strike(
     snaps: &[Snap],
     time: &Time,
     damage: &mut MessageWriter<DamageEvent>,
+    mut judged: Option<&mut MessageWriter<MeleeContact>>,
     log: &mut CombatLog,
     effects: &mut Vec<(Entity, Outcome)>,
 ) -> Outcome {
@@ -774,14 +780,33 @@ fn strike(
             } else {
                 1.0
             };
-            damage.write(DamageEvent {
+            let blow = DamageEvent {
                 target: s.entity,
                 amount,
                 kind: DamageKind::Slash,
                 point: s.pos + (up * 0.3).as_dvec3(),
                 impulse: a.dir * f.knockback * push,
                 source: Some(me),
-            });
+            };
+            // Where a module judges melee (the combat module), the katana's blow goes to it
+            // and it sends the one judged `DamageEvent`.
+            match judged.as_deref_mut() {
+                Some(contacts) => {
+                    contacts.write(MeleeContact {
+                        blow,
+                        item: ItemClass::OneHandedBlade,
+                        off_hand: false,
+                        // The rig doesn't trace the edge through the body: the judge goes by
+                        // `StrikeTargets.zone`.
+                        entry: None,
+                        edge_dir: None,
+                        bone: None,
+                    });
+                }
+                None => {
+                    damage.write(blow);
+                }
+            }
         }
         log.push(CombatRecord {
             world_secs: time.elapsed_secs_f64(),
@@ -818,11 +843,14 @@ fn strike(
 /// Apply `DamageEvent`s to fighters: health, knockback, stagger, defeat (ragdoll).
 #[allow(clippy::type_complexity)]
 /// Whether damage is a hit that staggers (and can be blocked), not just hurt. Burning,
-/// freezing and falling hurt every frame they last, so staggering on each would hold a player
+/// freezing, bleeding and falling hurt every frame they last, so staggering on each would hold a player
 /// in the fire it is trying to leave (playtest 2026-10-27 #28). As damage over time never breaks
 /// poise in Souls games, it only staggers when it also shoves (`push` m/s, e.g. a fireball).
 fn is_hit(kind: DamageKind, push: Vec3) -> bool {
-    !matches!(kind, DamageKind::Fire | DamageKind::Cold | DamageKind::Fall) || push.length() > 1.0
+    !matches!(
+        kind,
+        DamageKind::Fire | DamageKind::Cold | DamageKind::Fall | DamageKind::Bleed
+    ) || push.length() > 1.0
 }
 
 pub(crate) fn apply_damage(
@@ -850,7 +878,10 @@ pub(crate) fn apply_damage(
             cs.hits_taken += 1;
             cs.last_attacker = ev.source;
         }
-        m.knockback += push;
+        // A wound bleeding pushes nothing.
+        if ev.kind != DamageKind::Bleed {
+            m.knockback += push;
+        }
         if f.track_health {
             f.health -= ev.amount;
         }

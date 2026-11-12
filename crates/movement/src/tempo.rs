@@ -31,7 +31,10 @@ const UNTARGETED_SLACK: f32 = 2.5;
 
 /// Damage that comes from a blow (a strike, a shot, a blast), not from the surroundings.
 fn is_blow(kind: DamageKind) -> bool {
-    !matches!(kind, DamageKind::Fire | DamageKind::Cold | DamageKind::Fall)
+    !matches!(
+        kind,
+        DamageKind::Fire | DamageKind::Cold | DamageKind::Fall | DamageKind::Bleed
+    )
 }
 
 /// How fast a character acts (`speed`) and perceives (`reflexes`). 1 = an ordinary person.

@@ -518,3 +518,100 @@ fn grapple_aim_is_ready_facing_a_wall_in_reach_and_not_facing_away() {
     app.update();
     assert!(!app.world.resource::<GrappleAim>().active);
 }
+
+/// Combat K1/K2 (combat-k1.md): the pilot carries its katana and skill, names its lock-on
+/// target for look-to-aim, and while a module judges melee its blow goes out as a
+/// `MeleeContact` for that module to turn into damage, not as a `DamageEvent`.
+#[test]
+fn with_a_melee_judge_the_pilots_katana_blow_goes_to_the_judge() {
+    use engine_world::DamageEvent;
+    use engine_world::animation::StrikeTargets;
+    use engine_world::combat::{CombatSkills, ItemClass, Loadout, MeleeContact, MeleeJudge};
+
+    #[derive(Resource, Default)]
+    struct Seen {
+        contacts: Vec<MeleeContact>,
+        blows: usize,
+    }
+    fn watch(
+        mut seen: ResMut<Seen>,
+        mut contacts: MessageReader<MeleeContact>,
+        mut damage: MessageReader<DamageEvent>,
+    ) {
+        seen.contacts.extend(contacts.read().cloned());
+        seen.blows += damage.read().count();
+    }
+
+    let mut app = app();
+    app.insert_resource(MeleeJudge {
+        judged_by: "test".into(),
+    })
+    .init_resource::<Seen>()
+    .add_systems(Last, watch);
+    api(
+        &mut app,
+        "movement.play",
+        json!({"on": true, "at": [0.0, 0.0, 0.0]}),
+    )
+    .unwrap();
+    let pilot = app.world.resource::<Play>().pilot.unwrap();
+    let foe = enemy(&mut app, "Grunt", DVec3::new(0.0, 0.9, -1.4));
+    run(&mut app, 0.5);
+    api(&mut app, "movement.lock_on", json!({"target": "Grunt"})).unwrap();
+    run(&mut app, 0.1);
+
+    let kit = app.world.get::<Loadout>(pilot).expect("a loadout");
+    assert_eq!(kit.main, ItemClass::OneHandedBlade);
+    let skill = app.world.get::<CombatSkills>(pilot).expect("skills");
+    assert!(skill.skill(ItemClass::OneHandedBlade) > 0.5);
+    let aim = app
+        .world
+        .get::<StrikeTargets>(pilot)
+        .expect("strike targets");
+    assert_eq!(aim.target, Some(foe));
+
+    app.world.get_mut::<MoveIntent>(pilot).unwrap().attack = Some(AttackKind::Melee);
+    app.update();
+    app.world.get_mut::<MoveIntent>(pilot).unwrap().attack = None;
+    run(&mut app, 1.0);
+    let seen = app.world.resource::<Seen>();
+    let c = seen.contacts.first().expect("the blow went to the judge");
+    assert_eq!((c.blow.target, c.blow.source), (foe, Some(pilot)));
+    assert_eq!(c.item, ItemClass::OneHandedBlade);
+    assert!(c.blow.amount > 0.0);
+    assert_eq!(seen.blows, 0, "no unjudged damage");
+}
+
+/// A leg that gives out (combat's knee wound of 0.6 or more) limps and can't sprint.
+#[test]
+fn a_wounded_knee_limps_instead_of_sprinting() {
+    use engine_world::combat::{BodyInjuries, BodyZone};
+    let mut app = app();
+    let runner = |app: &mut App, z: f64| {
+        app.world
+            .spawn((
+                Transform::from_translation(DVec3::new(0.0, 0.9, z)),
+                MovementProfile::pilot(),
+                MoveIntent {
+                    direction: Vec3::X,
+                    sprint: true,
+                    ..Default::default()
+                },
+            ))
+            .id()
+    };
+    let sound = runner(&mut app, 0.0);
+    let hurt = runner(&mut app, 6.0);
+    let mut wounds = BodyInjuries::default();
+    wounds.get_mut(BodyZone::KneeR).wound = 0.7;
+    app.world.entity_mut(hurt).insert(wounds);
+    run(&mut app, 1.5);
+    let speed = |app: &App, e| app.world.get::<Mover>(e).unwrap().horizontal_speed();
+    let (fast, slow) = (speed(&app, sound), speed(&app, hurt));
+    assert!(fast > 6.0, "the sound runner sprints: {fast}");
+    assert!(slow > 0.5 && slow < fast * 0.4, "limps at {slow} m/s");
+    assert_ne!(
+        app.world.get::<Mover>(hurt).unwrap().mode,
+        LocomotionMode::Sprint
+    );
+}
