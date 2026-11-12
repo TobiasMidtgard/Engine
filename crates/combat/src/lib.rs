@@ -22,6 +22,9 @@
 //!   [`CombatSettings::gore`]; a severed neck kills. A ruined weapon arm drops the weapon
 //!   ([`CombatSettings::disarm`]: the [`Loadout`](engine_world::combat::Loadout) hand empties
 //!   and the animation module drops its props).
+//! * **Openings**: a defender reeling from a broken shield, stunned or frozen, or caught by a
+//!   riposte can't cover; an aimed blow lands where it was aimed and a stab goes in deep
+//!   ([`rules::OPENING_STAB`]).
 //! * **Bleeding** ([`bleed`]): open wounds keep costing health as `DamageKind::Bleed` (no
 //!   flinch, no alarm) and clot slowly; a cut-off limb bleeds hardest and clots slowest.
 //! * **Judged before anyone reads it**: the plugin is the world's melee judge

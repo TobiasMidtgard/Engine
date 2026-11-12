@@ -10,7 +10,7 @@ use engine_world::combat::{
     Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass,
     Loadout, MeleeContact,
 };
-use engine_world::{DamageEvent, DamageKind};
+use engine_world::{DamageEvent, DamageKind, Statuses};
 
 use crate::CombatSettings;
 use crate::body::BodyCapsules;
@@ -133,6 +133,7 @@ type BodyItem<'a> = (
     Option<&'a AttackWindow>,
     Option<&'a Armor>,
     Option<&'a Ragdoll>,
+    Option<&'a Statuses>,
 );
 
 fn salt(p: DVec3, amount: f32) -> u64 {
@@ -182,7 +183,7 @@ impl Judge<'_, '_> {
         let Some(by) = blow.source else {
             return Judged::Untouched;
         };
-        let Ok((agt, _, aload, askills, aim, awindow, _, _)) = self.bodies.get(by) else {
+        let Ok((agt, _, aload, askills, aim, awindow, _, _, _)) = self.bodies.get(by) else {
             return Judged::Untouched;
         };
         // Armed bodies (and their fists once disarmed), or any blow that names its weapon.
@@ -191,7 +192,7 @@ impl Judge<'_, '_> {
             (None, Some(l)) => l.main,
             _ => return Judged::Untouched,
         };
-        let Ok((tgt, pose, tload, tskills, _, twindow, armor, ragdoll)) =
+        let Ok((tgt, pose, tload, tskills, _, twindow, armor, ragdoll, tstatus)) =
             self.bodies.get(blow.target)
         else {
             return Judged::Untouched;
@@ -223,6 +224,10 @@ impl Judge<'_, '_> {
             )
         });
         let down = ragdoll.is_some_and(|r| r.weight > 0.5);
+        // An opening: the defender reeling (a broken shield), stunned or frozen, or a riposte
+        // into a guard the attacker just turned aside.
+        let opening = tstatus.is_some_and(|s| s.staggered || s.shocked || s.frozen)
+            || awindow.is_some_and(|w| w.name.contains("riposte"));
         let aimed = aim
             .filter(|a| a.target == Some(blow.target))
             .and_then(|a| a.zone);
@@ -264,6 +269,7 @@ impl Judge<'_, '_> {
             can_cover: approach != Approach::Back && !busy && !down,
             shield: tload.is_some_and(|l| l.off == ItemClass::Shield),
             heavy: awindow.is_some_and(|w| w.name.contains("heavy")),
+            opening,
             from_right: struck.side().map_or(local.x > 0.0, |s| s == 1),
             armor: armor.copied().unwrap_or_default(),
             gore: self.settings.gore,

@@ -62,6 +62,9 @@ impl Armor {
 pub const GLANCE_BELOW: f32 = 0.35;
 /// Damage kept by a glancing edge.
 pub const GLANCE_SHARE: f32 = 0.55;
+/// A stab into an opening (the defender staggered, stunned or frozen, or a riposte) hurts this
+/// much more: it goes in where the point was put, all the way.
+pub const OPENING_STAB: f32 = 1.3;
 /// Damage kept by a blow the defender covered with an arm or a thigh.
 pub const COVER_SHARE: f32 = 0.4;
 /// Knee wound at which the leg gives out (the body drops to that knee).
@@ -297,6 +300,9 @@ pub struct Strike {
     pub shield: bool,
     /// A heavy (committed) blow.
     pub heavy: bool,
+    /// The defender is open (staggered, stunned, frozen, or riposted): it can't cover, and an
+    /// aimed blow lands where it was aimed; a stab can't glance and hurts [`OPENING_STAB`] more.
+    pub opening: bool,
     /// The blow comes at the body's right side (for where a covered blow is caught).
     pub from_right: bool,
     /// Armour on the struck part, 0..1 (taken by [`judge`] from the final zone).
@@ -340,6 +346,7 @@ pub fn judge(s: &Strike, wound_of: impl Fn(BodyZone) -> ZoneInjury) -> Verdict {
     let mut off_target = false;
     if let Some(aimed) = s.aimed
         && aimed == s.struck
+        && !s.opening
         && s.rolls[0] > on_target(s.skill, aimed)
     {
         zone = beside(aimed, (s.rolls[0] * 7.0).fract());
@@ -347,7 +354,8 @@ pub fn judge(s: &Strike, wound_of: impl Fn(BodyZone) -> ZoneInjury) -> Verdict {
     }
     // 2. The defender covers vital parts more.
     let mut covered = false;
-    if s.can_cover && s.rolls[1] < cover(zone, s.defense, s.skill, s.shield, s.heavy) {
+    if s.can_cover && !s.opening && s.rolls[1] < cover(zone, s.defense, s.skill, s.shield, s.heavy)
+    {
         let caught = caught_on(zone, s.from_right);
         covered = caught != zone || cover_priority(zone) >= 0.85;
         zone = caught;
@@ -359,9 +367,13 @@ pub fn judge(s: &Strike, wound_of: impl Fn(BodyZone) -> ZoneInjury) -> Verdict {
     } else {
         0.0
     };
-    let glanced = edge && quality < GLANCE_BELOW;
+    let stab_in = s.opening && s.kind == DamageKind::Pierce;
+    let glanced = edge && quality < GLANCE_BELOW && !stab_in;
     let armor = s.armor.on(zone);
     let mut amount = s.amount * zone_damage(zone, s.kind, s.approach) * armor_factor(armor, s.kind);
+    if stab_in {
+        amount *= OPENING_STAB;
+    }
     if covered {
         amount *= COVER_SHARE;
     }
@@ -461,6 +473,7 @@ mod tests {
             can_cover: false,
             shield: false,
             heavy: false,
+            opening: false,
             from_right: true,
             armor: Armor::default(),
             gore: Gore::Full,
@@ -470,6 +483,47 @@ mod tests {
 
     fn fresh(_: BodyZone) -> ZoneInjury {
         ZoneInjury::default()
+    }
+
+    #[test]
+    fn a_stab_into_an_opening_goes_in_where_it_was_put() {
+        // A beginner's stab at a guarding master's neck: off target or covered when the
+        // master is ready, in the neck when the master staggers.
+        let ready = Strike {
+            kind: DamageKind::Pierce,
+            skill: 0.1,
+            defense: 1.0,
+            can_cover: true,
+            shield: true,
+            rolls: [0.9, 0.1, 0.05],
+            ..strike(BodyZone::Neck)
+        };
+        let v = judge(&ready, fresh);
+        assert!(
+            v.zone != BodyZone::Neck && (v.off_target || v.covered),
+            "{v:?}"
+        );
+        let open = Strike {
+            opening: true,
+            ..ready
+        };
+        let o = judge(&open, fresh);
+        assert_eq!(o.zone, BodyZone::Neck);
+        assert!(!o.covered && !o.off_target && !o.glanced, "{o:?}");
+        let plain = judge(
+            &Strike {
+                can_cover: false,
+                rolls: [0.0, 0.99, 0.05],
+                ..ready
+            },
+            fresh,
+        );
+        assert!(
+            o.amount > plain.amount * 1.2,
+            "{} vs {}",
+            o.amount,
+            plain.amount
+        );
     }
 
     /// Aimed-melee 3.1, row by row: what a clean hit on each part does.
