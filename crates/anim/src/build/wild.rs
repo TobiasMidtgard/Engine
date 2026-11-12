@@ -500,8 +500,8 @@ fn coat(kind: Wild, look: Look) -> Coat {
         },
         // European rabbit: agouti grey-brown, a rufous nape, white belly and scut.
         Wild::Rabbit => Coat {
-            back: f([0.2, 0.135, 0.075], 1.0),
-            side: f([0.25, 0.18, 0.11], 0.95),
+            back: f([0.19, 0.14, 0.09], 1.0),
+            side: f([0.235, 0.18, 0.125], 0.95),
             under: f([0.62, 0.58, 0.52], 0.85),
             leg: f([0.24, 0.17, 0.1], 0.7),
             foot: f([0.34, 0.27, 0.19], 0.6),
@@ -1770,10 +1770,18 @@ fn rabbit_body(g: &mut Grow, f: &Frame, c: &Coat) {
     )
     .el(
         "body",
-        v(0.0, 0.1, -0.08),
-        v(0.035, 0.04, 0.045),
+        v(0.0, 0.088, -0.075),
+        v(0.028, 0.026, 0.045),
         c.under,
         0.015,
+    )
+    // Filling the waist, so the body is one loaf rather than two balls.
+    .el(
+        "body",
+        v(0.0, 0.14, 0.005),
+        v(0.054, 0.064, 0.065),
+        c.side,
+        0.025,
     )
     .el(
         "loin",
@@ -1791,8 +1799,8 @@ fn rabbit_body(g: &mut Grow, f: &Frame, c: &Coat) {
     )
     .el(
         "loin",
-        v(0.0, 0.09, 0.02),
-        v(0.04, 0.04, 0.07),
+        v(0.0, 0.085, 0.02),
+        v(0.03, 0.028, 0.065),
         c.under,
         0.015,
     );
@@ -1856,36 +1864,34 @@ fn rabbit_body(g: &mut Grow, f: &Frame, c: &Coat) {
         0.004,
     );
     eyes(g, v(0.028, 0.208, -0.183), 0.0085, [0.05, 0.028, 0.015]);
-    // Long upright ears, dark-tipped.
-    let tip = Paint::fur([0.05, 0.04, 0.03], 0.5);
+    // Upright ears, broad and spoon-shaped (shorter than a hare's, without its black tips),
+    // a darker rim at the top.
+    let tip = Paint::fur([0.13, 0.09, 0.06], 0.4);
     for side in 0..2 {
         let x = if side == 0 { -1.0 } else { 1.0 };
         let ear = format!("ear_{}", SIDE[side]);
-        let q = Quat::from_rotation_z(-0.12 * x) * Quat::from_rotation_x(0.3);
-        g.el_rot(
-            &ear,
-            sided(v(0.021, 0.285, -0.14), side),
-            v(0.016, 0.058, 0.006),
-            q,
-            c.ear,
-            0.004,
-        )
-        .el_rot(
-            &ear,
-            sided(v(0.021, 0.284, -0.141), side),
-            v(0.011, 0.045, 0.003),
-            q,
-            Paint::fur([0.36, 0.25, 0.2], 0.3),
-            0.0015,
-        )
-        .el_rot(
-            &ear,
-            sided(v(0.023, 0.335, -0.125), side),
-            v(0.012, 0.012, 0.005),
-            q,
-            tip,
-            0.002,
-        );
+        // (Turned about its length so the cupped opening faces forward and out.)
+        let q = Quat::from_rotation_z(-0.2 * x)
+            * Quat::from_rotation_x(0.38)
+            * Quat::from_rotation_y(0.75 * x);
+        let base = sided(v(0.023, 0.268, -0.147), side);
+        g.el_rot(&ear, base, v(0.019, 0.042, 0.006), q, c.ear, 0.005)
+            .el_rot(
+                &ear,
+                sided(v(0.023, 0.267, -0.148), side),
+                v(0.013, 0.033, 0.003),
+                q,
+                Paint::fur([0.36, 0.25, 0.2], 0.3),
+                0.0015,
+            )
+            .el_rot(
+                &ear,
+                base + q * v(0.0, 0.034, 0.0),
+                v(0.011, 0.009, 0.0065),
+                q,
+                tip,
+                0.002,
+            );
     }
     // The cotton scut.
     g.el(
@@ -3166,6 +3172,25 @@ mod tests {
             hams < chest + 0.01 && waist < hams - 0.02,
             "chest {chest}, waist {waist}, hams {hams}"
         );
+    }
+
+    #[test]
+    fn a_rabbit_is_one_loaf_with_short_ears() {
+        let m = mesh(Wild::Rabbit, 1.0, Look::PLAIN);
+        let width = |z: f32| {
+            m.vertices
+                .iter()
+                .filter(|v| (v.position.z - z).abs() < 0.01 && v.position.y > 0.1)
+                .fold(0.0f32, |a, v| a.max(v.position.x.abs()))
+        };
+        let (fore, waist, haunch) = (width(-0.06), width(0.005), width(0.07));
+        assert!(
+            waist > 0.78 * fore.max(haunch),
+            "fore {fore}, waist {waist}, haunch {haunch}"
+        );
+        // A rabbit's ears, not a hare's: their tips a hand's breadth over the head.
+        let top = m.vertices.iter().fold(f32::MIN, |a, v| a.max(v.position.y));
+        assert!(top < 0.33, "ear tips at {top}");
     }
 
     #[test]
