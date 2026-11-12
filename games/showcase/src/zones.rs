@@ -155,6 +155,13 @@ pub const ZONES: &[Zone] = &[
         module: "npc",
     },
     Zone {
+        key: "combat",
+        name: "Combat yard (aimed melee: body parts, skill, cover, wounds, severing)",
+        center: DVec3::new(-50.0, 0.0, 215.0),
+        radius: 22.0,
+        module: "combat",
+    },
+    Zone {
         key: "parkour",
         name: "Movement course (wall-run, slide, dash)",
         center: DVec3::new(-125.0, 0.0, 330.0),
@@ -767,6 +774,7 @@ pub fn spawn_cell(
         ),
         ("cave", 0) => engine_foliage::demo::spawn_cave_demo(commands, z.center),
         ("arena", 0) => engine_npc::demo::spawn_demo(commands, z.center),
+        ("combat", 0) => engine_combat::demo::spawn_demo(commands, z.center),
         ("parkour", 0) => engine_movement::demo::spawn_demo(commands, z.center),
         ("fortress", 0) => engine_destruction::demo::spawn_demo(commands, z.center),
         ("fortress", 1) => {
@@ -1413,6 +1421,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .quick_warmup()
             },
         ],
+        // The yard's wound view (parts tinted by their wounds, where each blow landed) is on
+        // at its stops.
+        "combat" => engine_combat::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .warmup(v.warmup)
+                    .on_arrive("combat.settings", r#"{"show_wounds": true}"#)
+                    .on_leave("combat.settings", r#"{"show_wounds": false}"#)
+            })
+            .collect(),
         "fortress" => destruction_views(engine_destruction::demo::VIEWS),
         "voxel" => destruction_views(engine_destruction::hill::VIEWS),
         "arena" => vec![

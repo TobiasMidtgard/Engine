@@ -101,6 +101,8 @@ fn main() {
         .add_plugins(engine_script::ScriptPlugin)
         // Combinable spells: casting, carriers, statuses, reactions (the Weaving hall).
         .add_plugins(engine_magic::MagicPlugin)
+        // One melee rule set: aim where you look, body parts, skill, wounds (the Combat yard).
+        .add_plugins(engine_combat::CombatPlugin)
         .add_systems(Startup, build::start)
         // The showcase's `&mut World` systems run only while they have work, so the rest of
         // the frame isn't held up behind them (AGENTS.md "Let systems run side by side").

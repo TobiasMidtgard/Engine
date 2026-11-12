@@ -31,6 +31,7 @@ engine_softbody.workspace = true
 engine_character.workspace = true
 engine_script.workspace = true
 engine_magic.workspace = true
+engine_combat.workspace = true
 
 [features]
 # `dx serve --hot-patch -p showcase --features hotpatch`: edit this crate's systems live.

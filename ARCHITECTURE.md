@@ -86,6 +86,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 | `engine_smoke` | Smoke/gas volumes that react to wind, bullets and explosions; volumetric fog | Fire and smoke |
 | `engine_vfx` | GPU particles (spells, splashes, sparks, debris), trails, decals | Particles and magic effects |
 | `engine_magic` | Combinable spells: elements, effects, cast forms, mastery growth, casting, carriers (bolts, fields, beams, chains, rain), statuses and reactions (`magic.*` API) | Implement the magic system |
+| `engine_combat` | One melee rule set for the player and NPCs: aim where you look (camera ray on body-part capsules into `StrikeTargets`), each melee `DamageEvent` judged by body part, weapon skill, cover and armour, `BodyHit`, `BodyInjuries` (wounds, hamstrings, severed limbs), disarms (`combat.*` API, the Combat yard) | Combat |
 | `engine_foliage` | Procedural plants, growth from water/sun/soil/minerals, chopping and regrowth, glowing cave mushrooms | Foliage and ecology |
 | `engine_anim` | Skeletons, clips, blend trees, IK, procedural animation for humanoids, animals, vehicles; muscle flex and jiggle; GPU skinning feature | Animation system |
 | `engine_npc` | Perception, tactics, cover/terrain use, spacing, blocking, skill/reaction/logic parameters; wildlife and dynamic fauna | Smart NPC AI |
