@@ -4,7 +4,8 @@
 //! slow motion leaves a dense trail. That also makes still screenshots show movement.
 //!
 //! A ghost copies the whole character: every visible `MeshRenderer` in its hierarchy (the
-//! root's own too) except entities marked [`NoGhost`], at its world transform at that
+//! root's own too, and the armor hidden under a drawn person, [`crate::look::person::Shell`])
+//! except entities marked [`NoGhost`], at its world transform at that
 //! instant, so armor, weapons and the pose all show. A character without any mesh gets a
 //! capsule. The effects feature draws ghosts as a translucent shadow of the body in a deep
 //! tint of the character's trail color, edged with light, fading in as the character moves
@@ -210,6 +211,7 @@ pub(crate) fn spawn_afterimages(
         Option<&ResolvedMesh>,
         Option<&Children>,
         Has<NoGhost>,
+        Has<crate::look::person::Shell>,
     )>,
     mut ghosts: Query<(Entity, &mut Afterimage)>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
@@ -247,11 +249,11 @@ pub(crate) fn spawn_afterimages(
         stack.clear();
         stack.push(root);
         while let Some(e) = stack.pop() {
-            let Ok((part_gt, renderer, resolved, children, no_ghost)) = parts.get(e) else {
+            let Ok((part_gt, renderer, resolved, children, no_ghost, shell)) = parts.get(e) else {
                 continue;
             };
             if let Some(r) = renderer
-                && r.visible
+                && (r.visible || shell)
                 && !no_ghost
             {
                 let mesh = resolved.map(|r| r.mesh).or(match r.mesh {

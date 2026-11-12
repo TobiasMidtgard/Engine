@@ -15,6 +15,7 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::transform::look_rotation;
 use engine_world::animation::{AnimationParams, AnimationTrigger, SkeletonPose};
+use engine_world::combat::BodyInjuries;
 use engine_world::locomotion::{ClimbLine, Climbable, LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::{
     CharacterController, CharacterMove, CharacterState, Collider, Hit, PhysicsQueries, QueryFilter,
@@ -441,6 +442,8 @@ pub(crate) fn step_movers(
         &mut AnimationParams,
         Option<&LocalTimeScale>,
         Has<SkeletonPose>,
+        Has<crate::demo::Puppet>,
+        Option<&BodyInjuries>,
     )>,
 ) {
     let world_dt = time.delta_secs();
@@ -457,9 +460,17 @@ pub(crate) fn step_movers(
         mut loco,
         mut params,
         local,
-        animated,
+        posed,
+        puppet,
+        injuries,
     ) in &mut q
     {
+        // An animation module's body emits its own footsteps; a puppet (drawn as a person or
+        // not) is posed here, so its steps are this module's.
+        let animated = posed && !puppet;
+        // Wounded legs: slower, no sprint (crate::wounds).
+        let hobbled = injuries.and_then(|i| crate::wounds::hobble(intent, i));
+        let intent = hobbled.as_ref().unwrap_or(intent);
         let dt = time.delta_for(local);
         if dt <= 0.0 {
             mv.velocity = Vec3::ZERO;
@@ -756,19 +767,24 @@ fn step_one(
     // Feet on walkable ground with the capsule's side against a steep slope: physics may
     // report the slope as the ground. Look under the feet, like Unreal's floor check.
     let floor = if state.grounded && state.ground_normal.dot(up) < max_slope_cos {
-        floor_below(0.15).map(|h| (h.normal, 0.0))
+        floor_below(0.15).map(|h| (h.normal, 0.0, h.surface))
     } else if !state.grounded && on_foot && m.grounded {
         // Over a crest or down a step on foot: the ground is still within a step below, so
         // step down onto it (Unreal's step-down) rather than fly off.
-        floor_below(STEP_DOWN).map(|h| (h.normal, (h.distance - 0.1).max(0.0)))
+        floor_below(STEP_DOWN).map(|h| (h.normal, (h.distance - 0.1).max(0.0), h.surface))
     } else {
         None
     };
-    let ground_normal = floor.map_or(state.ground_normal, |(n, _)| n);
+    let ground_normal = floor.map_or(state.ground_normal, |(n, ..)| n);
     let leaving = (!on_foot && m.velocity.dot(ground_normal) > 1.0) || m.knockback.dot(up) > 1.0;
     let grounded =
         (state.grounded || floor.is_some()) && ground_normal.dot(up) >= max_slope_cos && !leaving;
     let landed = grounded && !m.grounded && m.air_secs > 0.05;
+    m.ground_surface = if grounded {
+        floor.map(|(.., s)| s).or(state.ground_surface)
+    } else {
+        None
+    };
     if landed {
         land(m, p, b, probe, intent.crouch, out);
     }
@@ -850,7 +866,7 @@ fn step_one(
         (m.dash_charges + dt / p.dash_recharge_secs.max(0.01)).min(p.dash_charges as f32);
     if grounded {
         settle(m, state, up, landed);
-        if let Some((_, gap)) = floor.filter(|_| !state.grounded) {
+        if let Some((_, gap, _)) = floor.filter(|_| !state.grounded) {
             m.step_down = gap / dt.max(1e-4);
         }
         m.coyote = p.coyote_secs;
@@ -1712,7 +1728,7 @@ fn land(
             load_kg: p.mass_kg * 0.5 * (1.0 + impact / 4.0),
             speed: m.velocity.length(),
             kind: ContactKind::Foot,
-            surface: None,
+            surface: m.ground_surface,
             entity: Some(b.entity),
         });
     }
@@ -2997,7 +3013,8 @@ fn feedback(
         load_kg: p.mass_kg,
         speed,
         kind,
-        surface: None,
+        // A wall run's steps are on the wall: left to the receivers.
+        surface: if on_wall { None } else { m.ground_surface },
         entity: Some(b.entity),
     });
     let quiet = if m.mode == LocomotionMode::Crouch {

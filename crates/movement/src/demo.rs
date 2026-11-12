@@ -43,7 +43,8 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::LocalTimeScale;
 use engine_render::{Camera, MeshRenderer, StandardMaterial};
-use engine_world::animation::AnimationParams;
+use engine_world::animation::{AnimationParams, SkeletonPose};
+use engine_world::character::HandControls;
 use engine_world::locomotion::{Climbable, LocomotionMode, MoveIntent};
 use engine_world::physics::{
     CharacterController, Collider, PhysicsBackend, PhysicsQueries, QueryFilter, RigidBody, Velocity,
@@ -460,11 +461,18 @@ pub struct Puppet {
     hand_l: Xf,
     /// The ankles as last posed (same space): where the feet probe the ground next.
     ankles: [Vec3; 2],
+    /// The look's seed, where the pilot is drawn as a person ([`crate::look::person`]).
+    seed: u64,
 }
 
 impl Puppet {
     pub fn style(&self) -> Style {
         self.anim.style
+    }
+
+    /// The seed of the person drawn for it (from its name and spawn point).
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
     /// The left hand as last posed, relative to the character's transform.
@@ -544,6 +552,7 @@ pub fn spawn_character(
         was_defeated: false,
         hand_l: Xf::IDENTITY,
         ankles: rig::Pose::BIND.ankle,
+        seed: crate::look::person::seed_for(name, pos),
     });
     id
 }
@@ -819,7 +828,12 @@ pub(crate) fn register(app: &mut App) {
     .add_systems(
         Update,
         (
-            animate_puppets,
+            (
+                crate::look::person::dress_people,
+                animate_puppets,
+                crate::look::person::hide_shells,
+            )
+                .chain(),
             crate::look::rope::draw_ropes,
             crate::look::rope::drop_orphan_ropes,
             crate::look::zipline::draw_ziplines,
@@ -2239,6 +2253,8 @@ fn animate_puppets(
         Option<&Fighter>,
         Option<&AnimationParams>,
         Option<&LocalTimeScale>,
+        Option<(&mut SkeletonPose, &mut HandControls)>,
+        Has<crate::play::Parked>,
     )>,
     mut bones: Query<&mut Transform, (With<PuppetPart>, Without<Puppet>)>,
     queries: Res<PhysicsQueries>,
@@ -2250,7 +2266,7 @@ fn animate_puppets(
             p.anim.impact(hit.strength(), hit.hitstop());
         }
     }
-    for (entity, mut p, t, m, cc, cs, f, params, local) in &mut puppets {
+    for (entity, mut p, t, m, cc, cs, f, params, local, person, parked) in &mut puppets {
         let defeated = cs.is_some_and(|c| c.defeated);
         if p.was_defeated && !defeated {
             // Revived: stand straight up instead of getting up through the blend.
@@ -2274,6 +2290,16 @@ fn animate_puppets(
                 // transform propagation leave its bones alone.
                 bt.set_if_neq(fighter::bone_transform(solved[i], lift));
             }
+        }
+        if let Some((mut skeleton, mut hands)) = person {
+            crate::look::person::write_person(
+                &pose,
+                &solved,
+                lift,
+                parked,
+                &mut skeleton,
+                &mut hands,
+            );
         }
         let hand = solved[Bone::HandL.index()];
         p.hand_l = Xf::new(hand.pos + Vec3::Y * lift, hand.rot);

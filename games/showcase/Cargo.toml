@@ -36,3 +36,10 @@ engine_combat.workspace = true
 [features]
 # `dx serve --hot-patch -p showcase --features hotpatch`: edit this crate's systems live.
 hotpatch = ["engine_script/hotpatch"]
+
+[dev-dependencies]
+# For the `parkour_people` example (the movement module's film, included by path).
+engine_core.workspace = true
+engine_input.workspace = true
+engine_render.workspace = true
+engine_world.workspace = true

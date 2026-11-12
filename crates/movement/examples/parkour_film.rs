@@ -12,10 +12,15 @@
 //! pre-2026-11-05 settings (world gravity, the same height for a tap and a hold, no steering
 //! in the air), for side-by-side comparisons. Needs a GPU or a software Vulkan driver
 //! (lavapipe) and ffmpeg on the path. With `FILM_DRY=1` nothing is drawn: the pilot's mode and
-//! position are printed every quarter second instead, to tune a script.
+//! position are printed every quarter second instead, to tune a script. `FILM_SIZE=2560x1440`
+//! draws at that size (960x540 by default).
+//!
+//! Other crates film the same clips with more plugins through [`run_with`] (the showcase's
+//! `parkour_people` adds the character module, so the pilot is a person).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use engine_core::math::{DVec3, Vec2, Vec3};
 use engine_core::prelude::*;
@@ -30,6 +35,24 @@ use engine_world::WorldPlugin;
 
 const WIDTH: u32 = 960;
 const HEIGHT: u32 = 540;
+
+/// The frame size: `FILM_SIZE` (`WxH`), else [`WIDTH`]x[`HEIGHT`].
+fn size() -> (u32, u32) {
+    std::env::var("FILM_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((WIDTH, HEIGHT))
+}
+
+/// What another crate adds to every clip's app ([`run_with`]): plugins, and whether what
+/// they draw is ready to be filmed (pipelines compiled, say).
+static EXTRA: OnceLock<Extra> = OnceLock::new();
+
+/// Plugins to add, and whether they are ready to draw.
+type Extra = (fn(&mut App), fn(&World) -> bool);
 const DT: f64 = 1.0 / 60.0;
 /// Frames simulated before a clip starts (the look bakes, the pilot settles).
 const SETTLE_FRAMES: u32 = 40;
@@ -696,8 +719,7 @@ fn build_app() -> (App, Entity) {
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
         let mut w = app.world.resource_mut::<Window>();
-        w.width = WIDTH;
-        w.height = HEIGHT;
+        (w.width, w.height) = size();
     }
     app.insert_resource(LookSettings {
         texture_size: 512,
@@ -707,6 +729,9 @@ fn build_app() -> (App, Entity) {
         .add_plugins(InputPlugin)
         .add_plugins(WorldPlugin)
         .add_plugins(MovementPlugin);
+    if let Some((extra, _)) = EXTRA.get() {
+        extra(&mut app);
+    }
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: DT });
@@ -802,6 +827,49 @@ fn film(clip: &Clip, out: &Path) -> Result<PathBuf, String> {
     for _ in 0..SETTLE_FRAMES {
         set_camera(&mut app.world, 0.0);
         app.update();
+    }
+    // Where a character module draws the pilot as a person, wait (standing) until it is built.
+    let drawn = app
+        .world
+        .get_resource::<engine_world::character::AppearanceBodies>()
+        .is_some();
+    let started = std::time::Instant::now();
+    while drawn
+        && app
+            .world
+            .get::<engine_world::character::BodyFit>(pilot)
+            .is_none()
+        && started.elapsed().as_secs() < 300
+    {
+        set_camera(&mut app.world, 0.0);
+        app.update();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if drawn {
+        // Draw (without keeping) frames until the added plugins can draw the person.
+        let dry = std::env::var_os("FILM_DRY").is_some();
+        let ready: fn(&World) -> bool = EXTRA.get().map_or(|_| true, |(_, r)| *r);
+        if !dry {
+            app.world.remove_resource::<RenderDisabled>();
+            while !ready(&app.world) && started.elapsed().as_secs() < 600 {
+                app.update();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            app.world.insert_resource(RenderDisabled("settling".into()));
+        }
+        let built = app
+            .world
+            .get::<engine_world::character::BodyFit>(pilot)
+            .is_some();
+        println!(
+            "{}: person {} after {:.1} s",
+            clip.name,
+            if built { "built" } else { "NOT built" },
+            started.elapsed().as_secs_f32()
+        );
+        for _ in 0..10 {
+            app.update();
+        }
     }
     if clip.before {
         // (The pilot's mover keeps its variable jump: the old one had none.)
@@ -949,6 +1017,13 @@ fn encode(frames: &Path, out: &Path, name: &str) -> Result<(), String> {
 }
 
 fn main() {
+    run_with(|_| {}, |_| true);
+}
+
+/// Films the clips named on the command line (all without any), each app built with `extra`'s
+/// plugins too, waiting before each clip until `ready` says they can draw.
+pub fn run_with(extra: fn(&mut App), ready: fn(&World) -> bool) {
+    let _ = EXTRA.set((extra, ready));
     let mut args = std::env::args().skip(1);
     let out = args
         .next()

@@ -190,8 +190,8 @@ pub struct MovementProfile {
     // ------------------------------------------------------------ feedback
     /// Body mass for footsteps and landings, kg.
     pub mass_kg: f32,
-    /// Stride footsteps are emitted by movement unless the entity has a `SkeletonPose`
-    /// (then the animation module emits them from its clips). Set false to never emit them.
+    /// Stride footsteps are emitted by movement unless the entity has a `SkeletonPose` it
+    /// doesn't pose itself (then the animation module emits them from its clips). Set false to never emit them.
     pub stride_footsteps: bool,
 }
 

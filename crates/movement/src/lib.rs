@@ -34,6 +34,7 @@ pub mod target;
 pub mod tempo;
 pub mod traverse;
 pub mod vault;
+pub mod wounds;
 pub mod zipline;
 
 use engine_core::prelude::*;
@@ -190,6 +191,9 @@ impl Plugin for MovementPlugin {
                     (
                         locomotion::adopt_characters,
                         lockon::lock_on.before(player::player_intent),
+                        (wounds::arm_fighters, wounds::name_targets)
+                            .chain()
+                            .after(lockon::lock_on),
                         player::player_intent,
                         tempo::apply_tempo,
                     )

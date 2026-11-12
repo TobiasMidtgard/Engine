@@ -12,6 +12,7 @@
 //!   stone, sand, cloth, lacquer…
 //! - [`course`]: set dressing for the parkour course and the duel ring.
 //! - [`fighter`]: the armored sword fighters (four styles) and their parts.
+//! - [`person`]: pilots drawn as people from the character creator, posed by the rig.
 //! - [`rig`]: the fighters' skeleton, poses, two-bone IK and the procedural animator.
 //! - [`rope`]: the grapple's cable and hook.
 //! - [`zipline`]: zip line cables, dipping under their riders.
@@ -28,6 +29,7 @@ pub mod fighter;
 pub mod lines;
 pub mod materials;
 pub mod meshgen;
+pub mod person;
 pub mod rig;
 pub mod rope;
 pub mod texgen;

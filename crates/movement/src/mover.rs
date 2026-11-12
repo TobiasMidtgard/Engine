@@ -311,6 +311,10 @@ pub struct Mover {
     pub facing: Vec3,
     pub grounded: bool,
     pub ground_normal: Vec3,
+    /// What the feet stand on (the physics' ground surface), while grounded; footsteps and
+    /// landings name it so receivers needn't look the ground up again.
+    #[serde(skip)]
+    pub ground_surface: Option<engine_world::SurfaceId>,
     /// Local up (opposite gravity) at the character, updated every step.
     pub up: Vec3,
     /// Seconds (own time) in the current mode.
@@ -501,6 +505,7 @@ impl Default for Mover {
             facing: Vec3::NEG_Z,
             grounded: false,
             ground_normal: Vec3::Y,
+            ground_surface: None,
             up: Vec3::Y,
             mode_secs: 0.0,
             air_secs: 0.0,

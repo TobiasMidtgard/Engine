@@ -403,7 +403,15 @@ pub fn spawn_body(commands: &mut Commands, owner: Entity, style: Style, lift: f3
         if part.mat.emissive() {
             r = r.without_shadows();
         }
-        commands.spawn((Transform::default(), r, ChildOf(bones[part.bone.index()])));
+        commands.spawn((
+            Transform::default(),
+            r,
+            ChildOf(bones[part.bone.index()]),
+            super::person::BodyPart {
+                owner,
+                bone: part.bone,
+            },
+        ));
     }
     let blade = bones[Bone::Blade.index()];
     let tip = commands
