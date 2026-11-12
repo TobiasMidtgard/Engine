@@ -1491,14 +1491,13 @@ impl RenderFeature for CharacterFeature {
                                 built.version,
                             ))
                         };
-                        // Until it is in, the old look stays as it was last drawn.
-                        let Some(new) = new else {
-                            c.seen = true;
-                            continue;
-                        };
-                        let placement = c.placement;
-                        *c = new;
-                        c.placement = placement;
+                        // Until it is in, the old look is still posed and drawn (a rebuild, such
+                        // as a severed limb's, never leaves the body missing or frozen).
+                        if let Some(new) = new {
+                            let placement = c.placement;
+                            *c = new;
+                            c.placement = placement;
+                        }
                     }
                     c
                 }
