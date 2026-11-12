@@ -318,6 +318,9 @@ fn a_melee_contact_becomes_one_judged_damage_event() {
         },
         item: ItemClass::TwoHandedBlade,
         off_hand: false,
+        entry: None,
+        edge_dir: None,
+        bone: None,
     });
     app.update();
     app.update();

@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use engine_core::math::Vec3;
+use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 
 use crate::events::DamageKind;
@@ -367,6 +367,15 @@ pub struct MeleeContact {
     pub item: ItemClass,
     /// Which hand struck, when an item did: false main hand, true off hand.
     pub off_hand: bool,
+    /// World point where the edge (or point, or fist) first crossed the target's body, when
+    /// the animation module knows it. With it, the judge picks the struck zone from geometry
+    /// instead of `StrikeTargets.zone`.
+    pub entry: Option<DVec3>,
+    /// World direction the striking edge moved at contact (unit length): tells a cut from a
+    /// stab, and which side it came from.
+    pub edge_dir: Option<Vec3>,
+    /// The `HUMANOID_BONES` name nearest `entry`, on the target.
+    pub bone: Option<String>,
 }
 
 /// Present while a module judges every [`MeleeContact`] into `DamageEvent`s (see
