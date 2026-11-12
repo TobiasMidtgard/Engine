@@ -679,6 +679,7 @@ fn marks(kind: DamageKind) -> (f32, f32) {
         DamageKind::Explosive => (0.8, 0.8),
         DamageKind::Fall => (0.2, 1.0),
         DamageKind::Fire | DamageKind::Cold | DamageKind::Magic => (0.2, 0.2),
+        DamageKind::Bleed => (0.0, 0.0),
     }
 }
 

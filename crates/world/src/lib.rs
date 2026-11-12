@@ -63,7 +63,7 @@ pub use character::{
 };
 pub use combat::{
     Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass,
-    Knockback, Loadout, ZoneInjury,
+    Knockback, Loadout, MeleeContact, MeleeJudge, ZoneInjury, judges_melee,
 };
 pub use cover::{CoverCell, CoverKind, GroundCover};
 pub use environment::*;

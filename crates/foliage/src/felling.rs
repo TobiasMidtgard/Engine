@@ -121,7 +121,7 @@ pub fn chop_factor(kind: DamageKind) -> f32 {
         DamageKind::Ballistic => 0.25,
         DamageKind::Pierce => 0.1,
         DamageKind::Magic => 0.5,
-        DamageKind::Fire | DamageKind::Cold | DamageKind::Fall => 0.0,
+        DamageKind::Fire | DamageKind::Cold | DamageKind::Fall | DamageKind::Bleed => 0.0,
     }
 }
 

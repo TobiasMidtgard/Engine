@@ -3,6 +3,8 @@
 //!
 //! * [`BodyZone`]: where on a body a strike aims or lands, from the humanoid bones, and how
 //!   vital it is. [`Approach`]: from the front, the side or behind.
+//! * [`MeleeContact`] and [`MeleeJudge`]: melee blows go to the rules module first, and it
+//!   writes the `DamageEvent`, so nobody reads an unjudged amount.
 //! * [`BodyHit`]: a strike landed on a zone, sent next to the [`DamageEvent`](crate::DamageEvent)
 //!   that keeps working for everyone else.
 //! * [`CombatSkills`] and [`Loadout`] (with [`ItemClass`]): how good someone is with what they
@@ -352,8 +354,40 @@ pub struct Knockback {
     pub velocity: Vec3,
 }
 
+/// A melee blow as it lands, before any rules judge it. While [`MeleeJudge`] is present the
+/// animation module writes its armed and unarmed blows here instead of as `DamageEvent`, and
+/// the judging module writes exactly one `DamageEvent` per contact (or none for a miss), so
+/// no reader ever sees an unjudged amount. Without a judge, blows go out as `DamageEvent`
+/// directly, as before.
+#[derive(Message, Debug, Clone)]
+pub struct MeleeContact {
+    /// The blow as the swing would deal it: target, amount, kind, point, push, attacker.
+    pub blow: crate::DamageEvent,
+    /// The striking item's class (`ItemClass::None` for fists, kicks and bites).
+    pub item: ItemClass,
+    /// Which hand struck, when an item did: false main hand, true off hand.
+    pub off_hand: bool,
+}
+
+/// Present while a module judges every [`MeleeContact`] into `DamageEvent`s (see
+/// [`judges_melee`]). Check for it when systems run, not in `Plugin::build`.
+#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+pub struct MeleeJudge {
+    pub judged_by: String,
+}
+
+/// Call from a combat plugin's `build` once it turns every [`MeleeContact`] into damage.
+pub fn judges_melee(app: &mut App, name: &str) {
+    if app.world.get_resource::<MeleeJudge>().is_none() {
+        app.insert_resource(MeleeJudge {
+            judged_by: name.to_string(),
+        });
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
     app.add_message::<BodyHit>()
+        .add_message::<MeleeContact>()
         .register_component::<Loadout>(
             "What a body holds: main and off hand item class (one-handed blade, axe, mace, \
              dagger, spear, two-handed blade, two-handed axe, shield, spell focus, torch, bow, \
@@ -380,6 +414,17 @@ pub(crate) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_melee_judge_stays() {
+        let mut app = App::new();
+        judges_melee(&mut app, "engine_combat");
+        judges_melee(&mut app, "other");
+        assert_eq!(
+            app.world.resource::<MeleeJudge>().judged_by,
+            "engine_combat"
+        );
+    }
 
     #[test]
     fn bones_fall_in_their_zones() {

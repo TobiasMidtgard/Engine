@@ -203,6 +203,10 @@ pub enum DamageKind {
     Cold,
     Magic,
     Fall,
+    /// Damage over time from a wound that is already there (bleeding): lowers health only.
+    /// Readers never flinch, stagger, knock back, mark or alarm on it; the wound's own blow
+    /// did that when it landed.
+    Bleed,
 }
 
 /// A sound that AI can hear (separate from what the audio engine plays).
