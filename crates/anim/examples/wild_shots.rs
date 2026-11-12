@@ -4,7 +4,7 @@
 //! cargo run -p engine_anim --example wild_shots --release -- <lineup|close|actions|gaits> [out_dir] [width] [height]
 //! ```
 //!
-//! * `lineup`: a stag, a hind, a fawn, a wolf, a boar and a rabbit side by side.
+//! * `lineup`: a stag, a hind, a fawn, a wolf, a boar, a piglet and a rabbit side by side.
 //! * `close`: each one close up, three-quarter on.
 //! * `actions`: the held poses and the one-shots (graze, lie, alert, rear, howl, fallen).
 //! * `gaits`: frames of each one walking, trotting and running past.
@@ -147,15 +147,15 @@ impl Stage {
 }
 
 /// (name, kind, height, seed, how far the camera stands back, the height it looks at).
-/// (name, kind, height, seed, camera distance, look-at height).
 type Cast = (&'static str, &'static str, Option<f32>, u64, f64, f64);
 
-const CAST: [Cast; 6] = [
+const CAST: [Cast; 7] = [
     ("stag", "deer", Some(1.32), 7, 4.6, 0.95),
     ("hind", "deer", None, 3, 4.2, 0.85),
     ("fawn", "deer", Some(0.6), 5, 2.4, 0.45),
     ("wolf", "wolf", None, 4, 3.0, 0.55),
     ("boar", "boar", None, 6, 3.0, 0.5),
+    ("piglet", "boar", Some(0.425), 8, 1.8, 0.28),
     ("rabbit", "rabbit", None, 2, 0.9, 0.13),
 ];
 
@@ -181,7 +181,7 @@ fn main() {
     let mut s = stage(width, height);
     match mode.as_str() {
         "lineup" => {
-            let xs = [-4.2, -2.3, -0.9, 0.5, 2.0, 3.2];
+            let xs = [-4.4, -2.5, -1.1, 0.3, 1.7, 3.1, 3.95];
             for (i, (_, kind, h, seed, ..)) in CAST.iter().enumerate() {
                 s.animal(kind, *h, *seed, DVec3::new(xs[i], 0.0, 0.0), -90.0);
             }

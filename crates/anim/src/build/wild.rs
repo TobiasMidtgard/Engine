@@ -139,6 +139,8 @@ pub struct Look {
     pub antlers: f32,
     /// A fawn's white spots.
     pub spots: bool,
+    /// A piglet's pale stripes along its flanks.
+    pub stripes: bool,
     /// Coat shade, -1 (darker) .. 1 (paler).
     pub shade: f32,
 }
@@ -147,12 +149,13 @@ impl Look {
     pub const PLAIN: Look = Look {
         antlers: 0.0,
         spots: false,
+        stripes: false,
         shade: 0.0,
     };
 
     /// The look a request gets: a stag (a deer above the typical adult, or asked for as
     /// `stag`) grows antlers sized by the seed; a deer under 70% of adult size is a spotted
-    /// fawn; the seed shades the coat.
+    /// fawn, a boar under 65% a striped piglet; the seed shades the coat.
     pub fn of(kind: Wild, asked: &str, scale: f32, seed: u64) -> Look {
         let h = |n: u64| {
             let mut x = seed ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -165,6 +168,7 @@ impl Look {
         Look {
             antlers: if stag { 0.7 + 0.3 * h(1) } else { 0.0 },
             spots: kind == Wild::Deer && scale < 0.7,
+            stripes: kind == Wild::Boar && scale < 0.65,
             shade: (h(2) - 0.5) * 2.0,
         }
     }
@@ -172,9 +176,10 @@ impl Look {
     /// A key for meshes of this look (looks are quantized so a herd shares a few meshes).
     pub fn key(&self) -> String {
         format!(
-            "a{}s{}c{}",
+            "a{}s{}t{}c{}",
             (self.antlers * 4.0).round() as i32,
             u8::from(self.spots),
+            u8::from(self.stripes),
             (self.shade * 2.0).round() as i32
         )
     }
@@ -184,6 +189,7 @@ impl Look {
         Look {
             antlers: (self.antlers * 4.0).round() / 4.0,
             spots: self.spots,
+            stripes: self.stripes,
             shade: (self.shade * 2.0).round() / 2.0,
         }
     }
@@ -467,10 +473,23 @@ fn coat(kind: Wild, look: Look) -> Coat {
             ear: f([0.17, 0.12, 0.08], 0.5),
             tail: f([0.16, 0.14, 0.11], 1.0),
         },
-        // Wild boar: coarse dark grey-brown bristles, a black mane along the spine.
+        // A piglet: a ginger-brown humbug coat (its pale stripes are painted on in
+        // `boar_body`), softer and shorter.
+        Wild::Boar if look.stripes => Coat {
+            back: f([0.075, 0.042, 0.022], 0.9),
+            side: f([0.13, 0.072, 0.036], 0.85),
+            under: f([0.2, 0.135, 0.075], 0.7),
+            leg: f([0.06, 0.038, 0.022], 0.5),
+            foot: f([0.03, 0.022, 0.016], 0.3),
+            face: f([0.12, 0.07, 0.038], 0.5),
+            muzzle: f([0.06, 0.04, 0.028], 0.25),
+            ear: f([0.06, 0.04, 0.025], 0.6),
+            tail: f([0.05, 0.03, 0.018], 0.5),
+        },
+        // Wild boar: coarse grizzled grey-brown bristles, a long black mane along the spine.
         Wild::Boar => Coat {
-            back: f([0.025, 0.02, 0.016], 1.0),
-            side: f([0.065, 0.05, 0.036], 0.85),
+            back: f([0.025, 0.02, 0.016], 1.2),
+            side: f([0.06, 0.048, 0.036], 1.05),
             under: f([0.08, 0.062, 0.046], 0.6),
             leg: f([0.035, 0.028, 0.022], 0.5),
             foot: f([0.03, 0.025, 0.02], 0.3),
@@ -1379,65 +1398,72 @@ fn wolf_body(g: &mut Grow, f: &Frame, c: &Coat) {
     );
 }
 
-fn boar_body(g: &mut Grow, f: &Frame, c: &Coat) {
-    // Heavy forequarters with a high mane, narrowing to the ham.
+fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
+    // Narrow and deep: heavy forequarters under high withers, narrowing to a small ham.
     g.el(
         "body",
-        v(0.0, 0.58, -0.24),
-        v(0.19, 0.22, 0.32),
+        v(0.0, 0.57, -0.24),
+        v(0.165, 0.235, 0.33),
         c.side,
         0.07,
     )
+    .el("body", v(0.0, 0.7, -0.36), v(0.14, 0.15, 0.2), c.back, 0.06)
     .el(
         "body",
-        v(0.0, 0.71, -0.33),
-        v(0.15, 0.13, 0.2),
-        c.back,
-        0.06,
-    )
-    .el(
-        "body",
-        v(0.0, 0.44, -0.24),
-        v(0.14, 0.09, 0.26),
+        v(0.0, 0.43, -0.2),
+        v(0.12, 0.09, 0.28),
         c.under,
         0.06,
     )
     .el(
         "loin",
         v(0.0, 0.6, 0.14),
-        v(0.165, 0.18, 0.25),
+        v(0.145, 0.17, 0.25),
         c.side,
         0.07,
     )
     .el(
         "loin",
-        v(0.0, 0.46, 0.06),
-        v(0.13, 0.09, 0.22),
+        v(0.0, 0.47, 0.06),
+        v(0.11, 0.08, 0.22),
         c.under,
         0.05,
     )
-    .el("loin", v(0.0, 0.6, 0.42), v(0.15, 0.15, 0.13), c.side, 0.05);
-    // The bristle crest along the spine, tallest at the withers: one ridge sloping to the
-    // rump (the loin's part starts where the body's ends, so there is no dip between them).
-    g.cap(
-        "body",
-        v(0.0, 0.8, -0.48),
-        v(0.0, 0.77, -0.05),
-        0.07,
-        0.06,
-        c.back,
-        0.06,
-    )
-    .cap(
+    .el(
         "loin",
-        v(0.0, 0.77, -0.08),
-        v(0.0, 0.7, 0.4),
-        0.06,
-        0.04,
-        c.back,
-        0.06,
+        v(0.0, 0.59, 0.4),
+        v(0.135, 0.14, 0.13),
+        c.side,
+        0.05,
     )
-    .el("loin", v(0.0, 0.66, 0.05), v(0.16, 0.12, 0.2), c.side, 0.07);
+    .el("loin", v(0.0, 0.66, 0.05), v(0.14, 0.11, 0.2), c.side, 0.07);
+    // The mane: a blade of long, coarse bristles standing up along the spine from the nape,
+    // tallest over the withers and falling away to the rump, so the back slopes down from a
+    // hump. (A piglet's is short.)
+    let mane = Paint {
+        fur: if look.stripes { 1.1 } else { 2.6 },
+        ..c.back
+    };
+    for (z, y) in [
+        (-0.7, 0.77),
+        (-0.58, 0.85),
+        (-0.45, 0.885),
+        (-0.3, 0.865),
+        (-0.15, 0.82),
+        (0.0, 0.78),
+        (0.15, 0.75),
+        (0.3, 0.715),
+        (0.42, 0.68),
+    ] {
+        let bone = if z < -0.55 {
+            "neck_1"
+        } else if z < 0.0 {
+            "body"
+        } else {
+            "loin"
+        };
+        g.el(bone, v(0.0, y, z), v(0.055, 0.075, 0.1), mane, 0.05);
+    }
     // A thick neck straight into the wedge of the head.
     let n = f.neck;
     g.cap(
@@ -1459,16 +1485,24 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat) {
         c.back,
         0.03,
     );
+    // A big wedge of a head, about a third of the body's length, the brow running straight
+    // down to the snout.
     g.cap(
         "head",
-        v(0.0, 0.63, -0.74),
-        v(0.0, 0.45, -1.07),
-        0.125,
-        0.058,
+        v(0.0, 0.65, -0.72),
+        v(0.0, 0.45, -1.08),
+        0.15,
+        0.06,
         c.face,
         0.04,
     )
-    .el("head", v(0.0, 0.6, -0.8), v(0.12, 0.11, 0.1), c.face, 0.03);
+    .el(
+        "head",
+        v(0.0, 0.61, -0.78),
+        v(0.135, 0.13, 0.12),
+        c.face,
+        0.03,
+    );
     for side in 0..2 {
         g.el(
             "head",
@@ -1709,6 +1743,55 @@ fn rabbit_body(g: &mut Grow, f: &Frame, c: &Coat) {
     );
 }
 
+/// A piglet's humbug stripes: pale bands along each flank, from the shoulder to the ham,
+/// painted onto the coat (each band is a chain of capsules lying just inside the body's
+/// surface, so it colours the skin without raising it).
+fn piglet_stripes(g: &mut Grow) {
+    let stripe = Paint::fur([0.36, 0.27, 0.15], 0.85);
+    let r = 0.016;
+    for y in [0.735, 0.655, 0.575, 0.5] {
+        for side in 0..2 {
+            // Where the flank is at this height, by bisection outward from the middle.
+            let surface = |z: f32| -> Option<f32> {
+                let d = |x: f32| g.b.distance(sided(v(x, y, z), side) * g.s);
+                if d(0.0) >= 0.0 {
+                    return None;
+                }
+                let (mut lo, mut hi) = (0.0, 0.4);
+                for _ in 0..24 {
+                    let mid = 0.5 * (lo + hi);
+                    if d(mid) < 0.0 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                Some(lo)
+            };
+            let points: Vec<Vec3> = (0..19)
+                .filter_map(|k| {
+                    let z = -0.56 + 0.06 * k as f32;
+                    surface(z).map(|x| sided(v((x - r - 0.002).max(0.0), y, z), side))
+                })
+                .collect();
+            for pair in points.windows(2) {
+                // Over the shoulder blade and the ham the band moves with the leg.
+                let z = 0.5 * (pair[0].z + pair[1].z);
+                let bone = if z < -0.4 {
+                    name("front", "scapula", side)
+                } else if z > 0.36 {
+                    name("hind", "upper", side)
+                } else if z < 0.0 {
+                    "body".to_string()
+                } else {
+                    "loin".to_string()
+                };
+                g.cap(&bone, pair[0], pair[1], r, r, stripe, 0.004);
+            }
+        }
+    }
+}
+
 /// The animal's body (scale 1 lengths grown at `scale`).
 pub fn body(kind: Wild, scale: f32, look: Look) -> Body {
     let f = frame(kind);
@@ -1721,10 +1804,14 @@ pub fn body(kind: Wild, scale: f32, look: Look) -> Body {
     match kind {
         Wild::Deer => deer_body(&mut g, &f, &c, look),
         Wild::Wolf => wolf_body(&mut g, &f, &c),
-        Wild::Boar => boar_body(&mut g, &f, &c),
+        Wild::Boar => boar_body(&mut g, &f, &c, look),
         Wild::Rabbit => rabbit_body(&mut g, &f, &c),
     }
     legs(&mut g, kind, &f, &c);
+    // (Over the shoulders and hams too, so after the legs.)
+    if kind == Wild::Boar && look.stripes {
+        piglet_stripes(&mut g);
+    }
     b
 }
 
@@ -2825,6 +2912,43 @@ mod tests {
             skeleton_name(Wild::Rabbit, scale_for_height(Wild::Rabbit, 0.1)),
             "rabbit@100mm"
         );
+    }
+
+    #[test]
+    fn a_piglet_wears_pale_stripes_along_its_flanks() {
+        let piglet_scale = scale_for_height(Wild::Boar, 0.425);
+        let piglet = Look::of(Wild::Boar, "boar", piglet_scale, 8);
+        let sow = Look::of(Wild::Boar, "boar", 1.0, 8);
+        assert!(piglet.stripes && !sow.stripes);
+        assert_ne!(
+            piglet.key(),
+            Look {
+                stripes: false,
+                ..piglet
+            }
+            .key()
+        );
+        // Pale vertices on the flanks, in bands one above another.
+        let pale_heights = |look: Look, scale: f32| {
+            let mut ys: Vec<i32> = mesh(Wild::Boar, scale, look)
+                .vertices
+                .iter()
+                .filter(|v| {
+                    let p = v.position / scale;
+                    p.x.abs() > 0.06 && p.z.abs() < 0.5 && v.color.x > 0.25
+                })
+                .map(|v| (v.position.y / scale * 100.0).round() as i32)
+                .collect();
+            ys.sort_unstable();
+            ys.dedup();
+            ys
+        };
+        let bands = pale_heights(piglet, piglet_scale);
+        assert!(
+            bands.len() >= 8,
+            "pale at heights {bands:?} (cm at scale 1)"
+        );
+        assert!(pale_heights(sow, 1.0).is_empty());
     }
 
     #[test]
