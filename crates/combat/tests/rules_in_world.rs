@@ -296,3 +296,73 @@ fn the_player_aims_where_the_camera_looks() {
     );
     assert!(!app.world.get::<LookAim>(a).unwrap().on_body);
 }
+
+#[test]
+fn a_melee_contact_becomes_one_judged_damage_event() {
+    use engine_world::{MeleeContact, MeleeJudge};
+    let mut app = app();
+    assert_eq!(
+        app.world.resource::<MeleeJudge>().judged_by,
+        "engine_combat"
+    );
+    let (a, b) = pair(&mut app, 0.9, false);
+    let point = on(&app, b, Vec3::new(0.0, 1.52, -0.05));
+    app.world.write_message(MeleeContact {
+        blow: DamageEvent {
+            target: b,
+            amount: 20.0,
+            kind: DamageKind::Slash,
+            point,
+            impulse: Vec3::X * 40.0,
+            source: Some(a),
+        },
+        item: ItemClass::TwoHandedBlade,
+        off_hand: false,
+    });
+    app.update();
+    app.update();
+    let log = app.world.resource::<CombatLog>();
+    assert_eq!(log.total, 1, "judged once, not again as damage");
+    let verdict = log.records.back().unwrap().verdict;
+    assert_eq!(judged(&app), vec![verdict.amount]);
+    assert_eq!(hits(&app).len(), 1);
+}
+
+#[test]
+fn an_open_wound_bleeds_without_flinching_and_clots() {
+    let mut app = app();
+    let (a, b) = pair(&mut app, 0.9, true);
+    // A cut across the back of the thigh, from behind: it can't be covered.
+    blow(
+        &mut app,
+        a,
+        b,
+        Vec3::new(0.12, 0.6, 0.08),
+        20.0,
+        DamageKind::Slash,
+    );
+    let start: f32 = BodyZone::ALL
+        .iter()
+        .map(|&z| app.world.get::<BodyInjuries>(b).unwrap().get(z).bleeding)
+        .sum();
+    assert!(start > 0.0, "the cut bleeds");
+    let mut bled = 0.0;
+    for _ in 0..(60 * 10) {
+        app.update();
+        let m = app.world.resource::<Messages<DamageEvent>>();
+        bled += m
+            .iter_current_update_messages()
+            .filter(|d| d.kind == DamageKind::Bleed && d.target == b)
+            .inspect(|d| assert!(d.source.is_none() && d.impulse == Vec3::ZERO))
+            .map(|d| d.amount)
+            .sum::<f32>();
+    }
+    let now: f32 = BodyZone::ALL
+        .iter()
+        .map(|&z| app.world.get::<BodyInjuries>(b).unwrap().get(z).bleeding)
+        .sum();
+    assert!(bled >= 1.0, "ten seconds of bleeding cost health: {bled}");
+    assert!(now < start * 0.8, "and it clots: {start} -> {now}");
+    // No body part was struck again by the bleeding.
+    assert_eq!(app.world.resource::<CombatLog>().total, 1);
+}

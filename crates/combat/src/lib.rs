@@ -22,6 +22,12 @@
 //!   [`CombatSettings::gore`]; a severed neck kills. A ruined weapon arm drops the weapon
 //!   ([`CombatSettings::disarm`]: the [`Loadout`](engine_world::combat::Loadout) hand empties
 //!   and the animation module drops its props).
+//! * **Bleeding** ([`bleed`]): open wounds keep costing health as `DamageKind::Bleed` (no
+//!   flinch, no alarm) and clot slowly; a cut-off limb bleeds hardest and clots slowest.
+//! * **Judged before anyone reads it**: the plugin is the world's melee judge
+//!   (`engine_world::judges_melee`), so the animation module sends its blows as `MeleeContact`
+//!   and every reader of `DamageEvent` sees only the judged amount. Blows still sent straight
+//!   as `DamageEvent` are judged in place.
 //! * Every judged blow goes out as a [`BodyHit`](engine_world::combat::BodyHit) and into the
 //!   [`CombatLog`] (`combat.log`).
 //! * **Pictures** ([`hint`]): a thin outline on the part a look-aimed strike would hit, and
@@ -31,6 +37,7 @@
 //! this frame's blows, before its hit reactions (PostUpdate) and before the health of NPCs and
 //! the player is taken (next fixed step).
 
+pub mod bleed;
 pub mod body;
 pub mod demo;
 pub mod hint;
@@ -61,6 +68,11 @@ pub struct CombatSettings {
     pub hint: bool,
     /// Draw every body's wounds on its parts (yellow to red, severed black), for pictures.
     pub show_wounds: bool,
+    /// Health a fully bleeding part costs per second (as `DamageKind::Bleed`); 0 turns
+    /// bleeding off.
+    pub bleed_hp_per_s: f32,
+    /// Time constant of clotting, s (a cut-off limb clots three times slower).
+    pub bleed_clot_secs: f32,
     /// Seconds a look-picked zone is held before another may replace it.
     pub look_hold_secs: f32,
     /// A camera ray passing this close to a part (m) still picks it.
@@ -77,6 +89,8 @@ impl Default for CombatSettings {
             disarm: true,
             hint: true,
             show_wounds: false,
+            bleed_hp_per_s: 1.5,
+            bleed_clot_secs: 25.0,
             look_hold_secs: 0.12,
             look_snap_m: 0.25,
             look_range_m: 4.0,
@@ -92,11 +106,16 @@ impl Plugin for CombatPlugin {
         app.world.init_resource::<CombatSettings>();
         app.world.init_resource::<CombatLog>();
         app.world.init_resource::<resolve::Dice>();
+        app.world.init_resource::<resolve::OwnDamage>();
+        // Animation sends its blows to us as MeleeContact, and we write their damage.
+        engine_world::judges_melee(app, "engine_combat");
         app.add_message::<engine_world::DamageEvent>()
-            .add_message::<engine_world::combat::BodyHit>();
+            .add_message::<engine_world::combat::BodyHit>()
+            .add_message::<engine_world::MeleeContact>();
         app.register_resource::<CombatSettings>(
             "Melee rules: rules on/off, gore (Off, Limbs, Full), disarm, hint (outline the \
-             look-aimed part), show_wounds, look_hold_secs, look_snap_m, look_range_m.",
+             look-aimed part), show_wounds, bleed_hp_per_s, bleed_clot_secs, look_hold_secs, look_snap_m, \
+             look_range_m.",
         )
         .register_component::<LookAim>(
             "Aim this fighter's strikes where the camera looks: the body part under the screen \
@@ -110,7 +129,9 @@ impl Plugin for CombatPlugin {
             Update,
             (
                 look::look_aim,
+                resolve::judge_contacts,
                 resolve::judge_blows,
+                bleed::bleed,
                 resolve::disarm,
                 hint::draw_hint,
                 hint::draw_blows,

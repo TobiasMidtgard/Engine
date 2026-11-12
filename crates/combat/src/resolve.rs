@@ -8,7 +8,7 @@ use engine_core::prelude::*;
 use engine_world::animation::{Ragdoll, SkeletonPose, StrikeTargets};
 use engine_world::combat::{
     Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatSkills, ItemClass,
-    Loadout,
+    Loadout, MeleeContact,
 };
 use engine_world::{DamageEvent, DamageKind};
 
@@ -140,47 +140,71 @@ fn salt(p: DVec3, amount: f32) -> u64 {
         ^ amount.to_bits() as u64
 }
 
-/// Judge this frame's melee blows (Update, after the animation module has landed them).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn judge_blows(
-    time: Res<Time>,
-    settings: Res<CombatSettings>,
-    mut dice: ResMut<Dice>,
-    mut log: ResMut<CombatLog>,
-    mut blows: MessageMutator<DamageEvent>,
-    mut hits: MessageWriter<BodyHit>,
-    bodies: Query<BodyItem>,
-    mut injuries: Query<&mut BodyInjuries>,
-    mut fresh: Local<HashMap<Entity, BodyInjuries>>,
-    mut commands: Commands,
-    metrics: Res<Metrics>,
-) {
-    let mut judged = 0u32;
-    for blow in blows.read() {
+/// What judging a blow needs: the rules' settings and dice, the bodies, their wounds, and
+/// where the verdicts go.
+#[derive(SystemParam)]
+pub(crate) struct Judge<'w, 's> {
+    time: Res<'w, Time>,
+    settings: Res<'w, CombatSettings>,
+    dice: ResMut<'w, Dice>,
+    log: ResMut<'w, CombatLog>,
+    hits: MessageWriter<'w, BodyHit>,
+    bodies: Query<'w, 's, BodyItem<'static>>,
+    injuries: Query<'w, 's, &'static mut BodyInjuries>,
+    fresh: Local<'s, HashMap<Entity, BodyInjuries>>,
+    own: ResMut<'w, OwnDamage>,
+    commands: Commands<'w, 's>,
+    metrics: Res<'w, Metrics>,
+}
+
+/// What became of a blow put to the rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Judged {
+    /// Not a blow the rules judge (not melee, no armed attacker, not a person): as it was.
+    Untouched,
+    /// The blade met a shield or a weapon: logged, the amount left to the guard.
+    Blocked,
+    /// Judged on a body part: the amount is the verdict's.
+    Landed,
+}
+
+impl Judge<'_, '_> {
+    /// Judge one melee blow in place. `item` is the striking item's class when the blow says
+    /// it (a `MeleeContact`), otherwise the attacker's main hand.
+    pub(crate) fn judge(&mut self, blow: &mut DamageEvent, item: Option<ItemClass>) -> Judged {
         if !matches!(
             blow.kind,
             DamageKind::Slash | DamageKind::Pierce | DamageKind::Blunt
         ) || blow.amount <= 0.0
         {
-            continue;
+            return Judged::Untouched;
         }
-        let Some(by) = blow.source else { continue };
-        let Ok((agt, _, Some(aload), askills, aim, awindow, _, _)) = bodies.get(by) else {
-            continue;
+        let Some(by) = blow.source else {
+            return Judged::Untouched;
         };
-        let Ok((tgt, pose, tload, tskills, _, twindow, armor, ragdoll)) = bodies.get(blow.target)
+        let Ok((agt, _, aload, askills, aim, awindow, _, _)) = self.bodies.get(by) else {
+            return Judged::Untouched;
+        };
+        // Armed bodies (and their fists once disarmed), or any blow that names its weapon.
+        let class = match (item, aload) {
+            (Some(c), _) if c != ItemClass::None || aload.is_some() => c,
+            (None, Some(l)) => l.main,
+            _ => return Judged::Untouched,
+        };
+        let Ok((tgt, pose, tload, tskills, _, twindow, armor, ragdoll)) =
+            self.bodies.get(blow.target)
         else {
-            continue;
+            return Judged::Untouched;
         };
         // Only people: something that fights or is posed as a humanoid.
         let humanoid = pose.is_some_and(|p| p.index_of("upper_arm_r").is_some());
         if !humanoid && tload.is_none() && tskills.is_none() {
-            continue;
+            return Judged::Untouched;
         }
         let caps = capsules_of(pose.filter(|_| humanoid));
         let local = to_model(tgt, blow.point);
         let Some(nearest) = caps.zone_at(local) else {
-            continue;
+            return Judged::Untouched;
         };
         let gap = caps
             .capsules
@@ -189,7 +213,6 @@ pub(crate) fn judge_blows(
             .fold(f32::INFINITY, f32::min);
         let forward = tgt.rotation() * Vec3::NEG_Z;
         let approach = Approach::of(forward, (agt.translation() - tgt.translation()).as_vec3());
-        let class = aload.main;
         let skill = askills.map_or(CombatSkills::DEFAULT_SKILL, |s| s.skill(class));
         let tclass = tload.map_or(ItemClass::None, |l| l.main);
         let defense = tskills.map_or(CombatSkills::DEFAULT_SKILL, |s| s.skill(tclass));
@@ -214,27 +237,18 @@ pub(crate) fn judge_blows(
             None => local,
         };
         let s = salt(blow.point, blow.amount);
-        let rolls = [dice.roll(s), dice.roll(s ^ 1), dice.roll(s ^ 2)];
-        let swing = blow.amount;
-        let kind = blow.kind;
+        let rolls = [
+            self.dice.roll(s),
+            self.dice.roll(s ^ 1),
+            self.dice.roll(s ^ 2),
+        ];
         let target = blow.target;
-        let record_base = |verdict: rules::Verdict| CombatRecord {
-            target: Some(target),
-            world_point: to_world(tgt, caps.center(verdict.zone).unwrap_or(point)),
-            at: time.elapsed_secs_f64(),
-            aimed,
-            struck,
-            verdict,
-            approach,
-            kind,
-            class,
-            swing,
-            blocked,
-        };
+        let fresh = &self.fresh;
+        let injuries = &self.injuries;
         let injury_now = |zone: BodyZone| {
             fresh
-                .get(&blow.target)
-                .or(injuries.get(blow.target).ok())
+                .get(&target)
+                .or(injuries.get(target).ok())
                 .map(|i| *i.get(zone))
                 .unwrap_or_default()
         };
@@ -252,21 +266,33 @@ pub(crate) fn judge_blows(
             heavy: awindow.is_some_and(|w| w.name.contains("heavy")),
             from_right: struck.side().map_or(local.x > 0.0, |s| s == 1),
             armor: armor.copied().unwrap_or_default(),
-            gore: settings.gore,
+            gore: self.settings.gore,
             rolls,
         };
         let verdict = rules::judge(&strike, injury_now);
-        judged += 1;
+        let record = CombatRecord {
+            target: Some(target),
+            world_point: to_world(tgt, caps.center(verdict.zone).unwrap_or(point)),
+            at: self.time.elapsed_secs_f64(),
+            aimed,
+            struck,
+            verdict,
+            approach,
+            kind: blow.kind,
+            class,
+            swing: blow.amount,
+            blocked,
+        };
         if blocked {
             // The blade met a shield or a weapon: that share already went through the guard.
-            log.push(record_base(verdict));
-            continue;
+            self.log.push(record);
+            return Judged::Blocked;
         }
-        if settings.rules {
+        if self.settings.rules {
             blow.amount = verdict.amount;
         }
-        hits.write(BodyHit {
-            target: blow.target,
+        self.hits.write(BodyHit {
+            target,
             attacker: Some(by),
             zone: verdict.zone,
             approach,
@@ -281,21 +307,71 @@ pub(crate) fn judge_blows(
             cut_quality: verdict.quality,
             blocked_by: None,
         });
-        if settings.rules {
-            let entry = match injuries.get_mut(blow.target) {
+        if self.settings.rules {
+            let entry = match self.injuries.get_mut(target) {
                 Ok(i) => i.into_inner(),
-                Err(_) => fresh.entry(blow.target).or_default(),
+                Err(_) => self.fresh.entry(target).or_default(),
             };
             rules::wound(entry.get_mut(verdict.zone), &verdict, blow.kind);
         }
-        log.push(record_base(verdict));
+        self.log.push(record);
+        Judged::Landed
     }
-    for (e, i) in fresh.drain() {
-        commands.entity(e).try_insert(i);
+
+    /// Insert the first `BodyInjuries` of bodies wounded this frame, and count the blows.
+    fn finish(&mut self, judged: u32) {
+        for (e, i) in self.fresh.drain() {
+            self.commands.entity(e).try_insert(i);
+        }
+        if judged > 0 {
+            self.metrics
+                .set("combat.blows_judged", self.log.total as f64);
+        }
     }
-    if judged > 0 {
-        metrics.set("combat.blows_judged", log.total as f64);
+}
+
+/// The `DamageEvent`s [`judge_contacts`] wrote this frame, already judged: the in-place path
+/// must not judge them again.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct OwnDamage {
+    ids: Vec<usize>,
+}
+
+/// Judge this frame's melee `DamageEvent`s in place (Update, after the animation module has
+/// landed them). The path for blows sent straight as damage, while the animation module
+/// still does that; [`judge_contacts`] is the one for `MeleeContact`s.
+pub(crate) fn judge_blows(mut judge: Judge, mut blows: MessageMutator<DamageEvent>) {
+    let mut judged = 0u32;
+    let own = std::mem::take(&mut judge.own.ids);
+    for (blow, id) in blows.read_with_id() {
+        if own.contains(&id.id) {
+            continue;
+        }
+        if judge.judge(blow, None) != Judged::Untouched {
+            judged += 1;
+        }
     }
+    judge.finish(judged);
+}
+
+/// Turn this frame's melee contacts into damage: each is judged and goes out as exactly one
+/// `DamageEvent` (the judged amount; a blade caught on a guard keeps the swing's own, a
+/// contact the rules don't judge goes out as it came).
+pub(crate) fn judge_contacts(
+    mut judge: Judge,
+    mut contacts: MessageReader<MeleeContact>,
+    mut damage: MessageWriter<DamageEvent>,
+) {
+    let mut judged = 0u32;
+    for c in contacts.read() {
+        let mut blow = c.blow.clone();
+        if judge.judge(&mut blow, Some(c.item)) != Judged::Untouched {
+            judged += 1;
+        }
+        let id = damage.write(blow);
+        judge.own.ids.push(id.id);
+    }
+    judge.finish(judged);
 }
 
 /// A ruined or severed weapon arm lets go: the main hand (the right) empties, or the off hand
