@@ -17,6 +17,7 @@
 
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationTrigger, SkeletonPose};
+use engine_world::combat::{BodyInjuries, Loadout};
 use engine_world::locomotion::MoveIntent;
 use engine_world::physics::{PhysicsBackend, PhysicsQueries};
 use engine_world::{AttackEvent, FocusPoints, Ground, GroundWear, HeatField, Obscurance, Water};
@@ -37,6 +38,7 @@ use crate::smoke::SmokeClouds;
 use crate::squad::{AttackTokens, CLEAR_RADIUS, ReviveClaims, SquadSettings};
 use crate::tactics::{PositionQuery, PositionWeights, TacticsCtx, choose_position};
 use crate::world_model::{Sight, TacticalWorld, physics_backend};
+use crate::wounds::Wounds;
 
 /// Everything the brain reads from the world.
 #[derive(SystemParam)]
@@ -80,6 +82,7 @@ type BrainItem<'a> = (
         Option<&'a Squad>,
         Option<&'a Downed>,
         Option<&'a crate::minds::Spellbound>,
+        (Option<&'a BodyInjuries>, Option<&'a Loadout>),
     ),
     &'a mut NpcBrain,
     &'a mut NpcMemory,
@@ -286,7 +289,20 @@ pub(crate) fn think_and_act(
         }
     }
     s.paths.waiting.clear();
-    for (e, npc, t, _, _, vitals, _, clock, (faction, squad, downed, _), brain, ..) in q.iter() {
+    for (
+        e,
+        npc,
+        t,
+        _,
+        weapon,
+        vitals,
+        _,
+        clock,
+        (faction, squad, downed, _, (injuries, loadout)),
+        brain,
+        ..,
+    ) in q.iter()
+    {
         if brain.home.is_none() && npc.active && !vitals.downed && clock.dt > 0.0 {
             s.waking += 1;
         }
@@ -307,6 +323,8 @@ pub(crate) fn think_and_act(
                 }),
                 reviving: brain.action == NpcAction::Revive,
             });
+        } else if Wounds::of(injuries, loadout, weapon).dead {
+            // Its neck cut through: no one comes to get it up.
         } else if let Some(&squad) = squad {
             let f = t.forward();
             let vary = seeds.get(e).map_or(0.0, |s| s.unit());
@@ -349,7 +367,7 @@ pub(crate) fn think_and_act(
         vitals,
         motor,
         clock,
-        (faction, squad, _, mind),
+        (faction, squad, _, mind, (injuries, loadout)),
         mut brain,
         mut memory,
         mut combat,
@@ -378,6 +396,12 @@ pub(crate) fn think_and_act(
             continue;
         }
         let pos = t.translation;
+        // What its wounds leave it (`wounds`): its fists once disarmed, its legs.
+        let wounds = Wounds::of(injuries, loadout, weapon);
+        let weapon = &wounds.weapon(weapon);
+        if combat.lame != wounds.lame() {
+            combat.lame = wounds.lame();
+        }
         let fresh = brain.home.is_none();
         if fresh {
             brain.home = Some(npc.home.unwrap_or(pos));
@@ -410,7 +434,7 @@ pub(crate) fn think_and_act(
                 skills,
                 weapon,
                 vitals,
-                (faction, squad, mind),
+                (faction, squad, mind, wounds),
                 (now, world_now),
                 &mut brain,
                 &mut memory,
@@ -465,6 +489,7 @@ pub(crate) fn think_and_act(
             &mut revives,
             s,
         );
+        hobble(&wounds, motor, &mut intent);
     }
     s.me = None;
     if !s.paths.asked.is_empty() {
@@ -499,7 +524,12 @@ fn think(
     skills: &NpcSkills,
     weapon: &NpcWeapon,
     vitals: &NpcVitals,
-    (faction, squad, mind): (&Faction, Option<&Squad>, Option<&crate::minds::Spellbound>),
+    (faction, squad, mind, wounds): (
+        &Faction,
+        Option<&Squad>,
+        Option<&crate::minds::Spellbound>,
+        Wounds,
+    ),
     (now, world_now): (f64, f64),
     brain: &mut NpcBrain,
     memory: &mut NpcMemory,
@@ -772,6 +802,42 @@ fn think(
         }
         add(NpcAction::Flee, 4.0);
     }
+    // Wounds (`wounds`): on a leg it can't stand on it neither flanks, climbs, revives nor
+    // chases; unless brave it crawls back to its mates, else it fights on from where it is.
+    // Disarmed, it backs off to its mates unless brave or cornered.
+    if (wounds.lame() || wounds.disarmed) && fear.is_none() && !calm && !frenzied {
+        let reach = weapon.reach.max(1.0) + 0.8;
+        let lame = wounds.lame();
+        scores.retain(|&(a, _)| {
+            !(lame
+                && matches!(
+                    a,
+                    NpcAction::Flank | NpcAction::SeekHighGround | NpcAction::Revive
+                ))
+        });
+        for (a, v) in scores.iter_mut() {
+            if *a == NpcAction::Engage && !ranged && dist > reach {
+                *v *= if lame {
+                    0.35
+                } else {
+                    0.5 + 0.4 * skills.courage
+                };
+            }
+        }
+        if confirmed {
+            let mates = allies_near.min(2) as f32;
+            let back = if lame {
+                0.45 + 0.55 * (1.0 - skills.courage) + 0.12 * mates
+            } else if dist > 2.5 {
+                0.55 + 0.5 * (1.0 - skills.courage) + 0.1 * mates
+            } else {
+                0.0
+            };
+            if back > 0.0 {
+                scores.push((NpcAction::Retreat, back));
+            }
+        }
+    }
     // Inertia: keep doing the current thing unless something is clearly better.
     let current = brain.action;
     let committed = now - brain.action_since < 0.6;
@@ -817,6 +883,21 @@ fn think(
         }
     }
     throw
+}
+
+/// What legs it can't stand on leave of its moves (`wounds`): no sprint and no dash, slower,
+/// and kept low, down on one knee where it fights and dragging the leg as it crawls back.
+fn hobble(wounds: &Wounds, motor: &NpcMotor, intent: &mut MoveIntent) {
+    if !wounds.lame() && !wounds.limping {
+        return;
+    }
+    intent.sprint = false;
+    let top = wounds.top_speed(motor.run_speed) / motor.run_speed.max(1e-3);
+    intent.direction = intent.direction.clamp_length_max(top);
+    if wounds.lame() {
+        intent.dash_to = None;
+        intent.crouch = true;
+    }
 }
 
 /// Something thrown: a smoke canister to land at a spot, or a frag at an enemy.
@@ -2464,6 +2545,7 @@ fn melee(
     let counter = p.attacking
         && !opening
         && weapon.can_block
+        && !combat.lame
         && skills.logic * skills.defense > COUNTER_FIGHTER;
     if (committed && !counter) || (ready && opening) {
         if dist > reach + 0.15 {
@@ -2471,6 +2553,7 @@ fn melee(
             // (Into an opening, from any way out: the window is short.)
             if (opening || skills.agility >= 1.1)
                 && skills.agility >= 1.0
+                && !combat.lame
                 && (dist > reach + 0.8 || opening)
                 && gap < motor.dash_distance
             {

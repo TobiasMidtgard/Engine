@@ -755,7 +755,8 @@ pub(crate) fn wear(
     mut down: Local<HashSet<Entity>>,
 ) {
     for b in blows.read() {
-        if b.amount <= 0.0 {
+        // A bleeding wound marks nothing new (its blow already did).
+        if b.amount <= 0.0 || b.kind == DamageKind::Bleed {
             continue;
         }
         let Ok((_, mut look, vitals, ..)) = q.get_mut(b.target) else {

@@ -928,6 +928,15 @@ pub(crate) fn animal_senses(
             continue;
         }
         vitals.health -= h.amount;
+        // A bleeding wound lowers health only: the animal already knows it was hurt.
+        if h.kind == DamageKind::Bleed {
+            if vitals.health <= 0.0 {
+                vitals.health = 0.0;
+                vitals.downed = true;
+                mind.set(AnimalState::Dead, clock.now);
+            }
+            continue;
+        }
         let from = h
             .source
             .and_then(|s| positions.get(s).ok())

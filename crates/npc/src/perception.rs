@@ -11,7 +11,8 @@ use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::physics::{CharacterController, PhysicsBackend, PhysicsQueries};
 use engine_world::{
-    DamageEvent, FocusPoints, Ground, NoiseEvent, Obscurance, ProjectileTrace, WeatherState,
+    DamageEvent, DamageKind, FocusPoints, Ground, NoiseEvent, Obscurance, ProjectileTrace,
+    WeatherState,
 };
 
 use crate::agent::{NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle};
@@ -434,7 +435,13 @@ pub(crate) fn perceive(
     heard.traces.clear();
     heard.traces.extend(traces.read().copied());
     heard.hurts.clear();
-    heard.hurts.extend(hurts.read().cloned());
+    // A bleeding wound tells it nothing new about who is where.
+    heard.hurts.extend(
+        hurts
+            .read()
+            .filter(|h| h.kind != DamageKind::Bleed)
+            .cloned(),
+    );
     let sight = Sight {
         world: &world,
         physics: physics_backend(&backend, &physics),

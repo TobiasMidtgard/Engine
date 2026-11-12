@@ -83,7 +83,7 @@ pub enum WeaponStyle {
 
 /// The NPC's weapon. Presets: [`NpcWeapon::sword`], [`sword_and_shield`](NpcWeapon::sword_and_shield),
 /// [`rifle`](NpcWeapon::rifle), [`carbine`](NpcWeapon::carbine), [`bow`](NpcWeapon::bow),
-/// [`claws`](NpcWeapon::claws).
+/// [`claws`](NpcWeapon::claws), [`fists`](NpcWeapon::fists).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NpcWeapon {
@@ -182,6 +182,19 @@ impl NpcWeapon {
         }
     }
 
+    /// Bare fists: what a disarmed fighter has left (`wounds`).
+    pub fn fists() -> Self {
+        Self {
+            damage: 8.0,
+            reach: 1.1,
+            windup: 0.35,
+            recovery: 0.35,
+            cooldown: 0.8,
+            can_block: false,
+            ..Self::sword()
+        }
+    }
+
     /// Teeth and claws for predators.
     pub fn claws() -> Self {
         Self {
@@ -195,7 +208,7 @@ impl NpcWeapon {
         }
     }
 
-    /// Named preset: `sword`, `sword_and_shield`, `rifle`, `carbine`, `bow`, `claws`.
+    /// Named preset: `sword`, `sword_and_shield`, `rifle`, `carbine`, `bow`, `claws`, `fists`.
     pub fn preset(name: &str) -> Option<Self> {
         Some(match name {
             "sword" => Self::sword(),
@@ -204,6 +217,7 @@ impl NpcWeapon {
             "carbine" => Self::carbine(),
             "bow" => Self::bow(),
             "claws" => Self::claws(),
+            "fists" => Self::fists(),
             _ => return None,
         })
     }
@@ -623,6 +637,9 @@ pub struct NpcCombat {
     pub anim_strikes: bool,
     /// Where on its foe its current (or last) melee strike aims (`aim.rs`).
     pub zone: Option<engine_world::combat::BodyZone>,
+    /// It can't stand on a leg (`wounds`): it fights from where it is, on one knee, without
+    /// stepping, circling or waiting to counter.
+    pub lame: bool,
 }
 
 impl NpcCombat {

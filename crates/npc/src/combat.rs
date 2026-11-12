@@ -6,7 +6,8 @@
 //! and everyone nearby hears them whiz by.
 
 use engine_core::prelude::*;
-use engine_world::animation::{AnimationTrigger, Ragdoll};
+use engine_world::animation::{AnimationTrigger, Ragdoll, StrikeTargets};
+use engine_world::combat::{BodyInjuries, Loadout};
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
 use engine_world::physics::{PhysicsBackend, PhysicsQueries, QueryFilter};
 use engine_world::{
@@ -27,6 +28,7 @@ use crate::seed::{Seed, seed_of};
 use crate::skills::NpcSkills;
 use crate::squad::{AttackTokens, ReviveClaims};
 use crate::world_model::{TacticalWorld, physics_backend};
+use crate::wounds::{Wounds, guard_weight};
 
 /// Deterministic 0..1 noise from a body's [`Seed`], a time and a salt (combat rolls).
 pub(crate) fn roll(seed: u64, now: f64, salt: u64) -> f32 {
@@ -175,7 +177,11 @@ pub(crate) fn notice_attacks(
     }
 }
 
-/// React to incoming attacks once the reaction time has passed.
+/// React to incoming attacks once the reaction time has passed. How well it guards a strike
+/// depends on the part the strike comes at, what it has learned of that foe and its own wounds
+/// (`wounds::guard_weight`); a fighter that can't stand on a leg can't dodge, and one disarmed
+/// guards with its fists (it can't block).
+#[allow(clippy::type_complexity)]
 pub(crate) fn defend(
     mut q: Query<(
         Entity,
@@ -185,11 +191,16 @@ pub(crate) fn defend(
         &mut NpcCombat,
         &NpcVitals,
         &mut NpcBrain,
+        (Option<&BodyInjuries>, Option<&Loadout>),
     )>,
     mut triggers: MessageWriter<AnimationTrigger>,
     seeds: Query<&Seed>,
+    aims: Query<&StrikeTargets>,
+    models: Res<OpponentModels>,
 ) {
-    for (me, clock, skills, weapon, mut combat, vitals, brain) in &mut q {
+    for (me, clock, skills, weapon, mut combat, vitals, brain, (injuries, loadout)) in &mut q {
+        let wounds = Wounds::of(injuries, loadout, weapon);
+        let weapon = &wounds.weapon(weapon);
         let now = clock.now;
         combat.incoming.retain(|a| now < a.lands_at + 0.6);
         if vitals.downed {
@@ -215,13 +226,28 @@ pub(crate) fn defend(
                 continue;
             }
             let left = (a.lands_at - now) as f32;
+            // The part it comes at: head and neck guarded hardest, and what this foe keeps
+            // going for, and its own wounds, harder still.
+            let zone = aims
+                .get(a.attacker)
+                .ok()
+                .filter(|s| s.target == Some(me))
+                .and_then(|s| s.zone);
+            let defense = skills.defense
+                * guard_weight(
+                    zone,
+                    zone.map_or(0.0, |z| models.get(a.attacker).aim_share(z)) * skills.learning,
+                    zone.and_then(|z| injuries.map(|i| i.get(z).wound))
+                        .unwrap_or(0.0),
+                );
+            let defense = defense.min(1.0);
             // Skilled sword fighters often hold their guard for the last moment to parry.
             if !a.ranged
                 && !staggered
                 && left > 0.2
                 && weapon.can_block
-                && skills.defense > 0.6
-                && roll(seed_of(&seeds, me), a.lands_at, 13) < skills.defense * 0.7
+                && defense > 0.6
+                && roll(seed_of(&seeds, me), a.lands_at, 13) < defense * 0.7
             {
                 continue;
             }
@@ -231,7 +257,7 @@ pub(crate) fn defend(
                 continue;
             }
             let r = roll(seed_of(&seeds, me), now, 11);
-            if r > skills.defense {
+            if r > defense {
                 continue; // read it, but not well enough to do anything
             }
             let d = if a.ranged {
@@ -239,7 +265,7 @@ pub(crate) fn defend(
                     Defense::Block {
                         until: a.lands_at + 0.3,
                     }
-                } else if r < skills.defense * 0.7 {
+                } else if r < defense * 0.7 {
                     Defense::Dodge {
                         until: a.lands_at + 0.15,
                     }
@@ -248,11 +274,11 @@ pub(crate) fn defend(
                 }
             } else if weapon.can_block {
                 // Masters wait for the last moment and deflect; others raise the guard.
-                if left < 0.2 && skills.defense > 0.6 && r < skills.defense * 0.6 {
+                if left < 0.2 && defense > 0.6 && r < defense * 0.6 {
                     Defense::Parry {
                         until: a.lands_at + 0.08,
                     }
-                } else if skills.agility > 1.1 && r < skills.defense * 0.25 {
+                } else if skills.agility > 1.1 && r < defense * 0.25 {
                     Defense::Dodge {
                         until: a.lands_at + 0.2,
                     }
@@ -265,6 +291,19 @@ pub(crate) fn defend(
                 Defense::Dodge {
                     until: a.lands_at + 0.2,
                 }
+            };
+            // On one leg there is no dodging: it guards if it can.
+            let d = match d {
+                Defense::Dodge { .. } if wounds.lame() => {
+                    if weapon.can_block {
+                        Defense::Block {
+                            until: a.lands_at + 0.35,
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                d => d,
             };
             response = Some(match (response, d) {
                 (Some(Defense::Block { until: u0 }), Defense::Block { until: u1 }) => {
@@ -880,25 +919,10 @@ pub(crate) fn apply_damage(
         }
         let now = clock.now;
         vitals.health -= h.amount;
-        combat.stats.hits_taken += 1;
-        combat.last_hurt = now;
-        vitals.poise -= h.amount / 60.0;
-        if vitals.poise <= 0.0 {
-            vitals.poise = 1.0;
-            combat.phase = AttackPhase::Staggered {
-                until: now + vitals.stagger_secs as f64,
-            };
-            combat.defense = Defense::None;
-        } else if let AttackPhase::Windup { heavy: false, .. } = combat.phase
-            && h.kind != DamageKind::Fire
-        {
-            // A light attack is interrupted by a hit.
-            combat.phase = AttackPhase::Recovery { until: now + 0.3 };
+        // A wound bleeding (damage over time) lowers health only: no flinch, no stagger.
+        if h.kind != DamageKind::Bleed {
+            take_blow(e, now, h, &mut vitals, &mut combat, &mut triggers);
         }
-        triggers.write(AnimationTrigger {
-            entity: e,
-            name: "hit_react".into(),
-        });
         if vitals.health <= 0.0 {
             vitals.health = 0.0;
             vitals.downed = true;
@@ -918,6 +942,37 @@ pub(crate) fn apply_damage(
                 .insert((Downed { since: now, push }, Ragdoll { weight: 1.0 }));
         }
     }
+}
+
+/// What a blow (not a bleeding wound) does besides lowering health: counts it, wears poise
+/// down to a stagger, interrupts a light wind-up and plays the hit reaction.
+fn take_blow(
+    e: Entity,
+    now: f64,
+    h: &DamageEvent,
+    vitals: &mut NpcVitals,
+    combat: &mut NpcCombat,
+    triggers: &mut MessageWriter<AnimationTrigger>,
+) {
+    combat.stats.hits_taken += 1;
+    combat.last_hurt = now;
+    vitals.poise -= h.amount / 60.0;
+    if vitals.poise <= 0.0 {
+        vitals.poise = 1.0;
+        combat.phase = AttackPhase::Staggered {
+            until: now + vitals.stagger_secs as f64,
+        };
+        combat.defense = Defense::None;
+    } else if let AttackPhase::Windup { heavy: false, .. } = combat.phase
+        && h.kind != DamageKind::Fire
+    {
+        // A light attack is interrupted by a hit.
+        combat.phase = AttackPhase::Recovery { until: now + 0.3 };
+    }
+    triggers.write(AnimationTrigger {
+        entity: e,
+        name: "hit_react".into(),
+    });
 }
 
 type ReviveItem<'a> = (
@@ -1115,6 +1170,7 @@ mod tests {
                     let now = 1.0 + 0.37 * f64::from(n);
                     let mut world = World::new();
                     world.init_resource::<Messages<AnimationTrigger>>();
+                    world.init_resource::<crate::learning::OpponentModels>();
                     let attacker = world.spawn_empty().id();
                     let brain = NpcBrain {
                         action: if kneeling {

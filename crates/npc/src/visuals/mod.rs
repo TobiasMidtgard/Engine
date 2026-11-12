@@ -467,6 +467,8 @@ type PoseItem<'a> = (
         Option<&'a crate::intent_body::IntentBody>,
         Has<BodyRequest>,
         Has<AttackWindow>,
+        // What its hands still hold (the combat module empties a hand whose arm is ruined).
+        Option<&'a engine_world::combat::Loadout>,
     ),
 );
 
@@ -508,14 +510,20 @@ pub(crate) fn pose_stand_ins(
     seen.attacks
         .extend(attacks.read().map(|a| (a.attacker, a.target, a.kind)));
     seen.blows.clear();
-    seen.blows.extend(blows.read().cloned());
+    // A bleeding wound is no blow to flinch from.
+    seen.blows.extend(
+        blows
+            .read()
+            .filter(|b| b.kind != engine_world::DamageKind::Bleed)
+            .cloned(),
+    );
     // How each downed fighter lay as last posed (a mate reviving it kneels there and puts its
     // hands on the chest).
     seen.lying.clear();
     seen.lying.extend(owners.iter().filter_map(|item| {
         let (me, _, st, _, owner, .., vitals, _, _, extra) = item;
         // A body the animation module lets fall lies where it fell.
-        if let (_, _, _, _, _, _, _, _, Some(pose), Some(body), true, _) = extra
+        if let (_, _, _, _, _, _, _, _, Some(pose), Some(body), true, _, _) = extra
             && body.asked
             && vitals.is_some_and(|v| v.downed)
             && let Some(lying) = crate::intent_body::drawn_lying(owner, pose)
@@ -552,8 +560,21 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let (animal, mind, bird, motor, memory, looks, asks, fit, pose, body, requested, armed) =
-            animal;
+        let (
+            animal,
+            mind,
+            bird,
+            motor,
+            memory,
+            looks,
+            asks,
+            fit,
+            pose,
+            body,
+            requested,
+            armed,
+            holds,
+        ) = animal;
         let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks.is_some() || asks);
         // The animation module poses it and holds its weapons (`intent_body.rs`).
         let posed_elsewhere = drawn_elsewhere
@@ -664,6 +685,17 @@ pub(crate) fn pose_stand_ins(
             // (Archers and riflemen shoot the animation module's bow and carbine: their own
             // are put away.)
             let hand = humanoid::in_hand(part.part).filter(|_| !ranged);
+            // Knocked from its hand (`wounds`): no longer drawn in it.
+            let lost = posed_elsewhere
+                && hand.is_some_and(|k| {
+                    let w = crate::wounds::Wounds::of(
+                        None,
+                        holds,
+                        &weapon.copied().unwrap_or_default(),
+                    );
+                    if k == 1 { w.disarmed } else { w.shield_lost }
+                });
+            let hand = hand.filter(|_| !lost);
             let carried = match (posed_elsewhere, worn, hand) {
                 (true, Some(frames), Some(k))
                     if !tending && p.pos.distance(frames[3 + k].own) < 0.3 =>
@@ -721,8 +753,9 @@ pub(crate) fn pose_stand_ins(
                 && !carried
                 && hand.is_some()
                 && !(tending && hand == Some(1) && p.pos.y > LAID_HEIGHT);
-            let held =
-                humanoid::held(part.part) && (!posed_elsewhere || carried || set_down || flash);
+            let held = humanoid::held(part.part)
+                && !lost
+                && (!posed_elsewhere || carried || set_down || flash);
             let visible = p.visible && !(drawn_elsewhere && !held && kept.is_none());
             if r.visible != visible {
                 r.visible = visible;

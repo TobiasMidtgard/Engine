@@ -17,7 +17,7 @@
 //! Durations run on world time (a spell lasts as long whoever it is cast on).
 
 use engine_core::prelude::*;
-use engine_world::{DamageEvent, MindEffect, MindKind};
+use engine_world::{DamageEvent, DamageKind, MindEffect, MindKind};
 
 use crate::agent::{Npc, NpcBrain, NpcClock};
 use crate::faction::{Faction, Squad};
@@ -144,6 +144,7 @@ pub(crate) fn take_minds(
     // A blow wakes the calmed (a hit from anyone but itself, swung after the calm fell).
     for h in hurts.read() {
         if h.amount > 0.0
+            && h.kind != DamageKind::Bleed
             && h.source != Some(h.target)
             && let Ok((mut m, ..)) = q.get_mut(h.target)
             && m.calm(now)

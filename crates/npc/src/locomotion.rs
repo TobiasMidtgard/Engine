@@ -16,7 +16,7 @@
 
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationEvent, AnimationParams};
-use engine_world::combat::{AttackWindow, Knockback};
+use engine_world::combat::{AttackWindow, BodyInjuries, Knockback};
 use engine_world::locomotion::{LocomotionBackend, LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::CharacterController;
 use engine_world::{ContactKind, Ground, GroundContact, Water, WorldShift};
@@ -108,7 +108,11 @@ type MoverItem<'a> = (
     Option<&'a NpcSkills>,
     Option<&'a Footfall>,
     Has<CharacterController>,
-    (Option<Ref<'a, AttackWindow>>, Option<&'a Knockback>),
+    (
+        Option<Ref<'a, AttackWindow>>,
+        Option<&'a Knockback>,
+        Option<&'a BodyInjuries>,
+    ),
 );
 
 /// One thread's footsteps from [`fallback_move`], handed over when the thread is done.
@@ -166,7 +170,7 @@ pub(crate) fn fallback_move(
             skills,
             foot,
             controlled,
-            (window, knockback),
+            (window, knockback, injuries),
         )| {
             if backend && controlled {
                 return;
@@ -185,8 +189,11 @@ pub(crate) fn fallback_move(
             }
             let pos = t.translation;
             let agility = skills.map(|s| s.agility).unwrap_or(1.0);
+            // What its legs still carry (`wounds`): no dash on a leg it can't stand on.
+            let legs = crate::wounds::Wounds::of(injuries, None, &crate::NpcWeapon::fists());
             // ---------------------------------------------------------------- dash
             if mover.dash.is_none()
+                && !legs.lame()
                 && let Some(to) = intent.dash_to
             {
                 let to = DVec3::new(to.x, pos.y, to.z);
@@ -211,9 +218,10 @@ pub(crate) fn fallback_move(
                 let mut wish = intent.direction.clamp_length_max(1.0);
                 wish.y = 0.0;
                 let mut speed = motor.run_speed * agility;
-                if intent.sprint && wish.length() > 0.5 {
+                if intent.sprint && wish.length() > 0.5 && !legs.lame() && !legs.limping {
                     speed = motor.sprint_speed * agility;
                 }
+                speed = legs.top_speed(speed);
                 if intent.crouch {
                     speed *= 0.45;
                 }

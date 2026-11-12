@@ -27,6 +27,7 @@ pub mod training;
 pub mod visuals;
 pub mod wildlife;
 pub mod world_model;
+pub mod wounds;
 
 pub use agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
@@ -183,6 +184,7 @@ impl Plugin for NpcPlugin {
                         .in_set(NpcSet::Perceive),
                     (
                         squad::plan_squads,
+                        learning::learn_aims,
                         combat::notice_attacks,
                         combat::defend,
                         brain::think_and_act,
