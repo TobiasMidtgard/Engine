@@ -466,8 +466,8 @@ fn coat(kind: Wild, look: Look) -> Coat {
             back: f([0.075, 0.065, 0.055], 1.0),
             side: f([0.2, 0.17, 0.13], 0.95),
             under: f([0.5, 0.43, 0.32], 0.85),
-            leg: f([0.3, 0.21, 0.12], 0.45),
-            foot: f([0.33, 0.25, 0.16], 0.3),
+            leg: f([0.25, 0.2, 0.145], 0.5),
+            foot: f([0.29, 0.24, 0.17], 0.32),
             face: f([0.24, 0.2, 0.15], 0.4),
             muzzle: f([0.45, 0.39, 0.3], 0.18),
             ear: f([0.17, 0.12, 0.08], 0.5),
@@ -542,8 +542,8 @@ fn girth(kind: Wild) -> Girth {
             arm: (0.06, 0.047),
             forearm: (0.036, 0.024),
             front_cannon: (0.023, 0.024),
-            haunch: v(0.06, 0.115, 0.1),
-            thigh: (0.07, 0.05),
+            haunch: v(0.045, 0.11, 0.1),
+            thigh: (0.058, 0.045),
             gaskin: (0.045, 0.023),
             hind_cannon: (0.022, 0.023),
         },
@@ -1261,12 +1261,15 @@ fn antlers(g: &mut Grow, f: &Frame, size: f32) {
 fn wolf_body(g: &mut Grow, f: &Frame, c: &Coat) {
     // A narrow, deep chest, a dark saddle over the shoulders and back, a tucked waist.
     g.el("body", v(0.0, 0.6, -0.2), v(0.12, 0.17, 0.24), c.side, 0.05)
-        .el(
+        // The dark saddle: one band from the withers to the croup.
+        .cap(
             "body",
-            v(0.0, 0.69, -0.22),
-            v(0.09, 0.08, 0.2),
+            v(0.0, 0.7, -0.36),
+            v(0.0, 0.695, -0.02),
+            0.085,
+            0.078,
             c.back,
-            0.04,
+            0.05,
         )
         .el(
             "body",
@@ -1277,27 +1280,53 @@ fn wolf_body(g: &mut Grow, f: &Frame, c: &Coat) {
         )
         .el(
             "body",
-            v(0.0, 0.47, -0.2),
-            v(0.08, 0.06, 0.15),
+            v(0.0, 0.46, -0.2),
+            v(0.065, 0.05, 0.15),
+            c.under,
+            0.04,
+        )
+        .el("loin", v(0.0, 0.645, 0.08), v(0.1, 0.1, 0.18), c.side, 0.06)
+        .cap(
+            "loin",
+            v(0.0, 0.695, -0.02),
+            v(0.0, 0.68, 0.3),
+            0.078,
+            0.062,
+            c.back,
+            0.05,
+        )
+        .el(
+            "loin",
+            v(0.0, 0.56, 0.02),
+            v(0.06, 0.05, 0.13),
             c.under,
             0.04,
         )
         .el(
             "loin",
-            v(0.0, 0.645, 0.08),
-            v(0.092, 0.1, 0.17),
+            v(0.0, 0.645, 0.27),
+            v(0.105, 0.1, 0.12),
+            c.side,
+            0.06,
+        );
+    // Lean hams on the thighs and the fold of skin from the flank to the stifle.
+    for side in 0..2 {
+        let hip = name("hind", "upper", side);
+        g.el(
+            &hip,
+            sided(v(0.062, 0.55, 0.31), side),
+            v(0.048, 0.1, 0.095),
             c.side,
             0.05,
         )
-        .el("loin", v(0.0, 0.7, 0.08), v(0.07, 0.06, 0.15), c.back, 0.04)
         .el(
-            "loin",
-            v(0.0, 0.565, 0.03),
-            v(0.075, 0.065, 0.13),
-            c.under,
-            0.04,
-        )
-        .el("loin", v(0.0, 0.65, 0.28), v(0.1, 0.1, 0.11), c.side, 0.04);
+            &hip,
+            sided(v(0.068, 0.49, 0.2), side),
+            v(0.038, 0.05, 0.065),
+            c.side,
+            0.05,
+        );
+    }
     // A thick ruff of fur around the neck, paler at the throat and cheeks.
     let n = f.neck;
     g.cap(
@@ -3120,6 +3149,22 @@ mod tests {
         assert!(
             shoulders > hams && waist > hams - 0.02,
             "shoulders {shoulders}, barrel {barrel:?}, hams {hams}"
+        );
+    }
+
+    #[test]
+    fn a_wolf_is_lean_its_hams_no_wider_than_its_chest() {
+        let m = mesh(Wild::Wolf, 1.0, Look::PLAIN);
+        let width = |z: f32| {
+            m.vertices
+                .iter()
+                .filter(|v| (v.position.z - z).abs() < 0.03 && v.position.y > 0.45)
+                .fold(0.0f32, |a, v| a.max(v.position.x.abs()))
+        };
+        let (chest, waist, hams) = (width(-0.35), width(0.05), width(0.3));
+        assert!(
+            hams < chest + 0.01 && waist < hams - 0.02,
+            "chest {chest}, waist {waist}, hams {hams}"
         );
     }
 
