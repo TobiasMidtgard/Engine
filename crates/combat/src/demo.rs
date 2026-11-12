@@ -178,9 +178,11 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             (kit(sword, ItemClass::None), 0.15, 0.0),
             false,
             vec![
+                // Light cuts follow an aimed line into the arm; the heavy overhead comes
+                // down on the head and neck.
                 (ForearmR, false),
-                (ForearmR, true),
-                (ForearmR, true),
+                (ForearmR, false),
+                (ForearmR, false),
                 (Neck, true),
             ],
             2.2,
