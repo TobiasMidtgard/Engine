@@ -206,12 +206,12 @@ impl Plugin for AnimationPlugin {
                         procedural::vehicle::vehicle_rig_system,
                     ),
                     procedural::spring::spring_chain_system,
-                    wounds::wound_pose,
                     // Blows insert reactions (`HitReaction`, `Hurt`, `Knockdown`) the systems
                     // after them read this frame: one sync point for both; what knockdowns
                     // insert (ragdoll weight, tone, pushes) lands at the one before the IK.
-                    // (PostUpdate's animation stages need three in all; they were nine.)
-                    (hit::take_hits, hurt::take_hurts).chain_ignore_deferred(),
+                    // (PostUpdate's animation stages need three in all; they were nine.) The
+                    // wound pose's first `WoundPose` insert shares that sync point too.
+                    (wounds::wound_pose, hit::take_hits, hurt::take_hurts).chain_ignore_deferred(),
                     (
                         knockdown::knockdown_system,
                         hit::stagger_system,
