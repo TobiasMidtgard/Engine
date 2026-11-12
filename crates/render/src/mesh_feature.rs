@@ -221,8 +221,8 @@ struct GpuMesh {
     still_from: u64,
     /// Coarser levels of detail, finest first (empty until built, or for small meshes).
     lods: Vec<GpuLod>,
-    /// With profiling on, once its levels are built: `mesh_lod::movable_shares` (else 1).
-    movable: [f32; 3],
+    /// Once its levels are built: `mesh_lod::movable_shares` (1 without profiling).
+    movable: Option<[f32; 3]>,
 }
 
 /// One level of detail of a [`GpuMesh`]: fewer triangles over the same vertices (indices in
@@ -264,10 +264,11 @@ impl GpuMesh {
     }
 }
 
-/// A mesh's levels of detail being built on a worker thread.
+/// Meshes' levels of detail being built on a worker thread, one mesh after another.
 struct LodJob {
-    version: u64,
-    job: std::thread::JoinHandle<(Vec<crate::mesh_lod::LodIndices>, [f32; 3])>,
+    /// Each mesh's index and the version its build started from.
+    meshes: Vec<(u32, u64)>,
+    job: std::thread::JoinHandle<Vec<(Vec<crate::mesh_lod::LodIndices>, [f32; 3])>>,
 }
 
 /// What a texture set binds in one slot.
@@ -1490,8 +1491,12 @@ pub struct MeshFeature {
     warmup: Option<Warmup<PipelineKey>>,
     /// What each drawn entity keeps between frames (bounds, transforms, normal matrix).
     scene: MeshScene,
-    /// Levels of detail being built, by mesh index.
-    lod_jobs: FastMap<u32, LodJob>,
+    /// The level-of-detail builds running (at most `MAX_LOD_JOBS`).
+    lod_jobs: Vec<LodJob>,
+    /// The meshes those builds hold.
+    lod_building: FastSet<u32>,
+    /// When finished builds were last collected and new ones started.
+    lod_collected: Option<std::time::Instant>,
     /// Level-of-detail builds collected so far, for the profile log: all, those the simplifier
     /// gave no level for, and those the index pool had no room to keep every level of.
     lod_built: [u32; 3],
@@ -1696,6 +1701,12 @@ pub(crate) const SPAWN_STILL_FRAMES: u64 = 2;
 const FAR_MOVING_CASTER_TEXELS: f32 = 2.0;
 /// Mesh level-of-detail builds running at once.
 const MAX_LOD_JOBS: usize = 2;
+/// Triangles one build takes on per second since builds were last started, and the least and
+/// the most it takes on. Builds are started once a frame, so a build of one mesh a frame (as
+/// it was) left a frame of 8 s, without a GPU, with two meshes built in it and a thousand
+/// waiting; a long list at a high frame rate would deliver its first levels late.
+const LOD_JOB_TRIANGLES_PER_S: f32 = 1.0e6;
+const LOD_JOB_TRIANGLES: std::ops::Range<f32> = 3.0e4..1.5e6;
 /// `MeshFeature::layout`: drawn as its impostor.
 const AS_IMPOSTOR: u32 = 1 << 31;
 /// An instance's `extra.y` bit for a mesh skinned on the GPU (`SKINNED_INSTANCE` in mesh.wgsl;
@@ -2150,7 +2161,6 @@ impl MeshFeature {
             true
         });
         // A finished build of a mesh that is gone is never collected; its thread ends alone.
-        self.lod_jobs.retain(|&index, _| !gone(index));
         self.lod_waiting.retain(|(index, _)| !gone(*index));
         self.warned_no_height.retain(|&index| !gone(index));
         self.uploaded_before.retain(|&index| !gone(index));
@@ -2204,7 +2214,7 @@ impl MeshFeature {
                         SPAWN_STILL_FRAMES
                     },
                 lods: Vec::new(),
-                movable: [1.0; 3],
+                movable: None,
             },
         );
         self.unusable.remove(&index);
@@ -2225,97 +2235,126 @@ impl MeshFeature {
         }
     }
 
-    /// Start building the levels of detail of a mesh just uploaded (or queue it while the
-    /// workers are busy).
-    fn request_lods(&mut self, index: u32, handle: Handle<Mesh>, mesh: &Mesh, version: u64) {
-        if mesh.indices.len() / 3 < crate::mesh_lod::MIN_TRIANGLES {
-            return;
-        }
-        if self.lod_jobs.len() >= MAX_LOD_JOBS {
-            if !self.lod_waiting.iter().any(|(i, _)| *i == index) {
-                self.lod_waiting.push((index, handle));
-            }
-            return;
-        }
-        let mesh = mesh.clone();
-        let job = std::thread::Builder::new()
-            .name("mesh lods".into())
-            .spawn(move || {
-                let levels = crate::mesh_lod::build(&mesh);
-                let movable = if engine_core::profile::enabled() {
-                    crate::mesh_lod::movable_shares(&mesh)
-                } else {
-                    [1.0; 3]
-                };
-                (levels, movable)
-            });
-        match job {
-            Ok(job) => {
-                self.lod_jobs.insert(index, LodJob { version, job });
-            }
-            Err(e) => tracing::warn!("could not start building mesh levels of detail: {e}"),
+    /// Queue a mesh just uploaded for its levels of detail (`collect_lods` starts the builds).
+    fn request_lods(&mut self, index: u32, handle: Handle<Mesh>, mesh: &Mesh) {
+        if mesh.indices.len() / 3 >= crate::mesh_lod::MIN_TRIANGLES
+            && !self.lod_waiting.iter().any(|(i, _)| *i == index)
+        {
+            self.lod_waiting.push((index, handle));
         }
     }
 
     /// Upload the levels of detail that finished building, and start queued builds.
     fn collect_lods(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, meshes: &Assets<Mesh>) {
-        let done: Vec<u32> = self
-            .lod_jobs
-            .iter()
-            .filter(|(_, j)| j.job.is_finished())
-            .map(|(i, _)| *i)
-            .collect();
-        for index in done {
-            let Some(LodJob { version, job }) = self.lod_jobs.remove(&index) else {
+        let mut i = 0;
+        while i < self.lod_jobs.len() {
+            if !self.lod_jobs[i].job.is_finished() {
+                i += 1;
                 continue;
-            };
-            let levels = job.join();
-            // A mesh changed meanwhile has been queued again by its upload.
-            let Some(gpu_mesh) = self.meshes.get_mut(&index).filter(|m| m.version == version)
-            else {
-                continue;
-            };
-            let pool = &mut self.pool;
-            let Ok((levels, movable)) = levels else {
-                tracing::warn!("building the levels of detail of mesh {index} failed");
-                continue;
-            };
-            // Finest first. A level its page has no room for (its index buffer is as large as
-            // one may be) is left out and the smaller ones after it still tried: they are what
-            // most far views draw.
-            let page = gpu_mesh.pool.page;
-            for l in gpu_mesh.lods.drain(..) {
-                pool.free_indices(page, l.first_index, l.index_count);
             }
-            let built = levels.len();
-            self.lod_indices[0] += gpu_mesh.pool.index_count as u64;
-            self.lod_indices[1] += levels.iter().map(|l| l.indices.len() as u64).sum::<u64>();
-            gpu_mesh.movable = movable;
-            gpu_mesh.lods = levels
-                .into_iter()
-                .filter_map(|l| {
-                    Some(GpuLod {
-                        first_index: pool.add_indices(device, queue, page, &l.indices)?,
-                        index_count: l.indices.len() as u32,
-                        error: l.error,
+            let LodJob { meshes: built, job } = self.lod_jobs.swap_remove(i);
+            for (index, _) in &built {
+                self.lod_building.remove(index);
+            }
+            let Ok(levels) = job.join() else {
+                tracing::warn!(
+                    "building the levels of detail of {} meshes failed",
+                    built.len()
+                );
+                continue;
+            };
+            for ((index, version), (levels, movable)) in built.into_iter().zip(levels) {
+                // A mesh changed meanwhile has been queued again by its upload; one that is
+                // gone is dropped here.
+                let Some(gpu_mesh) = self.meshes.get_mut(&index).filter(|m| m.version == version)
+                else {
+                    continue;
+                };
+                let pool = &mut self.pool;
+                // Finest first. A level its page has no room for (its index buffer is as large
+                // as one may be) is left out and the smaller ones after it still tried: they
+                // are what most far views draw.
+                let page = gpu_mesh.pool.page;
+                for l in gpu_mesh.lods.drain(..) {
+                    pool.free_indices(page, l.first_index, l.index_count);
+                }
+                let count = levels.len();
+                self.lod_indices[0] += gpu_mesh.pool.index_count as u64;
+                self.lod_indices[1] += levels.iter().map(|l| l.indices.len() as u64).sum::<u64>();
+                gpu_mesh.movable = Some(movable);
+                gpu_mesh.lods = levels
+                    .into_iter()
+                    .filter_map(|l| {
+                        Some(GpuLod {
+                            first_index: pool.add_indices(device, queue, page, &l.indices)?,
+                            index_count: l.indices.len() as u32,
+                            error: l.error,
+                        })
                     })
-                })
-                .collect();
-            self.lod_built[0] += 1;
-            self.lod_built[1] += (built == 0) as u32;
-            self.lod_built[2] += (gpu_mesh.lods.len() < built) as u32;
+                    .collect();
+                self.lod_built[0] += 1;
+                self.lod_built[1] += (count == 0) as u32;
+                self.lod_built[2] += (gpu_mesh.lods.len() < count) as u32;
+            }
         }
-        while self.lod_jobs.len() < MAX_LOD_JOBS
-            && let Some((index, handle)) = self.lod_waiting.pop()
-        {
-            let version = meshes.version(handle);
-            if let Some(mesh) = meshes.get(handle)
-                && self
-                    .meshes
-                    .get(&index)
-                    .is_some_and(|m| m.version == version)
+        // Each free worker takes as many of the waiting meshes (the newest first) as it can
+        // build in about the time since builds were last started.
+        let now = std::time::Instant::now();
+        let since = self
+            .lod_collected
+            .replace(now)
+            .map_or(0.0, |t| (now - t).as_secs_f32());
+        let most = (since * LOD_JOB_TRIANGLES_PER_S)
+            .clamp(LOD_JOB_TRIANGLES.start, LOD_JOB_TRIANGLES.end) as usize;
+        while self.lod_jobs.len() < MAX_LOD_JOBS && !self.lod_waiting.is_empty() {
+            let mut list: Vec<(u32, u64)> = Vec::new();
+            let mut copies: Vec<Mesh> = Vec::new();
+            let mut triangles = 0;
+            while triangles < most
+                && let Some((index, handle)) = self.lod_waiting.pop()
             {
-                self.request_lods(index, handle, mesh, version);
+                let version = meshes.version(handle);
+                if let Some(mesh) = meshes.get(handle)
+                    && self
+                        .meshes
+                        .get(&index)
+                        .is_some_and(|m| m.version == version)
+                {
+                    triangles += mesh.indices.len() / 3;
+                    list.push((index, version));
+                    copies.push(mesh.clone());
+                }
+            }
+            if list.is_empty() {
+                break;
+            }
+            let profile = engine_core::profile::enabled();
+            let job = std::thread::Builder::new()
+                .name("mesh lods".into())
+                .spawn(move || {
+                    copies
+                        .iter()
+                        .map(|mesh| {
+                            let levels = crate::mesh_lod::build(mesh);
+                            let movable = if profile {
+                                crate::mesh_lod::movable_shares(mesh)
+                            } else {
+                                [1.0; 3]
+                            };
+                            (levels, movable)
+                        })
+                        .collect()
+                });
+            match job {
+                Ok(job) => {
+                    self.lod_building
+                        .extend(list.iter().map(|(index, _)| *index));
+                    self.lod_jobs.push(LodJob { meshes: list, job });
+                }
+                Err(e) => {
+                    tracing::warn!("could not start building mesh levels of detail: {e}");
+                    break;
+                }
             }
         }
     }
@@ -2695,19 +2734,22 @@ impl MeshFeature {
         // (not baked yet, or cross-fading).
         let mut unbaked = [0u64; 5];
         // Triangles a GPU would draw (no impostor due), by why they can't get fewer.
-        const CAUSES: [&str; 8] = [
+        const CAUSES: [&str; 9] = [
             "a coarser level is left (fine as it is)",
             "at its coarsest level",
             "always full detail (skinned, NoMeshLod)",
             "under 512 triangles, no levels",
+            "levels not built yet",
             "no levels: hard edges only",
             "no levels: texture or color seams",
             "no levels: half open (15-50% movable when welded)",
             "no levels: open cards and borders",
         ];
-        let mut causes = [(0u64, 0u64); 8];
+        let mut causes = [(0u64, 0u64); 9];
         // Per mesh: triangles under a pixel each, instances, levels, triangles of the mesh.
         let mut dense: HashMap<u32, (u64, u32, usize, u32)> = HashMap::new();
+        // Per mesh: triangles drawn, instances, pixels across of the largest.
+        let mut most: HashMap<u32, (u64, u32, f32)> = HashMap::new();
         for item in self
             .items
             .iter()
@@ -2737,15 +2779,17 @@ impl MeshFeature {
                 2
             } else if (g.pool.index_count as usize / 3) < crate::mesh_lod::MIN_TRIANGLES {
                 3
-            } else if g.movable[0] >= 0.5 || g.movable[1] >= 0.5 {
-                4
-            } else if g.movable[2] >= 0.5 {
-                5
-            } else if g.movable[2] >= 0.15 {
-                6
             } else {
-                7
+                match g.movable {
+                    None => 4,
+                    Some(m) if m[0] >= 0.5 || m[1] >= 0.5 => 5,
+                    Some(m) if m[2] >= 0.5 => 6,
+                    Some(m) if m[2] >= 0.15 => 7,
+                    Some(_) => 8,
+                }
             };
+            let d = most.entry(item.mesh).or_default();
+            *d = (d.0 + tris, d.1 + 1, d.2.max(across));
             causes[cause].0 += tris;
             causes[cause].1 += if share < 1.0 { tris } else { 0 };
             if share < 1.0 {
@@ -2809,6 +2853,31 @@ impl MeshFeature {
                 out,
                 "  {mesh:<6} {tris:>9} {n:>6} {levels:>3} {full:>8}  {:.1} x {:.1} x {:.1}",
                 size.x, size.y, size.z
+            );
+        }
+        let mut rows: Vec<_> = most.into_iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1.0));
+        let _ = writeln!(
+            out,
+            "  most triangles drawn (no impostor due): mesh, tris drawn, instances, largest px across, levels, tris full, movable as indexed / hard edges closed / seams closed, size m"
+        );
+        for (mesh, (tris, n, across)) in rows.into_iter().take(40) {
+            let Some(g) = self.meshes.get(&mesh) else {
+                continue;
+            };
+            let size = g.half_extents * 2.0;
+            let movable = g.movable.unwrap_or([f32::NAN; 3]);
+            let _ = writeln!(
+                out,
+                "  {mesh:<6} {tris:>9} {n:>6} {across:>6.0} {:>3} {:>8}  {:.2} {:.2} {:.2}  {:.1} x {:.1} x {:.1}",
+                g.lods.len(),
+                g.pool.index_count / 3,
+                movable[0],
+                movable[1],
+                movable[2],
+                size.x,
+                size.y,
+                size.z
             );
         }
         out
@@ -3917,7 +3986,7 @@ impl RenderFeature for MeshFeature {
                 {
                     entry.set_uploaded(
                         gpu_mesh,
-                        self.lod_jobs.contains_key(&handle.index()),
+                        self.lod_building.contains(&handle.index()),
                         self.skins.motion_offset(handle.index()),
                     );
                 }
@@ -4324,10 +4393,10 @@ impl RenderFeature for MeshFeature {
                     drop(_span);
                     if lods {
                         let _span = crate::perf::HitchStep::new("meshes: start mesh levels");
-                        self.request_lods(mesh.index, handle, asset, mesh.version);
+                        self.request_lods(mesh.index, handle, asset);
                     }
                 }
-                let building = self.lod_jobs.contains_key(&mesh.index);
+                let building = self.lod_building.contains(&mesh.index);
                 let motion = self.skins.motion_offset(mesh.index);
                 let entry = &mut self.mesh_frames[raw];
                 entry.checked = true;
