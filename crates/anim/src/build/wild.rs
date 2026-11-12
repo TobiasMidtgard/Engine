@@ -548,12 +548,12 @@ fn girth(kind: Wild) -> Girth {
             hind_cannon: (0.022, 0.023),
         },
         Wild::Boar => Girth {
-            scapula: v(0.07, 0.13, 0.11),
-            arm: (0.1, 0.075),
+            scapula: v(0.06, 0.13, 0.11),
+            arm: (0.086, 0.07),
             forearm: (0.055, 0.035),
             front_cannon: (0.03, 0.028),
-            haunch: v(0.075, 0.13, 0.12),
-            thigh: (0.09, 0.06),
+            haunch: v(0.06, 0.12, 0.12),
+            thigh: (0.07, 0.05),
             gaskin: (0.05, 0.03),
             hind_cannon: (0.028, 0.026),
         },
@@ -1472,9 +1472,9 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
     g.el(
         "body",
         v(0.0, 0.57, -0.24),
-        v(0.165, 0.235, 0.33),
+        v(0.185, 0.235, 0.34),
         c.side,
-        0.07,
+        0.08,
     )
     .el("body", v(0.0, 0.7, -0.36), v(0.14, 0.15, 0.2), c.back, 0.06)
     .el(
@@ -1486,8 +1486,8 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
     )
     .el(
         "loin",
-        v(0.0, 0.6, 0.14),
-        v(0.145, 0.17, 0.25),
+        v(0.0, 0.59, 0.12),
+        v(0.175, 0.18, 0.27),
         c.side,
         0.07,
     )
@@ -1498,14 +1498,49 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
         c.under,
         0.05,
     )
+    .el("loin", v(0.0, 0.6, 0.36), v(0.16, 0.14, 0.17), c.side, 0.07)
     .el(
         "loin",
-        v(0.0, 0.59, 0.4),
-        v(0.135, 0.14, 0.13),
+        v(0.0, 0.66, 0.05),
+        v(0.155, 0.11, 0.22),
         c.side,
-        0.05,
+        0.07,
     )
-    .el("loin", v(0.0, 0.66, 0.05), v(0.14, 0.11, 0.2), c.side, 0.07);
+    // A broad, deep chest between the forelegs, so the elbows lie against it, and the
+    // massive forequarters the shoulder blades sink into.
+    .el(
+        "body",
+        v(0.0, 0.43, -0.37),
+        v(0.135, 0.11, 0.17),
+        c.side,
+        0.07,
+    )
+    .el(
+        "body",
+        v(0.0, 0.6, -0.47),
+        v(0.185, 0.18, 0.17),
+        c.side,
+        0.08,
+    );
+    // Hams that slope down from the croup, narrower than the shoulders, and the fold of
+    // skin from the flank to the stifle.
+    for side in 0..2 {
+        let hip = name("hind", "upper", side);
+        g.el(
+            &hip,
+            sided(v(0.08, 0.53, 0.45), side),
+            v(0.065, 0.12, 0.12),
+            c.side,
+            0.06,
+        )
+        .el(
+            &hip,
+            sided(v(0.09, 0.47, 0.3), side),
+            v(0.05, 0.06, 0.08),
+            c.side,
+            0.06,
+        );
+    }
     // The mane: a blade of long, coarse bristles standing up along the spine from the nape,
     // tallest over the withers and falling away to the rump, so the back slopes down from a
     // hump. (A piglet's is short.)
@@ -1531,20 +1566,24 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
         } else {
             "loin"
         };
-        g.el(bone, v(0.0, y, z), v(0.055, 0.075, 0.1), mane, 0.05);
+        g.el(bone, v(0.0, y - 0.01, z), v(0.05, 0.07, 0.15), mane, 0.07);
     }
     // A thick neck straight into the wedge of the head.
-    let n = f.neck;
-    g.cap(
+    // (Deeper than wide, so the forequarters don't bulge out at the sides.)
+    g.el(
         "neck_1",
-        v(0.0, 0.62, -0.48),
-        n[1] + v(0.0, 0.0, 0.02),
-        0.19,
-        0.16,
+        v(0.0, 0.61, -0.55),
+        v(0.15, 0.2, 0.15),
         c.side,
+        0.08,
+    )
+    .el(
+        "neck_2",
+        v(0.0, 0.615, -0.68),
+        v(0.135, 0.165, 0.1),
+        c.face,
         0.06,
     )
-    .cap("neck_2", n[1], n[2], 0.16, 0.14, c.face, 0.05)
     .cap(
         "neck_2",
         v(0.0, 0.74, -0.5),
@@ -1575,14 +1614,14 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
     for side in 0..2 {
         g.el(
             "head",
-            sided(v(0.075, 0.54, -0.83), side),
-            v(0.065, 0.085, 0.1),
+            sided(v(0.07, 0.56, -0.83), side),
+            v(0.06, 0.075, 0.1),
             c.face,
-            0.025,
+            0.04,
         );
     }
     // The snout disc, bare and moist, with two nostrils.
-    let disc = Paint::skin([0.16, 0.1, 0.09]);
+    let disc = Paint::skin([0.075, 0.055, 0.05]);
     g.b.part(
         "head",
         Shape::cylinder(
@@ -1606,12 +1645,23 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
             0.004 * g.s,
         );
     }
+    // The lower jaw: deep under the cheeks, running straight to the chin under the snout,
+    // so the head is a wedge from the side rather than a tube.
     g.cap(
         "jaw",
-        f.jaw,
-        v(0.0, 0.4, -1.03),
-        0.05,
-        0.035,
+        v(0.0, 0.5, -0.8),
+        v(0.0, 0.405, -1.02),
+        0.085,
+        0.04,
+        c.face,
+        0.03,
+    )
+    .cap(
+        "jaw",
+        v(0.0, 0.455, -0.9),
+        v(0.0, 0.395, -1.03),
+        0.045,
+        0.032,
         c.under,
         0.012,
     );
@@ -1664,7 +1714,13 @@ fn boar_body(g: &mut Grow, f: &Frame, c: &Coat, look: Look) {
             0.006,
         );
     }
-    g.el("tail_4", f.tail[4], v(0.018, 0.035, 0.018), c.back, 0.006);
+    g.el(
+        "tail_4",
+        f.tail[4] + v(0.0, -0.01, 0.0),
+        v(0.014, 0.04, 0.012),
+        Paint { fur: 2.2, ..c.back },
+        0.006,
+    );
 }
 
 fn rabbit_body(g: &mut Grow, f: &Frame, c: &Coat) {
@@ -3044,6 +3100,26 @@ mod tests {
         assert!(
             back < bare + 0.004 * scale,
             "the spotted back at {back}, plain {bare}"
+        );
+    }
+
+    #[test]
+    fn a_boar_is_widest_at_its_shoulders_with_no_waist_before_its_hams() {
+        let m = mesh(Wild::Boar, 1.0, Look::PLAIN);
+        // Half the body's width over the back half of its height, around a z.
+        let width = |z: f32| {
+            m.vertices
+                .iter()
+                .filter(|v| (v.position.z - z).abs() < 0.03 && v.position.y > 0.45)
+                .fold(0.0f32, |a, v| a.max(v.position.x.abs()))
+        };
+        let shoulders = width(-0.45);
+        let barrel = [-0.1, 0.0, 0.1].map(width);
+        let hams = width(0.4);
+        let waist = barrel.into_iter().fold(f32::MAX, f32::min);
+        assert!(
+            shoulders > hams && waist > hams - 0.02,
+            "shoulders {shoulders}, barrel {barrel:?}, hams {hams}"
         );
     }
 
