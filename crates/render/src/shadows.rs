@@ -66,6 +66,13 @@ impl Default for Cascades {
     }
 }
 
+/// Nothing farther than this toward the light (m) casts into a shadow map. A world's own ground
+/// cannot from farther (its tallest mountains under the lowest sun, and its curve), and the
+/// light's own body lies beyond it: by night the light is the Moon's, and the Moon's ground,
+/// 384 400 km up the light's axis, was inside every map's square (they are unbounded toward the
+/// light) and, flattened onto the near plane, shaded all of it from its own light.
+pub const CASTER_REACH_M: f32 = 1.0e6;
+
 impl Cascades {
     /// Whether a camera-relative bounding sphere can cast a shadow into cascade `i`: inside its
     /// square, and able to shade the part of the view the cascade covers (see
@@ -80,7 +87,10 @@ impl Cascades {
     pub fn sphere_in_square(&self, i: usize, center: Vec3, radius: f32) -> bool {
         let p = self.light_view[i].transform_point3(center);
         let e = self.half_extent[i] + radius;
-        p.x.abs() <= e && p.y.abs() <= e && -p.z - radius <= self.depth_range[i]
+        p.x.abs() <= e
+            && p.y.abs() <= e
+            && -p.z - radius <= self.depth_range[i]
+            && p.z - radius <= CASTER_REACH_M
     }
 
     /// Point cascade `i` at `center` (absolute, on its texel grid) for a camera at `origin`.
@@ -697,7 +707,10 @@ impl FarShadowView {
         }
         let p = self.light_view.transform_point3(center);
         let e = self.half_extent + radius;
-        p.x.abs() <= e && p.y.abs() <= e && -p.z - radius <= self.depth_range
+        p.x.abs() <= e
+            && p.y.abs() <= e
+            && -p.z - radius <= self.depth_range
+            && p.z - radius <= CASTER_REACH_M
     }
 
     /// Whether a caster with this camera-relative bounding sphere belongs in the far map: big
@@ -1147,6 +1160,31 @@ mod tests {
         let s = split_distances(1.0, 300.0, 4, 0.8);
         assert!(s[0] < s[1] && s[1] < s[2] && s[2] < s[3]);
         assert!((s[3] - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_lights_own_body_casts_into_no_map() {
+        let settings = RenderSettings::default();
+        let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
+        let proj = crate::frame::perspective_infinite_reverse(1.2, 1.6, 0.1);
+        let c = compute_cascades(
+            &settings,
+            DVec3::ZERO,
+            Quat::IDENTITY,
+            0.1,
+            1.2,
+            1.6,
+            false,
+            sun,
+            &proj,
+        );
+        for i in 0..MAX_CASCADES {
+            // A ridge 20 km toward the light casts into the square under it.
+            assert!(c.sphere_in_square(i, sun * 20_000.0, 500.0), "cascade {i}");
+            // The Moon by night, where its light comes from: a patch of its ground.
+            assert!(!c.sphere_in_square(i, sun * 3.844e8, 1.7e6), "cascade {i}");
+            assert!(!c.sphere_in_cascade(i, sun * 3.844e8, 1.7e6), "cascade {i}");
+        }
     }
 
     #[test]
