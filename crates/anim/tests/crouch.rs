@@ -201,3 +201,26 @@ fn an_archer_draws_and_holds_its_bow_crouched() {
     run(&mut app, 1.0);
     assert!(bone(&app, e, "head").y > low + 0.4);
 }
+
+#[test]
+fn a_fighter_on_a_ruined_knee_kneels_on_it_even_when_told_to_crouch() {
+    use engine_world::combat::{BodyInjuries, BodyZone};
+    let mut app = app();
+    let kneeling = [person(&mut app, 0.0), person(&mut app, 3.0)];
+    run(&mut app, 0.5);
+    for &e in &kneeling {
+        let mut inj = BodyInjuries::default();
+        inj.get_mut(BodyZone::KneeL).wound = 0.7;
+        app.world.entity_mut(e).insert(inj);
+    }
+    // NPC AI keeps a fighter on a bad knee crouched, so it doesn't chase.
+    crouch(&mut app, kneeling[1], true);
+    run(&mut app, 1.5);
+    let [hips, crouched] = kneeling.map(|e| bone(&app, e, "hips").y);
+    assert!(
+        (hips - crouched).abs() < 0.03,
+        "kneeling hips at {hips}, kneeling told to crouch at {crouched}"
+    );
+    let knee = bone(&app, kneeling[1], "lower_leg_l").y;
+    assert!(knee < 0.15, "the bad knee on the ground: {knee}");
+}
