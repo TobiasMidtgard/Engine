@@ -63,7 +63,7 @@ pub const CROUCH_SINK: f32 = 0.34;
 pub const CROUCH_PITCH: f32 = -16.0;
 pub const CROUCH_LEAN: f32 = 32.0;
 /// How far a crouched foot behind the hips rises onto its ball, degrees.
-const CROUCH_HEEL: f32 = 38.0;
+const CROUCH_HEEL: f32 = 55.0;
 /// The animation parameter the graph crouches by (0..1): the module eases it toward the
 /// contract's `crouch` (or a mover's [`MoveIntent::crouch`] or crouched
 /// [`LocomotionMode`]), which callers set as 0 or 1.
@@ -1003,7 +1003,7 @@ fn crouch_walk(s: &Skeleton) -> AnimationClip {
     step_cycle(
         s,
         "crouch_walk",
-        Gait::crouch(Vec2::Y, CROUCH_WALK_SPEED, 0.88),
+        Gait::crouch(Vec2::Y, CROUCH_WALK_SPEED, 0.72),
     )
 }
 
@@ -1013,11 +1013,11 @@ fn crouch_run(s: &Skeleton) -> AnimationClip {
         s,
         "crouch_run",
         Gait {
-            stance: 0.52,
+            stance: 0.46,
             lift: 0.11,
-            lean: CROUCH_LEAN + 8.0,
-            sink: CROUCH_SINK * 0.8,
-            ..Gait::crouch(Vec2::Y, CROUCH_RUN_SPEED, 0.7)
+            lean: CROUCH_LEAN + 16.0,
+            sink: CROUCH_SINK * 0.6,
+            ..Gait::crouch(Vec2::Y, CROUCH_RUN_SPEED, 0.56)
         },
     )
 }
@@ -1237,10 +1237,11 @@ impl Gait {
             secs,
             stance: 0.64,
             lift: 0.07,
-            lean: CROUCH_LEAN,
-            pitch: CROUCH_PITCH,
-            // (A little higher than crouched still, so the trailing knee clears the ground.)
-            sink: CROUCH_SINK * 0.9,
+            // (Higher hips than crouched still, bent further forward to keep the head as
+            // low, so the trailing knee stays well off the ground.)
+            lean: CROUCH_LEAN + 10.0,
+            pitch: CROUCH_PITCH - 8.0,
+            sink: CROUCH_SINK * 0.7,
             ..Self::STILL
         }
     }
@@ -1329,7 +1330,7 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
             let (mut at, swing) = foot(side, q);
             // Crouched, a foot behind the hips rises onto its ball (so the knee stays off
             // the ground) and lifts off from there.
-            let behind = smooth01((at.z - 0.02) / 0.3);
+            let behind = smooth01((at.z - 0.02) / 0.22);
             let leaving = 1.0 - smooth01(swing / 0.4);
             let heel = (CROUCH_HEEL * low).to_radians() * behind * leaving;
             at.y += ball * heel.sin();

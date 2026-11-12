@@ -99,7 +99,7 @@ fn a_person_sinks_into_a_crouch_low_enough_to_hide_and_creeps_hurries_and_steps_
     let [left, right] = ["foot_l", "foot_r"].map(|foot| bone(&app, e, foot).y);
     assert!(left < 0.11, "left ankle at {left} crouched");
     assert!(
-        right > left + 0.01 && right < 0.17,
+        right > left + 0.01 && right < 0.2,
         "right ankle at {right} crouched"
     );
 
@@ -132,6 +132,35 @@ fn a_person_sinks_into_a_crouch_low_enough_to_hide_and_creeps_hurries_and_steps_
         up > standing - 0.03,
         "head back at {up} (stood at {standing})"
     );
+}
+
+#[test]
+fn a_crouched_walker_keeps_its_knees_well_off_the_ground_and_its_head_low() {
+    let mut app = app();
+    let e = person(&mut app, 0.0);
+    crouch(&mut app, e, true);
+    run(&mut app, 1.0);
+    for (what, dir, speed) in [
+        ("creeping", DVec3::Z, 1.1),
+        ("hurrying", DVec3::Z, 2.4),
+        ("backing", -DVec3::Z, 0.8),
+        ("stepping left", DVec3::X, 0.8),
+    ] {
+        // Into the gait first, then the lowest knee and highest head over two strides.
+        walk(&mut app, e, dir, speed, 0.7);
+        let along = DVec3::new(-dir.x, 0.0, -dir.z);
+        let (mut knee, mut head) = (f32::MAX, f32::MIN);
+        for _ in 0..90 {
+            app.world.get_mut::<Transform>(e).unwrap().translation += along * speed * STEP;
+            app.update();
+            for b in ["lower_leg_l", "lower_leg_r"] {
+                knee = knee.min(bone(&app, e, b).y);
+            }
+            head = head.max(bone(&app, e, "head").y);
+        }
+        assert!(knee > 0.16, "{what}: a knee down at {knee}");
+        assert!(head < 1.15, "{what}: head up at {head}");
+    }
 }
 
 #[test]
