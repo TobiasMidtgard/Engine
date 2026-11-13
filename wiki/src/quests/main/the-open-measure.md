@@ -15,7 +15,7 @@ Leads to: [The Human Limit](the-human-limit.md)
 ```
 
 [Tessara](../../cities/tessara.md)'s defining law is that any machine with power over a person must
-reveal its pattern. When the Registry's envoy offered Tessara a Well Charter, **Ison**, the machine
+reveal its pattern. When the Registry's envoy offered Tessara a Well Charter, **[Ison](../../people/ison.md)**, the machine
 mind that governs the city, did what the law requires: it asked to see how the Registry works. The
 Registry declined, politely. Then a Fifth Reserve banker arrived with an offer for one of the Closed
 Kilns, and a sealed computing core for Ison.
@@ -34,7 +34,7 @@ Ison wants a **sample of a seal's pattern**: the real inner working of a Registr
 Tessaran tile-reader has ever been allowed to examine. You can get one by:
 
 - **Taking one** from a Seal Warden in the Fifth Reserve's Tessara office (Pickpocket, or worse).
-- **Asking Ivo Tarrant** for his own Gold Seal, which he will give you if he trusts you completely.
+- **Asking [Ivo Tarrant](../../people/ivo-tarrant.md)** for his own Gold Seal, which he will give you if he trusts you completely.
 - **Buying one** in the Hollow Market of the Second City, if you went there and left on good terms.
 
 ## The black core

@@ -14,7 +14,7 @@ Danger: 5/5
 Leads to: [A Door Nobody Locked](a-door-nobody-locked.md)
 ```
 
-**Warden-Captain Ulf Garrick** is the best fighter the Gilded Ascent has, and one of the few hundred
+**Warden-Captain [Ulf Garrick](../../people/companions/ulf-garrick.md)** is the best fighter the Gilded Ascent has, and one of the few hundred
 people on the continent who have [Awakened](../../play/ascension.md#awakening). He has been sent to
 bring you back to the Registry alive, if possible. He has stopped expecting it to be possible.
 
@@ -61,7 +61,7 @@ you will, but you will not become more than you are without something rare.
 
 ## The tortoise
 
-On the road afterwards you meet **Rain-Back**, an old tortoise envoy of [Oruvai](../../cities/oruvai.md)
+On the road afterwards you meet **[Rain-Back](../../people/rain-back.md)**, an old tortoise envoy of [Oruvai](../../cities/oruvai.md)
 travelling with the [Keepers' Road](../../factions/keepers-road.md), who has been walking towards
 you, very slowly, for some months. Rain-Back is much older than any tortoise should be. It speaks
 through the Chorus, in a voice that sounds like a forest agreeing with itself.

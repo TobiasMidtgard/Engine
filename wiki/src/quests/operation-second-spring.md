@@ -25,7 +25,7 @@ its future revenues to military households, and skilled workers appear on compul
 lists.
 
 Hushwing Station's glider teams carry sealed orders to seize key officials and the original
-financial records when it begins. **Captain Sera Noll** insists on bringing her crews home; she
+financial records when it begins. **Captain [Sera Noll](../people/sera-noll.md)** insists on bringing her crews home; she
 can be principled about how her people are treated and still help conquer another country.
 
 ## The evidence

@@ -105,7 +105,7 @@ Around the spire the city spreads in rings.
 The **Court of Seals**, the holders of the Glass Seal, governs the city. It meets at the Lantern
 Table, sets the tolls on the five roads and the season's prices on the Summit, and appoints the
 city's officials. Its chair is the **Sealkeeper**, who guards the master dies that strike every
-seal; the present Sealkeeper is [Hesper Lorn](../factions/chartered-road.md#people) of the
+seal; the present Sealkeeper is [Hesper Lorn](../people/hesper-lorn.md) of the
 Chartered Road.
 
 The city's guards are the **Seal Wardens**, in grey coats with a brass disc for each tier they may

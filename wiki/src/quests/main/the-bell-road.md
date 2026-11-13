@@ -33,7 +33,7 @@ food, sleeping at waystations, paying tolls, and dealing with what lives along t
 
 ## The caravan
 
-The caravan master of the Dunmore & Daughters, **Imke Dunmore**, needs a guard because one of hers
+The caravan master of the Dunmore & Daughters, **[Imke Dunmore](../../people/imke-dunmore.md)**, needs a guard because one of hers
 quit at Halfbell. Kit's outrider coat gets you the job if you can answer three questions about the
 Chartered Road's charter. If you can't, a Persuasion check, a few marks or a demonstration on the
 practice post will do.

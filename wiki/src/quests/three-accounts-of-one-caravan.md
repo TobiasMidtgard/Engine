@@ -6,7 +6,7 @@ status: draft
 tags: Investigation, Trade, Social
 Type: Guild job
 Where: [The Gilded Ascent](../cities/gilded-ascent.md), the Caravanserai and the Bonded Halls
-Given by: [Ivo Tarrant](../factions/chartered-road.md#people)
+Given by: [Ivo Tarrant](../people/ivo-tarrant.md)
 Faction: [The Chartered Road](../factions/chartered-road.md)
 Part of: The Chartered Road's questline (opening)
 ## The job
@@ -22,7 +22,7 @@ and three very respectable people have three very different explanations.
 
 ## The job
 
-[Ivo Tarrant](../factions/chartered-road.md#people) hires you as a drover for the day, the lowest
+[Ivo Tarrant](../people/ivo-tarrant.md) hires you as a drover for the day, the lowest
 work in the guild, because a drover can walk into the Caravanserai, the stables and the Bonded Halls
 without anyone noticing. Find out where the cargo went. Ivo doesn't care who is to blame. He cares
 that the guild can say what happened.
@@ -53,7 +53,7 @@ that the guild can say what happened.
 Everyone is lying a little, and nobody is lying about everything. The caravan master swapped four
 crates for sand at the inn on Lucan Prell's orders, so that Lucan could claim the insurance and
 sell the lamps again in [Arena City](../cities/arena-city.md). But the forger who resealed the
-crates was paid by **Captain Wenna Sallow**'s outriders, who stole the real lamps from Lucan's own
+crates was paid by **Captain [Wenna Sallow](../people/wenna-sallow.md)**'s outriders, who stole the real lamps from Lucan's own
 smugglers on the road and gave them to the frozen villages of the northern road, where they now
 heat a school.
 

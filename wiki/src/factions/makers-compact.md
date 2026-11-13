@@ -57,12 +57,12 @@ swords. Two of those kingdoms are gone now. The Compact signed the peace, and th
 
 ## People
 
-- **Hedda Strom**, steward of the smiths' lodge: workers should own the workshops, share their
+- **[Hedda Strom](../people/hedda-strom.md)**, steward of the smiths' lodge: workers should own the workshops, share their
   knowledge and bargain together. She led the last strike in Orravell's factories and spent a year
   in its prisons for it.
-- **Master Aldous Pike**, enchanter: skill needs hierarchy, long apprenticeships and protected
+- **Master [Aldous Pike](../people/aldous-pike.md)**, enchanter: skill needs hierarchy, long apprenticeships and protected
   techniques. His own masterpiece, a sword that cannot be dulled, took him eleven years.
-- **Perrin Haske**, production organiser: machines and standard recipes make goods affordable, even
+- **[Perrin Haske](../people/perrin-haske.md)**, production organiser: machines and standard recipes make goods affordable, even
   if many workers are no longer needed. He has bought three Tessaran pattern looms, and the
   weavers' lodge has not forgiven him.
 

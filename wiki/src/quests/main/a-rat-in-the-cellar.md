@@ -41,7 +41,7 @@ though she has opinions about the cheese.
 
 When you come back up, the supper crowd has been replaced by silence. A young courier in a
 Chartered Road outrider's coat is slumped by the fire, with a crossbow bolt in his side that
-somebody has snapped off short. His name is **Kit Fenn**. He has ridden from the Bell Road without
+somebody has snapped off short. His name is **[Kit Fenn](../../people/kit-fenn.md)**. He has ridden from the Bell Road without
 stopping, and he will not ride again.
 
 He looks at you, at your hands, at your empty collar where a seal would be, and makes a decision.

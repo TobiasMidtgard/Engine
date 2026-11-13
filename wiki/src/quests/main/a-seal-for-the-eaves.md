@@ -35,7 +35,7 @@ The five seats of the Night Council each see it differently:
 | **The Pack-Speaker** | Nothing that puts a seal on a werebeast. Against. |
 | **The Registrar of the Dead** | To know what the Registry wants the dead for. Curious. |
 | **The Warden of Wards** | To know what kind of lock a seal really is. Suspicious. |
-| **The Broker** | The deal. The Broker brought it here. |
+| **[The Broker](../../people/the-broker.md)** | The deal. The Broker brought it here. |
 
 Meanwhile drained bodies keep turning up on the Boulevard, and the Magistracy has begun hiring
 climbers. Somebody wants the Compact to break before the Council votes.
@@ -45,7 +45,7 @@ climbers. Somebody wants the Compact to break before the Council votes.
 A verified Red Writ can't be refused, but it can be **voided**: by the buyer withdrawing it, by
 proving it was bought with false papers, or by the Last Word deciding the writ itself was a
 crime. You need to know who bought it. The Last Writ's registrar,
-[Ophel Strand](../../factions/last-writ.md#people), won't tell you. Somebody else might:
+[Ophel Strand](../../people/ophel-strand.md), won't tell you. Somebody else might:
 
 > [!WARNING]
 > Spoilers for the main story below.

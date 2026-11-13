@@ -151,8 +151,8 @@ security of the whole city.
 > Spoilers for Orath's main quest below.
 
 You arrive just before the Unbarred Night, as the First Spring begins to weaken. The water
-engineer **Ilyan Dareth** has found an abandoned channel beneath the Underchoir, but later
-generations built burial galleries inside its old reservoir. **Sister Avara**, a physician of the
+engineer **[Ilyan Dareth](../people/ilyan-dareth.md)** has found an abandoned channel beneath the Underchoir, but later
+generations built burial galleries inside its old reservoir. **[Sister Avara](../people/companions/sister-avara.md)**, a physician of the
 Covenant of Ash, wants to prepare for shortages at once; several officials fear that announcing it
 will start hoarding before the pilgrims arrive. Beyond the blocked channel lies **the fifth
 passage**, an archive older than all four religions, recording how earlier communities kept the

@@ -6,7 +6,7 @@ status: draft
 tags: Escort, Investigation, Rooftops
 Type: Guild job
 Where: [The Second City](../cities/second-city.md), the Eaves
-Given by: [Edrin Vasse](../factions/last-writ.md#people)
+Given by: [Edrin Vasse](../people/edrin-vasse.md)
 Faction: [The Last Writ](../factions/last-writ.md)
 Part of: The Last Writ's questline (opening)
 ## The job
@@ -21,7 +21,7 @@ hearing will decide whether this one is real. You are hired to bring the only wi
 
 ## The job
 
-[Edrin Vasse](../factions/last-writ.md#people) hands you a lantern, a guild token and a name:
+[Edrin Vasse](../people/edrin-vasse.md) hands you a lantern, a guild token and a name:
 **Lisbet Arrow**, a laundress who says she saw the writ being signed. She lives in the Arcades, at
 street level, and the hearing is on the roofs. Between the two lies the third floor, and above it
 anyone may kill her if they can afford the writ, or are willing to answer for not having one.
@@ -53,7 +53,7 @@ Kesk is guilty: there is a child's shoe in his strongbox and a ledger of payment
 and she cannot write. It was bought by **Kesk's own business partner**, who wants Kesk dead and the
 partnership's ships for himself, and who has a second writ in his pocket: one naming Lisbet.
 
-At the hearing, [Ophel Strand](../factions/last-writ.md#people) presides. If the writ is forged, it
+At the hearing, [Ophel Strand](../people/ophel-strand.md) presides. If the writ is forged, it
 cannot be honoured, whatever Kesk has done.
 
 ```flow

@@ -51,16 +51,16 @@ wrist, re-cast at every promotion.
 
 ## People
 
-- **Dagna Holt, "the Anvil"**, retired champion and the Circuit's arbiter: fair competition and a
+- **[Dagna Holt](../people/dagna-holt.md), "the Anvil"**, retired champion and the Circuit's arbiter: fair competition and a
   way up for anyone. She wants protection for fighters, honest rankings and a life after
   retirement. Her own knees are ruined, and she tells everyone exactly whose fault it was.
-- **Orlo Vance, "the Voice"**, the grand promoter: spectacle pays for the whole city. Rivalries,
+- **[Orlo Vance](../people/orlo-vance.md), "the Voice"**, the grand promoter: spectacle pays for the whole city. Rivalries,
   gambling, dangerous formats and celebrity. He has never thrown a punch and is the richest man in
   the guild.
-- **Captain Brenn Askew**, the company captain: the arena should find the soldiers, officers and
+- **Captain [Brenn Askew](../people/companions/brenn-askew.md)**, the company captain: the arena should find the soldiers, officers and
   mercenaries for the wars to come. She scouts for
   [Orravell](../cities/orravell.md)'s Crown Companies and for anyone else who pays.
-- **Mags Rennick**, the pit organiser: formal rules favour the rich. Real brawling allows improvised
+- **[Mags Rennick](../people/mags-rennick.md)**, the pit organiser: formal rules favour the rich. Real brawling allows improvised
   weapons, the terrain and anyone willing to step in. She runs the open pits under the canals,
   where the Circuit's rules do not reach.
 

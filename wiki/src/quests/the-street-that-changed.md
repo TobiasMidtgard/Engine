@@ -6,7 +6,7 @@ status: draft
 tags: Magic, Containment, Investigation
 Type: Guild job
 Where: [Veyrhold](../cities/veyrhold.md), Sunledge
-Given by: [Halvard Cray](../factions/spillward.md#people)
+Given by: [Halvard Cray](../people/halvard-cray.md)
 Faction: [The Spillward](../factions/spillward.md)
 Part of: The Spillward's questline (opening)
 ## The job
@@ -22,7 +22,7 @@ because someone pulled them all out in the dark, and that someone has no licence
 
 ## The job
 
-The Spillward's inspector, [Halvard Cray](../factions/spillward.md#people), needs runners: people to
+The Spillward's inspector, [Halvard Cray](../people/halvard-cray.md), needs runners: people to
 carry measuring rods into the spill, mark where it has spread and bring back anything that has
 changed. He also wants the unlicensed mage found.
 
@@ -38,7 +38,7 @@ quarry's hushstone will start to drink it, and nobody knows what that will do.
 - **The warm cellar** is where the spill began. Its light makes plants grow and hair turn white.
 - **Changed things**: a loaf that never goes stale, a cat that is a little too clever, a kettle that
   boils cold. All of them are valuable, and all of them belong to someone.
-- **The street mage**: [Tamsin Reeve](../factions/spillward.md#people) is still inside, holding the
+- **The street mage**: [Tamsin Reeve](../people/companions/tamsin-reeve.md) is still inside, holding the
   spill back with a ward she taught herself, and she is getting tired.
 
 ## What caused it

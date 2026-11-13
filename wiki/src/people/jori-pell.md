@@ -6,7 +6,7 @@ status: draft
 Role: Master locksmith
 Home: [Vantress](../cities/vantress/index.md)
 Faction: [The Tangle](../factions/thieves-guild.md)
-Services: Locks, traps, mechanisms
+Services: Locks, traps, mechanisms; trains Lockcraft
 ```
 
 **Jori "Latch" Pell** is a master locksmith of [the Tangle](../factions/thieves-guild.md),
@@ -23,6 +23,8 @@ neutrality often ends up serving wealthy clients.
 ## Services
 
 Locks, traps, mechanisms and engineering.
+
+Trains Lockcraft up to Master, and Engineering (Mechanist) up to Adept (see [Training](../play/skills.md#training)); Tangle members pay half.
 
 ## Quests
 

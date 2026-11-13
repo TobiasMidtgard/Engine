@@ -6,7 +6,7 @@ status: draft
 Role: Fence and keeper of the guild's stores
 Home: [Vantress](../cities/vantress/index.md)
 Faction: [The Tangle](../factions/thieves-guild.md)
-Services: Fencing, appraisal, equipment, supplies
+Services: Fencing, appraisal, equipment, supplies; trains Trade (Fence and Appraiser)
 ```
 
 **Maera "Cask" Orro** runs [the Drunken Sailor](../cities/vantress/lantern-ward/drunken-sailor.md)
@@ -23,6 +23,8 @@ her the power to decide who gets food and medicine.
 
 Fencing, appraisal, equipment, supplies and trade. At the end of a job she weighs up what a haul
 is really worth:
+
+Trains Trade (Fence and Appraiser) up to Expert (see [Training](../play/skills.md#training)); Tangle members pay half.
 
 > Fence value = sale price − cost of laundering − heat − damage − partners' shares
 

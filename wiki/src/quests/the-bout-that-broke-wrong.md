@@ -6,7 +6,7 @@ status: draft
 tags: Tournament, Investigation, Arena
 Type: Guild job
 Where: [Arena City](../cities/arena-city.md), the night floor
-Given by: [Dagna Holt](../factions/brass-circuit.md#people)
+Given by: [Dagna Holt](../people/dagna-holt.md)
 Faction: [The Brass Circuit](../factions/brass-circuit.md)
 Part of: The Brass Circuit's questline (opening)
 ## The job
@@ -22,7 +22,7 @@ watch as well as fight.
 
 ## The job
 
-[Dagna Holt](../factions/brass-circuit.md#people) offers you two ways in: take Joss's place in the
+[Dagna Holt](../people/dagna-holt.md) offers you two ways in: take Joss's place in the
 tournament as an unranked Sand fighter, or work the Undercroft as a healer's helper, a runner or a
 second, where you can see everyone and nobody watches you. Either way, find out what happened to
 Joss before it happens to someone else.
@@ -48,7 +48,7 @@ Every skill gets you somewhere:
 
 Joss's bones were weakened by a **slow blight**: a dark Malefice curse, cast on his wrapping cloth
 days before the bout, which rots bone from the inside and leaves no wound. It was paid for by
-[Orlo Vance](../factions/brass-circuit.md#people)'s chief bookmaker, who had taken a fortune in bets
+[Orlo Vance](../people/orlo-vance.md)'s chief bookmaker, who had taken a fortune in bets
 on the underdog from a buyer in [Orravell](../cities/orravell.md). The buyer was not interested in
 the money. He was testing whether a curse could pass the Circuit's healers unnoticed, so that his
 army could use it on the battlefield.

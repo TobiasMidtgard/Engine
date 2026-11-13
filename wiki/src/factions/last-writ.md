@@ -48,13 +48,13 @@ in the Eaves without a writ.
 
 ## People
 
-- **Edrin Vasse**, Hand and the guild's chief bodyguard: killing is justified only when every
+- **[Edrin Vasse](../people/edrin-vasse.md)**, Hand and the guild's chief bodyguard: killing is justified only when every
   lawful option has failed. He wants the guild to protect witnesses, rescue marked targets and hunt
   rogue assassins.
-- **Ophel Strand**, the contract registrar: personal morality turns assassins into political
+- **[Ophel Strand](../people/ophel-strand.md)**, the contract registrar: personal morality turns assassins into political
   servants. Every properly verified writ must be honoured, whoever issued it, or the system
   collapses into ordinary murder.
-- **Sabeth Rook**, the master hunter: killing is the purest test of skill. Contracts provide worthy
+- **[Sabeth Rook](../people/sabeth-rook.md)**, the master hunter: killing is the purest test of skill. Contracts provide worthy
   prey and keep lesser killers in line. She keeps a small shrine to
   [the Antlered Hunt](../lore/gods.md#the-antlered-hunt) in her rooms.
 - **The Last Word**: speaks only through sealed letters. Some members believe the Last Word died

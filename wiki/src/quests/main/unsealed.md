@@ -55,7 +55,7 @@ Tarrant tells you what Kit had found:
 - In the last two years, a hand in fresh ink has added names to it. The First Spring of Orath. The
   Deepworks of Sky City. Others.
 - Every well whose name was written in has started to fail.
-- The hand belongs to **Gisela Quell**, Registrar of Seals.
+- The hand belongs to **[Gisela Quell](../../people/gisela-quell.md)**, Registrar of Seals.
 
 Tarrant can't prove it, can't accuse a Registrar without proof, and can't read the black script.
 The page names the First Spring; whoever wrote it there wants it back. He asks you to go to Orath,

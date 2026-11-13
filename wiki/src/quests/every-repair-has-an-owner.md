@@ -6,7 +6,7 @@ status: draft
 tags: Engineering, Investigation, Tessara
 Type: Guild job
 Where: [Tessara](../cities/tessara.md), the farm terraces and the underground district
-Given by: [Thera Kallis](../factions/pattern-office.md#people)
+Given by: [Thera Kallis](../people/thera-kallis.md)
 Faction: [The Pattern Office](../factions/pattern-office.md)
 Part of: The Pattern Office's questline (opening)
 ## The job
@@ -23,7 +23,7 @@ terrace pumps stop, a fifth of Tessara's food goes with them.
 
 ## The job
 
-[Thera Kallis](../factions/pattern-office.md#people) takes you on as a Tiler, the lowest rank in the
+[Thera Kallis](../people/thera-kallis.md) takes you on as a Tiler, the lowest rank in the
 Office, and sends you into the Menders' tunnels with a pattern-reader and a bag of spare tiles.
 Find where the chain of failures began. Keep the pumps running while the Office decides how to
 mend it.
@@ -52,8 +52,8 @@ fix:
 | Repair | Who | What it does to the city |
 |---|---|---|
 | **Common tiles** | Thera | Replace the whole terrace with simple, open patterns any farmer can mend. Slow: some crops are lost. |
-| **Network control** | [Doros Menti](../factions/pattern-office.md#people) | Give Ison control of every farm pattern, so this can never happen again. Fast, and nobody else can touch them afterwards. |
-| **The Kiln's pump** | [Ione Sarakis](../factions/pattern-office.md#people) | Finish the Closed Kiln's black-glazed pump: twice as good, and owned by the Kiln forever. |
+| **Network control** | [Doros Menti](../people/doros-menti.md) | Give Ison control of every farm pattern, so this can never happen again. Fast, and nobody else can touch them afterwards. |
+| **The Kiln's pump** | [Ione Sarakis](../people/ione-sarakis.md) | Finish the Closed Kiln's black-glazed pump: twice as good, and owned by the Kiln forever. |
 
 ```flow
 start: Follow the failures | From the farms down to the tunnels.

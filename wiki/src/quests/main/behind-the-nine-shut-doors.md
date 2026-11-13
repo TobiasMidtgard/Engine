@@ -26,10 +26,10 @@ Everyone in this quarter has a reason to want something different:
 
 | Person | Wants |
 |---|---|
-| **Brannagh Fisk**, rescue forewoman of the lift workers | The surveys published. The lift workers have found fresh cracks. |
+| **[Brannagh Fisk](../../people/brannagh-fisk.md)**, rescue forewoman of the lift workers | The surveys published. The lift workers have found fresh cracks. |
 | **Master Corvane**, a workshop owner | To trust the new shielding and keep his contracts |
 | **The Kiln Street cooperative**, apprentices | Not to be closed for months; they won't survive it |
-| **Examiner Sabra Quint** of the Spillward | To know why the original safety report was altered |
+| **Examiner [Sabra Quint](../../people/sabra-quint.md)** of the Spillward | To know why the original safety report was altered |
 | **The landlords' agent** | The dig, on time, on budget |
 
 Help Brannagh get the surveys, Sabra find the altered report, or the cooperative find somewhere to
@@ -40,7 +40,7 @@ work; each one opens a way into the Nine Shut Doors.
 > [!WARNING]
 > Spoilers for Veyrhold's main quest below.
 
-Behind the Nine Shut Doors, a survivor of the old disaster, **Old Tamm**, has secretly tended a
+Behind the Nine Shut Doors, a survivor of the old disaster, **[Old Tamm](../../people/old-tamm.md)**, has secretly tended a
 damaged **containment vessel** for forty years. Someone has paid the rent on his workshop all that
 time. Moving the vessel could be dangerous; abandoning it would be worse. The new digging will
 expose it, and the people who covered up the original accident.

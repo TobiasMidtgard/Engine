@@ -16,7 +16,7 @@ Leads to: Act III, starting with [The Drowning Year](the-drowning-year.md)
 
 You have reached level 60 and the end of being human. To go further you must
 [Awaken](../../play/ascension.md#awakening): find a catalyst, survive a deed, and pay a price.
-**Rain-Back** knows of five roads that touch the story you are already in. Any other road to
+**[Rain-Back](../../people/rain-back.md)** knows of five roads that touch the story you are already in. Any other road to
 Awakening in the world works as well; the story will adapt to it.
 
 ## The five roads
@@ -58,7 +58,7 @@ If Orath signed the Well Charter, this door belongs to the Registry, and you wil
 
 ### The bond
 
-A Brinewing chooses its partner; you can't choose it. The Keepers' Road's pactkeeper, **Sere**, can
+A Brinewing chooses its partner; you can't choose it. The Keepers' Road's pactkeeper, **[Sere](../../people/sere.md)**, can
 bring you to the rookeries if you have their trust, and then you wait, and work, and are looked at,
 for weeks. The deed is the first flight. This road is the one Keth Veyra's story needs most, and it
 makes [The Drowning Year](the-drowning-year.md) much easier.

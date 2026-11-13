@@ -47,13 +47,13 @@ stimulant, a narcotic or a poison. That makes it the quiet enemy of half the bla
 
 ## People
 
-- **Ilse Moorcroft**, elder and steward of the harvest grounds: never harvest anything faster than
+- **[Ilse Moorcroft](../people/ilse-moorcroft.md)**, elder and steward of the harvest grounds: never harvest anything faster than
   it grows back. She has walked every harvest ground in the ledger and can name the plants of a
   valley by its smell.
-- **Benedek Strawn**, cultivator: farm and breed at industrial scale, so that medicine is cheap and
+- **[Benedek Strawn](../people/benedek-strawn.md)**, cultivator: farm and breed at industrial scale, so that medicine is cheap and
   nobody needs to strip a wild valley. His tunnel farms in Rillvault grow healing moss by the
   tonne.
-- **Ottilie Brand**, refiner and master alchemist of the Vantress chapter: concentration and
+- **[Ottilie Brand](../people/ottilie-brand.md)**, refiner and master alchemist of the Vantress chapter: concentration and
   mutation make stronger medicines, stimulants, narcotics and poisons. Most of what she brews is
   legal. She would like all of it to be.
 

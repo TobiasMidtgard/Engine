@@ -67,14 +67,14 @@ The levels are a guide, not a gate. You can walk into the Gilded Ascent's Counti
 
 | Person | Who they are |
 |---|---|
-| **Kit Fenn** | A free-route courier of the Chartered Road, who should not have stopped in the Valley |
-| **[Ivo Tarrant](../../factions/chartered-road.md#people)** | Charter Captain of the western road, the reformer Kit was carrying the case to |
-| **Gisela Quell** | Registrar of Seals in the Gilded Ascent. Patient, exact, and never once wrong in the Registry. |
-| **Warden-Captain Ulf Garrick** | Captain of the Seal Wardens, and one of the Awakened |
-| **[Hesper Lorn](../../factions/chartered-road.md#people)** | The Sealkeeper, who wears the Sixth Seal and has sworn never to use it |
-| **Ilyan Dareth** and **Sister Avara** | A water engineer and a physician of Orath, trying to keep the First Spring alive |
+| **[Kit Fenn](../../people/kit-fenn.md)** | A free-route courier of the Chartered Road, who should not have stopped in the Valley |
+| **[Ivo Tarrant](../../people/ivo-tarrant.md)** | Charter Captain of the western road, the reformer Kit was carrying the case to |
+| **[Gisela Quell](../../people/gisela-quell.md)** | Registrar of Seals in the Gilded Ascent. Patient, exact, and never once wrong in the Registry. |
+| **Warden-Captain [Ulf Garrick](../../people/companions/ulf-garrick.md)** | Captain of the Seal Wardens, and one of the Awakened |
+| **[Hesper Lorn](../../people/hesper-lorn.md)** | The Sealkeeper, who wears the Sixth Seal and has sworn never to use it |
+| **[Ilyan Dareth](../../people/ilyan-dareth.md)** and **[Sister Avara](../../people/companions/sister-avara.md)** | A water engineer and a physician of Orath, trying to keep the First Spring alive |
 | **The Council of Three Anchors** | Sky City's rulers, whose island is sinking an inch a day |
-| **Sere** | The pactkeeper of Keth Veyra, who remembers what the animals remember |
+| **[Sere](../../people/sere.md)** | The pactkeeper of Keth Veyra, who remembers what the animals remember |
 
 ## How it can end
 

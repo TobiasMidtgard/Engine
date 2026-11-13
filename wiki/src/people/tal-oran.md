@@ -6,7 +6,7 @@ status: draft
 Role: Weight of Work
 Home: [Vantress](../cities/vantress/index.md)
 Faction: [The Tangle](../factions/thieves-guild.md)
-Services: Planning, timing, crew coordination
+Services: Planning, timing, crew coordination; trains Sleight of hand
 ```
 
 **Tal Oran** is the Weight of Work of [the Tangle](../factions/thieves-guild.md), Vantress's
@@ -21,6 +21,8 @@ take no side, which in practice means they mostly serve the rich.
 ## Services
 
 Planning, timing, coordinating crews and pulling off several objectives at once.
+
+Trains Sleight of hand up to Expert (see [Training](../play/skills.md#training)); Tangle members pay half.
 
 ## Quests
 

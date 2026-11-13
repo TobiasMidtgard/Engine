@@ -45,7 +45,7 @@ pensions for veterans, commissions for young officers and cheap luxuries from ab
 captured mines and tolls pay out between wars.
 
 Then a long regional peace brought unemployment, unpaid military debts and collapsing investment.
-The present ruler, **Cael Ordan**, rose out of that crisis, promising national renewal through
+The present ruler, **[Cael Ordan](../people/cael-ordan.md)**, rose out of that crisis, promising national renewal through
 discipline, permanent mobilisation and expansion.
 
 ## Law and government

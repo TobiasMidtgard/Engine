@@ -6,7 +6,7 @@ status: draft
 tags: Main story, Orath, Investigation, Act I
 Type: Main story
 Where: [Orath](../../cities/orath.md): the Hollow Crown, the Underchoir and the fifth passage
-Given by: [Ivo Tarrant](../../factions/chartered-road.md#people), then Ilyan Dareth
+Given by: [Ivo Tarrant](../../people/ivo-tarrant.md), then Ilyan Dareth
 Part of: [The Unsealed](index.md), Act I: Nobody
 ## The job
 Deadline: The Unbarred Night
@@ -21,10 +21,10 @@ Spring has started to weaken. The four faiths have not announced it. Somebody is
 
 ## The water engineer
 
-**Ilyan Dareth**, a water engineer of the Fifth Seat, has found an abandoned channel beneath the
+**[Ilyan Dareth](../../people/ilyan-dareth.md)**, a water engineer of the Fifth Seat, has found an abandoned channel beneath the
 **Underchoir**, the Deep Choir's echoing chambers below the Spring. Later generations built burial
 galleries inside its old reservoir, and the Deep Choir will not let anyone dig through its dead.
-**Sister Avara**, a physician of the Covenant of Ash, wants to prepare the city for a shortage at
+**[Sister Avara](../../people/companions/sister-avara.md)**, a physician of the Covenant of Ash, wants to prepare the city for a shortage at
 once; several officials fear that announcing it will start hoarding before the pilgrims arrive.
 
 Your first job is small: escort a maintenance crew through a disputed burial gallery. By the time you

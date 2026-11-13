@@ -46,16 +46,16 @@ through: a member of the guild may enter the city, and may bring one guest.
 
 ## People
 
-- **Sere**, keeper of the Brinewing rookery in Keth Veyra, and the guild's pactkeeper: a creature
+- **[Sere](../people/sere.md)**, keeper of the Brinewing rookery in Keth Veyra, and the guild's pactkeeper: a creature
   must choose to bond and may refuse orders. Fewer partnerships, but stronger ones. Sere has never
   given a Brinewing an order in their life, and the city has only four of them.
-- **Holm Agrest**, Roadmaster of the largest travelling chapter: responsible ownership and selective
+- **[Holm Agrest](../people/holm-agrest.md)**, Roadmaster of the largest travelling chapter: responsible ownership and selective
   breeding under welfare rules. His bloodlines of pack horses and bargebacks are the best on the
   roads.
-- **Varo Kett**, binder: magical or mechanical control is needed for defence, dangerous work and
+- **[Varo Kett](../people/companions/varo-kett.md)**, binder: magical or mechanical control is needed for defence, dangerous work and
   war. He has a harness that can hold a frightened Brinewing still, and the patience to make it
   feel like kindness.
-- **Rain-Back**, the Oruvai envoy, an ancient tortoise who speaks through a listener bloom: no
+- **[Rain-Back](../people/rain-back.md)**, the Oruvai envoy, an ancient tortoise who speaks through a listener bloom: no
   living creature can be property. The guild should become a sanctuary and a diplomatic service.
   Rain-Back walks with Holm's chapter, very slowly, and everyone waits.
 

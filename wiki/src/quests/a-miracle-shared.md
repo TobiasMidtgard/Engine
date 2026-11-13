@@ -6,7 +6,7 @@ status: draft
 tags: Faith, Investigation, Diplomacy
 Type: Guild job
 Where: [Orath](../cities/orath.md), the Hollow Crown
-Given by: [Amsel Dray](../factions/accord-of-four-keys.md#people)
+Given by: [Amsel Dray](../people/amsel-dray.md)
 Faction: [The Accord of Four Keys](../factions/accord-of-four-keys.md)
 Part of: The Accord's questline (opening)
 ## The job
@@ -23,7 +23,7 @@ in four days.
 
 ## The job
 
-[Amsel Dray](../factions/accord-of-four-keys.md#people) needs a Lamp who belongs to no faith to
+[Amsel Dray](../people/amsel-dray.md) needs a Lamp who belongs to no faith to
 gather what every side says and what the chamber shows, so the hearing has something to argue about
 besides itself. Keep the pilgrims safe, keep the four faiths from coming to blows, and find out
 what is happening.
@@ -39,7 +39,7 @@ what is happening.
 | **[The Spillward](../factions/spillward.md)** | A spill: something is leaking into the water from below, and it could get worse |
 
 Every one of them has evidence. The rain does heal small wounds. Voices do sound in the chamber at
-night. The rising water does catch the sunrise. And [Halvard Cray](../factions/spillward.md#people)'s
+night. The rising water does catch the sunrise. And [Halvard Cray](../people/halvard-cray.md)'s
 rods do twitch.
 
 ## What is happening

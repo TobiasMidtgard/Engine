@@ -47,12 +47,12 @@ difference between a spell that is a product and a spell that is a crime.
 
 ## People
 
-- **Inspector Halvard Cray**: magic must be licensed, measured and contained. He has closed more
+- **Inspector [Halvard Cray](../people/halvard-cray.md)**: magic must be licensed, measured and contained. He has closed more
   workshops than anyone in Veyrhold and can tell which spell caused a spill by the taste of the air.
-- **Tamsin Reeve**, a street practitioner on the First Cut who teaches cantrips in the Common
+- **[Tamsin Reeve](../people/companions/tamsin-reeve.md)**, a street practitioner on the First Cut who teaches cantrips in the Common
   Hearths for free: restricting knowledge makes magic a monopoly of the elite. Ordinary people
   should learn practical magic, and learn to clean up after it.
-- **Ysolde Marr**, field researcher: anomalies should be followed, not erased. Transformation,
+- **[Ysolde Marr](../people/ysolde-marr.md)**, field researcher: anomalies should be followed, not erased. Transformation,
   forbidden magic and instability may be the next great discovery. She has been inside more spills
   than anyone alive, and she is not entirely the same as when she started.
 

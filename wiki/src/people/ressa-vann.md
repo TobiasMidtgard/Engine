@@ -6,7 +6,7 @@ status: draft
 Role: Knotkeeper (local crew leader)
 Home: [Vantress](../cities/vantress/index.md)
 Faction: [The Tangle](../factions/thieves-guild.md)
-Services: Work, reputation, safehouses
+Services: Work, reputation, safehouses; trains Sneak and Pickpocket
 ```
 
 **Ressa Vann** is a Knotkeeper of [the Tangle](../factions/thieves-guild.md), Vantress's thieves'
@@ -23,6 +23,8 @@ passage are suddenly hard to come by.
 ## Services
 
 Persuasion, reputation, neighbourhood support and safehouses.
+
+Trains Sneak and Pickpocket up to Adept (see [Training](../play/skills.md#training)); Tangle members pay half.
 
 ## Quests
 

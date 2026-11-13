@@ -71,7 +71,7 @@ Security systems, medical devices, public works and the machinery of government 
 to inspection. Tessarans believe that technology nobody can understand is simply another form of
 tyranny.
 
-The city is run by **Ison**, a governing machine mind that serves as chief executive. It sets the
+The city is run by **[Ison](../people/ison.md)**, a governing machine mind that serves as chief executive. It sets the
 public budgets, plans construction, coordinates food production and manages emergencies. The
 citizens write its governing charter and can challenge its decisions through the Open Measure.
 Ison's data centre, **the Mnemeion**, stands in the civic complex: public galleries look down on

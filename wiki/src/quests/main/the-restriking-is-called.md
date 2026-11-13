@@ -6,7 +6,7 @@ status: draft
 tags: Main story, Gilded Ascent, Politics, Act I
 Type: Main story
 Where: [The Gilded Ascent](../../cities/gilded-ascent.md): the Ledger Floor, the Lantern Table and the Summit
-Given by: [Ivo Tarrant](../../factions/chartered-road.md#people)
+Given by: [Ivo Tarrant](../../people/ivo-tarrant.md)
 Part of: [The Unsealed](index.md), the end of Act I
 ## The job
 Deadline: The Court's sitting on Glassday
@@ -15,7 +15,7 @@ Leads to: Act II, starting with [Behind the Nine Shut Doors](behind-the-nine-shu
 ```
 
 Every seventh year the Gilded Ascent holds a **Restriking**: every Copper and Silver Seal is weighed
-again, and its holder must qualify once more. This year the Registrar of Seals, **Gisela Quell**,
+again, and its holder must qualify once more. This year the Registrar of Seals, **[Gisela Quell](../../people/gisela-quell.md)**,
 has called it early, and called it something new: **the Great Restriking**. Every city that has
 signed a Well Charter will receive seals for all its people, struck in one night, in the Five Quiet
 Days at the end of the year. Every city that hasn't is invited to.
@@ -56,7 +56,7 @@ of them. Within the hour:
 
 ## Getting out
 
-**Warden-Captain Ulf Garrick** is waiting at the Summit gate. He is enormous, courteous, and does
+**Warden-Captain [Ulf Garrick](../../people/companions/ulf-garrick.md)** is waiting at the Summit gate. He is enormous, courteous, and does
 not draw his sword, because he doesn't need to: he is one of the [Awakened](../../play/ascension.md#awakening),
 and at level 30 you can see the difference in how he moves. He offers you the chance to walk down
 under arrest.
@@ -73,7 +73,7 @@ end: Act II begins | Every city will be offered the Charter. You can be there fi
 
 ## Hesper Lorn
 
-The Sealkeeper, [Hesper Lorn](../../factions/chartered-road.md#people), was one of the four chairs
+The Sealkeeper, [Hesper Lorn](../../people/hesper-lorn.md), was one of the four chairs
 who voted to hear Tarrant. If you have won her over, she meets you at the bottom of the Summit stair
 and gives you something: a list of the cities the Registry's envoys will visit next, in order, and a
 warning.

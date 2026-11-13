@@ -6,7 +6,7 @@ status: draft
 tags: Healing, Herbalism, Choices
 Type: Guild job
 Where: [Rillvault](../cities/rillvault.md), the garden warrens and the deep springs
-Given by: [Ilse Moorcroft](../factions/root-ledger.md#people)
+Given by: [Ilse Moorcroft](../people/ilse-moorcroft.md)
 Faction: [The Root Ledger](../factions/root-ledger.md)
 Part of: The Root Ledger's questline (opening)
 ## The job
@@ -23,7 +23,7 @@ it to cure perhaps a third of the sick.
 
 ## The job
 
-[Ilse Moorcroft](../factions/root-ledger.md#people) hands you a gathering knife, a ledger page and a
+[Ilse Moorcroft](../people/ilse-moorcroft.md) hands you a gathering knife, a ledger page and a
 lamp. Go down to the springs with her gatherers, count the moss, and bring back what can be taken
 without killing the spring. The rest is a question for the Confluence Compact, and they would like
 your count first.
@@ -34,9 +34,9 @@ Everyone has a different answer before you even start:
   with it the farms of three tunnels.
 - **The Hearth Delegate** of the warrens says people come first, and will strip the walls if you
   don't.
-- **[Benedek Strawn](../factions/root-ledger.md#people)** says he can grow the moss in a tunnel farm,
+- **[Benedek Strawn](../people/benedek-strawn.md)** says he can grow the moss in a tunnel farm,
   given a season, and the sick don't have a season.
-- **[Ottilie Brand](../factions/root-ledger.md#people)** says she can make one sprig of moss do the
+- **[Ottilie Brand](../people/ottilie-brand.md)** says she can make one sprig of moss do the
   work of ten, and will not tell you how.
 
 ## In the springs

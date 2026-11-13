@@ -63,7 +63,7 @@ The heist has three layers, and the plan changes with whom you brought and what 
 
 ## The last page
 
-The last page of the Register has a name written on it that isn't a well. It is **Gisela Quell**.
+The last page of the Register has a name written on it that isn't a well. It is **[Gisela Quell](../../people/gisela-quell.md)**.
 
 Under it, in the Builders' script, a line the Voice Beneath Stone would have recognised: whoever
 writes in the Keeper's book is written in it. Quell has written herself into the Register as its

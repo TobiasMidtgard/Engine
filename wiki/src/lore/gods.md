@@ -63,7 +63,7 @@ to call. See [The Wound That Waits](../quests/the-wound-that-waits.md).
 
 The god of pursuit: of every chase, every hunt and every fight that ends with one side running.
 Hunters leave the first blood of a kill for it, pit fighters touch the ground before a bout, and
-[Sabeth Rook](../factions/last-writ.md#people) of the Last Writ keeps its shrine. Those who have
+[Sabeth Rook](../people/sabeth-rook.md) of the Last Writ keeps its shrine. Those who have
 seen it describe a stag taller than a tree, whose antlers are made of the bones of things it has
 caught. People say you must never run from it.
 
@@ -95,7 +95,7 @@ to kill a god, and then made sure nobody would remember how.
 
 - **The Chorus of [Oruvai](../cities/oruvai.md)** is a shared mind of animals and plants, not a god,
   whatever pilgrims say. The Chorus finds the question funny.
-- **Ison**, the machine mind that governs [Tessara](../cities/tessara.md), is not a god either,
+- **[Ison](../people/ison.md)**, the machine mind that governs [Tessara](../cities/tessara.md), is not a god either,
   although some of the Maker's priests are not so sure.
 - **Ascendants** are people who have gone beyond the limits of the world. Some have been mistaken
   for gods, and some have not corrected the mistake (see [Legends and Ascendants](ascendants.md)).

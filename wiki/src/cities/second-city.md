@@ -86,7 +86,7 @@ Five seats rule the Eaves, and none of them trusts the others:
 | **The Pack-Speaker** | The chief of the werebeast clans | The Moon Runs and every route across the roofs |
 | **The Registrar of the Dead** | A necromancer of the Pale Archive | Corpses, the dead workforce and the testimony of the dead |
 | **The Warden of Wards** | A black mage | The wards that keep sunlight, fire and the Magistracy out |
-| **The Broker** | The only mortal seat | Trade with the Boulevard and the outside world, and blackmail |
+| **[The Broker](../people/the-broker.md)** | The only mortal seat | Trade with the Boulevard and the outside world, and blackmail |
 
 ## Layout and districts
 

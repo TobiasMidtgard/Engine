@@ -36,7 +36,7 @@ Both are being courted by the Registry's envoy, a soft-spoken banker of the **Fi
 
 You can get into Orravell's government as a recruit of the Crown Companies (easy if you are a
 washed-out recruit by origin: you know the canopy test), as a glider crew at Hushwing Station under
-**Captain Sera Noll**, as a foreign trader, or over the branches at night.
+**Captain [Sera Noll](../../people/sera-noll.md)**, as a foreign trader, or over the branches at night.
 
 > [!WARNING]
 > Spoilers for the main story below.

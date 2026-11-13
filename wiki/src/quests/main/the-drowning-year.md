@@ -15,7 +15,7 @@ Leads to: [Steal the Register](steal-the-register.md)
 ```
 
 [Keth Veyra](../../cities/keth-veyra.md) does not let outsiders in, and you are about as outside as
-a person can be. **Sere**, the pactkeeper of the [Keepers' Road](../../factions/keepers-road.md),
+a person can be. **[Sere](../../people/sere.md)**, the pactkeeper of the [Keepers' Road](../../factions/keepers-road.md),
 gets you through the gate anyway, because the animals have started refusing work and Sere believes
 they are right.
 

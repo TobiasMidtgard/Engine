@@ -53,13 +53,13 @@ council:
 
 ## People
 
-- **Amsel Dray**, the concord keeper and the Accord's oldest Warden: no single faith may own the
+- **[Amsel Dray](../people/amsel-dray.md)**, the concord keeper and the Accord's oldest Warden: no single faith may own the
   sacred centre. Shared custody prevents another religious war. Amsel's grandmother was one of the
   rescuers.
-- **Brother Cassian Vey** of the Solitary Light, the restorer: one revelation came first, and Orath
+- **Brother [Cassian Vey](../people/cassian-vey.md)** of the Solitary Light, the restorer: one revelation came first, and Orath
   needs a clear doctrine. He is learned, sincere and very persuasive, and the people who agree with
   him are frightening.
-- **Oriel Thane**, wayspeaker: people should speak directly with local spirits, ancestors and
+- **[Oriel Thane](../people/oriel-thane.md)**, wayspeaker: people should speak directly with local spirits, ancestors and
   sacred places, without four institutions standing in the way. Oriel travels with the pilgrim
   roads and listens at shrines that nobody else has visited in years.
 

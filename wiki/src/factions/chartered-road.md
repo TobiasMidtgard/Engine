@@ -46,16 +46,16 @@ up the spire.
 
 ## People
 
-- **Hesper Lorn**, the Sealkeeper, who chairs the Court of Seals and keeps the master dies: the Five
+- **[Hesper Lorn](../people/hesper-lorn.md)**, the Sealkeeper, who chairs the Court of Seals and keeps the master dies: the Five
   Seals bring trust, security and steady advancement. Trade stays regulated and tiered. She has
   unsealed her own brother.
-- **Ivo Tarrant**, Charter Captain of the western road, the open-ledger reformer: prices,
+- **[Ivo Tarrant](../people/ivo-tarrant.md)**, Charter Captain of the western road, the open-ledger reformer: prices,
   ownership and fees should be public. Lesser merchants shouldn't need a rich patron to reach the
   higher floors. He started as a drover, and he never lets anyone forget it.
-- **Captain Wenna Sallow**, outrider captain, the free-route captain: tariffs, blockades and
+- **Captain [Wenna Sallow](../people/wenna-sallow.md)**, outrider captain, the free-route captain: tariffs, blockades and
   sanctions hurt ordinary people. Sometimes smuggling is the only honest trade. Her outriders are
   the safest escort on the roads, and the best smugglers.
-- **Lucan Prell**, Gold Seal investor, the black-cargo investor: anything can have a price:
+- **[Lucan Prell](../people/lucan-prell.md)**, Gold Seal investor, the black-cargo investor: anything can have a price:
   contraband, creatures, weapons, debt labour and people. He funds half of
   [Arena City](../cities/arena-city.md), and wants the Unsealed List torn up.
 

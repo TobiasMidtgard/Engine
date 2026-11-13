@@ -6,7 +6,7 @@ status: draft
 tags: Tracking, Animals, Mystery
 Type: Guild job
 Where: The northern road below [Keth Veyra](../cities/keth-veyra.md)
-Given by: [Holm Agrest](../factions/keepers-road.md#people)
+Given by: [Holm Agrest](../people/holm-agrest.md)
 Faction: [The Keepers' Road](../factions/keepers-road.md)
 Part of: The Keepers' Road's questline (opening)
 ## The job
@@ -17,7 +17,7 @@ Leads to: Rank of Groom in the Keepers' Road
 
 **Mossback**, a bargeback bred and trained by the Keepers' Road, broke its harness on the northern
 road, overturned three wagons, gored a drover and vanished into the forest. The caravan's insurers
-want it shot. [Holm Agrest](../factions/keepers-road.md#people), who bred it, wants it back alive,
+want it shot. [Holm Agrest](../people/holm-agrest.md), who bred it, wants it back alive,
 because in twelve years it has never so much as stepped on a foot.
 
 ## The job
@@ -59,7 +59,7 @@ end: Varo's way | Bind the mother and lead her home in a harness.
 end: Rain-Back's way | Let the mother take her egg wherever she wants to go.
 ```
 
-[Sere](../factions/keepers-road.md#people) and [Varo Kett](../factions/keepers-road.md#people) both
+[Sere](../people/sere.md) and [Varo Kett](../people/companions/varo-kett.md) both
 arrive on the road before you finish, and they want different things.
 
 ## What it leads to

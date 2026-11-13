@@ -6,7 +6,7 @@ status: draft
 tags: Main story, Sky City, Politics, Act I
 Type: Main story
 Where: [Sky City](../../cities/sky-city.md): the Hanging Market, the Crown and the Deepworks
-Given by: [Ivo Tarrant](../../factions/chartered-road.md#people), then the Council of Three Anchors
+Given by: [Ivo Tarrant](../../people/ivo-tarrant.md), then the Council of Three Anchors
 Part of: [The Unsealed](index.md), Act I: Nobody
 ## The job
 Deadline: Before the Golden Anchor signs

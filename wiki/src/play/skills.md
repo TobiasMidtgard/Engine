@@ -39,6 +39,27 @@ five ranks, and every rank opens a **perk** on that skill's tree. Past 100, a sk
 | **Ascended I to III** | Beyond 100 | Past mortal limits; each ascension opens an impossible perk |
 | **God** | Every skill ascended | Nothing left that you cannot do |
 
+## Training
+
+Trainers are people: guild masters, old soldiers, a herbalist in a village, a fence who teaches
+lockcraft in a back room. Each one trains a few skills **up to their own rank**, and each has
+something they want first: a guild rank, a favour, or simply to like you.
+
+| Trainer's rank | Trains up to | Price for one point |
+|---|---|---|
+| **Apprentice** | 49 | 2 chits for each point of the new level (skill 30 costs 6 marks) |
+| **Adept** | 74 | The same (skill 60 costs 12 marks) |
+| **Expert** | 99 | The same (skill 90 costs 18 marks) |
+| **Master** | 100 | 3 ascents, and a deed they set you |
+
+- You can train **five points per character level**, across all skills.
+- Training takes time: an hour a point, during which the trainer is busy and so are you.
+- Training never gives a **breakthrough**; you still have to earn those yourself. A trainer can
+  tell you where to look for one.
+- Guild trainers charge members half, and the guild's best charge nothing to someone they trust.
+
+Trainers are listed on each person's page, and by city on the city pages.
+
 ## The tree
 
 Each skill's tree has a perk at every rank. At **Adept** and at **Master** the tree splits and you

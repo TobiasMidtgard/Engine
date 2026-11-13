@@ -6,7 +6,7 @@ status: draft
 tags: Investigation, Crafting, Labour
 Type: Guild job
 Where: [Vantress](../cities/vantress/index.md), then the lodges of three cities
-Given by: [Hedda Strom](../factions/makers-compact.md#people)
+Given by: [Hedda Strom](../people/hedda-strom.md)
 Faction: [The Makers' Compact](../factions/makers-compact.md)
 Part of: The Makers' Compact's questline (opening)
 ## The job
@@ -22,7 +22,7 @@ the mark can't be trusted, nothing the Compact makes can be sold for what it is 
 
 ## The job
 
-[Hedda Strom](../factions/makers-compact.md#people) needs someone outside the lodges, who has no
+[Hedda Strom](../people/hedda-strom.md) needs someone outside the lodges, who has no
 reason to protect anyone, to follow the failed goods back to where they were made. Start with the
 crane brake, the brine and the harness. Bring the Council of Lodges an answer it can act on.
 

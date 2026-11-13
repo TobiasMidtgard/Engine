@@ -6,7 +6,7 @@ status: draft
 tags: Main story, Rillvault, Exploration, Act I
 Type: Main story
 Where: [Rillvault](../../cities/rillvault.md): the spring headworks, the Lantern Gardens and the Echo Galleries
-Given by: [Ilse Moorcroft](../../factions/root-ledger.md#people) of the Root Ledger
+Given by: [Ilse Moorcroft](../../people/ilse-moorcroft.md) of the Root Ledger
 Part of: [The Unsealed](index.md), Act I: Nobody
 ## The job
 Deadline: None. The springs are thinning.

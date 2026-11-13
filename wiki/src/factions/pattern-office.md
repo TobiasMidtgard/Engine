@@ -47,15 +47,15 @@ laid the first cores of the Mnemeion. Every engineer learns the Last Artificer's
 
 ## People
 
-- **Thera Kallis**, Chief of Water, the common-pattern engineer: every system should be open to
+- **[Thera Kallis](../people/thera-kallis.md)**, Chief of Water, the common-pattern engineer: every system should be open to
   inspection, modular and repairable on the spot. Designs belong to the public. Her water patterns
   are so simple that children in the poorest district repair their own fountains.
-- **Doros Menti**, Director of Patterns: one coordinated network that predicts demand and prevents
+- **[Doros Menti](../people/doros-menti.md)**, Director of Patterns: one coordinated network that predicts demand and prevents
   failures. He trusts Ison more than he trusts people, and he is usually right.
-- **Ione Sarakis**, patent architect: money from [Sky City](../cities/sky-city.md) can speed up
+- **[Ione Sarakis](../people/ione-sarakis.md)**, patent architect: money from [Sky City](../cities/sky-city.md) can speed up
   invention, but investors only fund designs they can own and hide. Her black-glazed work for the
   Closed Kilns is the most advanced in the world, and nobody but her can mend it.
-- **Corin Ostrander**, a quiet draughtsman who spends his nights in Veyrhold: he believes a pattern
+- **[Corin Ostrander](../people/corin-ostrander.md)**, a quiet draughtsman who spends his nights in Veyrhold: he believes a pattern
   could learn, and he has drawn one that does.
 
 ## What the guild gives you

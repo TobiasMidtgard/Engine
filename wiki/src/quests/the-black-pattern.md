@@ -20,7 +20,7 @@ repair. Its central quest asks whether the most advanced city in the world shoul
 
 Tessara's public network is nearly full. One of the Closed Kilns has made black-glazed plates
 powerful enough to modernise the whole city, but only that house can make, inspect or repair them.
-It also offers **Ison**, the machine mind that governs Tessara, a far more capable computing core
+It also offers **[Ison](../people/ison.md)**, the machine mind that governs Tessara, a far more capable computing core
 whose workings are sealed: accepting it would give a private invention house a hand on the
 machinery that runs the city.
 
