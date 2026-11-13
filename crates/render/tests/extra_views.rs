@@ -51,6 +51,10 @@ fn app(window: UVec2, pipelining: Pipelining) -> App {
         // Probe GI lights only the main view, so a camera alone (the main view) and the same
         // camera as an inset would differ by the bounce light.
         s.probe_gi = false;
+        // Full detail only: meshes' levels are built on worker threads and arrive when they
+        // are done, so in five frames one run may draw a sphere's coarser level and the
+        // other not (a silhouette pixel apart), which isn't what these tests compare.
+        s.mesh_lod_pixels = 0.0;
     }
     app
 }
