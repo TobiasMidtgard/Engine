@@ -14,6 +14,7 @@ editing/how-to-add-a-page.md.
   - [Planets](world/planets/index.md)
   - [Regions](world/regions/index.md)
   - [Landmarks](world/landmarks/index.md)
+  - [Dungeons and ruins](world/dungeons/index.md)
 - [Cities and towns](cities/index.md)
 
 # Stories
@@ -27,6 +28,7 @@ editing/how-to-add-a-page.md.
   - [The Fundaments](lore/fundaments.md)
   - [Legends and Ascendants](lore/ascendants.md)
   - [Money and trade](lore/money-and-trade.md)
+  - [Calendar and festivals](lore/calendar.md)
   - [Glossary](lore/glossary.md)
 
 # Database
@@ -39,6 +41,7 @@ editing/how-to-add-a-page.md.
   - [Potions and poisons](items/potions-and-poisons.md)
   - [Materials](items/materials.md)
   - [Relics](items/relics.md)
+- [Crafting](crafting/index.md)
 - [Magic](magic/index.md)
   - [Classes and subclasses](magic/classes.md)
     - [Evocation](magic/evocation.md)
@@ -68,10 +71,23 @@ editing/how-to-add-a-page.md.
 
 - [Guides and mechanics](play/index.md)
   - [Getting started](play/getting-started.md)
+  - [Character creation](play/character-creation.md)
+  - [Attributes and vitals](play/attributes.md)
   - [Controls](play/controls.md)
   - [Movement](play/movement.md)
   - [Combat](play/combat.md)
+  - [Damage, armour and injuries](play/injuries.md)
+  - [Status effects](play/status-effects.md)
+  - [Stealth](play/stealth.md)
   - [Thievery](play/thievery.md)
+  - [Crime and the law](play/crime.md)
+  - [Reputation and rumour](play/reputation.md)
+  - [Conversation and persuasion](play/dialogue.md)
+  - [Trading and shops](play/trading.md)
+  - [Homes and property](play/homes.md)
+  - [Travel and transport](play/travel.md)
+  - [Companions](play/companions.md)
+  - [Difficulty, defeat and death](play/difficulty.md)
 - [Recent changes](recent.md)
 - [Help and editing](editing/index.md)
   - [How to add a page](editing/how-to-add-a-page.md)

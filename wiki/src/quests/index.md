@@ -10,6 +10,16 @@ Quests in this world are jobs, not checklists. Each one hands you a goal and a d
 you find your own way in: talk, climb, steal a key, bribe a clerk, or bring a crew. What you leave
 behind matters as much as what you take.
 
+## The main story
+
+**[The Unsealed](main/index.md)** is the story the whole game is built around: a nobody with no
+seal, a page of black stone, and the wells of the world closing one by one. It runs from
+[A Rat in the Cellar](main/a-rat-in-the-cellar.md) in the Valley to
+[The Great Restriking](main/the-great-restriking.md) at the top of the Gilded Ascent, in eighteen
+quests and three acts.
+
+## Guild and city quests
+
 {{cards}}
 
 {{table: Type, Where, Given by}}
@@ -26,7 +36,6 @@ These are known so far only from their city pages.
 | The spring that may run dry | [Orath](../cities/orath.md#quests-and-rumours) | The First Spring weakens just before the Unbarred Night. |
 | The animals that refuse to work | [Keth Veyra](../cities/keth-veyra.md#quests-and-rumours) | Bargebacks, oxen and Brinewings sense a failing gate before anyone admits it. |
 | The stolen breeding colony | [Sifting Basin](../cities/sifting-basin.md#quests-and-rumours) | A keeper wants her colony back; a merchant says it was lawfully repossessed. |
-| Behind the Nine Shut Doors | [Veyrhold](../cities/veyrhold.md#quests-and-rumours) | New digging will expose an old disaster, and the people who hid it. |
 | The treasury heist | [Vantress](../cities/vantress/index.md#quests-and-rumours) | The guild's greatest job: make the theft of the treasury legal. |
 | Steal the City Before Dawn | [The Tangle](../factions/thieves-guild.md#questline) | The finale every branch of the guild questline ends in. |
 
