@@ -3,7 +3,7 @@
 ```infobox
 summary: Talk your way in, out and through. Checks against Presence and your social skills, observations from Perception, lies people remember, and the magic that cheats.
 status: draft
-tags: Mechanic, Social, Dialogue
+tags: Social, Dialogue
 Type: Mechanic
 Skills: Persuasion, Deception, Intimidation, Trade
 Attributes: Presence, Perception

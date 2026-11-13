@@ -3,7 +3,7 @@
 ```infobox
 summary: Sky City's chains have gone slack for the first time in four hundred years. Its three anchors blame each other. In the Deepworks, the rock that holds the island up is going quiet.
 status: draft
-tags: Main story, Sky City, Politics, Act I
+tags: Sky City, Politics, Act I
 Type: Main story
 Where: [Sky City](../../cities/sky-city.md): the Hanging Market, the Crown and the Deepworks
 Given by: [Ivo Tarrant](../../people/ivo-tarrant.md), then the Council of Three Anchors

@@ -3,7 +3,7 @@
 ```infobox
 summary: Before the Great Restriking, gather the cities. Every choice you made in the story comes back as an ally, a debt, an army or an empty chair at the Lantern Table.
 status: draft
-tags: Main story, Politics, War, Act III
+tags: Politics, War, Act III
 Type: Main story
 Where: Every city you helped, then the Summit of [the Gilded Ascent](../../cities/gilded-ascent.md)
 Given by: Gisela Quell's invitation, and Ivo Tarrant

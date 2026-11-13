@@ -3,7 +3,7 @@
 ```infobox
 summary: Veyrhold's landlords want to dig beneath the oldest workshops, with the Registry's money. Behind a side-cut sealed after an old disaster, someone has been tending something for forty years.
 status: draft
-tags: Main story, Veyrhold, Magic, Act II
+tags: Veyrhold, Magic, Act II
 Type: Main story
 Where: [Veyrhold](../../cities/veyrhold.md): the Nine Shut Doors, the Binding Yards and the Deep Court
 Given by: Hesper Lorn's list, then a rescue forewoman of the lift workers

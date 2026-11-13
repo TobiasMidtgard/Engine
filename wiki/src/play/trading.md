@@ -3,7 +3,7 @@
 ```infobox
 summary: Buying, selling, haggling, fencing and investing: how prices are made, who buys what, and how a nobody with a cart becomes a trading house.
 status: draft
-tags: Mechanic, Economy
+tags: Economy
 Type: Mechanic
 Skills: Trade, Persuasion
 Attributes: Presence

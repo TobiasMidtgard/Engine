@@ -138,6 +138,37 @@ passenger skiffs link the terraces that are hard to reach. Lighting works with t
 pavement lights guide people as they approach, and in an emergency the escape routes light up as
 the trams redirect the crowds.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Common Courts guest houses** | Common Courts | 1 mark | Clean, quiet, public, and Ison knows you are there |
+| **The garden baths** | Sunward Gardens | 3 marks | A room over the warm baths, with a terrace plate for breakfast |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Pattern Exchange** | On-demand fabrication, blank tiles, power tiles, Threadbows |
+| **The Menders' Steps** | Repairs to anything with a pattern |
+| **The Closed Kilns** | Private workshops: the Impulse Maul and other things they won't show you |
+
+**Stations**: Public workshops with free tinker's tables and tile benches; Aldous Pike's enchanting circle on the Menders' Steps.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Enchanting | [Aldous Pike](../people/aldous-pike.md) | Master |
+| Engineering (Patternwork) | [Thera Kallis](../people/thera-kallis.md) | Master |
+| Engineering | [Ison](../people/ison.md) | Expert |
+
+### In the main story
+
+Main quests here: [The Open Measure](../quests/main/the-open-measure.md).
+
 ## Quests and rumours
 
 - **[Every Repair Has an Owner](../quests/every-repair-has-an-owner.md)**: the Pattern Office's first

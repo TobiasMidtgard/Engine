@@ -86,6 +86,35 @@ Arena City is a crossroads rather than anyone's headquarters. Merchants, thieves
 fighters, mages who build wards and brokers for assassins all meet in its daytime market. It is
 home to [the Brass Circuit](../factions/brass-circuit.md), the guild of arena fighters.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The hotel terraces** | The north tiers | 2 marks to 2 ascents | The higher the seat, the higher the price, and the better the fights look |
+| **A fighters' dormitory** | The Undercroft | 2 chits | For anyone on the Brass Circuit's books |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Grand Exchange** | By day: anything, including everything on the Unsealed List, bought and sold at prices that pay for the risk |
+| **Fighters' outfitters** | Arena armour, show weapons, fighter's skewers |
+
+**Stations**: The Undercroft's forges and practice sand; stalls rent benches by the hour.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Maces, Unarmed | [Dagna Holt](../people/dagna-holt.md) | Master |
+| Unarmed (Brawler) | [Mags Rennick](../people/mags-rennick.md) | Expert |
+
+### In the main story
+
+[Brenn Askew](../people/companions/brenn-askew.md) can be recruited here.
+
 ## Quests and rumours
 
 - **[The Bout That Broke Wrong](../quests/the-bout-that-broke-wrong.md)**: the Brass Circuit's first

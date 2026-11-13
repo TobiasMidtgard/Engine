@@ -3,7 +3,7 @@
 ```infobox
 summary: Ascend. Claim something that is yours alone and make the world recognise it, before Gisela Quell finishes becoming the god's door.
 status: draft
-tags: Main story, Ascension, Act III
+tags: Ascension, Act III
 Type: Main story
 Where: Your choice
 Given by: Rain-Back

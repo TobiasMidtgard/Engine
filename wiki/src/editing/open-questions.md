@@ -104,12 +104,22 @@ that uses it.
 | Demons | The Hells and three patrons: Ommath, the Lady in the Furnace, Gorrow of a Thousand Chains | [Demons](../creatures/demons.md) |
 | Skills | 42 skills with perks at each rank, and titles | [Skills](../play/skills.md), [Titles](../play/titles.md) |
 | Items | Rarity from Common to Divine, materials, relics | [Items](../items/index.md) |
+| The main story | The Unsealed: 18 quests in three acts, Gisela Quell and the Sixth Register, four endings | [The main story](../quests/main/index.md) |
+| Companions | Eight companions with abilities, approval, personal quests and romances | [The companions](../people/companions/index.md) |
+| People | 43 named people for the main story, the rulers and the guilds, with services and trainers | [Characters](../people/index.md) |
+| Regions and dungeons | 13 regions with towns, roads and rumours; 15 dungeons with bosses; the old kingdoms of Ruthven, Esk and Saffra | [Regions](../world/regions/index.md), [Dungeons](../world/dungeons/index.md) |
+| Bestiary numbers | 22 new creatures, human enemies and bosses with levels, health and damage | [Creatures](../creatures/index.md) |
+| Crafting | Alchemy by shared effects, ingredients and recipes; smithing, tinkering, cooking | [Crafting](../crafting/index.md) |
+| Weapon and armour numbers | Damage, speed, armour ratings and skill multipliers | [Weapons](../items/weapons.md#numbers), [Armour](../items/armour.md#numbers) |
+| Books | Twelve books of the world, with excerpts | [Books](../lore/books/index.md) |
+| Side quests and services | 49 side quests by region; inns, shops and trainers in every city | [Side quests](../quests/side-quests.md) |
 
 ## Still to come
 
 - The lore files the chats produced as downloads (the Keth Veyra guide, Orravell's rewritten lore
   and Veyrhold's lore) hold characters, customs and quests that are not in the chat text.
 - An early chat proposed more cities (Greywatch, Saltmere, Asterhold, Blackiron, Aldermere,
-  Dunmar Charter) that never reached the world map. Should any of them become cities?
+  Dunmar Charter) that never reached the world map. Should any of them become cities? One region of the depth
+  round is called the Saltmire, close to the proposed Saltmere.
 - [The Quests page](../quests/index.md) names the city quests that have no name in the design by
   what happens in them ("The spring that may run dry"). Real names are welcome.

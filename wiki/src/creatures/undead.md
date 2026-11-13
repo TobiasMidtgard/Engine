@@ -3,15 +3,19 @@
 ```infobox
 summary: Skeletons, zombies, wraiths and bone golems raised by necromancy: real bodies that fight, carry and dig until the spell ends or they fall apart.
 status: draft
-tags: Undead, Necromancy
+tags: Necromancy
 Type: Undead
 Habitat: Graveyards, battlefields, the Pale Archive, wherever a necromancer works
 Behaviour: Obedient to whoever raised them
 Danger: 2/5 to 5/5
 ## Combat
+Level: 2 to 90
+Health: 20 to 12,000
+Damage: 3 to 150
 Attacks: Weapons they held in life, claws, bone spears, spells
 Weak to: Fire, maces, Radiance, silver
 ## Rewards
+XP: 5 to 5,000
 Drops: Bones, grave dust, what they were buried with
 ```
 
@@ -33,6 +37,21 @@ were.
 | **Revenant** | Master | 4/5 | A dead warrior raised with its will intact, for vengeance |
 | **Lich** | Master | 5/5 | A necromancer who has put their soul in a vessel and cannot die while it lasts |
 | **Bone dragon** | Ascended | 5/5 | The bones of a great beast, flying again |
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Raised rat | 2 | 20 | — | 3 to 4 | 5 |
+| Zombie | 10 | 200 | 80 | 12 to 18 | 60 |
+| Skeleton warrior | 12 | 160 | 60 | 14 to 20 | 80 |
+| The drowned | 30 | 380 | 60 | 20 to 30, drags you under | 250 |
+| Skeletal mage | 35 | 260 | 40 | Spells it knew in life | 350 |
+| Wraith | 40 | 400 (only magic and silver hurt it) | — | 30, chills (Frost) | 450 |
+| Bone golem | 45 | 3,000 | 300 | 50 to 80 | 1,200 |
+| Revenant | 60 | 1,600 | 200 | 50 to 70 | 1,000 |
+| Lich | 75 | 3,500 (while its phylactery lasts) | 150 | Master necromancy | 2,500 |
+| Bone dragon | 90 | 12,000 | Can't be staggered | 120 to 150, a breath of grave cold | 5,000 |
 
 ## Behaviour
 

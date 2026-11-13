@@ -3,7 +3,7 @@
 ```infobox
 summary: Tessara's law says any machine with power over a person must show its pattern. Ison has asked the Registry to show its own. The Registry has sent a banker, a sealed core, and a reason to stop asking.
 status: draft
-tags: Main story, Tessara, Machines, Act II
+tags: Tessara, Machines, Act II
 Type: Main story
 Where: [Tessara](../../cities/tessara.md): the Measure Forum, the Mnemeion and its deepest gallery
 Given by: Ison, through a public terminal

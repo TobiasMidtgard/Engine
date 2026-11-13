@@ -3,7 +3,7 @@
 ```infobox
 summary: Get into the Ledger Floor of the Gilded Ascent without a seal, find Ivo Tarrant, and learn what the black page in Kit's case is.
 status: draft
-tags: Main story, Infiltration, Act I
+tags: Infiltration, Act I
 Type: Main story
 Where: [The Gilded Ascent](../../cities/gilded-ascent.md): the Toll Rings, the Commons and the Ledger Floor
 Given by: Kit Fenn

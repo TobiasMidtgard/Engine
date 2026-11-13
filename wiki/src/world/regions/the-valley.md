@@ -16,6 +16,12 @@ Danger: 1/5
 by snowy peaks. In the current test builds it is where you start, and almost everything in the
 game can be found somewhere in it.
 
+## Getting there
+
+The Valley lies a day's walk west of the Bell Road, up its own river from the caravanserai at
+**Halfbell** in [the Bell Foothills](the-bell-foothills.md). The main story begins here, in the
+village tavern's cellar (see [A Rat in the Cellar](../../quests/main/a-rat-in-the-cellar.md)).
+
 ## Geography
 
 Meadows and woods fill the valley floor, with farmland and roads between them. A stream runs

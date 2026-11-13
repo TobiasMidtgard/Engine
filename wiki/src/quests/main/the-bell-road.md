@@ -3,7 +3,7 @@
 ```infobox
 summary: Carry Kit's case south down the Bell Road to the Gilded Ascent, with a caravan, a stranger's coat and two Seal Wardens somewhere behind you.
 status: draft
-tags: Main story, Travel, Act I
+tags: Travel, Act I
 Type: Main story
 Where: The Bell Road, from the Valley to the Toll Rings of [the Gilded Ascent](../../cities/gilded-ascent.md)
 Given by: Kit Fenn's last words

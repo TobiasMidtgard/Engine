@@ -3,7 +3,7 @@
 ```infobox
 summary: On foot, on horseback, with a caravan on the Five Roads, by ship along the coasts, up Sky City's chain or on the back of a Brinewing: how to cross the continent, and what waits on the way.
 status: draft
-tags: Mechanic, Travel, World
+tags: Travel, World
 Type: Mechanic
 Roads: The Five Roads, and the Black Track
 Fast travel: Caravans, ships and lifts, between their stops
@@ -58,6 +58,7 @@ two-thirds.
 | **Coastal ship** | Fast travel between ports | 1 to 5 marks | West sea: the Second City and Vantress. East sea: Veyrhold and Tessara. |
 | **Bargeback** | Slow, unstoppable | Hire with a handler | The great pack beasts of the north; they carry a house's worth |
 | **Sky City's lifts** | An hour up the Golden chain | 1 mark, and a reason to be there | The Golden Anchor decides who rides |
+| **Airship** | Fast, over anything | 3 marks a day | From Sky City's Hanging Market to any city with a mast; the Open Anchor's ships go where they like |
 | **Rillvault's Deep Freight Lift** | Down into the caverns | A few chits | Freight first, passengers if there is room |
 | **Brinewing** | Flight | Only for those the Keepers' Road trusts | See [Brinewing](../creatures/brinewing.md) |
 | **Magic** | Instant, over short distances | Mana | Shaping's Passage branch: blink, then portals; Pactbinding's Gates: hellgates |

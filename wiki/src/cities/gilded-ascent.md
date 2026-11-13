@@ -169,6 +169,45 @@ who lives behind them: [the God of Locked Doors](../lore/gods.md#the-god-of-lock
 - Every great guild keeps a hall in the Bonded Halls, and [the Makers' Compact](../factions/makers-compact.md)
   holds its council here one year in five.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Caravanserai of a Thousand Bells** | The Ring | 1 mark | A bed, a stall for your horse and the noise of every caravan arriving at once |
+| **A Lowmarket doss** | The Lowmarket | 3 chits | No seal asked for, and no lock on the door |
+| **The Weigher's Rest** | The Weighhouse tier | 3 marks | Copper Seal holders only; breakfast and the day's prices |
+| **The Lantern House** | The Ledger Floor | 2 ascents | Gold Seal guests and their visitors; the staff remember your name and report it |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Commons** | General traders, food, animals, cheap clothes: the cheapest prices in the city |
+| **The Weighhouse** | Anything by weight, in bulk; ore, grain, cloth |
+| **The Bonded Halls** | Imports: basin glass, stormglass, Patternwork tiles, Brinewing scale (when there is any) |
+| **Sealwrights' Row** | Seal engravers, and forgers: a Copper Seal costs 3 ascents and is a crime |
+| **The Hall of Contraband** | Seized goods, auctioned every Glassday |
+| **Booksellers of the Copper tier** | Books, maps, *How to Read a Seal* |
+| **The Lowmarket** | Unsealed goods, an unlicensed healer, the best street food in the world |
+
+**Stations**: A lodge forge and an enchanting circle on the Weighhouse tier (members); apothecary benches in the Commons; stables in the Ring (a horse is 15 ascents).
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Persuasion | [Hesper Lorn](../people/hesper-lorn.md) (Advocate) | Master |
+| Persuasion, Trade | [Ivo Tarrant](../people/ivo-tarrant.md) | Expert |
+| Trade | [Lucan Prell](../people/lucan-prell.md) | Expert |
+| Bows, Riding | [Wenna Sallow](../people/wenna-sallow.md), at the Caravanserai | Expert |
+
+### In the main story
+
+Main quests here: [Unsealed](../quests/main/unsealed.md), [The Restriking Is Called](../quests/main/the-restriking-is-called.md), [Steal the Register](../quests/main/steal-the-register.md), [The Lantern Table](../quests/main/the-lantern-table.md), [The Great Restriking](../quests/main/the-great-restriking.md).
+[The Bell Road](../quests/main/the-bell-road.md) ends at the Toll Rings, and [Ulf Garrick](../people/companions/ulf-garrick.md) is the Registry's warden-captain.
+
 ## Quests and rumours
 
 - **[Three Accounts of One Caravan](../quests/three-accounts-of-one-caravan.md)**: the Chartered

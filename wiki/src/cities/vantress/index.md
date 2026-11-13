@@ -144,6 +144,46 @@ Every street has four layers: the underdecks at the waterline, the bridges, the 
 upper walkways, and the rooftops. Between districts you can walk the bridges, balance along the
 ropes strung between buildings, or jump across the boats passing in the channels.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Drunken Sailor** | Lantern Ward | 1 mark | Every rumour in the city passes through (see [The Drunken Sailor](lantern-ward/drunken-sailor.md)) |
+| **The Lowwake Bunks** | Lowwater Chainyards | 2 chits | A bed by the shift; bring your own blanket |
+| **The Grand Hotel** | Argent Heights | 2 ascents | Upstream, dry and very expensive |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **Knot Square** | Everything, from everyone; ask the Tangle before you sell |
+| **The Fossil Reach** | Glow, refined, sold openly |
+| **The Reedwalk Yards** | Eel, rice, leather, blackwater lacquer, antivenom by the crate |
+| **The Lowwater Chainyards** | Rafts, rope, salvage, diving gear |
+| [Maera Orro](../../people/maera-orro.md) | The Tangle's fence: stolen goods at a fraction |
+
+**Stations**: Ottilie Brand's still (1 mark an hour); tinker's tables in every ward; forges in the Chainyards.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Lockcraft; Engineering (Mechanist) | [Jori Pell](../../people/jori-pell.md) | Master; Adept |
+| Alchemy | [Ottilie Brand](../../people/ottilie-brand.md) | Master |
+| Acrobatics, Climbing | [Nilo Sare](../../people/nilo-sare.md) | Expert |
+| Sleight of hand | [Tal Oran](../../people/tal-oran.md) | Expert |
+| Disguise, Deception | [Sella Dask](../../people/sella-dask.md) | Expert |
+| Trade (Fence) | [Maera Orro](../../people/maera-orro.md) | Expert |
+| Sneak, Pickpocket | [Ressa Vann](../../people/ressa-vann.md) | Adept |
+| Engineering | [Perrin Haske](../../people/perrin-haske.md) | Adept |
+
+### In the main story
+
+Main quests here: [Steal the Register](../../quests/main/steal-the-register.md) (the planning).
+[Yara Coil](../../people/companions/yara-coil.md) can be recruited here.
+
 ## Quests and rumours
 
 > [!WARNING]

@@ -3,7 +3,7 @@
 ```infobox
 summary: Who you were before the story starts: your face, your origin, your first attributes and the one thing you kept. Nobody here is the chosen one.
 status: draft
-tags: Mechanic, Character, Origins
+tags: Character, Origins
 Type: Mechanic
 Origins: 13, one for each city and the Valley
 Starting attributes: 4 in each, +1 in two from your origin, 2 points to place

@@ -3,7 +3,7 @@
 ```infobox
 summary: Every blow lands on a part of the body. What it hits, what it is made of and what you are wearing decide whether it bruises, cuts, cripples or kills.
 status: draft
-tags: Mechanic, Combat, Numbers
+tags: Combat, Numbers
 Type: Mechanic
 Damage types: 3 physical, 9 magical
 Body zones: 10 on each side of the body

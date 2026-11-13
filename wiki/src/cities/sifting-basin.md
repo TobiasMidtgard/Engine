@@ -80,6 +80,30 @@ Every year **the Opening of the Combs** begins when keepers release the first em
 harvest. Families show off delicate fragments of empty nest, glassmakers unveil new work, and
 contests test weighing, animal handling and sail setting.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The caravan houses** | Windward Steps | 1 mark, and 2 chits a cup of water | Cool rooms under the arcades; water is extra, and counted |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Assay Yards** | Basin glass, cut and graded; the only honest price on the continent |
+| **Whitekiln** | The glassworks: lenses, bottles, glass-worm tube vessels |
+| **The Weighmarket** | Flatbread, lentils, dates, veils and water skins |
+
+**Stations**: Glass kilns for hire at Whitekiln; forges in the Assay Yards.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Animal handling | A latticeback keeper of the Cradle Courts | Adept |
+
 ## Quests and rumours
 
 > [!WARNING]

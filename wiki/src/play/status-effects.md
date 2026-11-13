@@ -3,7 +3,7 @@
 ```infobox
 summary: Burning, bleeding, frozen, frightened, veiled: everything that can happen to a body in a fight, how long it lasts and how to end it.
 status: draft
-tags: Mechanic, Combat, Magic
+tags: Combat, Magic
 Type: Mechanic
 Effects: 28
 Stacking: Most build up before they take hold

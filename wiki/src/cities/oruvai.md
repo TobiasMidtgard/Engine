@@ -114,6 +114,33 @@ with a traveller who will water it and return it to good soil.
 - **The Patient Willow**: a nursery tree who answers slowly, but remembers generations of animals
   sleeping among its roots.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **A grown room** | The Returning Gardens | Free | The Chorus grows a space for each guest; it fits |
+| **The Quiet Verge** | The western ridge | Free | Glades apart from the vines, for a day or a lifetime |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The trading posts** | Silk from the White Galleries, marrowfruit given (never sold), listener blooms for every visitor |
+
+**Stations**: None that a person would recognise: the Chorus will grow you a bench if you explain what one is.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Animal handling, Vitalism (Wilds) | [Rain-Back](../people/rain-back.md), if you have met it | Master |
+
+### In the main story
+
+[Moss-Under-Stone](../people/companions/moss-under-stone.md) finds you on the roads nearby.
+
 ## Quests and rumours
 
 You can borrow the senses of the animals around you through the Chorus, grow living equipment by

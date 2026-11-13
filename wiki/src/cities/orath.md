@@ -137,6 +137,40 @@ wartime rescue: a lamp outside a home offers any stranger food and shelter. Nobo
 one, but turning a guest away after lighting it is a serious disgrace. Some households save all
 year to host in style; others offer one bowl of soup and a place by the stove.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Returning Yards** | By the southern gates | Free to pilgrims for a week | Courtyard hostels of all four faiths; dormitories at festival time |
+| **The Open Door** | The Fifth Quarter | 1 mark | An inn whose door is never shut, by its own rule; a lamp outside every night |
+| **The Dawn Steps guesthouses** | The Dawn Steps | 3 marks | Quiet rooms for important visitors and their translators |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Fifth Quarter** | Markets, translators, relics (mostly fake; sometimes not) |
+| **The Ash Gardens** | The Covenant of Ash's wound-houses: a healer's visit for 5 marks, free to the poor |
+| **The Returning Yards** | Stables, baggage stores, festival bread |
+
+**Stations**: Public forges in the Fifth Quarter; the Covenant of Ash's alchemy benches for healers; Ilyan Dareth's waterworks office has a tinker's table.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| One-handed blades | [Amsel Dray](../people/amsel-dray.md) | Expert |
+| Persuasion | [Cassian Vey](../people/cassian-vey.md) (Advocate) | Expert |
+| Engineering | [Ilyan Dareth](../people/ilyan-dareth.md) | Expert |
+| Illusion (Insight) | [Oriel Thane](../people/oriel-thane.md), on the pilgrim roads | Expert |
+
+### In the main story
+
+Main quests here: [A Spring Running Dry](../quests/main/a-spring-running-dry.md).
+[Sister Avara](../people/companions/sister-avara.md) can be recruited here.
+
 ## Quests and rumours
 
 - **[A Miracle Shared](../quests/a-miracle-shared.md)**: the Accord of Four Keys' first job for you.

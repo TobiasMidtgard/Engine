@@ -10,8 +10,12 @@ Behaviour: Skittish, bites when cornered
 Danger: 1/5
 Found on: Every settled world
 ## Combat
+Level: 1 to 3
+Health: 20 to 40
+Damage: 3 to 6 a bite (can cause Bleeding)
 Attacks: Bite, scratch
 ## Rewards
+XP: 5 to 15
 Drops: Rat tail, ragged pelt
 ```
 
@@ -24,6 +28,14 @@ it is a real fight, and the first story every legend tells about themselves.
 House rats keep to the dark and run from light, noise and anything bigger than they are. A rat
 that is cornered, or guarding young, turns and bites. Where there is one rat there are usually
 more.
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| House rat | 1 | 20 | 5 | 3 to 4 | 5 |
+| The cellar rat (A Rat in the Cellar) | 1 | 30 | 10 | 4 to 5 | 15 |
+| Sewer rat | 3 | 40 | 10 | 5 to 6 | 15 |
 
 ## Strategy
 

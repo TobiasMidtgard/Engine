@@ -9,9 +9,13 @@ Habitat: The Moon Runs of [the Second City](../cities/second-city.md); forests a
 Behaviour: Human by day; a pack hunter when changed
 Danger: 4/5
 ## Combat
+Level: 25 to 70
+Health: 500 to 2,400
+Damage: 30 to 80
 Attacks: Bite, claws, leap, howl
 Weak to: Silver, wolfsbane
 ## Rewards
+XP: 300 to 1,500
 Drops: Whatever they carry
 ```
 
@@ -39,6 +43,14 @@ own family.
 - **Rage**: wounds make them stronger for a while.
 - **Howl**: frightens animals and weaker people; calls the clan.
 - **The full moon** forces the change, wherever they are.
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Young werebeast | 25 | 500 | 150 | 30 to 40 | 300 |
+| Clan hunter | 45 | 1,200 | 220 | 45 to 60 | 700 |
+| Pack-Speaker's champion | 70 | 2,400 | 300 | 60 to 80 | 1,500 |
 
 ## Strategy
 

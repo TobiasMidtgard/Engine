@@ -85,6 +85,36 @@ contests, canal and harvest-barge races, prizes for the biggest root or the fine
 strain, mineral baths and water gardens, music in tunnels shaped for sound, glowing lantern
 parades and night markets where new foods and recipes change hands.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **A guest burrow** | The garden warrens | 1 mark | Warm, glowing and next to the communal kitchens |
+| **The Lantern Gardens** | The baths and grotto | 2 marks | A room over the mineral baths, and music in the tunnels at night |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Confluence Food Market** | Food, preserves, keeping-loaves, mushroom ale, glowing wine |
+| **The archive of seeds** | The Root Ledger's seeds and spores, for members |
+| **The spore nurseries** | Healing moss by the sack, and medicinal cultures |
+
+**Stations**: Communal kitchens, free to everyone; the Root Ledger's chapter benches; drying and smoking galleries for preserving.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Alchemy (Healer), Cooking | [Ilse Moorcroft](../people/ilse-moorcroft.md) | Master |
+| Alchemy | [Benedek Strawn](../people/benedek-strawn.md) | Adept |
+
+### In the main story
+
+Main quests here: [What the Builders Buried](../quests/main/what-the-builders-buried.md).
+
 ## Quests and rumours
 
 - **[Not Enough to Go Around](../quests/not-enough-to-go-around.md)**: the Root Ledger's first job for

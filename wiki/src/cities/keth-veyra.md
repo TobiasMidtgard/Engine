@@ -88,6 +88,36 @@ towers straight above the fighting, and send swimming creatures behind enemy boa
 anchor and steering lines. Breaking the dam would unleash the reservoir on the whole valley below,
 which makes a siege of Keth Veyra dangerous for everyone.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Broken Halter** | Dry Foot | 1 mark | The tavern for foreigners, outside the walls, with a view of a city you may never enter |
+| **A gate-house room** | Inside the dam | Only for those the keepers accept | Warm, from the Brinewings below |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **Dry Foot's inspected market** | Gaff spears, harness hooks, bows backed with Brinewing horn, keeper's oilskins |
+| **The Wet Face workshops** | Harness, saddles and tack; Varo Kett's binding harnesses, if you ask the wrong people |
+| **The keepers' auction** | A few shed Brinewing scales a year, after the Hundred Gates |
+
+**Stations**: A forge and a tanning yard in Dry Foot; stables and pens on the Wet Face.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Animal handling | [Sere](../people/sere.md) (Bond) | Master |
+
+### In the main story
+
+Main quests here: [The Drowning Year](../quests/main/the-drowning-year.md).
+[Varo Kett](../people/companions/varo-kett.md) can be recruited here.
+
 ## Quests and rumours
 
 - **[What the Beast Was Running From](../quests/what-the-beast-was-running-from.md)**: the Keepers'

@@ -3,7 +3,7 @@
 ```infobox
 summary: Light, sound, sight and the clothes you wear: how people notice you, how they search for you, and how to stay a stranger in a crowd.
 status: draft
-tags: Mechanic, Stealth
+tags: Stealth
 Type: Mechanic
 Skills: Sneak, Disguise, Sleight of hand
 Attributes: Agility, Perception, Presence

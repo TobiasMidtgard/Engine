@@ -3,7 +3,7 @@
 ```infobox
 summary: Gisela Quell announces the Great Restriking: not seven years' seals weighed again, but a seal for every city. Ivo Tarrant takes your evidence to the Court of Seals. It does not go as he hoped.
 status: draft
-tags: Main story, Gilded Ascent, Politics, Act I
+tags: Gilded Ascent, Politics, Act I
 Type: Main story
 Where: [The Gilded Ascent](../../cities/gilded-ascent.md): the Ledger Floor, the Lantern Table and the Summit
 Given by: [Ivo Tarrant](../../people/ivo-tarrant.md)

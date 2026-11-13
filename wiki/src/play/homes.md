@@ -3,7 +3,7 @@
 ```infobox
 summary: A rented bed, a raft of your own, a rooftop room in the Eaves or an estate above the clouds: where you can live, what it costs and what you can build into it.
 status: draft
-tags: Mechanic, Homes
+tags: Homes
 Type: Mechanic
 Homes: At least one in every great city
 Cheapest: A bed by the shift in the Lowwake Bunks

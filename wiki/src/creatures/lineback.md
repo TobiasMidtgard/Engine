@@ -7,6 +7,12 @@ Type: Beast
 Habitat: The waters beneath [Vantress](../cities/vantress/index.md)
 Behaviour: Trained working animal
 Danger: 1/5
+## Combat
+Level: 8
+Health: 220
+Damage: 10 to 15 (only if frightened)
+## Rewards
+XP: None: they belong to someone
 ```
 
 The **lineback** is a semi-aquatic working animal bred around the raft city of
@@ -17,6 +23,12 @@ guide-lines beneath the rafts, through flooded ducts and around anchor chains.
 
 Linebacks can follow a scent, fetch small objects, carry lines, scout ahead and distract guards.
 They can also smell blood, alchemical residue and unfamiliar magic.
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Lineback | 8 | 220 | 100 | 10 to 15 | — |
 
 ## Locations
 

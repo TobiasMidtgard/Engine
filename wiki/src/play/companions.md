@@ -3,7 +3,7 @@
 ```infobox
 summary: The people who travel with you: who they are, how they fight, what they think of what you do, and what they want from you in return.
 status: draft
-tags: Mechanic, Companions
+tags: Companions
 Type: Mechanic
 Companions: 8 who join for good, and many who follow for a job
 At once: 1, 2 at Presence 7, 3 at Presence 10

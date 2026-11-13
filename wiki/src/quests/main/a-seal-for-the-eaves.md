@@ -3,7 +3,7 @@
 ```infobox
 summary: There is a Red Writ on your name in the Second City, verified and hanging in the Quiet Bell. To lift it you will need the testimony of a dead courier, five seats that hate each other, and a Compact that is already cracking.
 status: draft
-tags: Main story, Second City, Intrigue, Act II
+tags: Second City, Intrigue, Act II
 Type: Main story
 Where: [The Second City](../../cities/second-city.md): the Dusk Stair, the Quiet Bell, the Pale Archive and the Red Exchange
 Given by: The writ itself

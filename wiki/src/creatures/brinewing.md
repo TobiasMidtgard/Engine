@@ -7,7 +7,12 @@ Type: Beast (dragon-like)
 Habitat: The rookeries of [Keth Veyra](../cities/keth-veyra.md)
 Behaviour: Trained; each has its own temper
 ## Combat
+Level: 90
+Health: 20,000
+Damage: 150 to 300; fire
 Attacks: Fire, flight
+## Rewards
+XP: None. Don't.
 ```
 
 The **Brinewing** is a dragon-like creature raised by the keepers of
@@ -31,6 +36,13 @@ defend itself rather than to conquer its neighbours.
 Brinewings fire ceramic sluice blocks, clear tangled driftwood, sterilise diseased pens, dry grain
 and patrol the reservoir. Their flame lights industrial kilns, and their flight makes them
 formidable scouts and defenders.
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Adult Brinewing | 90 | 20,000 | Can't be staggered | 150 to 300, fire breath | — |
+| Hatchling | 10 | 200 | 40 | 10 (and its mother arrives) | — |
 
 ## Locations
 

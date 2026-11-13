@@ -10,7 +10,12 @@ Habitat: Meadows and field edges
 Behaviour: Skittish
 Danger: 0/5
 Found on: [Home world](../world/planets/home-world.md)
+## Combat
+Level: 1
+Health: 8
+Damage: None
 ## Rewards
+XP: 1
 Drops: Rabbit pelt, meat
 ```
 
@@ -22,6 +27,13 @@ cover.
 Rabbits graze in short hops, sit up on their hind legs to listen, and dash for cover with their
 white tails flashing when anything comes close.
 
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Rabbit | 1 | 8 | — | — | 1 |
+
 ## Locations
 
 - [The Valley](../world/regions/the-valley.md): the meadows.
+- [The Tollands](../world/regions/the-tollands.md), [the Hollow Downs](../world/regions/the-hollow-downs.md), [the Pilgrim Hills](../world/regions/the-pilgrim-hills.md) and [the Sunward Coast](../world/regions/the-sunward-coast.md)

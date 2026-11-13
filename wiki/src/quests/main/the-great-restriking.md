@@ -3,7 +3,7 @@
 ```infobox
 summary: The finale. On the first of the Five Quiet Days, every seal on the continent is to be struck at once. Above, the Mint's great die begins to fall. Below, Gisela Quell waits at the bottom of the world with a god's door at her back.
 status: draft
-tags: Main story, Finale, Act III
+tags: Finale, Act III
 Type: Main story
 Where: [The Gilded Ascent](../../cities/gilded-ascent.md): the Toll Rings, the Mint of Seals, the Counting Deep and the Register room
 Given by: Everything before it

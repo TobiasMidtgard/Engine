@@ -3,7 +3,7 @@
 ```infobox
 summary: Warden-Captain Ulf Garrick has come for you, and he is Awakened. Survive him, reach the end of what a human can be, and learn from a very old tortoise that there are ways past it.
 status: draft
-tags: Main story, Boss, Progression, Act II
+tags: Boss, Progression, Act II
 Type: Main story
 Where: Wherever Garrick finds you, then the road
 Given by: Ulf Garrick

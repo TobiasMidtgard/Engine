@@ -3,7 +3,7 @@
 ```infobox
 summary: Orravell is about to swallow Kestrel Vale, and the Fifth Reserve is paying for it. Find out what the Gilded Ascent's bank expects in return, and who in the great tree is selling the army.
 status: draft
-tags: Main story, Orravell, War, Act II
+tags: Orravell, War, Act II
 Type: Main story
 Where: [Orravell](../../cities/orravell.md): the Sunward Canopy, Hushwing Station and the Council of Stewards; Kestrel Vale
 Given by: Hesper Lorn's list

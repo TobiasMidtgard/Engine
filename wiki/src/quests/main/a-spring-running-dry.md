@@ -3,7 +3,7 @@
 ```infobox
 summary: The First Spring of Orath is weakening on the eve of the Unbarred Night. Beneath the burial galleries lies a channel, an archive older than four faiths, and a door of black stone that is closing.
 status: draft
-tags: Main story, Orath, Investigation, Act I
+tags: Orath, Investigation, Act I
 Type: Main story
 Where: [Orath](../../cities/orath.md): the Hollow Crown, the Underchoir and the fifth passage
 Given by: [Ivo Tarrant](../../people/ivo-tarrant.md), then Ilyan Dareth

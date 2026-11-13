@@ -34,7 +34,7 @@
     var ICONS = [
         ['world/planets/', 'planet'], ['world/regions/', 'mountain'], ['world/landmarks/', 'tower'],
         ['world/', 'map'], ['cities/', 'castle'], ['people/', 'person'], ['factions/', 'shield'],
-        ['quests/', 'scroll'], ['lore/', 'book'], ['creatures/', 'paw'], ['items/', 'sword'],
+        ['quests/', 'scroll'], ['lore/', 'book'], ['creatures/', 'paw'], ['items/', 'sword'], ['crafting/', 'hammer'],
         ['magic/', 'spark'], ['play/progression', 'compass'], ['play/thievery', 'key'],
         ['play/', 'guide'], ['vehicles/', 'rocket'], ['recent', 'clock'], ['editing/', 'help'],
         ['index.html', 'home']

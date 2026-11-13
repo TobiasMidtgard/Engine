@@ -3,7 +3,7 @@
 ```infobox
 summary: Every city has its own laws, its own guards and its own idea of what a crime is. Learn them, break them carefully, and know how to make a bounty go away.
 status: draft
-tags: Mechanic, Law, Stealth
+tags: Law, Stealth
 Type: Mechanic
 Bounties: Per city, in marks
 Continent-wide: The Unsealed List, Red Writs

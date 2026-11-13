@@ -3,7 +3,7 @@
 ```infobox
 summary: Keth Veyra's animals have started refusing work, and the keeper families are hiding the gate reports. Eighty-three years ago the same thing happened, and a whole season of monsoon fell in one night.
 status: draft
-tags: Main story, Keth Veyra, Animals, Act III
+tags: Keth Veyra, Animals, Act III
 Type: Main story
 Where: [Keth Veyra](../../cities/keth-veyra.md): the Gateworks, the Deep Streets and the black stone beneath the dam
 Given by: Sere, pactkeeper of the Keepers' Road

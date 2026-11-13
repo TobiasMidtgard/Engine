@@ -3,7 +3,7 @@
 ```infobox
 summary: The Tangle's greatest job: rob the Counting Deep beneath the Gilded Ascent of the oldest book in the world, with a crew from Ward Null, a seal that opens a god's door, and a thief the Registry cannot see.
 status: draft
-tags: Main story, Heist, Vantress, Gilded Ascent, Act III
+tags: Heist, Vantress, Gilded Ascent, Act III
 Type: Main story
 Where: [Vantress](../../cities/vantress/index.md) (the planning), then [the Gilded Ascent](../../cities/gilded-ascent.md): the Fifth Reserve and the Counting Deep
 Given by: [Tal Oran](../../people/tal-oran.md), Weight of Work of the Tangle

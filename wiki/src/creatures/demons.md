@@ -9,9 +9,13 @@ Habitat: The Hells; wherever a pactbinder has opened a gate
 Behaviour: Clever, hungry, bound by bargains
 Danger: 2/5 to 5/5
 ## Combat
+Level: 10 to 100
+Health: 120 to 15,000
+Damage: 10 to 200
 Attacks: Claws, hellfire, chains, spells
 Weak to: Radiance, wards, breaking the pact that holds them
 ## Rewards
+XP: 80 to 6,000
 Drops: Brimstone, demon horn, sometimes a contract
 ```
 
@@ -29,6 +33,15 @@ permanent.
 | **Lesser demon** | Expert | 4/5 | A demon warrior with a will of its own and a long memory |
 | **Chain-warden** | Expert | 4/5 | A servant of Gorrow that binds whatever it catches |
 | **Demon lord** | Ascended | 5/5 | One of the great ones. It will remember who called it |
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Imp | 10 | 120 | 20 | 10 to 14, fire | 80 |
+| Chain hound | 30 | 600 | 140 | 30 to 40, binding | 300 |
+| Furnace knight | 60 | 2,400 | 300 | 60 to 90, hellfire | 1,200 |
+| Demon prince | 100 | 15,000 | Can't be staggered | 150 to 200 | 6,000 |
 
 ## Patrons
 

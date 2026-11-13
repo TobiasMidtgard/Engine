@@ -72,6 +72,42 @@ Workers eat filled breads at the shift canteens, drink orchard cider and go to t
 theatres. At the yearly **Small Wonders Fair**, craftspeople compete to solve everyday problems,
 and a charm that keeps a baby's milk warm can win more hearts than a spectacular weapon.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Last Step** | Sunledge | 2 marks | An inn with a view straight down into the quarry |
+| **The Rest Houses** | The Rest Houses | 5 chits | Bunks by the shift, for quarry workers; loud at every change of shift |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **Chainmarket** | Tools, rope, lift passes, hushstone pouches and plates |
+| **The Binding Yards** | Enchanted blades, spell foci, the hushstone-gripped rod |
+| **Sunledge** | Bakeries, orchard cider and shift bread |
+| [Ysolde Marr](../people/ysolde-marr.md) | Buys changed things from spills, and sometimes sells them |
+
+**Stations**: Hedda Strom's lodge forge; licensed casting rooms with hushstone walls (1 mark an hour); an enchanting circle at the Spillward's Wardhouse.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Smithing | [Hedda Strom](../people/hedda-strom.md) | Master |
+| Vitalism (Warding) | [Halvard Cray](../people/halvard-cray.md) | Master |
+| Enchanting | [Old Tamm](../people/old-tamm.md) (Wardwright) | Expert |
+| Shaping, Illusion | [Ysolde Marr](../people/ysolde-marr.md) | Expert |
+| Climbing (Rope-work) | [Brannagh Fisk](../people/brannagh-fisk.md) | Expert |
+| Evocation, Vitalism | [Tamsin Reeve](../people/companions/tamsin-reeve.md), at the Common Hearths, for nothing | Adept |
+
+### In the main story
+
+Main quests here: [Behind the Nine Shut Doors](../quests/main/behind-the-nine-shut-doors.md).
+[Tamsin Reeve](../people/companions/tamsin-reeve.md) can be recruited here.
+
 ## Quests and rumours
 
 - **[The Street That Changed](../quests/the-street-that-changed.md)**: the Spillward's first job for

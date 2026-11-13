@@ -3,7 +3,7 @@
 ```infobox
 summary: Below Rillvault's springs, in galleries shaped by a singer four centuries dead, the rock still remembers what the First Builders made and who they made it for.
 status: draft
-tags: Main story, Rillvault, Exploration, Act I
+tags: Rillvault, Exploration, Act I
 Type: Main story
 Where: [Rillvault](../../cities/rillvault.md): the spring headworks, the Lantern Gardens and the Echo Galleries
 Given by: [Ilse Moorcroft](../../people/ilse-moorcroft.md) of the Root Ledger

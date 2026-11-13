@@ -3,7 +3,7 @@
 ```infobox
 summary: Bind a spell into a sword, a ring, a rope or a stone: how enchantments work, what each material can hold, and the enchantments worth knowing.
 status: draft
-tags: Crafting, Magic, Profession
+tags: Crafting, Magic
 Type: Profession
 Skill: Enchanting, boosted by Shaping's Artifice branch
 Taught by: [The Makers' Compact](../factions/makers-compact.md) (enchanters' lodge), [the Spillward](../factions/spillward.md)

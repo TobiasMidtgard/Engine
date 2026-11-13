@@ -137,6 +137,34 @@ and weather cloth, with folding gliders, harness racks, repair benches and launc
 different winds. Gliders are limited by weather, load, height and skill, and many missions end far
 below and walk home. Its crews say: "The mission ends when the last harness is hung."
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Shed Limb** | The Lower Hearth | 1 mark | A soldiers' tavern; the political officer drinks for free |
+| **A branch billet** | The Great Boughs | Free while you serve the Crown Companies | Comes with a political officer down the corridor |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The March Stores** | Preserved food, medical supplies, expedition kit, march rations |
+| **The factory outlets** | Cohort steel, spears, resin plate; sold only to the Crown's friends |
+
+**Stations**: Factory forges for Crown Company members; Hushwing Station's glider workshops.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Piloting (Flyer) | [Sera Noll](../people/sera-noll.md), at Hushwing Station | Expert |
+
+### In the main story
+
+Main quests here: [The Price of Kestrel Vale](../quests/main/the-price-of-kestrel-vale.md).
+
 ## Quests and rumours
 
 **[Operation Second Spring](../quests/operation-second-spring.md)**: Orravell's mercenaries are about

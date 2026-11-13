@@ -7,7 +7,12 @@ Type: Beast
 Habitat: The sifting grounds of the [Sifting Basin](../cities/sifting-basin.md)
 Behaviour: Social burrower; kept by keepers
 Danger: 1/5
+## Combat
+Level: 3 to 6
+Health: 40 to 90
+Damage: 4 to 8 (only if you dig into a nest)
 ## Rewards
+XP: 10 to 30
 Drops: Empty nests, rich in minerals
 ```
 
@@ -24,6 +29,13 @@ predators, heat and cold. When the young leave, the colony moves on to fresh gro
 
 A latticeback can only concentrate the minerals already in its sand, so colonies on different
 grounds build nests of different metals.
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Latticeback | 3 | 40 | 40 (armoured) | 4 to 6 | 10 |
+| Nest-mother | 6 | 90 | 80 | 6 to 8 | 30 |
 
 ## Locations
 

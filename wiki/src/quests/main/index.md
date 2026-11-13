@@ -3,7 +3,6 @@
 ```infobox
 summary: The main story. A nobody with no seal carries a stolen page across the continent, and finds out why the world's wells are closing, who is closing them, and what is fed by every lock.
 status: draft
-tags: Main story
 Type: Main story
 Acts: A prologue and three acts, 18 quests
 Levels: 1 to 100

@@ -65,3 +65,32 @@ Airships dock at the Hanging Market. Raising or lowering one side of the island 
 exposes hidden caverns, floods the lower tunnels and changes the gliding routes. Criminals use
 folding gliders to move between the hanging buildings, and smugglers hide goods in the cargo
 ballast thrown overboard as the island climbs.
+
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Mooring Line** | The Hanging Market | 3 marks | A dock inn under the island, where the airship crews sleep |
+| **An estate's guest rooms** | The Sheltered Rings | By invitation | The best view in the world, and a host who wants something |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Hanging Market** | Foreign trade, airship passage, gliding coats, duelling silks, stormglass, cloudwater |
+
+**Stations**: Glassmakers' kilns for stormglass on the Crown; airship berths in the Hanging Market.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| Spears, Heavy armour | [Joska Kroll](../people/joska-kroll.md) | Expert |
+| Piloting (Flyer) | [Faro Wynd](../people/faro-wynd.md) | Master |
+
+### In the main story
+
+Main quests here: [The Island Sinks](../quests/main/the-island-sinks.md).
+

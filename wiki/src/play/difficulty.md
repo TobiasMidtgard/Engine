@@ -3,7 +3,7 @@
 ```infobox
 summary: Five difficulties that change how enemies think, not just how hard they hit; a separate setting for conversations; and what happens when you fall.
 status: draft
-tags: Mechanic, Difficulty
+tags: Difficulty
 Type: Mechanic
 Combat difficulty: Easy, Medium, Hard, Very hard, Extreme
 Dialogue difficulty: Its own setting

@@ -9,9 +9,13 @@ Habitat: The Eaves of [the Second City](../cities/second-city.md); hiding elsewh
 Behaviour: Intelligent; social; territorial
 Danger: 4/5
 ## Combat
+Level: 25 to 85
+Health: 400 to 3,000
+Damage: 25 to 90; drains health
 Attacks: Bite (drains health), claws, Blood magic, bat swarm, mist form
 Weak to: Sunlight, fire, silver, Radiance
 ## Rewards
+XP: 300 to 2,000
 Drops: Whatever they carry; their blood, which is someone's property
 ```
 
@@ -40,6 +44,14 @@ hide, and the ones who don't are hunted.
 - **Night strength**: stronger, faster and quicker to heal after dark.
 - **Bat swarm** and **mist form**: older vampires can break into a swarm of bats or a drifting mist.
 - **Blood magic**: Malefice's Blood spells cost them less (see [Malefice](../magic/malefice.md#blood)).
+
+## Stats
+
+| Kind | Level | Health | Poise | Damage | XP |
+|---|---|---|---|---|---|
+| Fledgling | 25 | 400 | 100 | 25 to 35, drain | 300 |
+| Blood-house noble | 50 | 1,200 | 200 | 45 to 60, drain, Blood magic | 800 |
+| Old Blood elder | 85 | 3,000 | 300 | 70 to 90, mist, bats, Blood magic | 2,000 |
 
 ## Strategy
 

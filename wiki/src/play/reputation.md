@@ -3,7 +3,7 @@
 ```infobox
 summary: People make up their minds about you from what they see and what they hear. Your standing in each city and guild, your fame and your infamy all travel faster than you do.
 status: draft
-tags: Mechanic, Social
+tags: Social
 Type: Mechanic
 Kept by: Every person, every city, every guild
 Spreads by: Gossip, witnesses, newsboards

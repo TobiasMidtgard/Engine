@@ -3,7 +3,7 @@
 ```infobox
 summary: Break the human limit. Rain-Back knows five roads to Awakening that the main story can take you down, and every one of them has a price.
 status: draft
-tags: Main story, Awakening, Act II
+tags: Awakening, Act II
 Type: Main story
 Where: Your choice of road
 Given by: Rain-Back

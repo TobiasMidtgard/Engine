@@ -3,7 +3,7 @@
 ```infobox
 summary: The merchants' calendar the whole continent keeps: seven-day weeks named for the seals, twelve months, four seasons, and the festivals of every city.
 status: draft
-tags: Lore, Time, Festivals
+tags: Time, Festivals
 Type: Lore
 Week: 7 days
 Year: 12 months of 30 days, and the Five Quiet Days

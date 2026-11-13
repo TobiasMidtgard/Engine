@@ -3,7 +3,7 @@
 ```infobox
 summary: Six attributes describe your body and mind, and four vitals keep you standing: health, stamina, mana and poise. Every number here is earned one level at a time.
 status: draft
-tags: Mechanic, Character, Numbers
+tags: Character, Numbers
 Type: Mechanic
 Attributes: Strength, Agility, Endurance, Perception, Presence, Attunement
 Vitals: Health, stamina, mana, poise

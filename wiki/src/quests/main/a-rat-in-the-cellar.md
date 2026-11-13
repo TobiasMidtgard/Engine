@@ -3,7 +3,7 @@
 ```infobox
 summary: The first job: clear a rat out of a tavern cellar in the Valley. It goes about as well as you would expect, and then a dying courier walks in.
 status: draft
-tags: Main story, Prologue, Tutorial
+tags: Prologue, Tutorial
 Type: Main story
 Where: The tavern in the village of [the Valley](../../world/regions/the-valley.md)
 Given by: The innkeeper

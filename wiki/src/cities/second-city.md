@@ -121,6 +121,40 @@ admits to buying: poisons, curses, forged identities, testimony from the dead, c
 and safe passage for people who need to disappear. Blood is the Eaves' real currency, and good
 blood houses pay their donors more than a dockworker earns in a week.
 
+## Services
+
+### Where to stay
+
+| Inn | Where | A night | What it's like |
+|---|---|---|---|
+| **The Anchor and Lamp** | The Harbour | 1 mark | Sailors, smugglers and the first news off every ship |
+| **The Sunset Rooms** | The Arcades | 1 ascent | Boulevard comfort; locks its doors at dusk |
+| **Rooms under the night-sails** | The Eaves, off the Dusk Stair | 2 marks | No window ever sees daylight, which some guests insist on |
+
+### Shops and markets
+
+| Where | What you'll find |
+|---|---|
+| **The Arcades** | Night-silk, silver-thorn rapiers, silvered blades, perfume |
+| **The Harbour** | Ships, salt fish, passage up the Grey Coast |
+| **The Hollow Market** | Everything on the Unsealed List: dark brews, soul gems, curses, silence |
+| **The Red Exchange** | The Eaves' market in favours, debts and blood |
+
+**Stations**: Forges and apothecaries on the Boulevard; dark alchemy benches in the Hollow Market, for anyone who knows the word.
+
+### Trainers
+
+| Skill | Trainer | Up to |
+|---|---|---|
+| One-handed blades, Shields | [Edrin Vasse](../people/edrin-vasse.md), at the Quiet Bell, at night | Master |
+| Daggers, Bows | [Sabeth Rook](../people/sabeth-rook.md) | Master |
+| Dark magic | Nobody who will admit it in daylight: ask in the Eaves or the Hollow Market | Varies |
+
+### In the main story
+
+Main quests here: [A Seal for the Eaves](../quests/main/a-seal-for-the-eaves.md).
+[Teodor Voss](../people/companions/teodor-voss.md) can be recruited here.
+
 ## Quests and rumours
 
 - **[A Writ in Question](../quests/a-writ-in-question.md)**: the Last Writ's first job for you.
