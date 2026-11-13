@@ -74,6 +74,13 @@ and a charm that keeps a baby's milk warm can win more hearts than a spectacular
 
 ## Quests and rumours
 
+- **[The Street That Changed](../quests/the-street-that-changed.md)**: the Spillward's first job for
+  you. A spill is rewriting a street of homes on the rim, and the unlicensed mage who saved its
+  people may be the one who caused it.
+- **[What the Crystal Remembers](../quests/what-the-crystal-remembers.md)**: steal a crystal from the
+  Sunken Works, a collapsed ruin in the hills east of the city, and survive what it does when it
+  breaks.
+
 Much of Veyrhold's trouble runs through its lifts: controlling them, smuggling creations between
 terraces, and using hushstone to weaken a spell.
 

@@ -87,6 +87,10 @@ parades and night markets where new foods and recipes change hands.
 
 ## Quests and rumours
 
+- **[Not Enough to Go Around](../quests/not-enough-to-go-around.md)**: the Root Ledger's first job for
+  you. A grey fever spreads through the garden warrens, and there is not enough of the one cave moss
+  that cures it.
+
 Merchants control the export routes, thieves steal valuable seed strains, smugglers dodge the food
 tariffs, alchemists study the fungi, diplomats negotiate famine relief, and fighters guard the
 caravans.

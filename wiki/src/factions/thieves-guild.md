@@ -120,6 +120,21 @@ The first jobs are shared by everyone. After that, the story branches by whose w
 Ressa's **Ward Knots**, Tal and Jori's **Clean Work**, Sella's **Quiet Ledger** or Nilo's **Loose
 Water**. Every branch ends in the same great finale, **Steal the City Before Dawn**.
 
+The shared apprenticeship comes first:
+
+- **[Every Door Has a Price](../quests/every-door-has-a-price.md)**: swap one page in a customs
+  office while the clerks are still at their desks, with every senior thief watching.
+- **[The Third Cut](../quests/the-third-cut.md)**: part of a heist's takings has vanished before the
+  shares were paid. Rebuild the cut without starting a war inside the guild.
+
+Then the guild's own jobs:
+
+- **[The Last Guest Wears It](../quests/the-last-guest-wears-it.md)**: lift a collar of nine
+  colour-changing stones from a dinner before it goes into the bank at first bell.
+- **[One Crate, Thirty Sailors](../quests/one-crate-thirty-sailors.md)**: take one cedar case off a
+  merchant ship before it clears the outer chain.
+- **[The Founder's Share](../quests/the-founders-share.md)**: steal a coffer the guild lost years
+  ago from a criminal auction, and bring it home unopened.
 - **[The House Without Locks](../quests/the-house-without-locks.md)**: a wealthy broker hires the
   guild to steal his own insured collection.
 - **[The Bank That Asked to Be Robbed](../quests/the-bank-that-asked-to-be-robbed.md)**: a bank

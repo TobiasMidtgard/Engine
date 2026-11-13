@@ -156,6 +156,15 @@ ropes strung between buildings, or jump across the boats passing in the channels
   [the Gilded Ledger](knot-square/the-gilded-ledger.md) hires thieves to test its own vault.
 - **[The House Without Locks](../../quests/the-house-without-locks.md)**: a wealthy broker wants
   his own insured collection stolen.
+- **[Every Door Has a Price](../../quests/every-door-has-a-price.md)** and
+  **[The Third Cut](../../quests/the-third-cut.md)**: the guild's apprenticeship, a page swapped
+  under the clerks' noses and a share that went missing.
+- **[The Last Guest Wears It](../../quests/the-last-guest-wears-it.md)**,
+  **[One Crate, Thirty Sailors](../../quests/one-crate-thirty-sailors.md)** and
+  **[The Founder's Share](../../quests/the-founders-share.md)**: a collar at a dinner, a case on a
+  ship and a coffer at a criminal auction.
+- **[Stamped and Sold](../../quests/stamped-and-sold.md)**: goods carrying the Makers' Compact's mark
+  have started to fail, and the Compact wants to know why before the mark means nothing.
 - **Fixing the tables** at [the Seven Lanterns](lantern-ward/seven-lanterns.md).
 - **Burgling [The Vale](argent-heights/the-vale.md)** through its balconies, cranes and
   trellises.

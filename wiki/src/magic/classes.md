@@ -15,10 +15,10 @@ is a skill you level by using it, up to 100 and then beyond. Every subclass has 
 
 | Class | Clean subclass and branches | Dark subclass and branches |
 |---|---|---|
-| **Destructor** (elements) | **Evocation**: Fire, Frost, Storm, Spellblade | **Malefice**: Blood, Blight, Shadow, Hexblade |
-| **Channeler** (life) | **Vitalism**: Restoration, Warding, Wilds, Herbalism | **Necromancy**: Undeath, Afflictions, Soul, Sacrifice |
-| **Transmuter** (matter, force, space) | **Shaping**: Kinesis, Passage, Conjuration, Artifice | **Pactbinding**: Infernal, Chains, Pact Arms, Gates |
-| **Mesmer** (mind) | **Illusion**: Veil, Phantasm, Insight, Glamour | **Domination**: Fear, Wrath, Command, Memory |
+| **Destructor** (elements) | **[Evocation](evocation.md)**: Fire, Frost, Storm, Spellblade | **[Malefice](malefice.md)**: Blood, Blight, Shadow, Hexblade |
+| **Channeler** (life) | **[Vitalism](vitalism.md)**: Restoration, Warding, Wilds, Herbalism | **[Necromancy](necromancy.md)**: Undeath, Afflictions, Soul, Sacrifice |
+| **Transmuter** (matter, force, space) | **[Shaping](shaping.md)**: Kinesis, Passage, Conjuration, Artifice | **[Pactbinding](pactbinding.md)**: Infernal, Chains, Pact Arms, Gates |
+| **Mesmer** (mind) | **[Illusion](illusion.md)**: Veil, Phantasm, Insight, Glamour | **[Domination](domination.md)**: Fear, Wrath, Command, Memory |
 
 ## Every family, on both sides
 
@@ -49,3 +49,10 @@ is a skill you level by using it, up to 100 and then beyond. Every subclass has 
 | Warlock | Pactbinding, often with Malefice |
 | Herbalist | Vitalism (Herbalism) and the Alchemy profession |
 | Artificer | Shaping (Artifice) and the Enchanting and Smithing professions |
+
+## The eight subclasses
+
+Each subclass has its own page, with its lore, its four branches and the named spells of each
+branch from Novice to God.
+
+{{cards}}

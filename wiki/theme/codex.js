@@ -263,7 +263,10 @@
                 strong.classList.add('cx-term');
                 var next = strong.nextSibling;
                 if (next && next.nodeType === 3) {
-                    next.textContent = next.textContent.replace(/^\s*[:—–-]\s*/, '');
+                    // "**Name**: text", "**Name**, which ..." and "**Name** does ..." all lose
+                    // their joining mark, and the card text starts with a capital.
+                    var rest = next.textContent.replace(/^\s*[:;,—–-]?\s*/, '');
+                    next.textContent = rest.charAt(0).toUpperCase() + rest.slice(1);
                 }
             });
         });

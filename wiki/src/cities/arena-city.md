@@ -88,4 +88,8 @@ home to [the Brass Circuit](../factions/brass-circuit.md), the guild of arena fi
 
 ## Quests and rumours
 
+- **[The Bout That Broke Wrong](../quests/the-bout-that-broke-wrong.md)**: the Brass Circuit's first
+  job for you. A favourite fighter breaks his arm in a bout he should have won. Fight in the
+  tournament or work behind it, and find out who broke it.
+
 Whether you want to trade, steal or fight with magic, blades or bows, Arena City has work for you.

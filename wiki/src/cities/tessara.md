@@ -140,6 +140,10 @@ the trams redirect the crowds.
 
 ## Quests and rumours
 
+- **[Every Repair Has an Owner](../quests/every-repair-has-an-owner.md)**: the Pattern Office's first
+  job for you. Patternwork failures are spreading through the farms and terraces, and each of the
+  three repairs on offer ties the city to a different future.
+
 Hacking in Tessara is physical: a thief can slip into a maintenance gallery and swap three tiles
 to divert a shipment; an artificer can build new pattern chains; a mage can trace or corrupt the
 signals running through a wall. Cutting one route might open a vault, but it might also shut down

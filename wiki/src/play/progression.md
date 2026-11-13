@@ -125,17 +125,22 @@ becomes a single leap.
 Alongside your level, every skill improves by using it: fight to fight better, cast to cast
 better, sneak to sneak better. Each skill rises to 100 and can then **ascend**, past what any
 mortal can do. Ascended skills keep climbing, and the change is visible: your blows crack stone
-and fell trees, your spells grow from sparks to suns.
+and fell trees, your spells grow from sparks to suns. Every rank opens a perk on the skill's tree;
+see [Skills and the skill tree](skills.md).
 
 | Rank | Where it comes |
 |---|---|
 | Novice | Your first steps in a skill |
-| Apprentice | |
-| Adept | Element pairs open in magic |
-| Expert | |
-| Master | All three elements combine; the strongest spells |
-| Ascended | Past skill level 100 |
+| Apprentice | Skill 25 |
+| Adept | Skill 50; element pairs open in magic |
+| Expert | Skill 75 |
+| Master | Skill 100; all three elements combine; the strongest spells |
+| Ascended I to III | Past 100, once you have Awakened (and Ascended for the higher two) |
 | God | Every skill ascended |
+
+The ways to break the human limit, and what you can claim when you Ascend, are on
+[Awakening and Ascension](ascension.md). The names the world gives you for your deeds, each with a
+power of its own, are on [Titles](titles.md).
 
 ## Reflexes and speed
 

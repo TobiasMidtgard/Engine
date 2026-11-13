@@ -139,6 +139,10 @@ year to host in style; others offer one bowl of soup and a place by the stove.
 
 ## Quests and rumours
 
+- **[A Miracle Shared](../quests/a-miracle-shared.md)**: the Accord of Four Keys' first job for you.
+  Water has begun to rise upward in a shared chamber. Four faiths claim the miracle, and the
+  Spillward says it is a spill.
+
 You can earn a separate reputation with each faith, and work as a guide, relic hunter, temple
 guard, investigator of the faiths or go-between. Festival crowds change the routes and the
 security of the whole city.

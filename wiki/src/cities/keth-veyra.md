@@ -90,6 +90,10 @@ which makes a siege of Keth Veyra dangerous for everyone.
 
 ## Quests and rumours
 
+- **[What the Beast Was Running From](../quests/what-the-beast-was-running-from.md)**: the Keepers'
+  Road's first job for you. A trained bargeback has wrecked a caravan and escaped. Bring it back,
+  and find out what it was really running from.
+
 > [!WARNING]
 > Spoilers for Keth Veyra's main quest below.
 
