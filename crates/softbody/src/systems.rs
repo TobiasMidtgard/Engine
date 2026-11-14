@@ -1538,8 +1538,10 @@ fn solve_beside(mut work: Vec<InFlight>, timed: bool) -> Vec<InFlight> {
 ///
 /// Under a real clock a job not done yet is left to run rather than waited for: the frame went on without it
 /// (two fixed steps in one frame give it no time between them; 99 frames of the stutter
-/// flight waited 12-44 ms here, VM), its bodies keep last step's state, and when it is taken
-/// they make up the steps it ran past (up to [`MAX_CATCH_UP`]).
+/// flight waited 12-44 ms here, VM), its bodies keep last step's state, and the steps it ran
+/// past are lost to them, not made up: build 5 put them into the next step, up to four steps
+/// long with the substeps of one, and the yard's shot curtain stretched to 1.9 times its
+/// length and flew in the wind (examples/shot_curtain.rs).
 pub fn join_heavy_bodies(
     mut job: ResMut<FrameJob>,
     mut bodies: Query<&mut SoftBodySim>,
@@ -1563,7 +1565,7 @@ pub fn join_heavy_bodies(
         return;
     }
     let waited = Instant::now();
-    let held = std::mem::take(&mut job.held).min(MAX_CATCH_UP);
+    job.held = 0;
     job.in_flight.clear();
     let Some(done) = job.job.take() else {
         return;
@@ -1585,15 +1587,9 @@ pub fn join_heavy_bodies(
         job.solved += 1;
         let b = &mut *b;
         b.sim = f.sim;
-        // The steps it ran past go into its next one, as a far body's skipped steps do.
-        b.lod_debt += held as f32 * f.prep.dt;
         finish(b, f.prep, solved, &colliders, &env);
     }
 }
-
-/// Fixed steps a heavy body makes up for when its solve ran past them: its next step is at
-/// most this many longer (more would loosen it).
-const MAX_CATCH_UP: u32 = 3;
 
 /// Step `bodies`, longest first, each its own task (the pool takes them in order), so the
 /// costly bodies start at once and the cheap ones fill in around them: the step takes about
