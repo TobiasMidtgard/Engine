@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The great swamp of the south-west, where Vantress floats on the delta, the Salt Spur runs on ferries and causeways, and the flood of the Drowning Year left whole villages under the water.
+map: 19, 88
 status: draft
 tags: Region, South-west, Swamp, Coast
 Type: Swamp and delta

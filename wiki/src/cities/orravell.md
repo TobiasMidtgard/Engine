@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The One-Tree City: a beautiful city in one colossal tree, paid for by war, plunder and mercenary work.
+image: cities/orravell.jpg
+caption: The Garden Crown: orchards and officers' estates high in Avarren
+map: 31.9, 24.4
 status: draft
 Also called: The One-Tree City
 Type: City
@@ -86,6 +89,11 @@ mixed people, and their records are incomplete.
 
 ## Layout and districts
 
+```gallery
+wide: yes
+cities/orravell-cutaway.jpg | Orravell from root to crown: the six levels of Avarren and the water its roots pump up
+```
+
 | Level | In peace | In war |
 |---|---|---|
 | The Rootcourt | The main entrance, guesthouses, the public market and the Prize Exchange | A walled basin ringed by firing positions |
@@ -97,6 +105,15 @@ mixed people, and their records are incomplete.
 
 Avarren's roots draw and filter groundwater and pump it through hidden pipes, so ordinary taps
 supply homes, kitchens and workshops throughout the tree.
+
+```gallery
+cities/orravell-rootcourt.jpg | The Prize Exchange in the Rootcourt, where war plunder is sold
+cities/orravell-lower-hearth.jpg | The arsenal in the Lower Hearth, inside the trunk
+cities/orravell-great-boughs.jpg | Soldiers coming home to their families on the Great Boughs
+cities/orravell-heartwood.jpg | The council chamber in the Heartwood
+cities/orravell-hushwing-station.jpg | Hushwing Station in the Sunward Canopy, where the gliders launch
+cities/orravell.jpg | The Garden Crown: orchards and officers' estates
+```
 
 ## Economy
 

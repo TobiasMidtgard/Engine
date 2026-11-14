@@ -69,14 +69,15 @@ Quell is an **Ascendant of Keeping**. She doesn't fight like a warrior: she **lo
 doors, your abilities one at a time, your companions behind walls that weren't there a moment ago,
 and, if she holds Keth Veyra's door, time itself. Every seal the Mint strikes above heals her.
 
-| | The Great Restriking |
-|---|---|
-| **Level** | 100 |
-| **Health** | 8,000, and every seal struck above restores 40 |
-| **Poise** | Can't be staggered while she holds a lock |
-| **Locks** | Doors, then your strongest ability, then a companion, then time, then your name |
-| **Weak to** | Trespass, the Unwritten and Severance (see [A Law of Your Own](../quests/main/a-law-of-your-own.md)); a broken die above; the Register's stand |
-| **Drops** | Her Glass Seal; whatever is left of the Sixth Register; the **Keeper's Pen** |
+```stats
+title: In the Great Restriking
+Level | 100
+Health | 8,000, and every seal struck above restores 40
+Poise | Can't be staggered while she holds a lock
+Locks | Doors, then your strongest ability, then a companion, then time, then your name
+Weak to | Trespass, the Unwritten and Severance (see [A Law of Your Own](../quests/main/a-law-of-your-own.md)); a broken die above; the Register's stand
+Drops | Her Glass Seal; whatever is left of the Sixth Register; the **Keeper's Pen**
+```
 
 ## What she says
 

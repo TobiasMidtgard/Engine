@@ -27,8 +27,11 @@ fix the pages, and delete the question.
 
 ## Maps
 
-- **Keth Veyra**: the world map draws a ring of walls in the snowy northern mountains, but the
-  final city is a dam across a monsoon river. Where is the dam?
+- **The drawn world map** on [World and map](../world/index.md#map) is the v3 colour atlas from
+  the map chat, which draws Keth Veyra as its dam and reservoir in the northern mountains. The
+  city pins sit on its drawn cities; the region names and the dungeon diamonds on top of it were
+  placed by the wiki from the region and dungeon pages, and are new. Each one is the `map:` row of
+  its page's infobox, so a misplaced one is a one-line fix.
 - **Sky City**: its first design chained the island between mountain peaks, but the world map
   floats it beside the Gilded Ascent in the middle of the continent. The wiki now brings the Golden
   chain down at the Anchorage, on the Gilded Ascent's eastern edge, and leaves the other two chains'

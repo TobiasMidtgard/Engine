@@ -2,6 +2,8 @@
 
 ```infobox
 summary: Homes and workshops by day, the casino, the theatre and the night market after dark.
+image: cities/vantress-lantern-ward.jpg
+caption: The floating streets of the Lantern Ward
 status: draft
 City: [Vantress](../index.md)
 Position: West

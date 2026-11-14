@@ -13,6 +13,8 @@ enemies, its boss with full numbers, its treasure and its secrets (hidden behind
 
 ## Every dungeon
 
+{{levels: Every dungeon by level, from the Burnt Mill to the Counting Deep}}
+
 | Dungeon | Where | Levels | Danger | Boss |
 |---|---|---|---|---|
 | [The Burnt Mill](the-burnt-mill.md) | The Bell Foothills | 3 to 6 | 2/5 | Old Sorrel |

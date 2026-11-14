@@ -2,6 +2,7 @@
 
 ```infobox
 summary: A city of the old kingdoms swallowed by the Sifting Desert centuries ago. A sandstorm has uncovered the top of a tower, with a window, and a light in the window.
+map: 77, 89
 status: draft
 tags: Dungeon, Sifting Desert, Old kingdoms, Ruins
 Type: Buried city
@@ -48,14 +49,14 @@ breathing heat, and the fused streets are its tunnels. It is forty metres long. 
 sand as through water, and it comes up under you. The keepers feed it, and it lets them live. It
 doesn't know you.
 
-| | |
-|---|---|
-| **Level** | 70 |
-| **Health** | 9,000 |
-| **Poise** | Can't be staggered on sand; 400 on stone |
-| **Damage** | 100 to 160 (bite); swallows whole (break free or take 40 a second); molten glass spit |
-| **Weak to** | Frost (it cracks); fighting on stone, where it can't dive; the keepers' bells, which call it to feed |
-| **Drops** | **Glass-worm heart**: a lump of perfect basin glass, worth a house, capacity 12 |
+```stats
+Level | 70
+Health | 9,000
+Poise | Can't be staggered on sand; 400 on stone
+Damage | 100 to 160 (bite); swallows whole (break free or take 40 a second); molten glass spit
+Weak to | Frost (it cracks); fighting on stone, where it can't dive; the keepers' bells, which call it to feed
+Drops | **Glass-worm heart**: a lump of perfect basin glass, worth a house, capacity 12
+```
 
 ## Treasure
 

@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The underground breadbasket: a federation of glowing tunnel farms that feeds half the world.
+image: cities/rillvault.jpg
+caption: The Great Glowgroves, Rillvault's main mushroom forests
+map: 18.9, 53.2
 status: draft
 Also called: The Underground Breadbasket
 Type: City
@@ -26,6 +29,11 @@ distances without it spoiling, which lets it supply armies, cities and regions s
 
 ## Layout and districts
 
+```gallery
+wide: yes
+cities/rillvault-map.jpg | The fourteen tunnel districts of Rillvault, numbered as in the table below
+```
+
 | # | Tunnel district |
 |---|---|
 | 1 | Outer Trade Gate, where caravans are inspected |
@@ -42,6 +50,11 @@ distances without it spoiling, which lets it supply armies, cities and regions s
 | 12 | Lantern Gardens, baths and the performance grotto |
 | 13 | Export canal, packing halls and freight depot |
 | 14 | The archive of seeds, fungal strains and farming knowledge |
+
+```gallery
+cities/rillvault-trade-gate.jpg | The Outer Trade Gate, where caravans are inspected before they go below
+cities/rillvault.jpg | The Great Glowgroves, lit by the mushrooms themselves
+```
 
 ## Law and government
 

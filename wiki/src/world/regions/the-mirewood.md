@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The marsh woodlands of the west, wrapped around Oruvai: braided rivers, giant reeds, lantern-lit fens and a flower belt that will make you leave if you're not wanted.
+map: 14, 40
 status: draft
 tags: Region, West, Marsh, Forest
 Type: Marsh woodland

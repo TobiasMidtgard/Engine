@@ -2,6 +2,7 @@
 
 ```infobox
 summary: A ruined Chartered Road fort on the Black Track, from the days when the Road tried to police the steppe. The Wind's Teeth raiders hold it now, and they have started leaving caravan drivers alive.
+map: 31, 79
 status: draft
 tags: Dungeon, Black Steppe, Raiders, Fort
 Type: Ruined fort, raider stronghold
@@ -46,14 +47,14 @@ and fights with a great axe, from the saddle if he can. He would rather talk. He
 agent of the Fifth Reserve, to keep the Black Track open for one cargo in the Five Quiet Days, and he
 doesn't like the cargo.
 
-| | |
-|---|---|
-| **Level** | 40 |
-| **Health** | 1,200 |
-| **Poise** | 220 (mounted) |
-| **Damage** | 45 to 70 (great axe); a mounted charge |
-| **Weak to** | Unhorsing (spears, Hamstring, snares); his pride (beat him in a duel and the band follows you) |
-| **Drops** | His great axe, the **Toll-Taker** (see [Relics](../../items/relics.md#weapons-with-names)), the Fifth Reserve's letter, his horse (if you're kind to it) |
+```stats
+Level | 40
+Health | 1,200
+Poise | 220 (mounted)
+Damage | 45 to 70 (great axe); a mounted charge
+Weak to | Unhorsing (spears, Hamstring, snares); his pride (beat him in a duel and the band follows you)
+Drops | His great axe, the **Toll-Taker** (see [Relics](../../items/relics.md#weapons-with-names)), the Fifth Reserve's letter, his horse (if you're kind to it)
+```
 
 ## Treasure
 

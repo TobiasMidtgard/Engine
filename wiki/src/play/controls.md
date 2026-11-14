@@ -4,7 +4,7 @@
 summary: Every key in one place: on foot, in a car, in a plane and in a spaceship.
 ```
 
-{{draft: Keys from the current test builds; they will change as the game grows.}}
+{{draft}}
 
 ## On foot
 
@@ -14,7 +14,7 @@ summary: Every key in one place: on foot, in a car, in a plane and in a spaceshi
 | Mouse | Look |
 | Space | Jump |
 | E | Use, talk, get in a vehicle |
-| P | In test builds: switch between the free camera and your character |
+| P | Switch between the free camera and your character |
 
 ## Car
 

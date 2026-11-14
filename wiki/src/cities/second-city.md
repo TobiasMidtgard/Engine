@@ -2,6 +2,9 @@
 
 ```infobox
 summary: A respectable city by day, and above its streets a second city of vampires, werebeasts and licensed murder across the rooftops.
+image: cities/second-city.jpg
+caption: The Second City at night: the lawful streets below, the Eaves on the rooftops above
+map: 14.0, 14.6
 status: draft
 tags: Vampires, Assassins, Night
 Type: City

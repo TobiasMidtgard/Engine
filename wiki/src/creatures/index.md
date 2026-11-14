@@ -26,6 +26,13 @@ after a hundred levels; the levels say when.
 | **People** | [Human enemies](human-enemies.md): bandits, wardens, soldiers, assassins, cultists and machines |
 | **Bosses** | [Every boss](bosses.md), with levels and what beats them |
 
+## By level
+
+The bar runs from the weakest to the strongest of each kind you can meet. Long bars are creatures
+that grow: young and old, tame and wild, or a whole family under one name.
+
+{{levels: Every creature by level}}
+
 ## Numbers
 
 Every creature page has a **Stats** table: level, health, poise, damage and the experience it is

@@ -20,6 +20,13 @@ What it adds to Markdown (src/editing/how-to-add-a-page.md explains it for edito
     ```spoiler            text hidden behind a "Show" cover (also: a `> [!WARNING]` that starts
                           with "Spoilers" hides the rest of its section)
     ```hero ```columns    the home page's big title and link columns
+    ```levels ```bars     charts: level ranges on the 1-100 scale, and horizontal bars
+    ```stats ```tiers     number tiles for a boss, and a staircase of ranks or stages
+    ```timeline           events down a line, oldest first
+    {{levels}}            this section's pages on the level scale, from their Level rows
+    ```gallery            pictures side by side with captions (`picture | caption` lines)
+    `map: x, y`           (infobox) a pin on the world map and a small map in the panel
+    {{worldmap}}          the world map with every page that has `map:`
 
 Every page is framed for theme/index.hbs: its title, summary and chips become the title block,
 the infobox becomes the panel beside the text, and theme/codex.js adds tabs and the side panel.
@@ -30,17 +37,18 @@ in alphabetical order. A folder with an index.md inside a section becomes a sub-
 
 import html
 import json
+import math
 import os
 import posixpath
 import re
 import subprocess
 import sys
 
-RESERVED = {"title", "image", "caption", "summary", "status", "tags", "tabs", "facts"}
+RESERVED = {"title", "image", "caption", "summary", "status", "tags", "tabs", "facts", "map"}
 STATUSES = {
     "draft": (
         "Draft",
-        "Written from early design notes. Names and details may still change.",
+        "Names and details on this page may still change.",
     ),
     "stub": (
         "Stub",
@@ -284,6 +292,7 @@ def page_info(chapter):
         "tags": [],
         "notabs": False,
         "fields": {},
+        "map": None,
         "parents": chapter.get("parent_names", []),
         "children": [
             c["Chapter"]["source_path"]
@@ -301,6 +310,8 @@ def page_info(chapter):
                         info[key] = meta[key]
                 if meta.get("image"):
                     info["image"] = image_path(meta["image"], path)
+                if meta.get("map") and not info["map"]:
+                    info["map"] = map_point(meta["map"])
                 if meta.get("summary"):
                     info["summary_explicit"] = True
                 if meta.get("tags") and not info["tags"]:
@@ -452,7 +463,11 @@ def facts(lines, chapter):
         else:
             value = pips(row[2]) or inline(row[2], page) or '<span class="wiki-muted">Unknown</span>'
             out.append("<tr><th>%s</th><td>%s</td></tr>" % (inline(row[1], page), value))
-    out.append("</tbody></table></aside>")
+    out.append("</tbody></table>")
+    point = map_point(meta.get("map", ""))
+    if point:
+        out.append(locator(point, page))
+    out.append("</aside>")
     return "".join(out)
 
 
@@ -661,6 +676,400 @@ def flow(lines, page):
     return "".join(out)
 
 
+# ---------------------------------------------------------------------------------------------
+# Charts: ```levels ```bars ```stats ```tiers ```timeline (plain HTML; theme/wiki.css draws them)
+
+LEVEL_BANDS = (("Human", 1, 60), ("Awakened", 61, 80), ("Ascendant", 81, 100))
+CHART_OPTIONS = ("title", "max", "unit", "note", "scale", "show")
+
+
+def chart_rows(lines):
+    """A chart block's lines -> (options, rows). `title:`, `max:`, `unit:` and `note:` lines are
+    options, `## Heading` starts a group and every other line is a row of `|`-separated cells."""
+    opts, rows = {}, []
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("<!--"):
+            continue
+        if s.startswith("#"):
+            rows.append(("group", [p.strip() for p in s.lstrip("#").strip().split("|")]))
+            continue
+        key, sep, value = s.partition(":")
+        if sep and "|" not in s and key.strip().lower() in CHART_OPTIONS:
+            opts[key.strip().lower()] = value.strip()
+            continue
+        rows.append(("row", [p.strip() for p in s.split("|")]))
+    return opts, rows
+
+
+def number(text):
+    m = re.match(r"^\s*[^\d-]{0,2}(-?\d[\d,]*(?:\.\d+)?)", text or "")
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def level_range(text):
+    """`1-10`, `1 to 10`, `55`, `61+` -> (low, high, open-ended) or None."""
+    t = (text or "").replace("–", "-").replace("—", "-").strip()
+    m = re.match(r"^(\d+)\s*(?:-|to)\s*(\d+)$", t)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        return min(a, b), max(a, b), False
+    m = re.match(r"^(\d+)\s*\+$", t)
+    if m:
+        return int(m.group(1)), 100, True
+    m = re.match(r"^(\d+)$", t)
+    if m:
+        return int(m.group(1)), int(m.group(1)), False
+    return None
+
+
+def level_span(lo, hi):
+    """Each level is one slot 1% wide: level 1 fills 0 to 1%, level 100 fills 99 to 100%."""
+    return max(0.0, lo - 1.0), min(100.0, float(hi))
+
+
+def chart_title(opts, page):
+    out = ""
+    if opts.get("title"):
+        out += '<figcaption class="cx-chart-title">%s</figcaption>' % inline(opts["title"], page)
+    return out
+
+
+def chart_note(opts, page):
+    return '<p class="cx-chart-note">%s</p>' % inline(opts["note"], page) if opts.get("note") else ""
+
+
+def levels_chart(lines, page):
+    """```levels: `Name | 1-10 | note` rows on the 1 to 100 level scale, over the Human, Awakened
+    and Ascendant bands. A single level draws a dot, `61+` a bar that runs off the end."""
+    opts, rows = chart_rows(lines)
+    out = ['<figure class="cx-chart cx-levels" style="--h:60%;--w:80%">', chart_title(opts, page)]
+    out.append('<div class="cx-lv-row cx-lv-bands" aria-hidden="true"><span></span><span class="cx-lv-track">')
+    for name, lo, hi in LEVEL_BANDS:
+        out.append(
+            '<span class="cx-lv-band" style="--a:%.2f%%;--b:%.2f%%">%s <small>%d–%d</small></span>'
+            % (level_span(lo, hi) + (name, lo, hi))
+        )
+    out.append("</span></div>")
+    for kind, cells in rows:
+        if kind == "group":
+            out.append('<div class="cx-lv-group">%s</div>' % inline(cells[0], page))
+            continue
+        label = inline(cells[0], page)
+        value = cells[1] if len(cells) > 1 else ""
+        note = cells[2] if len(cells) > 2 else ""
+        rng = level_range(value)
+        tip = "%s: %s" % (plain(cells[0]), ("level " if rng and rng[0] == rng[1] else "levels ") + value if value else "")
+        out.append('<div class="cx-lv-row" title="%s">' % esc(tip))
+        out.append(
+            '<span class="cx-lv-label">%s%s</span>'
+            % (label, '<small class="cx-lv-note">%s</small>' % inline(note, page) if note else "")
+        )
+        out.append('<span class="cx-lv-track">')
+        if rng:
+            lo, hi, open_end = rng
+            a, b = level_span(lo, hi)
+            shape = "cx-lv-dot" if lo == hi else "cx-lv-bar" + (" open" if open_end else "")
+            text = esc(value.replace("-", "–").replace(" to ", "–"))
+            side = "before" if b > 68 and a > 12 else "after"
+            out.append('<span class="%s" style="--a:%.2f%%;--b:%.2f%%"></span>' % (shape, a, b))
+            out.append('<span class="cx-lv-val %s" style="--a:%.2f%%;--b:%.2f%%">%s</span>' % (side, a, b, text))
+        else:
+            out.append('<span class="cx-lv-val cx-lv-none">%s</span>' % (inline(value, page) or "Any level"))
+        out.append("</span></div>")
+    out.append('<div class="cx-lv-row cx-lv-axis" aria-hidden="true"><span></span><span class="cx-lv-track">')
+    for tick in (1, 20, 40, 60, 80, 100):
+        out.append('<span style="--a:%d%%">%d</span>' % (0 if tick == 1 else tick, tick))
+    out.append("</span></div>")
+    out.append(
+        '<div class="cx-lv-key" aria-hidden="true">%s</div>'
+        % "".join("<span><i></i>%s %d\u2013%d</span>" % band for band in LEVEL_BANDS)
+    )
+    out.append(chart_note(opts, page))
+    out.append("</figure>")
+    return "".join(out)
+
+
+def section_levels(arg, info, pages, page):
+    """{{levels}}: this section's pages on the level scale, from their infobox Level (or Levels)
+    field, lowest first. `{{levels: Title}}` gives the chart a title."""
+    rows = []
+    for path in info["children"]:
+        child = pages.get(path)
+        if not child or child["fields"].get("type", "").lower() == "list":
+            continue
+        raw = child["fields"].get("level") or child["fields"].get("levels") or ""
+        m = re.search(r"(\d+)(?:\s*(?:to|-|\u2013)\s*(\d+))?", raw)
+        if not m:
+            continue
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        label = "[%s](%s)" % (plain(child["title"]), rel(path, page))
+        rows.append((lo, hi, "%s | %s | %s" % (label, "%d-%d" % (lo, hi) if hi != lo else str(lo), child["fields"].get("type", ""))))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    lines = (["title: " + arg] if arg else []) + [r[2] for r in rows]
+    return levels_chart(lines, page) if rows else ""
+
+
+def bars_chart(lines, page):
+    """```bars: `Name | 45 | note` rows as horizontal bars from one baseline, the value at the
+    tip. `max:` fixes the scale (default: the largest value), `unit:` follows each value."""
+    opts, rows = chart_rows(lines)
+    values = [number(c[1]) for k, c in rows if k == "row" and len(c) > 1]
+    values = [v for v in values if v is not None]
+    top = number(opts.get("max", "")) or (max(values) if values else 1) or 1
+    unit = opts.get("unit", "")
+    log = opts.get("scale", "").lower() == "log"
+    show_note = opts.get("show", "").lower() == "note"
+    out = ['<figure class="cx-chart cx-bars%s">' % (" cx-bars-log" if log else ""), chart_title(opts, page)]
+    for kind, cells in rows:
+        if kind == "group":
+            out.append('<div class="cx-bar-group">%s</div>' % inline(cells[0], page))
+            continue
+        value = cells[1] if len(cells) > 1 else ""
+        note = cells[2] if len(cells) > 2 else ""
+        v = number(value)
+        shown = esc(value) + ((" " + esc(unit)) if unit and v is not None else "")
+        if show_note and note:
+            # `show: note`: the bar is drawn from the number, the third cell is what it says.
+            shown, value, note = inline(note, page), plain(note), ""
+        out.append('<div class="cx-bar-row" title="%s">' % esc("%s: %s" % (plain(cells[0]), plain(value + (" " + unit if unit else "")))))
+        out.append(
+            '<span class="cx-bar-label">%s%s</span>'
+            % (inline(cells[0], page), '<small class="cx-bar-note">%s</small>' % inline(note, page) if note else "")
+        )
+        if v is None:
+            out.append('<span class="cx-bar-track"><span class="cx-bar-val cx-bar-text">%s</span></span></div>' % inline(value, page))
+            continue
+        if log:
+            # A log scale from a tenth of one unit: every tenfold step is the same length.
+            pct = max(0.6, min(100.0, (math.log10(max(v, 0.1)) + 1) / (math.log10(top) + 1) * 100.0))
+        else:
+            pct = max(0.6, min(100.0, v / top * 100.0))
+        inside = " in" if pct > 82 else ""
+        out.append(
+            '<span class="cx-bar-track"><span class="cx-bar" style="--v:%.2f%%"></span>'
+            '<span class="cx-bar-val%s" style="--v:%.2f%%">%s</span></span></div>' % (pct, inside, pct, shown)
+        )
+    out.append(chart_note(opts, page))
+    out.append("</figure>")
+    return "".join(out)
+
+
+STAT_NUMBER = re.compile(r"^((?:\d[\d,.]*)(?:\s*(?:to|-|\u2013)\s*\d[\d,.]*)?\+?(?:\s*(?:%|kg|m|s))?)(?:\s*[,;(]\s*(.*?)\)?)?$")
+
+
+def stats_tiles(lines, page):
+    """```stats: `Label | value | note` rows. Short values and numbers become big tiles (a number
+    followed by a remark keeps the remark as a note); long values are listed under the tiles."""
+    opts, rows = chart_rows(lines)
+    tiles, wide = [], []
+    for kind, cells in rows:
+        if kind != "row" or len(cells) < 2:
+            continue
+        label, raw = cells[0], cells[1]
+        note = cells[2] if len(cells) > 2 else ""
+        m = STAT_NUMBER.match(raw)
+        if pips(raw):
+            tiles.append((label, pips(raw), note, ""))
+        elif m and len(m.group(2) or "") + len(note) <= 44:
+            tiles.append((label, inline(m.group(1), page), note or (m.group(2) or ""), ""))
+        elif len(plain(raw)) <= 16:
+            tiles.append((label, inline(raw, page), note, " word"))
+        else:
+            wide.append((label, raw))
+    out = ['<div class="cx-statblock">', chart_title(opts, page).replace("figcaption", "div")]
+    if tiles:
+        out.append('<div class="cx-stats">')
+        for label, value, note, cls in tiles:
+            out.append(
+                '<div class="cx-stat"><span class="cx-stat-label">%s</span><span class="cx-stat-value%s">%s</span>%s</div>'
+                % (inline(label, page), cls, value, '<span class="cx-stat-note">%s</span>' % inline(note, page) if note else "")
+            )
+        out.append("</div>")
+    if wide:
+        out.append('<dl class="cx-stat-rows">')
+        for label, raw in wide:
+            out.append("<div><dt>%s</dt><dd>%s</dd></div>" % (inline(label, page), inline(raw, page)))
+        out.append("</dl>")
+    out.append("</div>")
+    return "".join(out)
+
+
+def tiers_chart(lines, page):
+    """```tiers: `Name | what it means | small label` rows as a staircase, lowest first."""
+    opts, rows = chart_rows(lines)
+    tiers = [c for k, c in rows if k == "row"]
+    n = max(1, len(tiers))
+    out = ['<figure class="cx-chart cx-tiers-fig">', chart_title(opts, page), '<div class="cx-tiers" style="--n:%d">' % n]
+    for i, cells in enumerate(tiers):
+        tone = 0.28 + 0.72 * (i / (n - 1) if n > 1 else 1)
+        out.append(
+            '<div class="cx-tier" style="--i:%d;--t:%.2f;--w:%.0f%%">'
+            '<div class="cx-tier-head">%s<span class="cx-tier-name">%s</span></div>'
+            '<div class="cx-tier-step" aria-hidden="true"></div>'
+            '<div class="cx-tier-text">%s</div></div>'
+            % (
+                i,
+                tone,
+                30 + 70 * (i / (n - 1) if n > 1 else 1),
+                '<span class="cx-tier-sub">%s</span>' % inline(cells[2], page) if len(cells) > 2 and cells[2] else "",
+                inline(cells[0], page),
+                inline(cells[1], page) if len(cells) > 1 else "",
+            )
+        )
+    out.append("</div>" + chart_note(opts, page) + "</figure>")
+    return "".join(out)
+
+
+def timeline(lines, page):
+    """```timeline: `## Age | when` headings and `When | what happened` events, oldest first."""
+    opts, rows = chart_rows(lines)
+    out = ['<figure class="cx-chart cx-tl-fig">', chart_title(opts, page), '<ol class="cx-tl">']
+    for kind, cells in rows:
+        if kind == "group":
+            out.append(
+                '<li class="cx-tl-era"><span class="cx-tl-era-name">%s</span>%s</li>'
+                % (inline(cells[0], page), '<span class="cx-tl-era-when">%s</span>' % inline(cells[1], page) if len(cells) > 1 else "")
+            )
+            continue
+        when, text = (cells[0], " | ".join(cells[1:])) if len(cells) > 1 else ("", cells[0])
+        out.append(
+            '<li class="cx-tl-ev"><span class="cx-tl-when">%s</span><span class="cx-tl-dot" aria-hidden="true"></span>'
+            '<div class="cx-tl-text">%s</div></li>' % (inline(when, page), inline(text, page))
+        )
+    out.append("</ol>" + chart_note(opts, page) + "</figure>")
+    return "".join(out)
+
+
+# ---------------------------------------------------------------------------------------------
+# Pictures and the world map
+
+WORLD_MAP = "images/world/world-map.jpg"
+WORLD_MAP_RATIO = 1536 / 1024
+WORLD_PAGE = "world/index.md"
+MAP_KINDS = (("cities/", "city"), ("world/regions/", "region"), ("world/dungeons/", "dungeon"), ("world/landmarks/", "landmark"))
+
+
+def map_point(text):
+    """`map: 48.5, 46` in an infobox: where the place is on the world map, in percent from the
+    map's left and top edges."""
+    m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$", text or "")
+    if not m:
+        return None
+    x, y = float(m.group(1)), float(m.group(2))
+    return (x, y) if 0 <= x <= 100 and 0 <= y <= 100 else None
+
+
+def map_kind(path):
+    for prefix, kind in MAP_KINDS:
+        if path.startswith(prefix):
+            return kind
+    return "place"
+
+
+def locator(point, page, zoom=2.4, window=0.62):
+    """The small map in the "At a glance" panel: the world map, zoomed in on this place, with a pin.
+    `window` is the panel's height as a share of its width."""
+    x, y = point
+    map_h = zoom / WORLD_MAP_RATIO  # the zoomed map's height, in panel widths
+    off_x = min(max(zoom * x - 50.0, 0.0), (zoom - 1) * 100.0)  # percent of the panel width
+    pin_y = map_h * y / 100.0
+    off_y = min(max(pin_y - window / 2, 0.0), map_h - window)  # panel widths
+    style = "width:%.1f%%;left:%.2f%%;top:%.2f%%" % (zoom * 100, -off_x, -off_y / window * 100)
+    pin = "left:%.2f%%;top:%.2f%%" % (zoom * x - off_x, (pin_y - off_y) / window * 100)
+    return (
+        '<a class="cx-locator" href="%s" style="--win:%.0f%%" title="Open the world map">'
+        '<img src="%s" alt="" loading="lazy" style="%s"><span class="cx-locator-pin" style="%s"></span>'
+        '<span class="cx-locator-label">World map</span></a>'
+        % (esc(rel(html_path(WORLD_PAGE), page) + "#map"), window * 100, esc(rel(WORLD_MAP, page)), style, pin)
+    )
+
+
+def world_map(pages, page):
+    """{{worldmap}}: the drawn map with a marker for every page that has `map:` in its infobox.
+    Cities are pins, regions are names, dungeons are small diamonds; each opens its page."""
+    marks = {"city": [], "region": [], "dungeon": [], "landmark": []}
+    for path, info in pages.items():
+        if info.get("map"):
+            marks.setdefault(map_kind(path), []).append((path, info))
+    out = [
+        '<div class="cx-worldmap" id="map">',
+        '<div class="cx-map-layers" role="group" aria-label="Show on the map">',
+    ]
+    labels = (("city", "Cities"), ("region", "Regions"), ("dungeon", "Dungeons"))
+    for kind, label in labels:
+        if marks.get(kind):
+            out.append(
+                '<label class="cx-map-layer cx-map-layer-%s"><input type="checkbox" checked data-layer="%s">'
+                '<span class="cx-map-key" aria-hidden="true"></span>%s <small>%d</small></label>'
+                % (kind, kind, label, len(marks[kind]))
+            )
+    out.append("</div>")
+    out.append('<div class="cx-map-scroll"><figure class="cx-map">')
+    out.append('<img class="cx-map-img" src="%s" alt="The drawn map of the great continent">' % esc(rel(WORLD_MAP, page)))
+    order = ("region", "dungeon", "landmark", "city")
+    for kind in order:
+        for path, info in sorted(marks.get(kind, []), key=lambda pi: pi[1]["map"][1]):
+            x, y = info["map"]
+            fields = info["fields"]
+            facts_line = []
+            for key in ("levels", "region"):
+                if fields.get(key) and not (kind == "region" and key == "region"):
+                    facts_line.append(plain(fields[key]) if key == "region" else "Levels " + plain(fields[key]))
+            tip = '<span class="cx-map-tip"><b>%s</b>%s%s</span>' % (
+                esc(plain(info["title"])),
+                "<em>%s</em>" % esc(" · ".join(facts_line)) if facts_line else "",
+                "<span>%s</span>" % esc(shorten(plain(info["summary"] or ""), 120)) if info["summary"] else "",
+            )
+            side = " cx-tip-left" if x > 70 else (" cx-tip-right" if x < 30 else "")
+            below = " cx-tip-below" if y < 22 else ""
+            name = '<span class="cx-map-name">%s</span>' % esc(re.sub(r"^The\s+", "", plain(info["title"]))) if kind == "region" else ""
+            out.append(
+                '<a class="cx-mark cx-mark-%s%s%s" data-layer="%s" href="%s" style="left:%.2f%%;top:%.2f%%">%s'
+                '<span class="cx-mark-dot" aria-hidden="true"></span>%s</a>'
+                % (kind, side, below, kind, esc(rel(html_path(path), page)), x, y, name, tip)
+            )
+    out.append("</figure></div></div>")
+    return "".join(out)
+
+
+def zoomable(src, alt):
+    """A picture that opens full size when clicked (the same markup mdBook gives Markdown pictures)."""
+    return (
+        '<label class="checkbox-label"><input class="checkbox-img" type="checkbox">'
+        '<img src="%s" alt="%s" loading="lazy"><span class="img-wrapper"><img src="%s" alt="%s" loading="lazy"></span></label>'
+        % (esc(src), esc(alt), esc(src), esc(alt))
+    )
+
+
+def gallery(lines, page):
+    """```gallery: `picture | caption` lines (paths from src/images/, like the infobox), and an
+    optional `wide: yes` to give each picture the full width (maps)."""
+    opts, items = {}, []
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        key, sep, value = s.partition(":")
+        if sep and "|" not in s and key.strip().lower() in ("wide", "title"):
+            opts[key.strip().lower()] = value.strip()
+            continue
+        src, _, caption = s.partition("|")
+        items.append((image_path(src.strip(), page), caption.strip()))
+    wide = opts.get("wide", "").lower() in ("yes", "true", "1") or len(items) == 1
+    cols = 2 if len(items) in (2, 4) else 3
+    out = ['<div class="cx-gallery%s" style="--n:%d">' % (" cx-gallery-wide" if wide else "", cols)]
+    if opts.get("title"):
+        out.append('<div class="cx-chart-title">%s</div>' % inline(opts["title"], page))
+    for img, caption in items:
+        out.append(
+            '<figure class="cx-shot">%s%s</figure>'
+            % (zoomable(image_src(img, page), plain(caption)), "<figcaption>%s</figcaption>" % inline(caption, page) if caption else "")
+        )
+    out.append("</div>")
+    return "".join(out)
+
+
 def nice_date(iso):
     try:
         y, m, d = (int(x) for x in iso.split("-"))
@@ -740,6 +1149,9 @@ def spoiler_note(text):
     return note or "Spoilers"
 
 
+CHARTS = {"levels": levels_chart, "bars": bars_chart, "stats": stats_tiles, "tiers": tiers_chart, "timeline": timeline}
+
+
 def transform(chapter, pages, history):
     page = chapter["source_path"]
     info = pages[page]
@@ -794,6 +1206,12 @@ def transform(chapter, pages, history):
             if kind == "flow":
                 out.extend(["", flow(body, page), ""])
                 continue
+            if kind in CHARTS:
+                out.extend(["", CHARTS[kind](body, page), ""])
+                continue
+            if kind == "gallery":
+                out.extend(["", gallery(body, page), ""])
+                continue
             if kind == "spoiler":
                 lines = list(body)
                 note = "Spoilers"
@@ -844,6 +1262,12 @@ def transform(chapter, pages, history):
             if name == "table":
                 cols = [c.strip() for c in (arg or "").split(",") if c.strip()]
                 out.extend(["", table(cols, info, pages, page), ""])
+                continue
+            if name == "levels":
+                out.extend(["", section_levels(arg, info, pages, page), ""])
+                continue
+            if name == "worldmap":
+                out.extend(["", world_map(pages, page), ""])
                 continue
             if name == "review":
                 out.extend(["", review_list(pages, page), ""])
@@ -915,6 +1339,8 @@ def check():
                         img = image_path(meta.get("image", ""), page)
                         if img and not is_external(img) and not os.path.isfile(os.path.join(src, img)):
                             warn(page, n + 1, "infobox image not found: src/%s" % img)
+                        if meta.get("map") and not map_point(meta["map"]):
+                            warn(page, n + 1, "map: %r is not two numbers from 0 to 100" % meta["map"])
                         if meta.get("status") and meta["status"].lower() not in STATUSES:
                             warn(page, n + 1, "unknown status %r (use draft or stub)" % meta["status"])
                     if block[1] in ("cards", "list"):
@@ -934,7 +1360,15 @@ def check():
                                 target = resolve(value.partition("|")[2].strip(), page)
                                 if target and not os.path.exists(os.path.join(src, target)):
                                     warn(page, n + 1, "hero button: no page at src/%s" % target)
-                    if block[1] in ("columns", "flow"):
+                    if block[1] == "gallery":
+                        for l in block[2]:
+                            p = l.strip()
+                            if not p or p.startswith("#") or ("|" not in p and ":" in p):
+                                continue
+                            img = image_path(p.partition("|")[0].strip(), page)
+                            if not os.path.isfile(os.path.join(src, img)):
+                                warn(page, n + 1, "gallery picture not found: src/%s" % img)
+                    if block[1] in ("columns", "flow") or block[1] in CHARTS:
                         for l in block[2]:
                             for m in LINK.finditer(l):
                                 target = resolve(m.group(2), page)

@@ -2,6 +2,8 @@
 
 ```infobox
 summary: The great pack beasts of Keth Veyra: slow, patient, enormously strong, and the only animals that can carry a house's worth of cargo up a mountain pass.
+image: creatures/bargeback.jpg
+caption: A bargeback towing cargo in the reservoir's work harbour
 status: draft
 tags: Creature, Animal, Keth Veyra
 Type: Working animal

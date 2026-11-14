@@ -2,6 +2,7 @@
 
 ```infobox
 summary: A ruined watermill on the Bell Road where bandits wait for carts that stop to water their horses. Most travellers' first real fight.
+map: 43, 31
 status: draft
 tags: Dungeon, Bell Foothills, Bandits
 Type: Ruined mill, bandit camp
@@ -47,14 +48,14 @@ fights with a long boathook from behind a barricade of sacks, while her people t
 She surrenders when half her gang is down, if you let her, and tells you everything she has heard on
 the road for her life.
 
-| | |
-|---|---|
-| **Level** | 6 |
-| **Health** | 140 |
-| **Poise** | 60 |
-| **Damage** | 12 to 18 (boathook: hooks and pulls you off your feet) |
-| **Weak to** | Fire (the sacks are flour), getting past the barricade, the flooded cellar |
-| **Drops** | Sorrel's strongbox key, a boathook, 15 marks |
+```stats
+Level | 6
+Health | 140
+Poise | 60
+Damage | 12 to 18 (boathook: hooks and pulls you off your feet)
+Weak to | Fire (the sacks are flour), getting past the barricade, the flooded cellar
+Drops | Sorrel's strongbox key, a boathook, 15 marks
+```
 
 ## Treasure
 

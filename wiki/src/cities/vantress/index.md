@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The City of Borrowed Streets: a swamp city of floating rafts whose districts move with the water and whose law is for sale.
+image: cities/vantress.jpg
+caption: Vantress from above: rafts, canals and the lanterns of the Lantern Ward
+map: 15.0, 72.0
 status: draft
 Also called: The City of Borrowed Streets
 Type: City
@@ -215,4 +218,9 @@ Main quests here: [Steal the Register](../../quests/main/steal-the-register.md) 
 
 ## Gallery
 
-Pictures of Vantress and its eight districts are on their way.
+```gallery
+cities/vantress-argent-heights.jpg | [Argent Heights](argent-heights/index.md): the rich upstream quarter, where the moorings never move far
+cities/vantress-knot-square.jpg | [Knot Square](knot-square/index.md): the market under the Hall of Seals
+cities/vantress-lantern-ward.jpg | [The Lantern Ward](lantern-ward/index.md): inns, theatres and gambling halls on floating streets
+cities/vantress-ward-null.jpg | [Ward Null](ward-null.md): the hidden galleries under the decks
+```

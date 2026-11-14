@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The catacombs under the necromancers' tower of the Second City, older than the Eaves, where 212 sealed corpses lie on shelves that nobody was supposed to fill.
+map: 16.4, 12.0
 status: draft
 tags: Dungeon, Second City, Undead, Companion quest
 Type: Catacombs
@@ -47,14 +48,14 @@ order, and remade by the Broker's junior registrar to guard the new shelves. It 
 of skeletons and it keeps adding to itself from the fallen. Kill what it fights beside before you
 fight it, or it grows.
 
-| | |
-|---|---|
-| **Level** | 45 |
-| **Health** | 3,200, +200 for every corpse it absorbs |
-| **Poise** | 300 |
-| **Damage** | 50 to 80 (bone arms); throws skeletons |
-| **Weak to** | Maces and hammers; Radiance; fire on the bone; Teodor Voss can unmake part of it |
-| **Drops** | **Keeper's knucklebone**: a bone focus for Necromancy (complexity 6, dark only) |
+```stats
+Level | 45
+Health | 3,200, +200 for every corpse it absorbs
+Poise | 300
+Damage | 50 to 80 (bone arms); throws skeletons
+Weak to | Maces and hammers; Radiance; fire on the bone; Teodor Voss can unmake part of it
+Drops | **Keeper's knucklebone**: a bone focus for Necromancy (complexity 6, dark only)
+```
 
 ## Treasure
 

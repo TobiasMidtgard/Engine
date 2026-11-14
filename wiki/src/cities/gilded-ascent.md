@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The trading heart of the world: a five-tier market spire at the centre of the continent, where every road meets and every seal is a promise.
+map: 48.5, 45.9
 status: draft
 tags: Trade, Law, Heists
 Type: City
@@ -48,13 +49,14 @@ Each seal is a small disc, struck from its own material and stamped with the hol
 seal is not money and cannot be sold: it is recorded in **the Registry of Seals** against one
 name, and anyone can ask the Registry whether a seal is real.
 
-| Seal | Tier | Who carries it | What it allows |
-|---|---|---|---|
-| **Clay Seal** | The Commons | Anyone who registers at a gate, for one chit a season | Selling from a stall or a blanket; staying in the Ring |
-| **Copper Seal** | The Weighhouse | Traders with a guild or a sponsor and a clean record for a year | Trading by registered weight; hiring porters; borrowing small sums |
-| **Silver Seal** | The Bonded Halls | Wholesalers, foreign trading houses and consuls | Storing goods tax-free until sold; importing in bulk; a seat in a trade hall |
-| **Gold Seal** | The Ledger Floor | Bankers, insurers, notaries and the richest houses | Lending, insuring and witnessing contracts; entering the Registry |
-| **Glass Seal** | The Summit | About sixty holders, the Court of Seals | Setting tolls, prices and laws; entering the Lantern Table |
+```tiers
+title: The Five Seals, from the street to the summit
+Clay Seal | **Who:** anyone who registers at a gate, for one chit a season. **Allows:** selling from a stall or a blanket; staying in the Ring | The Commons
+Copper Seal | **Who:** traders with a guild or a sponsor and a clean record for a year. **Allows:** trading by registered weight; hiring porters; borrowing small sums | The Weighhouse
+Silver Seal | **Who:** wholesalers, foreign trading houses and consuls. **Allows:** storing goods tax-free until sold; importing in bulk; a seat in a trade hall | The Bonded Halls
+Gold Seal | **Who:** bankers, insurers, notaries and the richest houses. **Allows:** lending, insuring and witnessing contracts; entering the Registry | The Ledger Floor
+Glass Seal | **Who:** about sixty holders, the Court of Seals. **Allows:** setting tolls, prices and laws; entering the Lantern Table | The Summit
+```
 
 The Glass Seal is cut from a single flawless piece of uncut basin glass from the Sifting Basin,
 so clear that it bends the light of any lamp held behind it into five colours. No two are alike,

@@ -600,6 +600,10 @@
     });
     document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape' && html.classList.contains('cx-nav-open')) { setNav(false); }
+        // A picture opened full size closes on Escape too.
+        if (e.key === 'Escape') {
+            Array.prototype.forEach.call(document.querySelectorAll('input.checkbox-img:checked'), function (c) { c.checked = false; });
+        }
     });
 
     // ---- Search window --------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The machinery and ballast chambers beneath Sky City, running down into the ancient buoyancy caverns of black stone, where a well of raw Force pushes the island up and a door is nearly shut.
+map: 61.8, 38.2
 status: draft
 tags: Dungeon, Sky City, Black stone, Main story
 Type: Machinery halls and caverns
@@ -48,14 +49,14 @@ shield and a spear, and six wardens who fight in a line. She will let you leave 
 notebook. In the caverns near the well, gravity turns: fight her on the ceiling and her shield wall
 is useless.
 
-| | |
-|---|---|
-| **Level** | 22 |
-| **Health** | 520 |
-| **Poise** | 220 (shield up) |
-| **Damage** | 25 to 35 (spear thrusts from behind the shield) |
-| **Weak to** | Flanking; the reversed gravity near the well; Force magic pushes her shield aside |
-| **Drops** | A warden's tower shield, her sergeant's brass disc (opens the Wardens' doors on the Weighhouse tier) |
+```stats
+Level | 22
+Health | 520
+Poise | 220 (shield up)
+Damage | 25 to 35 (spear thrusts from behind the shield)
+Weak to | Flanking; the reversed gravity near the well; Force magic pushes her shield aside
+Drops | A warden's tower shield, her sergeant's brass disc (opens the Wardens' doors on the Weighhouse tier)
+```
 
 ## Treasure
 

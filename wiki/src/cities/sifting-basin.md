@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The City of Patient Wealth: a desert basin where small burrowing animals sift metal out of the wind-blown sand.
+image: cities/sifting-basin.jpg
+caption: The Weighmarket above the harvest bowl
+map: 86.5, 81.2
 status: draft
 Also called: The City of Patient Wealth
 Type: City
@@ -48,6 +51,11 @@ can ruin the next breeding season.
 Windcatcher walls funnel the sand into the dry sifting grounds, and the cleaned sand left over goes
 to the glassworks.
 
+```gallery
+wide: yes
+creatures/latticeback.jpg | A keeper with a latticeback colony and its honeycomb nursery in the Cradle Courts
+```
+
 ## Layout and districts
 
 | District | What is there | What really goes on |
@@ -58,6 +66,13 @@ to the glassworks.
 | Whitekiln | Glass studios, ceramic workshops, steep delivery lanes and the shared **Long Furnace** | Furnace time is shared and expensive. Apprentices work through the night; famous masters sometimes sell work secretly made by rivals in their debt. |
 | Cistern Ward | Covered reservoirs, public fountains, baths, shaded homes and **the Well Court** | The social heart of the city: bathhouse gossip, neighbourhood meals, petitions and arguments over water. |
 | Weighmarket and High Terraces | Caravan courts and warehouses below; merchants' homes, guesthouses, private gardens and pools above, with **the Exchange Steps** overlooking the basin | Visitors see fine craft and generous hosts. Workers see fortunes borrowed against harvests that haven't happened yet. |
+
+```gallery
+cities/sifting-basin-windward-steps.jpg | Windward Steps: colony plots on the dry terraces
+cities/sifting-basin-cistern-ward.jpg | Cistern Ward: the covered reservoirs and the Well Court
+cities/sifting-basin-assay-yards.jpg | Assay Yards: crushing sheds and furnaces on the downwind edge
+cities/sifting-basin-whitekiln.jpg | Whitekiln: glass studios and the steep delivery lanes
+```
 
 ## Law and government
 

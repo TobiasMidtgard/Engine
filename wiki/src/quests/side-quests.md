@@ -16,8 +16,8 @@ or a person standing in the road who needs help. Each [region](../world/regions/
 the rumours you hear on its roads, and your journal keeps the ones you have heard.
 
 A side quest has no marker until somebody tells you where to go. Most can end more than one way, and
-many touch the main story, a guild or a companion. The levels below are where a quest is meant to
-be done; you can try it sooner.
+many touch the main story, a guild or a companion. The level beside each quest is the level its fights
+and checks expect; you can try it sooner.
 
 ## The Valley
 

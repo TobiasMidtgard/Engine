@@ -8,8 +8,8 @@ summary: The books of the world: herbals and manuals that teach, histories that 
 
 People write things down. Every city has booksellers (the best in the Gilded Ascent, Tessara and
 the Second City), every guild has its manuals, and every ruin has someone's last journal in it.
-Books are found on shelves, in desks, on bodies and in the libraries of dungeons, and they are
-worth reading.
+Books are found on shelves, in desks, on bodies and in the libraries of dungeons, and reading one
+can raise a skill, reveal what an ingredient does or tell you where something was left.
 
 ## What books do
 

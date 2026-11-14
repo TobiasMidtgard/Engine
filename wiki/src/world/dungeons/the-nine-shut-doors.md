@@ -2,6 +2,7 @@
 
 ```infobox
 summary: A side-cut of Veyrhold's quarry sealed after a disaster forty years ago: nine workshop doors bricked shut with hushstone, and behind the ninth, an old man, a copper vessel and a crack in black stone.
+map: 80.2, 25.8
 status: draft
 tags: Dungeon, Veyrhold, Spill, Main story
 Type: Sealed quarry workings
@@ -48,14 +49,14 @@ in the shapes of the cutters who died, repeating the last minute of their lives,
 they touch. They can't be hurt, only contained: with hushstone, with Old Tamm's vessel, or by sealing
 the crack.
 
-| | |
-|---|---|
-| **Level** | 38 |
-| **Health** | Can't be harmed; 6 figures, each burns 30 to 50 a touch |
-| **Poise** | None |
-| **Damage** | Fire and Energy; spreads to anything flammable |
-| **Weak to** | Hushstone (each plate set around the crack removes a figure); Old Tamm's vessel; saying their names, which are in Tamm's report |
-| **Drops** | Nothing. Brannagh Fisk's crews will remember you. |
+```stats
+Level | 38
+Health | Can't be harmed; 6 figures, each burns 30 to 50 a touch
+Poise | None
+Damage | Fire and Energy; spreads to anything flammable
+Weak to | Hushstone (each plate set around the crack removes a figure); Old Tamm's vessel; saying their names, which are in Tamm's report
+Drops | Nothing. Brannagh Fisk's crews will remember you.
+```
 
 ## Treasure
 

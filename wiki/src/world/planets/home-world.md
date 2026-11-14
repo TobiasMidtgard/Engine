@@ -15,8 +15,8 @@ Radius: 6,371 km
 ```
 
 The **home world** is where every journey begins: a planet of oceans and continents, snowy
-ranges, forests, farmland and towns. In the game's current test builds it is modelled on Earth,
-at full size.
+ranges, forests, farmland and towns. It is a whole planet at full size: the ground runs unbroken
+from your valley over the oceans to the far side of the world, and straight up to orbit.
 
 ## Overview
 

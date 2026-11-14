@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The snow mountains of the north, where Keth Veyra's dam holds back a whole river, bargebacks carry houses up passes, and the ice spires stand over the frozen sea.
+map: 66, 7
 status: draft
 tags: Region, North, Mountains, Snow
 Type: High mountains

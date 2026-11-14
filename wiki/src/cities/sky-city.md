@@ -2,6 +2,9 @@
 
 ```infobox
 summary: A floating island of the rich and powerful, a garden city of estates, pools and waterfalls chained above the clouds.
+image: cities/sky-city.jpg
+caption: Sky City, the garden island above the clouds
+map: 59.8, 35.6
 status: draft
 Type: City
 Region: The centre-east, beside the Gilded Ascent

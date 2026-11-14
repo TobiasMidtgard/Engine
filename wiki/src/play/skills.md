@@ -29,15 +29,16 @@ five ranks, and every rank opens a **perk** on that skill's tree. Past 100, a sk
 - **Each hand** has its own skill with each weapon. Your off hand starts weaker and grows when you
   use it.
 
-| Rank | Skill | What it means |
-|---|---|---|
-| **Novice** | 0 to 24 | You can do it, badly. A novice spell fizzles a third of the time |
-| **Apprentice** | 25 to 49 | You can do it reliably; the first perk opens |
-| **Adept** | 50 to 74 | You are good at it; choose one of two perks |
-| **Expert** | 75 to 99 | Among the best in a city |
-| **Master** | 100 | As good as a person can be; choose one of two perks |
-| **Ascended I to III** | Beyond 100 | Past mortal limits; each ascension opens an impossible perk |
-| **God** | Every skill ascended | Nothing left that you cannot do |
+```tiers
+title: The ranks of a skill
+Novice | You can do it, badly. A novice spell fizzles a third of the time | 0–24
+Apprentice | You can do it reliably; the first perk opens | 25–49
+Adept | You are good at it; choose one of two perks | 50–74
+Expert | Among the best in a city | 75–99
+Master | As good as a person can be; choose one of two perks | 100
+Ascended I to III | Past mortal limits; each ascension opens an impossible perk | Beyond 100
+God | Nothing left that you cannot do | Every skill ascended
+```
 
 ## Training
 

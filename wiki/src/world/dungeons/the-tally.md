@@ -2,6 +2,7 @@
 
 ```infobox
 summary: A census barge of Vantress that sank under the Lowwater Chainyards in the Drowning Year, with the original roll of the dead in a sealed chest. Thirty metres down, in the dark, and not empty.
+map: 17.6, 74.6
 status: draft
 tags: Dungeon, Saltmire, Vantress, Underwater, Companion quest
 Type: Sunken wreck
@@ -47,14 +48,14 @@ and he rose with it, and he will not let it go until every name in it is account
 counting: every name he reads aloud raises one of the drowned. He can be beaten, or he can be
 answered: tell him the names of the people who lived, and he crosses them off.
 
-| | |
-|---|---|
-| **Level** | 60 |
-| **Health** | 2,600 |
-| **Poise** | 100 |
-| **Damage** | Raises the drowned (one per name, every 4 seconds); a grip that drags you down |
-| **Weak to** | Radiance; Teodor Voss's records; Yara's family names (each one stops him for 10 seconds) |
-| **Drops** | The key to the iron chest |
+```stats
+Level | 60
+Health | 2,600
+Poise | 100
+Damage | Raises the drowned (one per name, every 4 seconds); a grip that drags you down
+Weak to | Radiance; Teodor Voss's records; Yara's family names (each one stops him for 10 seconds)
+Drops | The key to the iron chest
+```
 
 ## Treasure
 

@@ -2,6 +2,7 @@
 
 ```infobox
 summary: An archive older than Orath's four faiths, beneath the burial galleries of the Underchoir, recording how the First Spring was kept, and ending at a door of black stone that is closing.
+map: 74.6, 48.4
 status: draft
 tags: Dungeon, Orath, Black stone, Main story
 Type: Ancient archive and channel
@@ -48,14 +49,14 @@ faceless figure without seams that wakes when anyone not written in comes near. 
 has slept for a thousand years. The black page wakes it, and it will not let you pass with the page,
 until it understands that the page is what keeps the door open.
 
-| | |
-|---|---|
-| **Level** | 18 |
-| **Health** | 1,400 |
-| **Poise** | Can't be staggered except by Crush |
-| **Damage** | 35 to 50 (stone fists); a shockwave every fourth blow |
-| **Weak to** | Maces and hammers; holding the page up to it (it stops for 5 seconds each time); the Builders' script |
-| **Drops** | A doorwarden's core: black stone, worth a great deal to the Spillward and to Ison |
+```stats
+Level | 18
+Health | 1,400
+Poise | Can't be staggered except by Crush
+Damage | 35 to 50 (stone fists); a shockwave every fourth blow
+Weak to | Maces and hammers; holding the page up to it (it stops for 5 seconds each time); the Builders' script
+Drops | A doorwarden's core: black stone, worth a great deal to the Spillward and to Ison
+```
 
 ## Treasure
 

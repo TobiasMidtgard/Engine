@@ -16,11 +16,12 @@ guild and on every road, which is one more reason the world's roads all lead to 
 
 ## Coins
 
-| Coin | Metal | Worth | What it buys |
-|---|---|---|---|
-| **Chit** | Copper, square, with a hole | The smallest coin | A loaf, a cup of ale, a ferry across a canal |
-| **Mark** | Silver, round, stamped with a seal | 10 chits | A night at a decent inn, a day's wages for a skilled worker |
-| **Ascent** | Gold, five-sided, one side for each tier of the spire | 10 marks | A month's rent in a good street, a young horse's first saddle |
+```tiers
+title: Three coins, each worth ten of the one below
+Chit | Copper, square, with a hole. Buys a loaf, a cup of ale, a ferry across a canal | 1 chit
+Mark | Silver, round, stamped with a seal. Buys a night at a decent inn, a day's wages for a skilled worker | 10 chits
+Ascent | Gold, five-sided, one side for each tier of the spire. Buys a month's rent in a good street, a young horse's first saddle | 100 chits
+```
 
 Every coin carries the mark of the tier that struck it, and the Assayers of the Weighhouse check
 them by weight. Clipped and shaved coins are weighed, not counted.
@@ -32,21 +33,26 @@ real currency is blood.
 
 ## What things cost
 
-| Thing | Price |
-|---|---|
-| A bowl of stew in a tavern | 3 chits |
-| A night in a common room | 4 chits |
-| A night in a good inn | 1 mark |
-| A day's wages for a labourer | 6 chits |
-| A day's wages for a skilled craftsperson | 1 mark |
-| A healing potion (Fine) | 8 marks |
-| A good steel sword (Fine) | 40 marks |
-| A set of lockpicks (Fine) | 5 marks |
-| A mail shirt (Fine) | 60 marks |
-| A Clay Seal in the Gilded Ascent | 1 chit a season |
-| A working horse | 15 ascents |
-| A Red Writ on an ordinary person, in the Eaves | 30 ascents |
-| A young Brinewing | Not for sale |
+```bars
+title: What things cost, from a bowl of stew to a Red Writ
+scale: log
+show: note
+A Clay Seal, for a season | 1 | 1 chit
+A bowl of stew in a tavern | 3 | 3 chits
+A night in a common room | 4 | 4 chits
+A day's wages for a labourer | 6 | 6 chits
+A night in a good inn | 10 | 1 mark
+A day's wages for a skilled craftsperson | 10 | 1 mark
+A set of lockpicks (Fine) | 50 | 5 marks
+A healing potion (Fine) | 80 | 8 marks
+A good steel sword (Fine) | 400 | 40 marks
+A mail shirt (Fine) | 600 | 60 marks
+A working horse | 1500 | 15 ascents
+A Red Writ on an ordinary person, in the Eaves | 3000 | 30 ascents
+note: Each step of the scale is ten times the one before it, so a horse is a hundred and fifty nights in a good inn.
+```
+
+A young Brinewing is not for sale at any price.
 
 ## What the cities sell
 

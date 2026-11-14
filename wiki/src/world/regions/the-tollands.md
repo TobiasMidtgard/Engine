@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The rich farmland that rings the Gilded Ascent for a day's ride in every direction: wheat, caravanserais, toll posts, and the barrows of the kings who ruled here before the seals.
+map: 49, 60
 status: draft
 tags: Region, Centre, Farmland
 Type: Plains and farmland

@@ -4,6 +4,7 @@
 image: world/valley-from-the-air.jpg
 caption: The Valley from the air, over the airfield runway.
 summary: A green mountain valley with a village, a lake, a waterfall, an arena and an airfield.
+map: 40, 17
 status: draft
 Type: Mountain valley
 Planet: [Home world](../planets/home-world.md)
@@ -13,8 +14,9 @@ Danger: 1/5
 ```
 
 **The Valley** is a green mountain valley on the [home world](../planets/home-world.md), ringed
-by snowy peaks. In the current test builds it is where you start, and almost everything in the
-game can be found somewhere in it.
+by snowy peaks. It is where your story starts, and it holds a little of everything: a village and
+its tavern, farms and woods, a lake, a movement course, an arena, a race track, an airfield and a
+spaceport.
 
 ## Getting there
 

@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The black stone below Keth Veyra's Gateworks, where the old kingdom's engineers built over a door they couldn't break, and where, 83 years ago, someone tried to write the door shut and jammed it.
+map: 54.6, 11.4
 status: draft
 tags: Dungeon, Whitecrowns, Keth Veyra, Black stone, Time, Main story
 Type: Sluices and black stone caverns
@@ -48,14 +49,14 @@ time. He fights from behind his wardens with the page itself: every line he read
 speeds them, and if he finishes the page, the door begins to close. Behind him, the doorwarden of Time
 wakes when the page is read, and it doesn't care whose side anyone is on.
 
-| | |
-|---|---|
-| **Level** | 72 (doorwarden: 70) |
-| **Health** | 900 (doorwarden: 6,000) |
-| **Poise** | 80 (doorwarden: can't be staggered except by Crush) |
-| **Damage** | Reading: slows you by half for 5 seconds; doorwarden: 90 to 130, and it moves before you see it |
-| **Weak to** | Interrupting him (any hit stops a line); the time echoes; Brinewing fire on the doorwarden |
-| **Drops** | The Registry page for Keth Veyra's door; a copy of the **index** of the Sixth Register |
+```stats
+Level | 72 (doorwarden: 70)
+Health | 900 (doorwarden: 6,000)
+Poise | 80 (doorwarden: can't be staggered except by Crush)
+Damage | Reading: slows you by half for 5 seconds; doorwarden: 90 to 130, and it moves before you see it
+Weak to | Interrupting him (any hit stops a line); the time echoes; Brinewing fire on the doorwarden
+Drops | The Registry page for Keth Veyra's door; a copy of the **index** of the Sixth Register
+```
 
 ## Treasure
 

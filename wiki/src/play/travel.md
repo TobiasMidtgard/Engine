@@ -67,8 +67,8 @@ Fast travel always goes **along a route**: you can't jump from a field to a city
 passage on a caravan, ship or lift between its stops. Time passes while you travel, prices change
 while you are gone, and sometimes the journey is interrupted.
 
-In the current test builds, cars, planes and spaceplanes can be driven in [the Valley](../world/regions/the-valley.md); see
-[Vehicles](../vehicles/index.md).
+In [the Valley](../world/regions/the-valley.md) you can also drive a car, fly a plane and take a
+spaceplane up to orbit; see [Vehicles](../vehicles/index.md).
 
 ## On the road
 

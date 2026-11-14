@@ -49,7 +49,7 @@ energy, resistance to fire, cold and poison, movement that ignores ordinary limi
 **supernatural ability** of your own, and a first touch of souls and other realms. Your skills can
 pass 100 for the first time.
 
-| Levels | What it feels like |
+| Levels | Stage |
 |---|---|
 | 61 to 65 | Newly Awakened and unstable: power surges you don't control |
 | 66 to 72 | Controlled superhuman ability |

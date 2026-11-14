@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The Hundred-Gate City: a colossal dam that people live inside, guarded by fire-breathing Brinewings.
+image: cities/keth-veyra.jpg
+caption: Keth Veyra, the Hundred-Gate City, with Brinewings over the reservoir
+map: 52.1, 9.3
 status: draft
 Also called: The Hundred-Gate City
 Type: City
@@ -53,6 +56,13 @@ neighbourhood. **The Night of Cut Harnesses** is why the city shuts outsiders ou
 | Gateworks | The sluices | Machinery halls of capstans, counterweights and enormous chains, turned by Gate Oxen and held by brakes and ratchets |
 | Reservoir Range | The reservoir above the dam | Floating pastures, fisheries and breeding islands, with Bargebacks towing cargo between them. Vets and fodder stores are as busy as the docks. |
 | Dry Foot | Downstream, outside the walls | The inspected market for foreigners. At the **Broken Halter** tavern, merchants can look up at a city they may never be allowed to enter. |
+
+```gallery
+cities/keth-veyra-dam.jpg | The dam face from below: controlled waterfalls, terraces and the town at its foot
+creatures/gate-ox.jpg | A gate ox hauling a cart along a dam terrace
+creatures/brinewing.jpg | An old Brinewing at its rookery tower
+creatures/bargeback.jpg | Bargebacks in the work harbour on the reservoir
+```
 
 ## Creatures
 

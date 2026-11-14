@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The hill country east of the Gilded Ascent towards Veyrhold and the coast, where the stone drinks magic, the Spillward's warning posts line the Quarry Road, and the Sunken Works lie collapsed into their own foundations.
+map: 88, 38
 status: draft
 tags: Region, East, Hills, Magic
 Type: Hills and quarries

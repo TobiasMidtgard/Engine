@@ -2,6 +2,8 @@
 
 ```infobox
 summary: The enormous oxen that turn the capstans of Keth Veyra's Gateworks. They feel the dam's machinery through their feet, and know when something is wrong before anyone else does.
+image: creatures/gate-ox.jpg
+caption: A gate ox hauling a cart along the dam terrace in Keth Veyra
 status: draft
 tags: Creature, Animal, Keth Veyra
 Type: Working animal

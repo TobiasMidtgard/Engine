@@ -2,6 +2,8 @@
 
 ```infobox
 summary: The wealthy upstream quarter, where the water is cleanest and the moorings never move far.
+image: cities/vantress-argent-heights.jpg
+caption: Argent Heights after rain
 status: draft
 City: [Vantress](../index.md)
 Position: North, upstream

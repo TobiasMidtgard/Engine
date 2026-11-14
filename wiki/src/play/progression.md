@@ -17,15 +17,16 @@ obstacle. By the end you can stand against an army, and even learn how to kill a
 There are 100 levels, and only three states of being: **Human**, **Awakened** and **Ascendant**.
 Most of the game is human; the last two states are earned, never ground out.
 
-| Levels | State | What it means |
-|---|---|---|
-| 1–10 | Ordinary human | From below average to a capable civilian |
-| 11–25 | Trained human | A professional: soldier, burglar, hunter, craftsperson, apprentice mage |
-| 26–45 | Exceptional human | One of the most capable people in a city |
-| 46–60 | Human apex | The very limit of what a real person can do |
-| 61–80 | Awakened | Superhuman growth becomes possible |
-| 81–100 | Ascendant | You begin to impose your own laws on the world |
-| Earned separately | Godslayer | You learn how to kill a god for good |
+```tiers
+title: The six stages of a hundred levels
+Ordinary human | From below average to a capable civilian | Levels 1–10
+Trained human | A professional: soldier, burglar, hunter, craftsperson, apprentice mage | Levels 11–25
+Exceptional human | One of the most capable people in a city | Levels 26–45
+Human apex | The very limit of what a real person can do | Levels 46–60
+Awakened | Superhuman growth becomes possible | Levels 61–80
+Ascendant | You begin to impose your own laws on the world | Levels 81–100
+note: **Godslayer** is not a level: it is earned separately, by learning how to kill a god for good.
+```
 
 The three great moments are reaching the human limit, Awakening and Ascending: you master being
 human, you break the limits of humanity, and you establish what you are becoming. Then you find
@@ -116,9 +117,9 @@ less and less. Picking simple locks makes you faster; a unique living lock teach
 new; robbing a master locksmith can be a breakthrough.
 
 As you grow, the world adapts. Run the roofs and the guards start patrolling them; poison people
-and the rich hire tasters; rely on brute force and the doors get thicker. Go back to places you
-know and feel how far you've come: the wall that once needed a rope, a distraction and a ladder
-becomes a single leap.
+and the rich hire tasters; rely on brute force and the doors get thicker. Places you knew early
+change with you: the wall that once needed a rope, a distraction and a ladder becomes a single
+leap.
 
 ## Skill mastery
 

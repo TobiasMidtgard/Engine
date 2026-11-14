@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The Quarry of Mages: a city terraced down an old quarry whose dark stone swallows stray magic.
+image: cities/veyrhold.jpg
+caption: The quarry tiers of Veyrhold, down to the testing grounds on its floor
+map: 78.0, 28.3
 status: draft
 Also called: The Quarry of Mages
 Type: City

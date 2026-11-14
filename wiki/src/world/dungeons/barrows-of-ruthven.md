@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The long tombs of the kings of Ruthven on the low hills of the Tollands. The kings were buried with their silver, their soldiers and their grudges, and something has opened the Long Barrow from the inside.
+map: 41, 51
 status: draft
 tags: Dungeon, Tollands, Undead, Old kingdoms
 Type: Barrow tombs
@@ -48,14 +49,14 @@ buried without his crown because his son had already sold it. He has been awake,
 his son's bargain, and he wants his crown back. He fights with a broad sword and calls his soldiers
 up from the Hall of Shields, and he cannot be killed while he believes he is a king.
 
-| | |
-|---|---|
-| **Level** | 15 |
-| **Health** | 900 |
-| **Poise** | 180 |
-| **Damage** | 30 to 45 (sword); summons 4 skeleton warriors at a time |
-| **Weak to** | Fire, maces, Radiance; telling him his son sold the crown (Persuasion, Adept) halves his health |
-| **Drops** | The **Iron Circlet** (a Storied circlet: +1 Presence, and the dead of Ruthven don't attack you); Ruthven silver |
+```stats
+Level | 15
+Health | 900
+Poise | 180
+Damage | 30 to 45 (sword); summons 4 skeleton warriors at a time
+Weak to | Fire, maces, Radiance; telling him his son sold the crown (Persuasion, Adept) halves his health
+Drops | The **Iron Circlet** (a Storied circlet: +1 Presence, and the dead of Ruthven don't attack you); Ruthven silver
+```
 
 ## Treasure
 

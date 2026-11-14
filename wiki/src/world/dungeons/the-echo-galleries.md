@@ -2,6 +2,7 @@
 
 ```infobox
 summary: Smooth, curving tunnels below Rillvault's springs that were never dug: they were sung open. They carry sound for kilometres, remember what they heard, and are hunted by blind things that listen.
+map: 21.2, 50.6
 status: draft
 tags: Dungeon, Rillvault, Caves, Puzzles, Main story
 Type: Sung caverns
@@ -49,14 +50,14 @@ hear a heartbeat across a cavern. She fights by sound: every noise you make tell
 and her shriek, focused by the galleries, can stun. Silence is your weapon. So is the Choir of
 Pillars: ring a pillar and she turns on it.
 
-| | |
-|---|---|
-| **Level** | 28 |
-| **Health** | 1,800 |
-| **Poise** | 200 |
-| **Damage** | 40 to 60 (mandibles); shriek stuns for 3 seconds |
-| **Weak to** | Silence (Sneak, Illusion's Veil); ringing pillars to distract her; Fire |
-| **Drops** | **Matriarch's shell**: light armour plates that muffle your footsteps |
+```stats
+Level | 28
+Health | 1,800
+Poise | 200
+Damage | 40 to 60 (mandibles); shriek stuns for 3 seconds
+Weak to | Silence (Sneak, Illusion's Veil); ringing pillars to distract her; Fire
+Drops | **Matriarch's shell**: light armour plates that muffle your footsteps
+```
 
 ## Treasure
 

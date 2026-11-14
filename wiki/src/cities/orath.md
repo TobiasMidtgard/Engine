@@ -2,6 +2,9 @@
 
 ```infobox
 summary: City of the Four Revelations: four faiths share one holy spring and the great ring temple built around it.
+image: cities/orath.jpg
+caption: Orath and the Hollow Crown, its great ring temple around the holy spring
+map: 72.5, 50.8
 status: draft
 Also called: City of the Four Revelations
 Type: Holy city
@@ -51,6 +54,11 @@ Its black foundations belong to a civilisation older than any of the four faiths
 believes it is the true heir of the temple's first builders. Pilgrims perform **the Crossing**:
 they enter by one religion's gate, climb the terraces, cross above the sacred well and leave by
 another gate. Each faith prescribes its own route. Weapons must be sealed before entering.
+
+```gallery
+cities/orath-hollow-crown.jpg | The inner court of the Hollow Crown, above the first spring
+cities/orath-bridge.jpg | The stone bridge to the Hollow Crown and the pilgrim streets around it
+```
 
 ## The four faiths
 

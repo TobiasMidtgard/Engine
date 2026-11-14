@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The forested borderlands under Orravell's great tree, and Kestrel Vale, the farming valley that hired Orravell's army and now owes it everything.
+map: 21, 23
 status: draft
 tags: Region, North-west, Forest, War
 Type: Forest and farm valleys

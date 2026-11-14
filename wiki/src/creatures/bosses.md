@@ -19,6 +19,34 @@ if you look. Many of them can be talked to.
 > [!WARNING]
 > Spoilers for every boss in the game below.
 
+```levels
+title: Every boss on the level scale, with its health
+## Dungeons
+Old Sorrel | 6 | 140 health
+The Barrow King | 15 | 900 health
+The doorwarden of the Spring | 18 | 1,400 health
+Warden-Sergeant Hollis | 22 | 520 health
+The Matriarch | 28 | 1,800 health
+The Ninth Crew | 38 | Can't be harmed
+Marrok Teague | 40 | 1,200 health
+The Shelf-Keeper | 45 | 3,200+ health
+Silas Morrow | 50 | 2,200 health
+Commissar Vellen Harsk | 52 | 1,600 health
+The Root Mother | 55 | 4,000 health
+The Census Clerk | 60 | 2,600 health
+The Mind in the Crystal | 60 | Can't be harmed, only answered
+The Great Glass Worm | 70 | 9,000 health
+The Registry scribe and the doorwarden of Time | 72 | 900 and 6,000 health
+## The main story
+The house rat | 1 | 30 health
+The two Seal Wardens | 20 | 240 each
+Ulf Garrick | 60 | 2,400 health
+Ulf Garrick, Awakened | 61+ | 3,600 health
+The Mint of Seals | 90 | A fortress
+Gisela Quell | 100 | 8,000 health
+note: A dot is a boss of one level; a bar running off the end has no ceiling. Health is on Medium difficulty.
+```
+
 ## Dungeon bosses
 
 | Boss | Where | Level | Health | Beat it with |

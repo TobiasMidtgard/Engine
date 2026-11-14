@@ -2,6 +2,9 @@
 
 ```infobox
 summary: A city built into the seats of a colossal arena: a forbidden market by day, a fighting floor by night.
+image: cities/arena-city.jpg
+caption: The Grand Exchange by day, on the platforms of the old arena
+map: 38.4, 69.5
 status: draft
 Also called: The forbidden city
 Type: City
@@ -60,6 +63,12 @@ hotel terraces in the north, homes and artisans' courts in the east, the canal q
 ring, restaurant terraces and the fighters' and guards' quarter.
 
 ## A day in Arena City
+
+```gallery
+cities/arena-city.jpg | By day: the Grand Exchange on the central and outer platforms
+cities/arena-city-night.jpg | By night: the same central platform as a fighting floor
+cities/arena-city-gate.jpg | The great south gate, where visitors arrive
+```
 
 | Time | What happens |
 |---|---|

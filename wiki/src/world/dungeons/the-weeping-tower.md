@@ -2,6 +2,7 @@
 
 ```infobox
 summary: A tower on a sea stack off the Grey Coast that drips salt water down its walls in every weather. A necromancer built it to bring his wife back from the sea, thirty years ago, and the light in it has come back on.
+map: 5.5, 25
 status: draft
 tags: Dungeon, Grey Coast, Necromancy, Tower
 Type: Necromancer's tower
@@ -48,14 +49,14 @@ spent thirty years trying to mend what came back, and he has become what necroma
 they raise themselves to keep working. He fights with dark magic from the lantern room, raising the
 drowned from the sea below, and he begs you to leave between every spell.
 
-| | |
-|---|---|
-| **Level** | 50 |
-| **Health** | 2,200; his phylactery is the lens (break it and he can die) |
-| **Poise** | 120 |
-| **Damage** | Grave chill, plague touch, raised drowned (4 at a time), a tide that floods the room |
-| **Weak to** | Radiance, fire; breaking the lens; mercy (let him see his wife's grave in Cape Sorrow and he lays himself down) |
-| **Drops** | The **Tide Ring** (Storied: breathe water, and the drowned won't rise against you); his journal |
+```stats
+Level | 50
+Health | 2,200; his phylactery is the lens (break it and he can die)
+Poise | 120
+Damage | Grave chill, plague touch, raised drowned (4 at a time), a tide that floods the room
+Weak to | Radiance, fire; breaking the lens; mercy (let him see his wife's grave in Cape Sorrow and he lays himself down)
+Drops | The **Tide Ring** (Storied: breathe water, and the drowned won't rise against you); his journal
+```
 
 ## Treasure
 

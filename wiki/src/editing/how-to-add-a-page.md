@@ -59,6 +59,17 @@ Anywhere else in a page, use a normal Markdown picture, with a path from the pag
 ![A frost wyrm diving from the clouds](../images/creatures/frost-wyrm.jpg)
 ```
 
+A `gallery` block puts several pictures side by side, each with a caption under it. Paths are
+from the `images` folder, like the infobox; `wide: yes` gives each picture the full width (for
+maps). Every picture opens full size when clicked.
+
+````text
+```gallery
+cities/keth-veyra-dam.jpg | The dam face from below
+creatures/gate-ox.jpg | A gate ox on a dam terrace
+```
+````
+
 ## The infobox
 
 The **At a glance** panel beside the page (above the text on a phone). One `Key: value` per
@@ -87,6 +98,9 @@ Attacks: Bite, lunge
 - Any other key becomes a row of the panel, in the order you write them.
 - A value like `3/5` shows as dots, for danger or difficulty.
 - Links work inside values: `[Home world](../world/planets/home-world.md)`.
+- `map: 48.5, 46` puts the place on the [world map](../world/index.md#map) (percent from the
+  map's left and top edges) and shows a small map with a pin at the bottom of the panel. Cities
+  show as pins, regions as names and dungeons as diamonds.
 
 ## Draft and stub
 
@@ -122,6 +136,33 @@ The wiki breaks long pages up by itself, so write plain sections and let it do t
 
 - **Quest routes**: a `flow` block draws how a quest can go: where it starts, the ways in side by
   side, where they meet and how it can end. The [quest template](templates.md#quest) has one.
+
+## Charts
+
+Numbers read faster as pictures. Each block below is drawn as a chart; the text stays in the
+page, so search still finds it.
+
+| Block | Lines | Draws |
+|---|---|---|
+| `levels` | `Name \| 10-25 \| note` | Bars on the 1 to 100 level scale, over the Human, Awakened and Ascendant bands. One level is a dot; `61+` runs off the end. |
+| `bars` | `Name \| 45 \| note` | Horizontal bars from one baseline. `max:` fixes the scale, `unit:` follows each value, `scale: log` makes each tenfold step the same length, and `show: note` prints the note at the bar's tip instead of the number. |
+| `stats` | `Health \| 900` | Big number tiles, for a boss or a creature; long values are listed under them |
+| `tiers` | `Name \| what it means \| small label` | A staircase, lowest first: ranks, stages, coins |
+| `timeline` | `When \| what happened` | Events down a line; `## Age \| when` starts an age |
+
+Every block takes a `title:` line, and all but `stats` a `note:` line under the chart. A line
+starting with `##` in `levels` and `bars` starts a group. `{{levels}}` on a section page charts
+the section's pages by their infobox `Level` or `Levels` row; `{{worldmap}}` draws the world map
+with every page that has a `map:` row.
+
+````text
+```bars
+title: Range
+unit: m
+Short bow | 60 | 20 damage
+Longbow | 120 | 30 damage
+```
+````
 
 ## Section pages
 

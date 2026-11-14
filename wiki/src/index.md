@@ -2,7 +2,7 @@
 title: A world worth knowing.
 tagline: Explore its places, people and possibilities.
 image: home/plaza.jpg
-caption: A village square, from the current test build
+caption: The village square in the Valley, where every story starts
 button: Start exploring | world/index.md
 button: Open the city map | world/index.md#the-world-map
 ```

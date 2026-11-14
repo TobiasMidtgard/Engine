@@ -1,7 +1,8 @@
 # World and map
 
 ```meta
-image: world/valley-from-the-air.jpg
+image: world/world-map.jpg
+caption: The great continent, from the Whitecrowns to the Sifting Desert
 summary: Planets, regions and landmarks: where everything is, from one valley to the stars.
 ```
 
@@ -12,8 +13,6 @@ the same ground stretches unbroken to the horizon, over the oceans and out to or
 it lie the Moon, a red desert planet and the worlds of other stars, each with its own land to
 explore.
 
-![The valley from the air: an airfield runway among green fields, woods and snowy peaks](../images/world/valley-from-the-air.jpg)
-
 ## The world map
 
 The great continent stretches between two seas, one on the west coast and one on the east, with
@@ -23,7 +22,11 @@ the land changes gradually from marsh woodland in the west to desert in the sout
 fertile, Mediterranean coast in the south-east and a great swamp in the south-west. Between the
 cities lie long stretches of open country to travel.
 
-The drawn map is coming soon. Until then, this is where the thirteen great cities stand:
+Gold pins are the thirteen great cities, names in italics are the regions, and diamonds are the
+dungeons and ruins. Point at any of them for its levels and a line about it, and click to open its
+page. The buttons above the map hide a layer.
+
+{{worldmap}}
 
 | City | Where | Known for |
 |---|---|---|

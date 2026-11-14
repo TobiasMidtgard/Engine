@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The fertile south-east coast around Tessara: terraces that farm themselves, white towns, olive groves, trams along the shore and a sea warm enough to swim in all year.
+map: 61, 84
 status: draft
 tags: Region, South-east, Coast
 Type: Mediterranean coast

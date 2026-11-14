@@ -29,13 +29,14 @@ peak a god starts to listen.
 
 ## The five stages
 
-| Stage | What shows | How the world reacts |
-|---|---|---|
-| **Touched** | Faint dark veins at the wrists after casting | Animals grow uneasy around you |
-| **Marked** | Eyes darken in dim light; a chill to your touch | Temples refuse you blessings; guards in clean cities search you |
-| **Tainted** | Your voice carries a faint echo; wounds close slowly | Healing magic works at half strength on you; shrines turn you away; some towns bar their gates |
-| **Hollowed** | Your shadow lags a moment behind you | Children and animals flee; clean healers can't touch you; dark factions open their doors |
-| **Claimed** | All of it, and dreams of a door made of skin | [The Waiting Wound](../lore/gods.md#the-waiting-wound) notices you (see [The Wound That Waits](../quests/the-wound-that-waits.md)) |
+```tiers
+title: The five stages of corruption
+Touched | **Shows:** faint dark veins at the wrists after casting. **The world:** animals grow uneasy around you | Stage 1
+Marked | **Shows:** eyes darken in dim light; a chill to your touch. **The world:** temples refuse you blessings; guards in clean cities search you | Stage 2
+Tainted | **Shows:** your voice carries a faint echo; wounds close slowly. **The world:** healing magic works at half strength on you; shrines turn you away; some towns bar their gates | Stage 3
+Hollowed | **Shows:** your shadow lags a moment behind you. **The world:** children and animals flee; clean healers can't touch you; dark factions open their doors | Stage 4
+Claimed | **Shows:** all of it, and dreams of a door made of skin. **The world:** [the Waiting Wound](../lore/gods.md#the-waiting-wound) notices you (see [The Wound That Waits](../quests/the-wound-that-waits.md)) | Stage 5
+```
 
 The changes are visible on your character, in the character creator's body system: the veins, the
 eyes, the voice. Disguises, glamours and corruption tinctures can hide them for a while.

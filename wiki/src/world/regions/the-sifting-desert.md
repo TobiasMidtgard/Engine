@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The red desert of the south-east, where latticebacks build glass-rich mounds, hoodoos stand in fields, arches frame the sky, and a city of the old kingdoms lies under the sand.
+map: 73, 93
 status: draft
 tags: Region, South-east
 Type: Desert

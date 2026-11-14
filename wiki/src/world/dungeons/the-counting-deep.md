@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The vaults beneath the Gilded Ascent: the banks' rented vaults, level below level, then the built levels of seamless black stone, then the Register room at the bottom of the world.
+map: 50.8, 48.6
 status: draft
 tags: Dungeon, Gilded Ascent, Black stone, Heist, Main story, Finale
 Type: Vaults and black stone
@@ -48,14 +49,14 @@ At the end of the story, [Gisela Quell](../../people/gisela-quell.md) waits in t
 Sixth Register open, as an Ascendant of Keeping who locks doors, abilities, companions, time and your
 name. Her full fight is on her page and on [The Great Restriking](../../quests/main/the-great-restriking.md).
 
-| | |
-|---|---|
-| **Level** | 100 |
-| **Health** | 8,000 |
-| **Poise** | Can't be staggered while she holds a lock |
-| **Damage** | Locks: see [Gisela Quell](../../people/gisela-quell.md#as-an-enemy) |
-| **Weak to** | Trespass, the Unwritten, Severance; a broken die above |
-| **Drops** | Her Glass Seal; the Keeper's Pen; whatever is left of the Sixth Register |
+```stats
+Level | 100
+Health | 8,000
+Poise | Can't be staggered while she holds a lock
+Damage | Locks: see [Gisela Quell](../../people/gisela-quell.md#as-an-enemy)
+Weak to | Trespass, the Unwritten, Severance; a broken die above
+Drops | Her Glass Seal; the Keeper's Pen; whatever is left of the Sixth Register
+```
 
 ## Treasure
 

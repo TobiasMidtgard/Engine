@@ -2,6 +2,7 @@
 
 ```infobox
 summary: A magical research facility east of Veyrhold that collapsed into its own foundations forty years ago. The Spillward sealed it. Inside, a crystal of raw Mind is rewriting everything near it, slowly.
+map: 92, 31
 status: draft
 tags: Dungeon, Hushlands, Spill, Mind
 Type: Collapsed research facility
@@ -48,14 +49,14 @@ room. You fight it by holding on to what you are. You can absorb it, redirect it
 animal, share it with an ally, seal it, or bargain with it (one of the roads to Awakening; see
 [A Door Nobody Locked](../../quests/main/a-door-nobody-locked.md)).
 
-| | |
-|---|---|
-| **Level** | 60 |
-| **Health** | Its shell: 5,000; the mind can't be harmed, only answered |
-| **Poise** | None |
-| **Damage** | Rewrites: confuses, turns a companion for 10 seconds, swaps your abilities around; shardlings |
-| **Weak to** | Hushstone; Illusion's Insight; companions at Devoted approval can't be turned; your title's power |
-| **Drops** | Raw Mind (if you take it), or nothing, or a friend |
+```stats
+Level | 60
+Health | Its shell: 5,000; the mind can't be harmed, only answered
+Poise | None
+Damage | Rewrites: confuses, turns a companion for 10 seconds, swaps your abilities around; shardlings
+Weak to | Hushstone; Illusion's Insight; companions at Devoted approval can't be turned; your title's power
+Drops | Raw Mind (if you take it), or nothing, or a friend
+```
 
 ## Treasure
 

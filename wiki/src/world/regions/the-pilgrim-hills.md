@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The warm, terraced hills between the Gilded Ascent and Orath, where the Glass Road carries pilgrims, glass carts and the occasional saint, and every crossroads has a shrine.
+map: 85, 58
 status: draft
 tags: Region, South-east, Hills, Pilgrimage
 Type: Terraced hills

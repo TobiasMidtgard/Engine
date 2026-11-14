@@ -12,16 +12,16 @@ can join.
 
 ## How factions work
 
-The ten great guilds are institutions, not moral sides. You join one because it offers something
-useful, not because you have already picked its beliefs. The real factions are the people inside:
-each senior member has a different answer to what the guild is for, and they pull you in different
-directions.
+Each of the ten great guilds offers something you can use: training, a workshop, a safe house, a
+licence or a way into places that are shut to everyone else. Inside every guild the senior members
+disagree about what the guild is for, and the jobs they give you pull in different directions.
 
-- **You start neutral.** Your first jobs are ordinary work for several senior members in turn.
-- **Disagreements surface through practical problems**, and private requests that seem compatible
-  at first turn out to undermine each other.
-- **Nobody asks you to choose a branch.** The guild decides what you believe from what you
-  repeatedly do. In the end you can back one person, build a coalition or split the guild.
+- **You join as a neutral member.** Your first jobs are ordinary work for several senior members
+  in turn.
+- **Jobs conflict.** Two private requests can look compatible and then undermine each other; the
+  one you finish decides who gains ground.
+- **There is no branch to pick from a menu.** The guild judges your side by what you keep doing.
+  At the end you can back one leader, build a coalition or split the guild.
 - **The world changes with the result**: who eats, who profits, who governs and who controls
   dangerous knowledge, in every chapter of the guild across the world.
 

@@ -26,7 +26,7 @@ quests and three acts.
 
 ## More quests in the cities
 
-These are known so far only from their city pages.
+These quests are described on their city pages.
 
 | Quest | Where | What happens |
 |---|---|---|
@@ -39,5 +39,4 @@ These are known so far only from their city pages.
 | The treasury heist | [Vantress](../cities/vantress/index.md#quests-and-rumours) | The guild's greatest job: make the theft of the treasury legal. |
 | Steal the City Before Dawn | [The Tangle](../factions/thieves-guild.md#questline) | The finale every branch of the guild questline ends in. |
 
-Only the quests that have their own pages have names from the design; the others are described
-by what happens in them.
+Quests without a name of their own are listed by what happens in them.

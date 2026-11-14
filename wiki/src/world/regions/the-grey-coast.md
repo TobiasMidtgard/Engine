@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The foggy north-west coast around the Second City: cliffs, fishing towns that bar their doors at dusk, moors where the werebeast clans run, and a tower on a sea stack that weeps.
+map: 26, 11
 status: draft
 tags: Region, North-west, Coast
 Type: Coast and moorland

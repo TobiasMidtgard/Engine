@@ -2,6 +2,8 @@
 
 ```infobox
 summary: The crowded heart of Vantress, where the four great bridges meet over market, bank and seal hall.
+image: cities/vantress-knot-square.jpg
+caption: Knot Square market after rain, under the Hall of Seals
 status: draft
 City: [Vantress](../index.md)
 Position: Centre

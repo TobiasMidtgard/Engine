@@ -12,7 +12,8 @@ Atmosphere: Thin, dusty
 ```
 
 **The red planet** is a cold desert world of rust-red dust, giant volcanoes and canyons deeper
-than any on the home world. In the game's test builds it is modelled on Mars.
+than any on the home world. Its gravity is little more than a third of the home world's, so you
+jump nearly three times as high, and its air is too thin to breathe.
 
 ## Surface
 

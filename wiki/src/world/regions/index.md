@@ -17,6 +17,25 @@ the wilds, and the wilds are always safer by day.
 
 ## The continent
 
+```levels
+title: How dangerous each region is, by level
+[The Valley](the-valley.md) | 1-5
+[The Tollands](the-tollands.md) | 1-10
+[The Bell Foothills](the-bell-foothills.md) | 1-12
+[The Pilgrim Hills](the-pilgrim-hills.md) | 8-20
+[The Mirewood](the-mirewood.md) | 10-30
+[The Hollow Downs](the-hollow-downs.md) | 15-30
+[The Saltmire](the-saltmire.md) | 15-75
+[The Black Steppe](the-black-steppe.md) | 20-60
+[The Hushlands](the-hushlands.md) | 28-45
+[The Grey Coast](the-grey-coast.md) | 32-48
+[The Canopy Marches](the-canopy-marches.md) | 38-55
+[The Sunward Coast](the-sunward-coast.md) | 42-58
+[The Sifting Desert](the-sifting-desert.md) | 45-70
+[The Whitecrowns](the-whitecrowns.md) | 55-80
+note: The low end is the roads and villages; the high end is the deep wilds, the ruins and what comes out at night.
+```
+
 | Region | Where | City | Levels | Danger |
 |---|---|---|---|---|
 | [The Tollands](the-tollands.md) | The centre | The Gilded Ascent | 1 to 10 | 1/5 |

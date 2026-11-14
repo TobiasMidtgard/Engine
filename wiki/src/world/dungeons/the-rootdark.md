@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The caves among the roots of Orravell's great tree, older than the city: root-tunnels, underground rivers, spiders that glow, and the Office of Civic Integrity's cells, which nobody admits to.
+map: 34.2, 27.2
 status: draft
 tags: Dungeon, Canopy Marches, Orravell, Caves, Prison
 Type: Root caves and a secret prison
@@ -48,14 +49,14 @@ the Greater Canopy, and he has a key to every cell on a ring at his belt. He fig
 pistol from Tessara, and calls the guards. If you free the prisoners first, they fight him for you.
 Beyond his cells, the **Root Mother**, the lantern spiders' queen, is optional, and much worse.
 
-| | |
-|---|---|
-| **Level** | 52 (Root Mother: 55) |
-| **Health** | 1,600 (Root Mother: 4,000) |
-| **Poise** | 140 |
-| **Damage** | 30 to 45 (sabre), 60 (pistol, once a fight); Root Mother: venom that paralyses |
-| **Weak to** | The freed prisoners; his files (show a guard what's in them and he switches sides); the Root Mother: fire |
-| **Drops** | The cell keys; Civic Integrity files; a Pattern pistol (Unsealed List) |
+```stats
+Level | 52 (Root Mother: 55)
+Health | 1,600 (Root Mother: 4,000)
+Poise | 140
+Damage | 30 to 45 (sabre), 60 (pistol, once a fight); Root Mother: venom that paralyses
+Weak to | The freed prisoners; his files (show a guard what's in them and he switches sides); the Root Mother: fire
+Drops | The cell keys; Civic Integrity files; a Pattern pistol (Unsealed List)
+```
 
 ## Treasure
 

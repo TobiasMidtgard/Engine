@@ -48,6 +48,18 @@ A hit does the weapon's damage, multiplied by your skill with it and, in melee, 
 Then the armour on the part of the body you hit takes its share, and that part of the body
 multiplies what is left (see [Damage, armour and injuries](../play/injuries.md)).
 
+```bars
+title: Damage multiplier by skill rank
+max: 3
+Untrained | ×0.75 | skill 0
+Novice | ×1 | 1 to 24
+Apprentice | ×1.15 | 25 to 49
+Adept | ×1.3 | 50 to 74
+Expert | ×1.5 | 75 to 99
+Master | ×1.75 | 100
+Ascended | ×3 | ×2, ×2.5 or ×3
+```
+
 | Your skill with the weapon | Damage | Swing speed | What else |
 |---|---|---|---|
 | **Untrained** (0) | ×0.75 | Slow | Every third swing is clumsy and leaves you open |
@@ -61,6 +73,32 @@ multiplies what is left (see [Damage, armour and injuries](../play/injuries.md))
 **Strength** adds 5% to melee damage for each point above 5, and takes 5% away for each point
 below. A stab at an opening, or at someone who can't see you, does triple damage with a dagger and
 double with anything else.
+
+### Weapons compared
+
+```bars
+title: Damage per hit, Common steel (the note is damage per second of steady swinging)
+## One-handed
+Kitchen knife | 5 | 10 a second
+Dirk | 9 | 18 a second
+Stiletto | 8 | 16 a second
+Rapier | 15 | 25 a second
+Sabre | 17 | 24 a second
+Cutlass | 17 | 21 a second
+Hatchet | 17 | 19 a second
+Arming sword | 18 | 22 a second
+Short spear | 18 | 20 a second
+Flanged mace | 19 | 19 a second
+Bearded axe | 21 | 21 a second
+## Two-handed
+Spear, both hands | 22 | 24 a second
+Longsword | 26 | 24 a second
+Maul | 30 | 17 a second
+Greatsword | 32 | 23 a second
+War hammer | 32 | 20 a second
+Great axe | 36 | 22 a second
+note: Heavy weapons hit hardest but not fastest: a rapier does more damage over a fight than a maul. What a maul does better is break poise (48 a hit against the rapier's 6).
+```
 
 ### One-handed weapons
 
@@ -101,6 +139,16 @@ double with anything else.
 A shield stops part of every blow you block, and its **stability** is how much poise a block costs
 you: higher is better.
 
+```bars
+title: How much of a blocked blow each shield stops
+max: 100
+unit: %
+Buckler | 40 | stability 20, 1 kg
+Round shield | 65 | stability 40, 3.5 kg
+Kite shield | 75 | stability 50, 5 kg
+Tower shield | 90 | stability 70, 7 kg
+```
+
 | Shield | Blocks | Stability | Bash | Weight | Value |
 |---|---|---|---|---|---|
 | **Buckler** | 40% | 20 | 6 Crush; parries are easier | 1.0 kg | 3 marks |
@@ -109,6 +157,19 @@ you: higher is better.
 | **Tower shield** | 90% | 70 | 10 Crush; plant it and fight from behind | 7 kg | 9 marks |
 
 ### Ranged weapons
+
+```bars
+title: Range
+unit: m
+Throwing knife | 15 | 9 damage
+Powder pistol | 25 | 45 damage, 5 s to reload
+Javelin | 30 | 22 damage
+Short bow | 60 | 20 damage
+Hunting bow | 80 | 24 damage
+Longbow | 120 | 30 damage
+Powder carbine | 120 | 60 damage, 4 s to reload
+Pattern carbine | 200 | 70 damage, 3 s to reload
+```
 
 | Weapon | Damage | Type | Draw or reload | Range | Weight | Value |
 |---|---|---|---|---|---|---|

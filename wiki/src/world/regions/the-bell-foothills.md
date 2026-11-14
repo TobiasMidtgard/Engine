@@ -2,6 +2,7 @@
 
 ```infobox
 summary: The wooded hill country along the Bell Road north of the Gilded Ascent, where the Valley meets the road at Halfbell, wolves follow the waystations and a burnt mill waits for carts.
+map: 49, 25
 status: draft
 tags: Region, North, Hills, Bell Road
 Type: Foothills and river valleys

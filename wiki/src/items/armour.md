@@ -33,6 +33,15 @@ numbers below are the **rating** of each piece in Common steel or leather: ratin
 physical damage, in full against Cut, by half at the gaps against Pierce, and by a quarter against
 Crush (see [Damage, armour and injuries](../play/injuries.md#armour)). Fine adds 15% and Masterwork 30%.
 
+```bars
+title: Armour rating, added up over all seven pieces of a set
+Clothing | 5 | 2 to 4 kg; poise +0
+Light | 29 | 6 to 10 kg; poise +5
+Medium | 78 | 12 to 18 kg; poise +15
+Heavy | 162 | 22 to 30 kg; poise +30
+note: Only the piece over the part of the body that is hit counts, so the helm and the body piece do most of the work.
+```
+
 | Piece | Covers | Clothing | Light | Medium | Heavy |
 |---|---|---|---|---|---|
 | **Head** | Head | 0 (hood) | 5 (leather cap) | 12 (mail coif) | 24 (helm) |

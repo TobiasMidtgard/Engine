@@ -2,6 +2,8 @@
 
 ```infobox
 summary: Small armoured burrowers that sift minerals out of desert sand and build them into honeycomb nests.
+image: creatures/latticeback.jpg
+caption: Latticebacks at a sand colony in the Cradle Courts
 status: draft
 Type: Beast
 Habitat: The sifting grounds of the [Sifting Basin](../cities/sifting-basin.md)

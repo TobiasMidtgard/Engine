@@ -13,8 +13,8 @@ no seal and no reputation. Everything you become, you earn by doing it.
 
 1. **Make your character** (see [Character creation](character-creation.md)): choose a face, an
    origin, where to put your two free attribute points, and a keepsake.
-2. **Pick a difficulty** (see [Difficulty, defeat and death](difficulty.md)). Medium is the game as
-   it is meant to be played the first time; Hard makes enemies clever.
+2. **Pick a difficulty** (see [Difficulty, defeat and death](difficulty.md)). On Easy enemies
+   come straight at you, Medium is the standard challenge, and Hard makes enemies clever.
 
 ## Your first hours
 
@@ -43,10 +43,10 @@ no seal and no reputation. Everything you become, you earn by doing it.
 - **Watch what you carry into the Gilded Ascent.** Some things are banned there (see
   [Crime and the law](crime.md)).
 
-## Trying the test builds
+## Machines in the Valley
 
-The current test builds also let you drive and fly: a car waits in the race track's pit lane, a
-plane on the airfield apron and a spaceplane at the spaceport. Walk up and press **E** (see
+The Valley also has machines to drive and fly: a car waits in the race track's pit lane, a plane
+on the airfield apron and a spaceplane at the spaceport. Walk up and press **E** (see
 [Vehicles](../vehicles/index.md)). Climb above 12 km in the spaceplane and press **J** to cruise to
 [the Moon](../world/planets/moon.md) or the stars.
 

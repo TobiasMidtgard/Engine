@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The Open Machine: the most advanced city in the world, which looks almost ancient and runs on its mosaics.
+image: cities/tessara.jpg
+caption: The Sunward Gardens, where flying skiffs land among the terraces
+map: 65.0, 69.5
 status: draft
 Also called: The Open Machine
 Type: City
@@ -80,6 +83,11 @@ cores in each district keep essential services running, and the heat of the comp
 the baths and nurseries.
 
 ## Layout and districts
+
+```gallery
+wide: yes
+cities/tessara-map.jpg | Tessara, the Open Machine: its twelve districts, numbered as in the table below
+```
 
 | # | District | What is there |
 |---|---|---|

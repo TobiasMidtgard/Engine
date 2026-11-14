@@ -2,6 +2,8 @@
 
 ```infobox
 summary: The ward the city erased: hidden rooms and drifting barges under the decks, home of the thieves' guild.
+image: cities/vantress-ward-null.jpg
+caption: The underdeck galleries of Ward Null
 status: draft
 City: [Vantress](index.md)
 Position: Under the decks of the centre and south-west

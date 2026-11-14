@@ -2,6 +2,9 @@
 
 ```infobox
 summary: The Manybody City: one mind shared by millions of animals and plants, in a valley that grows its own bridges.
+image: cities/oruvai.jpg
+caption: Oruvai in its violet mist
+map: 11.6, 31.0
 status: draft
 Also called: The Manybody City
 Type: City
@@ -76,6 +79,11 @@ recycled nutrients and the odd import of mineral salts keep the city from feelin
 abundant.
 
 ## Layout and districts
+
+```gallery
+wide: yes
+cities/oruvai-map.jpg | The valley of Oruvai and its eight districts
+```
 
 The valley is about three kilometres long. Its districts follow sunlight, water and height.
 

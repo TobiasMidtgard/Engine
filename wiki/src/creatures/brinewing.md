@@ -2,6 +2,8 @@
 
 ```infobox
 summary: A heavily insulated, fire-breathing wyvern, raised and flown by the keepers of Keth Veyra.
+image: creatures/brinewing.jpg
+caption: An old Brinewing on its rookery tower, with its keepers
 status: draft
 Type: Beast (dragon-like)
 Habitat: The rookeries of [Keth Veyra](../cities/keth-veyra.md)
