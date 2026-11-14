@@ -29,7 +29,7 @@ What it adds to Markdown (src/editing/how-to-add-a-page.md explains it for edito
     {{worldmap}}          the world map with every page that has `map:`
 
 Every page is framed for theme/index.hbs: its title, summary and chips become the title block,
-the infobox becomes the panel beside the text, and theme/codex.js adds tabs and the side panel.
+the infobox becomes the panel beside the text, and theme/codex.js adds the side panel.
 
 A page saved in a section's folder joins the sidebar by itself, after the pages SUMMARY.md lists,
 in alphabetical order. A folder with an index.md inside a section becomes a sub-section.
@@ -290,7 +290,6 @@ def page_info(chapter):
         "status": None,
         "summary_explicit": False,
         "tags": [],
-        "notabs": False,
         "fields": {},
         "map": None,
         "parents": chapter.get("parent_names", []),
@@ -316,8 +315,6 @@ def page_info(chapter):
                     info["summary_explicit"] = True
                 if meta.get("tags") and not info["tags"]:
                     info["tags"] = [t.strip() for t in meta["tags"].split(",") if t.strip()]
-                if meta.get("tabs", "").strip().lower() in ("no", "off", "false"):
-                    info["notabs"] = True
                 if meta.get("title") and block[1] == "infobox":
                     info["title"] = meta["title"]
                 for row in rows:
@@ -771,7 +768,13 @@ def levels_chart(lines, page):
             a, b = level_span(lo, hi)
             shape = "cx-lv-dot" if lo == hi else "cx-lv-bar" + (" open" if open_end else "")
             text = esc(value.replace("-", "–").replace(" to ", "–"))
-            side = "before" if b > 68 and a > 12 else "after"
+            # The value sits after the mark, before it near the right edge, or inside a long bar
+            # that reaches from one edge almost to the other.
+            side = "after" if b <= 68 else ("before" if a > 12 else "inside")
+            if side == "inside" and lo != hi:
+                shape += " has-val"
+            elif side == "inside":
+                side = "after"
             out.append('<span class="%s" style="--a:%.2f%%;--b:%.2f%%"></span>' % (shape, a, b))
             out.append('<span class="cx-lv-val %s" style="--a:%.2f%%;--b:%.2f%%">%s</span>' % (side, a, b, text))
         else:
@@ -1169,7 +1172,7 @@ def transform(chapter, pages, history):
             [
                 '<div class="cx-body"%s>' % (' data-rail="off"' if home else ""),
                 "@@FACTS@@",
-                '<article class="cx-main%s" id="cx-main">' % (" cx-notabs" if home or info["notabs"] else ""),
+                '<article class="cx-main" id="cx-main">',
                 "",
             ]
         )

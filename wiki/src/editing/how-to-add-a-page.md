@@ -119,9 +119,8 @@ marked.
 
 The wiki breaks long pages up by itself, so write plain sections and let it do the rest:
 
-- **Tabs**: a page with three or more `##` sections and more than about 500 words shows one tab
-  per section, plus **Full page**. Put `tabs: no` in the page's `meta` or `infobox` block to keep
-  it as one long page.
+- **On this page**: every `##` section is listed in the panel beside the text, and clicking one
+  jumps to it.
 - **Cards**: a list where every line starts with a bold name, like `- **The Iron Anchor**:
   soldiers and engineers`, shows as a grid of small cards.
 - **Quotes**: a one-paragraph `>` quote shows large, as a quote.

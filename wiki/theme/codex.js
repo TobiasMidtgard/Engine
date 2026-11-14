@@ -2,12 +2,11 @@
  *
  *   - the grouped sidebar with icons, built from mdBook's chapter list (toc.js)
  *   - breadcrumbs, and the Read / History / Edit links above every page
- *   - tabs on long pages (one tab per ## section, plus "Full page"), kept in the address bar
- *   - the side panel: spoiler switch, "On this page" and "More in this section"
+ *   - the side panel: spoiler switch, "On this page" (the section list) and "More in this section"
  *   - spoiler blur, card lists for "**Name**: text" lists, scrollable tables
  *   - the search window (Ctrl K, / or S), the dark/light switch and the phone menu
  *
- * Pages still read top to bottom without it: tabs, panels and the sidebar are extras.
+ * Pages still read top to bottom without it: the side panel and the sidebar are extras.
  */
 (function () {
     'use strict';
@@ -304,162 +303,14 @@
         s.insertBefore(cover, s.firstChild);
     });
 
-    // ---- Tabs ------------------------------------------------------------------------------------
-    var panels = [];
-    var tabBar = null;
+    // ---- Pages read top to bottom; "On this page" in the side panel jumps between sections. ----
     var otpLinks = [];
-    var showAll = false;
 
     function textOf(h) { return (h.textContent || '').replace(/\s+/g, ' ').trim(); }
-
-    if (article && !article.classList.contains('cx-notabs')) {
-        var h2s = Array.prototype.filter.call(article.children, function (c) { return c.tagName === 'H2'; });
-        var heroBlock = article.querySelector(':scope > .cx-hero');
-        var long = (article.textContent || '').length - (heroBlock ? heroBlock.textContent.length : 0) > 3000;
-        if (h2s.length >= 3 && long) {
-            var nodes = Array.prototype.slice.call(article.childNodes);
-            // The title block stays above the tabs.
-            var heroEl = article.querySelector(':scope > .cx-hero');
-            if (heroEl) { nodes = nodes.slice(nodes.indexOf(heroEl) + 1); }
-            var panel = { title: 'Overview', id: '', nodes: [] };
-            var list = [panel];
-            nodes.forEach(function (n) {
-                if (n.tagName === 'H2') {
-                    var introEmpty = list.length === 1 && !panel.nodes.some(function (x) {
-                        return x.nodeType === 1 || (x.nodeType === 3 && x.textContent.trim());
-                    });
-                    var isOverview = /^(overview|about)$/i.test(textOf(n));
-                    // A short opening shares the first tab with the first section.
-                    var introShort = list.length === 1 && panel.nodes.reduce(function (sum, x) {
-                        return sum + (x.textContent || '').length;
-                    }, 0) < 600;
-                    if (list.length === 1 && (introEmpty || isOverview || (introShort && !panel.merged))) {
-                        panel.merged = true;
-                        panel.title = introEmpty ? textOf(n) : panel.title;
-                        panel.id = n.id;
-                        panel.nodes.push(n);
-                        return;
-                    }
-                    panel = { title: textOf(n), id: n.id, nodes: [n] };
-                    list.push(panel);
-                } else {
-                    panel.nodes.push(n);
-                }
-            });
-            tabBar = el('div', 'cx-tabs');
-            tabBar.setAttribute('role', 'tablist');
-            tabBar.setAttribute('aria-label', 'Sections of this page');
-            list.forEach(function (p, i) {
-                var sec = el('section', 'cx-panel');
-                sec.id = 'cx-panel-' + i;
-                sec.setAttribute('role', 'tabpanel');
-                p.nodes.forEach(function (n) { sec.appendChild(n); });
-                article.appendChild(sec);
-                var b = el('button', 'cx-tab', p.title);
-                b.type = 'button';
-                b.setAttribute('role', 'tab');
-                b.setAttribute('aria-controls', sec.id);
-                b.id = 'cx-tab-' + i;
-                sec.setAttribute('aria-labelledby', b.id);
-                b.addEventListener('click', function () { activate(i, true); });
-                tabBar.appendChild(b);
-                panels.push({ el: sec, tab: b, id: p.id, title: p.title });
-            });
-            var all = el('button', 'cx-tab cx-tab-all');
-            all.type = 'button';
-            all.innerHTML = icon('list') + '<span>Full page</span>';
-            all.title = 'Show every section at once';
-            all.addEventListener('click', function () { activate(-1, true); });
-            tabBar.appendChild(all);
-            tabBar.addEventListener('keydown', function (e) {
-                if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') { return; }
-                var tabs = Array.prototype.slice.call(tabBar.querySelectorAll('.cx-tab'));
-                var at = tabs.indexOf(document.activeElement);
-                if (at < 0) { return; }
-                e.preventDefault();
-                var to = (at + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
-                tabs[to].focus();
-                tabs[to].click();
-            });
-            article.insertBefore(tabBar, heroEl ? heroEl.nextSibling : article.firstChild);
-            article.classList.add('has-tabs');
-            // Fade the right edge while more tabs hide past it.
-            var edge = function () {
-                tabBar.classList.toggle('is-overflow', tabBar.scrollWidth > tabBar.clientWidth + 2);
-                tabBar.classList.toggle('at-end', tabBar.scrollLeft + tabBar.clientWidth >= tabBar.scrollWidth - 2);
-            };
-            tabBar.addEventListener('scroll', edge, { passive: true });
-            window.addEventListener('resize', edge);
-            edge();
-        }
-    }
-
-    function scrollToTabs() {
-        if (!tabBar) { return; }
-        var y = tabBar.getBoundingClientRect().top + window.pageYOffset - topOffset();
-        if (window.pageYOffset > y) { window.scrollTo(0, y); }
-    }
     function topOffset() {
         var top = document.querySelector('.cx-top');
         return top ? top.offsetHeight : 0;
     }
-    function activate(i, byClick) {
-        if (!panels.length) { return; }
-        showAll = i < 0;
-        panels.forEach(function (p, j) {
-            var on = showAll || j === i;
-            p.el.hidden = !on;
-            p.tab.classList.toggle('is-on', !showAll && j === i);
-            p.tab.setAttribute('aria-selected', !showAll && j === i ? 'true' : 'false');
-            p.tab.tabIndex = (!showAll && j === i) ? 0 : -1;
-        });
-        var onTab = showAll ? tabBar.querySelector('.cx-tab-all') : panels[i].tab;
-        if (onTab && (onTab.offsetLeft < tabBar.scrollLeft || onTab.offsetLeft + onTab.offsetWidth > tabBar.scrollLeft + tabBar.clientWidth)) {
-            tabBar.scrollLeft = onTab.offsetLeft - 24;
-        }
-        var allTab = tabBar.querySelector('.cx-tab-all');
-        allTab.classList.toggle('is-on', showAll);
-        allTab.setAttribute('aria-selected', showAll ? 'true' : 'false');
-        article.classList.toggle('shows-all', showAll);
-        if (byClick) {
-            var id = showAll ? 'all' : (i > 0 ? panels[i].id : '');
-            try { history.replaceState(null, '', id ? '#' + id : location.pathname + location.search); } catch (e) { }
-            scrollToTabs();
-        }
-        markOnThisPage();
-    }
-    function panelIndexOf(node) {
-        for (var i = 0; i < panels.length; i++) {
-            if (panels[i].el.contains(node)) { return i; }
-        }
-        return 0;
-    }
-    function openHash(scroll) {
-        var hash = decodeURIComponent((location.hash || '').slice(1));
-        if (!panels.length) { return; }
-        if (hash === 'all') { activate(-1, false); return; }
-        var target = hash && document.getElementById(hash);
-        if (target && article.contains(target)) {
-            if (!showAll) { activate(panelIndexOf(target), false); }
-            if (scroll) {
-                var y = target.getBoundingClientRect().top + window.pageYOffset - topOffset() - 70;
-                window.scrollTo(0, Math.max(0, y));
-            }
-            return true;
-        }
-        if (!hash) { activate(0, false); }
-        return false;
-    }
-    if (panels.length) {
-        if (!openHash(true) && location.hash !== '#all') { activate(0, false); }
-        window.addEventListener('hashchange', function () { openHash(true); });
-    }
-    // After a search, open the tab that holds the first highlighted word.
-    window.codexAfterSearch = function () {
-        if (!panels.length || location.hash) { return; }
-        var mark = article.querySelector('mark');
-        if (mark) { activate(panelIndexOf(mark), false); }
-    };
 
     // ---- Side panel -----------------------------------------------------------------------------
     var rail = null;
@@ -492,8 +343,7 @@
                 a.addEventListener('click', function (e) {
                     e.preventDefault();
                     try { history.replaceState(null, '', '#' + h.id); } catch (err) { }
-                    if (panels.length && !showAll) { activate(panelIndexOf(h), false); }
-                    var y = h.getBoundingClientRect().top + window.pageYOffset - topOffset() - (panels.length ? 70 : 16);
+                    var y = h.getBoundingClientRect().top + window.pageYOffset - topOffset() - 16;
                     window.scrollTo(0, Math.max(0, y));
                     markOnThisPage(h);
                 });
@@ -552,6 +402,31 @@
         }
         if (rail.children.length) { bodyGrid.appendChild(rail); bodyGrid.classList.add('has-rail'); }
     }
+    // On a phone the side panel sits below the text, so the section list opens above it instead.
+    if (article && otpLinks.length) {
+        var box = el('details', 'cx-sections');
+        var sum = el('summary', 'cx-sections-head');
+        sum.innerHTML = icon('list') + '<span>On this page</span><span class="cx-sections-count">' + otpLinks.length + ' sections</span>';
+        box.appendChild(sum);
+        var list2 = el('ol', 'cx-sections-list');
+        otpLinks.forEach(function (o) {
+            var li = el('li');
+            var a = el('a', '', textOf(o.h));
+            a.href = '#' + o.h.id;
+            a.addEventListener('click', function (e) {
+                e.preventDefault();
+                box.open = false;
+                try { history.replaceState(null, '', '#' + o.h.id); } catch (err) { }
+                var y = o.h.getBoundingClientRect().top + window.pageYOffset - topOffset() - 16;
+                window.scrollTo(0, Math.max(0, y));
+            });
+            li.appendChild(a);
+            list2.appendChild(li);
+        });
+        box.appendChild(list2);
+        var heroIn = article.querySelector(':scope > .cx-hero');
+        article.insertBefore(box, heroIn ? heroIn.nextSibling : article.firstChild);
+    }
     if (spoilers.length) { setSpoilers(spoilersShown()); }
 
     function markOnThisPage(forced) {
@@ -562,10 +437,6 @@
             otpLinks.forEach(function (o) {
                 if (o.h.offsetParent !== null && o.h.getBoundingClientRect().top < line) { on = o.h; }
             });
-            if (!on && panels.length && !showAll) {
-                var p = panels.filter(function (x) { return !x.el.hidden; })[0];
-                on = p ? p.el.querySelector('h2') : null;
-            }
         }
         otpLinks.forEach(function (o) { o.a.classList.toggle('is-on', o.h === on); });
     }
