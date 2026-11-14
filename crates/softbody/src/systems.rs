@@ -10,6 +10,7 @@ use bevy_ecs::change_detection::Tick;
 use bevy_ecs::system::SystemChangeTick;
 use engine_core::ecs::entity::{EntityHashMap, EntityHashSet};
 use engine_core::prelude::*;
+use engine_core::time::FixedTime;
 use engine_world::animation::SkeletonPose;
 use engine_world::physics::{
     ApplyImpulse, BodyKind, CharacterController, CharacterState, Collider, ColliderShape,
@@ -1252,12 +1253,22 @@ pub fn snapshot_frames(
     poses: Query<&'static SkeletonPose>,
     movers: Query<(Option<&RigidBody>, Has<CharacterController>)>,
     mut physical: Local<HashMap<Entity, bool>>,
-    (time, engine, job): (Res<Time>, Option<Res<EngineConfig>>, Res<FrameJob>),
+    (time, fixed, engine, job): (
+        Res<Time>,
+        Res<FixedTime>,
+        Option<Res<EngineConfig>>,
+        Res<FrameJob>,
+    ),
 ) {
     let range = range.map_or_else(SimulationRange::default, |r| *r);
     let beside = beside_frame(&config, engine.as_deref(), &time);
-    // While last step's job still runs, nothing new joins it (see `join_heavy_bodies`).
-    let kick = !job.job.is_pending();
+    // Only the frame's last step sends bodies beside the frame, as physics overlaps only its
+    // last step: a step with another after it in this frame steps them here, beside the
+    // physics step. Kicked there, the next step would begin at once with a job that had no
+    // time, and wait for it or (build 5) hold the cloth still a step and jump the next, a
+    // stutter in every frame of two steps. While last step's job still runs, nothing new
+    // joins it (see `join_heavy_bodies`).
+    let kick = fixed.is_last_step() && !job.job.is_pending();
     let live = LiveFrames {
         transforms: &transforms,
         poses: &poses,
