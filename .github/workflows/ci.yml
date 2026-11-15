@@ -87,8 +87,10 @@ jobs:
         if: matrix.lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
+        # --no-fail-fast: one failing test binary must not hide the ones after it (a red
+        # extra_views hid materials and portals for two days in November 2026).
         run: |
-          cargo test ${{ matrix.packages }}
+          cargo test --no-fail-fast ${{ matrix.packages }}
           if [ -n "${{ matrix.after }}" ]; then cargo test ${{ matrix.after }}; fi
       - name: Disk left
         if: always()
