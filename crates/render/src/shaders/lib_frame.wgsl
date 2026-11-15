@@ -304,6 +304,13 @@ fn frame_noise(pixel: vec2<f32>) -> f32 {
 // pixel. `dither` 0 draws them all; a positive share hides the pixels whose `frame_noise` is
 // below it, a negative one keeps only those below its negation, so `t` and `-t` split the pixels
 // between them.
+//
+// A program that takes screen derivatives (dpdx, dpdy, fwidth, or textureSample's own) discards
+// by this only after taking them and reading the textures they pick levels for: they come
+// from the four pixels of a 2x2 block, and a pixel of the block discarded first stops, so the
+// others read at whatever level the broken differences pick (on lavapipe the smallest: a
+// fading mesh's textures came out speckled with their average color). Reads at a level of
+// their own (impostor.wgsl) need no such care.
 fn dither_keeps(dither: f32, pixel: vec2<f32>) -> bool {
     if (dither == 0.0) { return true; }
     let n = frame_noise(pixel);

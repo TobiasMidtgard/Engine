@@ -1,8 +1,8 @@
 //! Procedural material presets and the mapping features they use: every preset generates
 //! finite, physically plausible, tileable maps; parallax occlusion mapping shifts texels the
-//! right way; triplanar mapping wraps a sphere without seams; and a preset draws through the
-//! ordinary mesh pipeline. Needs a GPU or lavapipe; passes with a note when neither is
-//! available.
+//! right way; triplanar mapping wraps a sphere without seams, also while it fades between two
+//! levels of detail; and a preset draws through the ordinary mesh pipeline. Needs a GPU or
+//! lavapipe; passes with a note when neither is available.
 
 use std::path::Path;
 
@@ -41,14 +41,37 @@ fn headless_app(width: u32, height: u32, configure: impl FnOnce(&mut RenderSetti
     app
 }
 
-/// Render a few frames and read the picture back; `None` (with a note) without a GPU. Panics
-/// if the GPU reported a validation error.
+/// Render a few frames, then until every mesh draws the level of detail it will keep (as a
+/// scene looks a second after it loads), and read the picture back; `None` (with a note)
+/// without a GPU. Panics if the GPU reported a validation error.
 fn render(app: &mut App, name: &str) -> Option<RgbaImage> {
     app.update_n(4);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping {name}: no GPU ({})", d.0);
         return None;
     }
+    // Levels are built on worker threads, in as many frames as the machine takes: wait for
+    // them and for the fade to them, so the view draws the same triangles on every machine.
+    let start = std::time::Instant::now();
+    loop {
+        let state = meshes_state(app);
+        let pending = state["lods_pending"].as_u64().expect("lods_pending");
+        let fading = state["lods_fading"].as_u64().expect("lods_fading");
+        if pending == 0 && fading == 0 {
+            break;
+        }
+        assert!(
+            start.elapsed().as_secs() < 120,
+            "{name}: levels of detail still building ({pending}) or fading ({fading})"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.update();
+    }
+    Some(capture(app, name))
+}
+
+/// Draw a frame and read it back. Panics if the GPU reported a validation error.
+fn capture(app: &mut App, name: &str) -> RgbaImage {
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.png"));
     capture_now(&mut app.world, &path).expect("screenshot");
     let gpu_errors: Vec<String> = engine_core::log::log_buffer()
@@ -61,7 +84,17 @@ fn render(app: &mut App, name: &str) -> Option<RgbaImage> {
         gpu_errors.is_empty(),
         "GPU errors while rendering {name}: {gpu_errors:#?}"
     );
-    Some(image::open(&path).expect("png").to_rgba8())
+    image::open(&path).expect("png").to_rgba8()
+}
+
+/// The meshes feature's state in `Renderer::describe`.
+fn meshes_state(app: &App) -> serde_json::Value {
+    let describe = app.world.resource::<Renderer>().describe();
+    describe["features"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
+        .map(|f| f["state"].clone())
+        .unwrap_or_default()
 }
 
 fn add_image(app: &mut App, image: Image) -> Handle<Image> {
@@ -501,6 +534,37 @@ fn triplanar_mapping_wraps_a_sphere_without_seams() {
         tri_seams <= 3,
         "triplanar mapping shows {tri_seams} seam pixels (UV control: {uv_seams})"
     );
+}
+
+/// While a mesh fades from one level of detail to the next, each level draws its share of the
+/// pixels: both read their textures as the settled picture does. (Each threw its other pixels
+/// away before reading them, which broke the mip level of the pixels beside them in their 2x2
+/// blocks: the fading sphere came out speckled with its texture's average color, 2,800 seam
+/// pixels.)
+#[test]
+fn a_sphere_fading_between_two_levels_shows_no_seams() {
+    let mut app = pattern_sphere(TextureMapping::Triplanar, 0.8);
+    let start = std::time::Instant::now();
+    loop {
+        app.update();
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let state = meshes_state(&app);
+        if state["lods_fading"].as_u64().expect("lods_fading") > 0 {
+            break;
+        }
+        assert!(
+            start.elapsed().as_secs() < 120,
+            "the sphere never faded to a level of detail: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let fading = capture(&mut app, "triplanar_sphere_fading");
+    let seams = seam_pixels(&fading);
+    eprintln!("seam pixels while fading: {seams}");
+    assert!(seams <= 3, "the fading sphere shows {seams} seam pixels");
 }
 
 #[test]

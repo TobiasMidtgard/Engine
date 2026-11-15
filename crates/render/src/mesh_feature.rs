@@ -5622,6 +5622,10 @@ impl RenderFeature for MeshFeature {
             "skinned": self.skins.skinned,
             "skinned_vertices": self.skins.skinned_vertices,
             "lods_fading": self.lods_fading,
+            // Meshes whose levels of detail are queued or being built (on worker threads, so
+            // how many frames that takes depends on the machine).
+            "lods_pending": self.lod_waiting.len()
+                + self.lod_jobs.iter().map(|j| j.meshes.len()).sum::<usize>(),
             "once": self.once_now,
             "depth_first": self.depth_first_now,
             "early_z": self.early_now,

@@ -47,6 +47,11 @@ fn app(pipelining: Pipelining) -> App {
         s.screen_space_gi = false;
         // Probe GI lights only the main view, and the portal's view is an extra view.
         s.probe_gi = false;
+        // Full detail only: the portal's view picks the balls' levels of detail at once, for
+        // its own picture's pixels, and the camera beyond fades into its own over 24 frames,
+        // after they arrive from worker threads (silhouettes and shading a level apart), which
+        // isn't what these tests compare.
+        s.mesh_lod_pixels = 0.0;
     }
     app
 }
@@ -261,10 +266,12 @@ fn through_the_portal(pipelining: Pipelining, moving: bool, tag: &str) {
         green == 0,
         "{green} pixels show the green ball behind the exit"
     );
-    // Resampling the picture blurs edges a little; the rest matches. Moving, the picture is
-    // resolved twice (by its own view's anti-aliasing and the main view's): softer still, but
-    // without the ghosts the flat rectangle's motion would leave (that measured 15 here).
-    let (max_mean, max_p95) = if moving { (2.5, 9) } else { (2.0, 3) };
+    // Resampling the picture blurs edges a little; the rest matches (full detail: 1.66 and 4
+    // here; 3 was met while the balls' coarser levels softened their outlines). Moving, the
+    // picture is resolved twice (by its own view's anti-aliasing and the main view's): softer
+    // still, but without the ghosts the flat rectangle's motion would leave (that measured 15
+    // here).
+    let (max_mean, max_p95) = if moving { (2.5, 9) } else { (2.0, 4) };
     assert!(mean < max_mean, "mean difference {mean:.2}");
     assert!(p95 <= max_p95, "95th percentile difference {p95}");
 }

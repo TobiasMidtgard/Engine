@@ -4,7 +4,7 @@
 //! error stays under a pixel (the camera) or a texel (shadow maps). Objects smaller than that
 //! are left out of the view altogether.
 
-use engine_core::math::{Vec2, Vec3, Vec4};
+use engine_core::math::{DVec3, Vec2, Vec3, Vec4};
 
 use crate::mesh::{Mesh, Vertex};
 use crate::virtual_geometry::simplify::{Welded, simplify, simplify_welded};
@@ -89,32 +89,95 @@ const FOLD_COS: f32 = -0.9;
 /// place's vertices (or of the chain's own there, [`Made`]) it is drawn with. Surfaces that only touch, or lie back to back, stay
 /// apart as they are indexed.
 struct Weld {
+    /// Each vertex's position, as the index of a vertex there ([`spots`]).
+    spot: Vec<u32>,
     /// The first vertex of each vertex's place.
     place: Vec<u32>,
     /// The next vertex of the same place (a ring through them).
     next: Vec<u32>,
 }
 
+/// Vertices closer together than this share of the mesh's size (its bounding box's
+/// diagonal) are at one position. Generated meshes close their seams with vertices worked out
+/// apart: a UV sphere's at u = 0 and u = 1 lie sin(2π) in f32, 1.7e-7 of its radius, apart,
+/// and its south pole's 8.7e-8. As positions of their own the seam was a border of the
+/// surface, which the simplifier moves along on either side alone: the sphere's levels opened
+/// cracks along it, 2.5 cm wide on a 1 m sphere's first level.
+const SAME_POSITION: f32 = 1e-6;
+
+/// For each vertex, the position it is at: the one of the nearest vertex before it within
+/// [`SAME_POSITION`] (so copies of one point always share one), or its own index.
+fn spots(mesh: &Mesh) -> Vec<u32> {
+    type Map<K, V> = bevy_platform::collections::HashMap<K, V>;
+    let n = mesh.vertices.len();
+    let position = |i: usize| Vec3::from(mesh.vertices[i].position).as_dvec3();
+    let (lo, hi, finite) = (0..n).map(position).fold(
+        (DVec3::INFINITY, DVec3::NEG_INFINITY, true),
+        |(lo, hi, finite), p| (lo.min(p), hi.max(p), finite && p.is_finite()),
+    );
+    let near = (hi - lo).length() * f64::from(SAME_POSITION);
+    let mut spot: Vec<u32> = Vec::with_capacity(n);
+    if !finite || near <= 0.0 || !near.is_finite() {
+        // One position, or some not finite: by bits, as indexed.
+        let mut first: Map<[u32; 3], u32> = Map::with_capacity(n);
+        for (i, v) in mesh.vertices.iter().enumerate() {
+            // + 0.0: -0.0 and 0.0 are one position.
+            let key = v.position.map(|c| (c + 0.0).to_bits());
+            spot.push(*first.entry(key).or_insert(i as u32));
+        }
+        return spot;
+    }
+    // Cells 16 times as wide as `near`: a vertex that near another is in its cell, or in the
+    // cell beside it across a face it is that near to (two in three vertices look up one cell).
+    let width = near * 16.0;
+    let near_sq = near * near;
+    let mut cells: Map<[i64; 3], Vec<u32>> = Map::with_capacity(n);
+    for i in 0..n {
+        let p = position(i);
+        let corner = (p / width).floor();
+        let key = corner.to_array().map(|c| c as i64);
+        let inside = (p - corner * width).to_array();
+        let beside = |k: usize| -i64::from(inside[k] < near)..=i64::from(width - inside[k] <= near);
+        let mut nearest: Option<(f64, u32)> = None;
+        'cells: for dz in beside(2) {
+            for dy in beside(1) {
+                for dx in beside(0) {
+                    let Some(list) = cells.get(&[key[0] + dx, key[1] + dy, key[2] + dz]) else {
+                        continue;
+                    };
+                    for &j in list {
+                        let d = p.distance_squared(position(j as usize));
+                        if d <= near_sq && nearest.is_none_or(|(best, _)| d < best) {
+                            nearest = Some((d, j));
+                            if d == 0.0 {
+                                break 'cells;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        spot.push(nearest.map_or(i as u32, |(_, j)| spot[j as usize]));
+        cells.entry(key).or_default().push(i as u32);
+    }
+    spot
+}
+
 impl Weld {
     fn new(mesh: &Mesh) -> Self {
         let n = mesh.vertices.len();
         // Vertices by position.
-        let mut first: std::collections::HashMap<[u32; 3], u32> =
-            std::collections::HashMap::with_capacity(n);
-        let spot: Vec<u32> = mesh
-            .vertices
-            .iter()
-            .enumerate()
-            .map(|(i, v)| {
-                // + 0.0: -0.0 and 0.0 are one position.
-                let key = v.position.map(|c| (c + 0.0).to_bits());
-                *first.entry(key).or_insert(i as u32)
-            })
-            .collect();
-        // Edges by position, with the vertices the triangle has at either end.
+        let spot = spots(mesh);
+        // Edges by position, with the vertices the triangle has at either end. A triangle with
+        // two corners at one position covers nothing (a pole's sliver): its edges would make
+        // the edges there look shared by three triangles, so it is left out.
         let position = |i: u32| Vec3::from(mesh.vertices[i as usize].position);
         let mut edges: Vec<(u32, u32, u32, u32, u32)> = Vec::with_capacity(mesh.indices.len());
         for (t, tri) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
+            let s = tri.map(|i| spot[i as usize]);
+            if s[0] == s[1] || s[1] == s[2] || s[0] == s[2] {
+                continue;
+            }
             for k in 0..3 {
                 let (a, b) = (tri[k], tri[(k + 1) % 3]);
                 let (sa, sb) = (spot[a as usize], spot[b as usize]);
@@ -158,7 +221,7 @@ impl Weld {
                 next[p as usize] = i as u32;
             }
         }
-        Self { place, next }
+        Self { spot, place, next }
     }
 
     /// The vertex at place `at` for a corner drawn with `was` so far, in a triangle whose
@@ -360,10 +423,14 @@ fn build_as(mesh: &Mesh, welded: bool) -> Lods {
     let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| v.position.into()).collect();
     let weld = Weld::new(mesh);
     // The triangles over the places, and the vertex each of their corners is drawn with.
+    // (Not those with two corners at one position: they cover nothing.)
     let (mut current, mut drawn): (Vec<[u32; 3]>, Vec<[u32; 3]>) = corners
         .iter()
+        .filter(|tri| {
+            let s = tri.map(|i| weld.spot[i as usize]);
+            s[0] != s[1] && s[1] != s[2] && s[0] != s[2]
+        })
         .map(|tri| (tri.map(|i| weld.place[i as usize]), *tri))
-        .filter(|(c, _)| c[0] != c[1] && c[1] != c[2] && c[0] != c[2])
         .unzip();
     // The connected parts (a merged fence is many posts and rails), and each one's surface.
     let mut part: Vec<u32> = (0..positions.len() as u32).collect();
@@ -731,6 +798,116 @@ mod tests {
                 (b - a).cross(c - a).length() * 0.5
             })
             .sum()
+    }
+
+    /// Edges (by position, within `tol`) that only one triangle of `indices` has: where the
+    /// surface is open. Triangles with two corners at one position draw nothing and count not.
+    fn open_edges(mesh: &Mesh, indices: &[u32], tol: f32) -> usize {
+        let key = |i: u32| {
+            Vec3::from(mesh.vertices[i as usize].position)
+                .to_array()
+                .map(|c| (c / tol).round() as i64)
+        };
+        let mut edges: Vec<([i64; 3], [i64; 3])> = Vec::new();
+        for tri in indices.as_chunks::<3>().0 {
+            let k = tri.map(key);
+            if k[0] == k[1] || k[1] == k[2] || k[0] == k[2] {
+                continue;
+            }
+            for e in 0..3 {
+                let (a, b) = (k[e], k[(e + 1) % 3]);
+                edges.push((a.min(b), a.max(b)));
+            }
+        }
+        edges.sort_unstable();
+        edges
+            .chunk_by(|a, b| a == b)
+            .filter(|run| run.len() == 1)
+            .count()
+    }
+
+    #[test]
+    fn vertices_a_hair_apart_are_one_position_wherever_they_lie() {
+        // Points scattered over many of the cells `spots` sorts vertices into, each followed by
+        // copies nudged up to nine tenths of SAME_POSITION of the mesh's size (many across a
+        // cell's face) and one nudged twice that far: the copies are at their point's
+        // position, the far one is not.
+        let size = 10.0;
+        let near = 3f32.sqrt() * size * SAME_POSITION;
+        let mut seed = 0x9e37_79b9_u32;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        let mut direction =
+            || (Vec3::new(random(), random(), random()) * 2.0 - 1.0).normalize_or(Vec3::X);
+        let vertex = |p: Vec3| Vertex::new(p, Vec3::Y, Vec2::ZERO);
+        let mut vertices = vec![
+            vertex(Vec3::ZERO),
+            vertex(Vec3::splat(size)),
+            vertex(Vec3::new(-0.0, 0.0, 0.0)),
+        ];
+        let mut expected = vec![0, 1, 0];
+        for k in 0..2000 {
+            let p = Vec3::new(
+                (k % 13) as f32 * 0.61 + 1.0,
+                (k % 17) as f32 * 0.47 + 1.0,
+                (k / 221) as f32 * 0.83 + 1.0,
+            ) + direction() * 0.1;
+            let base = vertices.len() as u32;
+            vertices.push(vertex(p));
+            expected.push(base);
+            for i in 1..4 {
+                vertices.push(vertex(p + direction() * near * 0.3 * i as f32));
+                expected.push(base);
+            }
+            vertices.push(vertex(p + direction() * near * 2.0));
+            expected.push(vertices.len() as u32 - 1);
+        }
+        let spot = spots(&Mesh::new(vertices, Vec::new()));
+        let wrong = spot.iter().zip(&expected).filter(|(a, b)| a != b).count();
+        assert_eq!(wrong, 0, "{wrong} of {} vertices", spot.len());
+
+        // Two copies of one point share its position though the cell looked at first, across
+        // a face, holds a vertex near them that is at another (along x, in SAME_POSITIONs of
+        // the size; cells are 16 wide).
+        let at = |x: f32| vertex(Vec3::new(x * near, 0.0, 0.0));
+        let row = vec![at(0.0), at(15.5), at(16.6), at(15.9), at(16.6), at(1e6)];
+        let spot = spots(&Mesh::new(row, Vec::new()));
+        assert_eq!(spot[4], spot[2], "{spot:?}");
+        assert_eq!(spot[3], spot[1], "{spot:?}");
+    }
+
+    #[test]
+    fn a_uv_sphere_stays_closed_along_its_texture_seam() {
+        // Its seam's two rows of vertices are worked out apart (u = 0 and u = 1, sin(2π) in
+        // f32), and as two borders the simplifier moved each side along the seam alone: the
+        // levels opened cracks along it, up to 2.5 cm wide on the first.
+        let mesh = crate::mesh::uv_sphere(1.0, 96);
+        assert_eq!(open_edges(&mesh, &mesh.indices, 1e-5), 0);
+        let full = mesh.indices.len() / 3;
+        let (mesh, levels) = built(&mesh);
+        assert!(levels.len() >= 3, "{} levels", levels.len());
+        assert!(levels[2].indices.len() / 3 <= full / 5);
+        for l in &levels {
+            assert_eq!(
+                open_edges(&mesh, &l.indices, 1e-5),
+                0,
+                "a level of {} triangles (error {}) is open",
+                l.indices.len() / 3,
+                l.error
+            );
+            // Still the ball, short of its area by no more than its error allows (the coarsest,
+            // 86 triangles straying 0.2 m, has 93% of it).
+            let kept = area(&mesh, &l.indices) / area(&mesh, &mesh.indices);
+            assert!(
+                kept > 1.0 - l.error,
+                "{kept} of its area at error {}",
+                l.error
+            );
+        }
     }
 
     #[test]

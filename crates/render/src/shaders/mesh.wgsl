@@ -1097,21 +1097,26 @@ fn fs_main_early(in: VertexOut, @builtin(front_facing) front: bool) -> @location
 }
 
 fn scene_fragment(in: VertexOut, front: bool) -> vec4<f32> {
-    // The prepass's dither again: where a fading pair's two meshes lie at the same depth (flat
-    // faces both levels share), each shades only its own pixels.
     // Under a planar reflection's mirror (its view only; elsewhere the plane is zero).
-    if (!dither_keeps(in.dither, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
+    if (clip_plane_distance(in.rel) < 0.0) {
         discard;
     }
+    // The prepass's dither again: where a fading pair's two meshes lie at the same depth (flat
+    // faces both levels share), each shades only its own pixels: discarded after the material
+    // is sampled (`dither_keeps`).
+    let kept = dither_keeps(in.dither, in.clip.xy);
     let mat = materials[in.material];
     let flags = mat.flags.x;
     if (shade_skip(SKIP_MESH_SCENE) && (flags & 15u) == 0u) {
+        if (!kept) {
+            discard;
+        }
         return vec4<f32>(0.2, 0.2, 0.2, 1.0);
     }
     // Blended materials have no prepass: they ask for their virtual texture tiles here.
     vt_feedback_on = (flags & 15u) == 2u && vt_feedback_pixel(in.clip.xy);
     let m = evaluate_material(surface_in(in, front), true);
-    if (SCENE_ALPHA_TEST && (flags & 15u) == 1u && m.base.a < mat.params.w) {
+    if (!kept || (SCENE_ALPHA_TEST && (flags & 15u) == 1u && m.base.a < mat.params.w)) {
         discard;
     }
 
@@ -1292,18 +1297,23 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
     // mesh leaves): the scene pass shades only what the prepass kept.
     // Under a planar reflection's mirror: cut away in its view, where the near plane alone
     // leaves what pokes up from the bottom (posts, banks) in front of the reflected scene.
-    if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
+    // Dithered out after the material is sampled (`dither_keeps`).
+    if (clip_plane_distance(in.rel) < 0.0) {
         discard;
     }
+    let kept = dither_keeps(in.fade, in.clip.xy);
     let mat = materials[in.material];
     if (shade_skip(SKIP_MESH_PREPASS_MATERIAL) && (mat.flags.x & 15u) == 0u) {
+        if (!kept) {
+            discard;
+        }
         return prepass_output(normalize(in.normal), 0.6, in.motion_now, in.motion_prev);
     }
     vt_feedback_on = vt_feedback_pixel(in.clip.xy);
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
         mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, 0.0);
     let m = evaluate_material(si, false);
-    if ((mat.flags.x & 15u) == 1u && m.base.a < mat.params.w) {
+    if (!kept || ((mat.flags.x & 15u) == 1u && m.base.a < mat.params.w)) {
         discard;
     }
     return prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
@@ -1401,32 +1411,38 @@ fn fs_once_early(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceO
 // too, get their whole material for the layer in view only.
 @fragment
 fn fs_once_depth(in: OnceVertexOut, @builtin(front_facing) front: bool) {
-    if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
+    if (clip_plane_distance(in.rel) < 0.0) {
         discard;
     }
+    // Dithered out after the material is sampled (`dither_keeps`).
+    let kept = dither_keeps(in.fade, in.clip.xy);
     let mat = materials[in.material];
+    var hole = false;
     if ((mat.flags.x & 15u) == 1u) {
         let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local,
             in.object_normal, mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, in.snow);
         let m = evaluate_material_with(si, false, true);
-        if (m.base.a < mat.params.w) {
-            discard;
-        }
+        hole = m.base.a < mat.params.w;
+    }
+    if (!kept || hole) {
+        discard;
     }
 }
 
 // `holes`: alpha-tested materials are tested here (not when a depth step has done it).
 fn once_fragment(in: OnceVertexOut, front: bool, holes: bool) -> OnceOutput {
-    if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
+    if (clip_plane_distance(in.rel) < 0.0) {
         discard;
     }
+    // Dithered out after the material is sampled (`dither_keeps`).
+    let kept = dither_keeps(in.fade, in.clip.xy);
     let mat = materials[in.material];
     let flags = mat.flags.x;
     vt_feedback_on = vt_feedback_pixel(in.clip.xy);
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
         mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, in.snow);
     let m = evaluate_material(si, true);
-    if (holes && (flags & 15u) == 1u && m.base.a < mat.params.w) {
+    if (!kept || (holes && (flags & 15u) == 1u && m.base.a < mat.params.w)) {
         discard;
     }
     let basic = prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
