@@ -13,6 +13,11 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 
+/// The features ray queries need: the queries, and the hit triangle's corners
+/// ([`crate::features::GpuShared::ray_queries`]). Asked for both or neither.
+pub(crate) const RAY_QUERY_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RAY_QUERY
+    .union(wgpu::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN);
+
 /// Lets wgpu keep the platform's window alive for as long as the surface exists.
 #[derive(Clone)]
 pub(crate) struct WindowTarget(pub Arc<dyn WindowHandleSource>);
@@ -198,11 +203,47 @@ fn try_create(
         | wgpu::Features::SHADER_EARLY_DEPTH_TEST
         | wgpu::Features::TEXTURE_COMPRESSION_BC
         | wgpu::Features::INDIRECT_FIRST_INSTANCE;
-    let required_features = adapter.features() & wanted;
+    let mut required_features = adapter.features() & (wanted | RAY_QUERY_FEATURES);
+    // Ray queries: both or neither (probe GI's hardware rays read the hit triangle's corners).
+    // `ENGINE_RAY_QUERIES=off` leaves them out, so everything traces in software, and so does
+    // the noop device (it claims every feature but builds nothing, and timing the software
+    // walk's CPU side is what it's for).
+    let noop = info.backend == wgpu::Backend::Noop;
+    let rays_off = std::env::var("ENGINE_RAY_QUERIES").is_ok_and(|v| v == "off" || v == "0");
+    if noop || rays_off || !required_features.contains(RAY_QUERY_FEATURES) {
+        required_features.remove(RAY_QUERY_FEATURES);
+    }
+    let ray_queries = required_features.contains(RAY_QUERY_FEATURES);
+    tracing::info!(
+        "GPU ray queries: {}",
+        if ray_queries {
+            "yes (probe GI and world reflections trace on the GPU's ray-tracing hardware)"
+        } else if rays_off {
+            "off (ENGINE_RAY_QUERIES)"
+        } else if noop {
+            "off (the noop device)"
+        } else {
+            "no (probe GI and world reflections trace in software)"
+        }
+    );
+    let experimental_features = if ray_queries {
+        // SAFETY: wgpu marks its ray queries experimental: a misuse may be undefined behavior
+        // rather than a validation error. Only probe GI's hardware path uses them
+        // (probe_gi/rt.rs), with every structure opaque, built before any query reads it, and
+        // kept until the GPU has finished every frame that may trace it (wgpu frees a
+        // structure with its last handle, though a top-level structure the GPU is still
+        // tracing points at it); its scene starts over when a submission holding its builds
+        // fails, and its tests hold its pictures to the software path's on lavapipe's ray
+        // queries.
+        unsafe { wgpu::ExperimentalFeatures::enabled() }
+    } else {
+        wgpu::ExperimentalFeatures::disabled()
+    };
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("engine device"),
         required_features,
         required_limits: adapter.limits(),
+        experimental_features,
         memory_hints: memory_hints(),
         ..Default::default()
     }))

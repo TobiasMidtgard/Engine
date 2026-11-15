@@ -22,7 +22,8 @@
 //! software GPU's times say nothing).
 //!
 //! The cuts of `RenderSettings::trial_cuts` are on by default. `--old-way` takes them all off
-//! for the sweep, so the baseline is the frame as it was before them, each `cut_*` row reads
+//! for the sweep (and puts probe GI's rays back in software), so the baseline is the frame as it
+//! was before them, each `cut_*` row reads
 //! what that cut saves by itself and `cut_all` what the default frame saves. Without it the
 //! baseline is the default frame: `old_way` is the whole before and after, the cuts that are
 //! on change nothing, and those that are off (the trades) are added.
@@ -120,6 +121,12 @@ fn variants() -> Vec<Variant> {
             r,
             json!({"probe_gi": false}),
             "probe tracing and the eight probe lookups a pixel",
+        ),
+        v(
+            "software_rays",
+            r,
+            json!({"gi_hardware_rays": false}),
+            "probe GI's and world reflections' rays walk the software hierarchy in a compute shader instead of the RT cores (as before 15 Nov; the same on a GPU without ray queries)",
         ),
         v(
             "no_ssgi",
@@ -645,17 +652,18 @@ fn variants() -> Vec<Variant> {
             json!({"trial_cuts": 3_137_211, "trial_cuts_more": 15, "shadow_refresh_secs": 0.25}),
             "every same-picture cut in RenderSettings at once (lighting but for the deep-shadow shortcut and the reflection taps, ground textures but for rock's single lookup, ground lines, ground and objects once a pixel, depth first, holes first, nearest first, far shadow refresh): the frame if all of them pass",
         ),
-        x(
-            "old_way",
-            r,
-            &[
+        Variant {
+            name: "old_way",
+            resource: r,
+            patch: json!({"gi_hardware_rays": false}),
+            times: &[
                 ("trial_cuts", 0.0),
                 ("trial_cuts_more", 0.0),
                 ("shadow_refresh_secs", 0.0),
                 ("pacing_fps", 0.0),
             ],
-            "the frame as it was drawn before 11 Nov 2026 (no cut on, no pacing): against the default frame, the whole before and after",
-        ),
+            note: "the frame as it was drawn before 11 Nov 2026 (no cut on, no pacing, the rays in software): against the default frame, the whole before and after",
+        },
         v(
             "cut_all_no_screen_pass",
             r,
@@ -1143,7 +1151,7 @@ fn run(args: &Args) -> Result<(), String> {
         .unwrap_or(Value::Null);
     // `--old-way`: the baseline is the frame without any cut, so a cut's row reads what that
     // cut saves by itself and `cut_all` what the default frame saves. Put back at the end.
-    let old = json!({"trial_cuts": 0, "trial_cuts_more": 0, "shadow_refresh_secs": 0.0, "pacing_fps": 0.0});
+    let old = json!({"trial_cuts": 0, "trial_cuts_more": 0, "shadow_refresh_secs": 0.0, "pacing_fps": 0.0, "gi_hardware_rays": false});
     let default_way = if args.old_way {
         let now = bridge.call("resource.get", json!({"name": "RenderSettings"}))?;
         bridge.call(
@@ -1158,7 +1166,7 @@ fn run(args: &Args) -> Result<(), String> {
     let mut md = String::new();
     md.push_str(&format!("# GPU sweep: {}\n\n", args.label));
     if args.old_way {
-        md.push_str("Baseline: the old way (no cut on).\n\n");
+        md.push_str("Baseline: the old way (no cut on, the rays in software).\n\n");
     }
     let stats = &renderer["stats"];
     md.push_str(&format!(

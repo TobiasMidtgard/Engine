@@ -560,6 +560,12 @@ pub struct RenderSettings {
     pub gi_hysteresis: f32,
     /// Point lights (the nearest first) the probes' rays see, through shadow rays.
     pub gi_shadowed_lights: u32,
+    /// Probe GI's and world reflections' rays trace on the GPU's ray-tracing hardware where it
+    /// has ray queries (`render.gi.hardware_rays`): the GPU builds and walks the meshes'
+    /// structures, instead of software hierarchies built on the CPU and walked in a shader. The
+    /// same scene and the same light; off traces in software everywhere
+    /// (`ENGINE_RAY_QUERIES=off` leaves the device without ray queries).
+    pub gi_hardware_rays: bool,
     /// How far light spreads under skin, meters at full strength (screen-space subsurface
     /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
     /// 0 = off.
@@ -858,6 +864,7 @@ impl Default for RenderSettings {
             gi_rays_per_probe: 64,
             gi_hysteresis: 0.9,
             gi_shadowed_lights: 8,
+            gi_hardware_rays: true,
             subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,

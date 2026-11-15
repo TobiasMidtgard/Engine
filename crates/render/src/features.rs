@@ -129,6 +129,16 @@ pub struct GpuShared {
     pub(crate) canopy: crate::canopy::CanopyMap,
 }
 
+impl GpuShared {
+    /// Whether the device traces rays on its own hardware: ray queries with the hit
+    /// triangle's corners (`Features::EXPERIMENTAL_RAY_QUERY` and
+    /// `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`, both or neither, see `gpu.rs`). Probe GI and world
+    /// reflections trace their rays that way when they can (`probe_gi/rt.rs`).
+    pub fn ray_queries(&self) -> bool {
+        self.features.contains(crate::gpu::RAY_QUERY_FEATURES)
+    }
+}
+
 /// See [`GpuShared::side_commands`].
 #[derive(Default)]
 pub(crate) struct SideCommands {
@@ -528,16 +538,37 @@ pub fn take_change_tick(world: &World) -> bevy_ecs::change_detection::Tick {
         .increment_change_tick()
 }
 
-/// Build the full WGSL source for a feature shader.
+/// Build the full WGSL source for a feature shader. The source's directives (`enable ...;`
+/// lines, which WGSL wants before any declaration) go first, above the libraries; an empty line
+/// keeps each one's place, so the source's own lines stay where they were.
 pub fn compose_shader(source: &str, with_frame: bool) -> String {
+    let directive = |line: &str| line.trim_start().starts_with("enable ");
+    let mut directives = String::new();
+    let mut rest = std::borrow::Cow::Borrowed(source);
+    if source.lines().any(directive) {
+        let mut body = String::with_capacity(source.len());
+        for line in source.split_inclusive('\n') {
+            if directive(line) {
+                directives.push_str(line.trim());
+                directives.push('\n');
+                body.push('\n');
+            } else {
+                body.push_str(line);
+            }
+        }
+        rest = std::borrow::Cow::Owned(body);
+    }
+    let source = rest.as_ref();
     let mut code = String::with_capacity(
-        engine_world::GUST_WAVES_WGSL.len()
+        directives.len()
+            + engine_world::GUST_WAVES_WGSL.len()
             + SHADER_LIB_TYPES.len()
             + SHADER_LIB_FRAME.len()
             + SHADER_LIB_ATMOSPHERE.len()
             + source.len()
             + 3,
     );
+    code.push_str(&directives);
     // The gust fronts (`GustWaves`, `gust_waves`) that plants, grass and anything else moving
     // in the wind evaluate the same way.
     code.push_str(engine_world::GUST_WAVES_WGSL);
@@ -1172,5 +1203,27 @@ mod upload_budget_tests {
             b.take(9, 4 * MB, true);
             assert_eq!(b.report(), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod compose_tests {
+    use super::compose_shader;
+
+    #[test]
+    fn directives_go_above_the_libraries() {
+        let source = "// a feature\nenable wgpu_ray_query;\n  enable wgpu_ray_query_vertex_return;\nfn f() {}\n";
+        let code = compose_shader(source, true);
+        assert!(code.starts_with("enable wgpu_ray_query;\nenable wgpu_ray_query_vertex_return;\n"));
+        let directives = code
+            .lines()
+            .filter(|l| l.trim_start().starts_with("enable "));
+        assert_eq!(directives.count(), 2, "each directive once");
+        // The source's lines keep their places within it.
+        assert!(code.ends_with("// a feature\n\n\nfn f() {}\n"));
+        // A source without directives composes as before.
+        let plain = compose_shader("fn f() {}\n", true);
+        assert!(plain.starts_with(engine_world::GUST_WAVES_WGSL));
+        assert!(plain.ends_with("\nfn f() {}\n"));
     }
 }

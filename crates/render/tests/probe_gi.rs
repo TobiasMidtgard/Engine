@@ -7,8 +7,11 @@
 //! far from the grid don't gather it again, a near one moving updates only its own instance and
 //! the rays see it where it went, a large mesh builds on a worker before the rays see it, a
 //! world shift moves the gather without reading every entity again, and walking with a budget
-//! smaller than a plane of probes never starts them all over. Needs a GPU or lavapipe; passes
-//! with a note when neither is available.
+//! smaller than a plane of probes never starts them all over. On a GPU with ray queries
+//! (lavapipe has them) the rays trace through the GPU's acceleration structures, lighting each
+//! scene as the software walk does, and a large mesh is in them the frame it shows up, its
+//! structure compacted once built. Needs a GPU or lavapipe; passes with a note when neither is
+//! available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -165,6 +168,11 @@ fn shoot(mut app: App, frames: usize, name: &str, rect: [f32; 4]) -> Option<f32>
         eprintln!("skipping: no GPU ({})", d.0);
         return None;
     }
+    // Where probe GI is on, its rays traced on the path asked for, with nothing lost in the
+    // frames so far (a loss shows in the diagnostics the frame after it).
+    if app.world.resource::<Diagnostics>().get("render.gi.on") == Some(1.0) {
+        on_hardware(&app);
+    }
     let mean = brightness(&mut app, name, rect);
     let d = app.world.resource::<Diagnostics>();
     eprintln!(
@@ -291,33 +299,91 @@ fn a_lamp_lights_its_room_by_bounce_and_nothing_leaks_next_door() {
     );
 }
 
+/// The paths the rays trace on, for the tests that check what each does on its own (the
+/// gather's reuse, refits, world shifts, the far meshes): the software walk, then the
+/// hardware's where the GPU has ray queries ([`skip_path`]). Lavapipe has them, so the tests on
+/// [`app`] alone take the hardware path.
+const PATHS: [bool; 2] = [false, true];
+
+/// On the hardware pass of a test run on both [`PATHS`], whether the GPU has no ray queries
+/// (the rays traced in software again: nothing new to check). See [`on_hardware`].
+fn skip_path(app: &App, hardware: bool) -> bool {
+    let skip = on_hardware(app) != hardware;
+    if skip {
+        eprintln!("skipping the hardware pass: the GPU has no ray queries");
+    }
+    skip
+}
+
+/// Whether the rays traced on the GPU's ray-tracing hardware. Where the settings ask for it
+/// and the device has ray queries (`render.ray_queries`), they must have, with no structure
+/// lost: a hardware path that fell back to software fails here instead of passing as a device
+/// without ray queries. Where the settings ask for the software walk, they must not have.
+fn on_hardware(app: &App) -> bool {
+    let wanted = app.world.resource::<RenderSettings>().gi_hardware_rays;
+    let d = app.world.resource::<Diagnostics>();
+    let hardware = d.get("render.gi.hardware_rays") == Some(1.0);
+    if !wanted {
+        assert!(
+            !hardware,
+            "the software walk was asked for and the hardware traced"
+        );
+        return false;
+    }
+    if d.get("render.ray_queries") != Some(1.0) {
+        return false;
+    }
+    assert_eq!(
+        d.get("render.gi.rt_losses"),
+        Some(0.0),
+        "the GPU lost the hardware rays' structures"
+    );
+    assert!(hardware, "the hardware rays fell back to software");
+    true
+}
+
+/// The path's name, for messages; `shot` is the suffix of its screenshots (the hardware's keep
+/// the plain names).
+fn path_name(hardware: bool) -> &'static str {
+    if hardware { "hardware" } else { "software" }
+}
+fn shot(hardware: bool) -> &'static str {
+    if hardware { "" } else { "_sw" }
+}
+
 #[test]
 fn meshes_far_from_the_grid_are_not_built_for_its_rays() {
-    let meshes = |far: bool| {
-        let mut app = app(true);
-        let w = &mut app.world;
-        room(w, DVec3::ZERO, 0.7, 0.5, None);
-        ground(w);
-        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
-        camera(w, EYE, TARGET, 12.0);
-        if far {
-            // Its own mesh (no other cuboid has this size), 2 km away.
-            slab(w, DVec3::new(2000.0, 4.0, 0.0), DVec3::splat(7.7), 0.5);
-        }
-        app.update_n(4);
-        if app.world.get_resource::<RenderDisabled>().is_some() {
-            return None;
-        }
-        app.world.resource::<Diagnostics>().get("render.gi.meshes")
-    };
-    let Some(near) = meshes(false) else {
-        eprintln!("skipping: no GPU");
-        return;
-    };
-    let with_far = meshes(true).expect("GPU");
-    eprintln!("meshes built: {near} near the room, {with_far} with a far one");
-    assert!(near > 0.0);
-    assert_eq!(with_far, near, "the far mesh was built");
+    for hardware in PATHS {
+        let meshes = |far: bool| {
+            let mut app = app_rays(hardware);
+            let w = &mut app.world;
+            room(w, DVec3::ZERO, 0.7, 0.5, None);
+            ground(w);
+            sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+            camera(w, EYE, TARGET, 12.0);
+            if far {
+                // Its own mesh (no other cuboid has this size), 2 km away.
+                slab(w, DVec3::new(2000.0, 4.0, 0.0), DVec3::splat(7.7), 0.5);
+            }
+            app.update_n(4);
+            if app.world.get_resource::<RenderDisabled>().is_some() {
+                eprintln!("skipping: no GPU");
+                return None;
+            }
+            if skip_path(&app, hardware) {
+                return None;
+            }
+            app.world.resource::<Diagnostics>().get("render.gi.meshes")
+        };
+        let Some(near) = meshes(false) else {
+            return;
+        };
+        let with_far = meshes(true).expect("GPU");
+        let path = path_name(hardware);
+        eprintln!("{path}: meshes built: {near} near the room, {with_far} with a far one");
+        assert!(near > 0.0, "{path}");
+        assert_eq!(with_far, near, "{path}: the far mesh was built");
+    }
 }
 
 #[test]
@@ -423,36 +489,7 @@ fn a_mirror_reflects_a_wall_behind_the_camera() {
     let scene = |world_reflections: bool| {
         let mut app = app(true);
         app.world.resource_mut::<RenderSettings>().world_reflections = world_reflections;
-        let w = &mut app.world;
-        ground(w);
-        w.spawn((
-            Transform::from_translation(DVec3::new(0.0, 1.5, -3.0)),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [5.0, 3.0, 0.1],
-                },
-                StandardMaterial::color(0.95, 0.95, 0.95)
-                    .with_metallic(1.0)
-                    .with_roughness(0.05),
-            ),
-        ));
-        w.spawn((
-            Transform::from_translation(DVec3::new(0.0, 2.0, 4.0)),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [8.0, 4.0, 0.3],
-                },
-                StandardMaterial::color(0.8, 0.05, 0.05).with_roughness(0.9),
-            ),
-        ));
-        // From behind the mirror, onto the red wall's face.
-        sun(w, 110_000.0, DVec3::new(0.2, -0.8, 0.6));
-        camera(
-            w,
-            DVec3::new(0.0, 1.5, 1.0),
-            DVec3::new(0.0, 1.5, -3.0),
-            14.0,
-        );
+        mirror(&mut app.world);
         app
     };
     let Some(off) = red_share(scene(false), "mirror_off.png") else {
@@ -462,6 +499,39 @@ fn a_mirror_reflects_a_wall_behind_the_camera() {
     assert!(
         on > 0.25 && on > off + 0.2,
         "mirror's red share: {on:.2} with world reflections, {off:.2} without"
+    );
+}
+
+/// A mirror facing the camera, and a red wall behind the camera that the sun lights.
+fn mirror(w: &mut World) {
+    ground(w);
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 1.5, -3.0)),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [5.0, 3.0, 0.1],
+            },
+            StandardMaterial::color(0.95, 0.95, 0.95)
+                .with_metallic(1.0)
+                .with_roughness(0.05),
+        ),
+    ));
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 2.0, 4.0)),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [8.0, 4.0, 0.3],
+            },
+            StandardMaterial::color(0.8, 0.05, 0.05).with_roughness(0.9),
+        ),
+    ));
+    // From behind the mirror, onto the red wall's face.
+    sun(w, 110_000.0, DVec3::new(0.2, -0.8, 0.6));
+    camera(
+        w,
+        DVec3::new(0.0, 1.5, 1.0),
+        DVec3::new(0.0, 1.5, -3.0),
+        14.0,
     );
 }
 
@@ -502,51 +572,57 @@ fn red_share(mut app: App, name: &str) -> Option<f32> {
 /// first frames and then left alone, and a wall that moves is gathered again the next frame.
 #[test]
 fn a_still_scene_is_not_gathered_again_every_frame() {
-    let mut app = app(true);
-    let w = &mut app.world;
-    room(w, DVec3::ZERO, 0.7, 0.5, None);
-    sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
-    camera(w, EYE, TARGET, 12.0);
-    let block = w
-        .spawn((
-            Transform::from_translation(DVec3::new(0.0, 0.5, 0.0)),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [0.5, 1.0, 0.5],
-                },
-                StandardMaterial::color(0.5, 0.5, 0.5),
-            ),
-        ))
-        .id();
-    app.update_n(6);
-    if app.world.get_resource::<RenderDisabled>().is_some() {
-        eprintln!("skipping: no GPU");
-        return;
+    for hardware in PATHS {
+        let mut app = app_rays(hardware);
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.5, None);
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+        camera(w, EYE, TARGET, 12.0);
+        let block = w
+            .spawn((
+                Transform::from_translation(DVec3::new(0.0, 0.5, 0.0)),
+                MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: [0.5, 1.0, 0.5],
+                    },
+                    StandardMaterial::color(0.5, 0.5, 0.5),
+                ),
+            ))
+            .id();
+        app.update_n(6);
+        if app.world.get_resource::<RenderDisabled>().is_some() {
+            eprintln!("skipping: no GPU");
+            return;
+        }
+        if skip_path(&app, hardware) {
+            continue;
+        }
+        let gathered = |app: &App| {
+            let d = app.world.resource::<Diagnostics>();
+            (
+                d.get("render.gi.gathered").unwrap_or(-1.0),
+                d.get("render.gi.instances").unwrap_or(-1.0),
+                d.get("render.gi.full_gather").unwrap_or(-1.0),
+            )
+        };
+        let still = gathered(&app);
+        app.world
+            .get_mut::<Transform>(block)
+            .expect("block")
+            .translation
+            .x = 1.0;
+        app.update();
+        let moved = gathered(&app);
+        let path = path_name(hardware);
+        eprintln!("{path}: still: {still:?}, after a move: {moved:?}");
+        assert_eq!(
+            still,
+            (0.0, 7.0, 0.0),
+            "{path}: a still room's gather (gathered, instances, all read again)"
+        );
+        // Only the block's instance is read and written again.
+        assert_eq!(moved, (1.0, 7.0, 0.0), "{path}: after the block moved");
     }
-    let gathered = |app: &App| {
-        let d = app.world.resource::<Diagnostics>();
-        (
-            d.get("render.gi.gathered").unwrap_or(-1.0),
-            d.get("render.gi.instances").unwrap_or(-1.0),
-            d.get("render.gi.full_gather").unwrap_or(-1.0),
-        )
-    };
-    let still = gathered(&app);
-    app.world
-        .get_mut::<Transform>(block)
-        .expect("block")
-        .translation
-        .x = 1.0;
-    app.update();
-    let moved = gathered(&app);
-    eprintln!("still: {still:?}, after a move: {moved:?}");
-    assert_eq!(
-        still,
-        (0.0, 7.0, 0.0),
-        "a still room's gather (gathered, instances, all read again)"
-    );
-    // Only the block's instance is read and written again.
-    assert_eq!(moved, (1.0, 7.0, 0.0), "after the block moved");
 }
 
 /// A crowd far from the probe grid costs the gather nothing: moving one of them doesn't gather
@@ -642,88 +718,99 @@ fn far_entities_moving_leave_the_gather_alone() {
 fn a_lid_slid_aside_lets_the_sun_in_like_one_that_was_never_on() {
     let lid_over = DVec3::new(0.0, HEIGHT + THICK * 1.5, -0.5);
     let lid_aside = DVec3::new(2.2, HEIGHT + THICK * 1.5, -0.5);
-    let scene = |lid_at: DVec3| {
-        let mut app = app(true);
-        let w = &mut app.world;
-        room(w, DVec3::ZERO, 0.7, 0.8, Some((1.4, -0.5)));
-        ground(w);
-        sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
-        camera(w, EYE, TARGET, 12.0);
-        let lid = w
-            .spawn((
-                Transform::from_translation(lid_at),
-                MeshRenderer::new(
-                    Shape::Cuboid {
-                        size: [1.8, THICK as f32, 2.0],
-                    },
-                    StandardMaterial::color(0.7, 0.7, 0.7).with_roughness(0.9),
-                ),
-            ))
-            .id();
-        (app, lid)
-    };
-    let (mut slid, lid) = scene(lid_over);
-    slid.update_n(16);
-    if slid.world.get_resource::<RenderDisabled>().is_some() {
-        eprintln!("skipping: no GPU");
-        return;
+    for hardware in PATHS {
+        let scene = |lid_at: DVec3| {
+            let mut app = app_rays(hardware);
+            let w = &mut app.world;
+            room(w, DVec3::ZERO, 0.7, 0.8, Some((1.4, -0.5)));
+            ground(w);
+            sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
+            camera(w, EYE, TARGET, 12.0);
+            let lid = w
+                .spawn((
+                    Transform::from_translation(lid_at),
+                    MeshRenderer::new(
+                        Shape::Cuboid {
+                            size: [1.8, THICK as f32, 2.0],
+                        },
+                        StandardMaterial::color(0.7, 0.7, 0.7).with_roughness(0.9),
+                    ),
+                ))
+                .id();
+            (app, lid)
+        };
+        let (mut slid, lid) = scene(lid_over);
+        slid.update_n(16);
+        if slid.world.get_resource::<RenderDisabled>().is_some() {
+            eprintln!("skipping: no GPU");
+            return;
+        }
+        if skip_path(&slid, hardware) {
+            continue;
+        }
+        let (path, tag) = (path_name(hardware), shot(hardware));
+        let (closed, _) = scene(lid_over);
+        let closed = shoot(closed, 16, &format!("lid_closed{tag}.png"), UPPER).expect("GPU");
+        // Slide it aside over a few frames.
+        let mut full_gathers = 0.0;
+        for step in 1..=4 {
+            slid.world
+                .get_mut::<Transform>(lid)
+                .expect("lid")
+                .translation = lid_over.lerp(lid_aside, step as f64 / 4.0);
+            slid.update();
+            full_gathers += slid
+                .world
+                .resource::<Diagnostics>()
+                .get("render.gi.full_gather")
+                .unwrap_or(-1.0);
+        }
+        assert_eq!(
+            full_gathers, 0.0,
+            "{path}: sliding the lid read every instance again"
+        );
+        let slid = shoot(slid, 16, &format!("lid_slid{tag}.png"), UPPER).expect("GPU");
+        let (open, _) = scene(lid_aside);
+        let open = shoot(open, 20, &format!("lid_open{tag}.png"), UPPER).expect("GPU");
+        assert!(
+            open > closed * 1.3 + 3.0,
+            "{path}: the opening should light the room: lid on {closed:.1}, never on {open:.1}"
+        );
+        assert!(
+            (slid - open).abs() < (open - closed) * 0.15 + 1.0,
+            "{path}: lid slid aside {slid:.1}, never on {open:.1}, on {closed:.1}"
+        );
     }
-    let (closed, _) = scene(lid_over);
-    let Some(closed) = shoot(closed, 16, "lid_closed.png", UPPER) else {
-        return;
-    };
-    // Slide it aside over a few frames.
-    let mut full_gathers = 0.0;
-    for step in 1..=4 {
-        slid.world
-            .get_mut::<Transform>(lid)
-            .expect("lid")
-            .translation = lid_over.lerp(lid_aside, step as f64 / 4.0);
-        slid.update();
-        full_gathers += slid
-            .world
-            .resource::<Diagnostics>()
-            .get("render.gi.full_gather")
-            .unwrap_or(-1.0);
-    }
-    assert_eq!(
-        full_gathers, 0.0,
-        "sliding the lid read every instance again"
-    );
-    let slid = shoot(slid, 16, "lid_slid.png", UPPER).expect("GPU");
-    let (open, _) = scene(lid_aside);
-    let open = shoot(open, 20, "lid_open.png", UPPER).expect("GPU");
-    assert!(
-        open > closed * 1.3 + 3.0,
-        "the opening should light the room: lid on {closed:.1}, never on {open:.1}"
-    );
-    assert!(
-        (slid - open).abs() < (open - closed) * 0.15 + 1.0,
-        "lid slid aside {slid:.1}, never on {open:.1}, on {closed:.1}"
-    );
 }
 
-/// A mesh too large to build on the render thread builds on a worker, and the rays see it once
-/// it's done: a closed sphere of 66k triangles around the camera keeps most of the noon sky out.
+/// A closed sphere of 66k triangles around the camera (inside the probe grid, 8 m high around
+/// it).
+fn large_sphere(w: &mut World) {
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 1.5, 0.0)),
+        MeshRenderer::new(
+            Shape::Sphere {
+                radius: 3.0,
+                segments: 256,
+            },
+            StandardMaterial {
+                double_sided: true,
+                ..StandardMaterial::color(0.7, 0.7, 0.7).with_roughness(0.9)
+            },
+        ),
+    ));
+}
+
+/// On the software walk a mesh too large to build on the render thread builds on a worker, and
+/// the rays see it once it's done: a closed sphere of 66k triangles around the camera keeps most
+/// of the noon sky out.
 #[test]
 fn a_large_mesh_builds_on_a_worker_and_then_blocks_the_sky() {
     let scene = |gi: bool| {
         let mut app = app(gi);
+        app.world.resource_mut::<RenderSettings>().gi_hardware_rays = false;
         let w = &mut app.world;
-        w.spawn((
-            Transform::from_translation(DVec3::new(0.0, 1.5, 0.0)),
-            MeshRenderer::new(
-                // Inside the probe grid (8 m high around the camera).
-                Shape::Sphere {
-                    radius: 3.0,
-                    segments: 256,
-                },
-                StandardMaterial {
-                    double_sided: true,
-                    ..StandardMaterial::color(0.7, 0.7, 0.7).with_roughness(0.9)
-                },
-            ),
-        ));
+        large_sphere(w);
         sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
         camera(w, EYE, TARGET, 12.0);
         app
@@ -774,7 +861,7 @@ fn a_large_mesh_builds_on_a_worker_and_then_blocks_the_sky() {
 fn a_world_shift_moves_the_gather_without_reading_every_entity() {
     // Whole meters and a quarter turn: the walls stay on whole meters, between the probes.
     let turn = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
-    for (name, shift) in [
+    let shifts = [
         (
             "move",
             engine_world::WorldShift::translate(DVec3::new(3000.0, 0.0, -1700.0)),
@@ -786,102 +873,127 @@ fn a_world_shift_moves_the_gather_without_reading_every_entity() {
                 ..engine_world::WorldShift::translate(DVec3::new(-850.0, 0.0, 420.0))
             },
         ),
-    ] {
-        let mut app = app(true);
-        app.add_message::<engine_world::WorldShift>();
-        let w = &mut app.world;
-        room(w, DVec3::ZERO, 0.7, 0.5, None);
-        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
-        camera(w, EYE, TARGET, 12.0);
-        let crate_at = |w: &mut World, at: DVec3| {
-            w.spawn((
-                Transform::from_translation(at),
-                MeshRenderer::new(
-                    Shape::Cuboid {
-                        size: [0.5, 1.0, 0.5],
-                    },
-                    StandardMaterial::color(0.5, 0.5, 0.5),
+    ];
+    'paths: for hardware in PATHS {
+        for (name, shift) in shifts {
+            let (path, tag) = (path_name(hardware), shot(hardware));
+            let mut app = app_rays(hardware);
+            app.add_message::<engine_world::WorldShift>();
+            let w = &mut app.world;
+            room(w, DVec3::ZERO, 0.7, 0.5, None);
+            sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+            camera(w, EYE, TARGET, 12.0);
+            let crate_at = |w: &mut World, at: DVec3| {
+                w.spawn((
+                    Transform::from_translation(at),
+                    MeshRenderer::new(
+                        Shape::Cuboid {
+                            size: [0.5, 1.0, 0.5],
+                        },
+                        StandardMaterial::color(0.5, 0.5, 0.5),
+                    ),
+                ))
+                .id()
+            };
+            // 2000 crates 1-2 km away, and one that also moves on the shift's frame.
+            let far: Vec<Entity> = (0..2000)
+                .map(|i| {
+                    let (x, z) = ((i % 50) as f64, (i / 50) as f64);
+                    crate_at(w, DVec3::new(1000.0 + 20.0 * x, 0.5, 20.0 * z))
+                })
+                .collect();
+            app.update_n(16);
+            if app.world.get_resource::<RenderDisabled>().is_some() {
+                eprintln!("skipping: no GPU");
+                return;
+            }
+            if skip_path(&app, hardware) {
+                continue 'paths;
+            }
+            let diag = |app: &App, name: &str| {
+                app.world
+                    .resource::<Diagnostics>()
+                    .get(name)
+                    .unwrap_or(-1.0)
+            };
+            let instances = diag(&app, "render.gi.instances");
+            let before = brightness(&mut app, &format!("shift_{name}_before{tag}.png"), UPPER);
+
+            // Transforms written without changing (as some systems do every frame): nothing to
+            // refresh either.
+            for &e in &far {
+                app.world
+                    .get_mut::<GlobalTransform>(e)
+                    .expect("crate")
+                    .set_changed();
+            }
+            app.update();
+            assert_eq!(
+                (
+                    diag(&app, "render.gi.unchanged"),
+                    diag(&app, "render.gi.changed")
                 ),
-            ))
-            .id()
-        };
-        // 2000 crates 1-2 km away, and one that also moves on the shift's frame.
-        let far: Vec<Entity> = (0..2000)
-            .map(|i| {
-                let (x, z) = ((i % 50) as f64, (i / 50) as f64);
-                crate_at(w, DVec3::new(1000.0 + 20.0 * x, 0.5, 20.0 * z))
-            })
-            .collect();
-        app.update_n(16);
-        if app.world.get_resource::<RenderDisabled>().is_some() {
-            eprintln!("skipping: no GPU");
-            return;
-        }
-        let diag = |app: &App, name: &str| {
-            app.world
-                .resource::<Diagnostics>()
-                .get(name)
-                .unwrap_or(-1.0)
-        };
-        let instances = diag(&app, "render.gi.instances");
-        let before = brightness(&mut app, &format!("shift_{name}_before.png"), UPPER);
+                (2000.0, 0.0),
+                "{path} {name}: transforms written unchanged"
+            );
 
-        // Transforms written without changing (as some systems do every frame): nothing to
-        // refresh either.
-        for &e in &far {
+            // The shift, as `engine_world` applies it: every root transform moves.
+            let mut roots = app.world.query::<&mut Transform>();
+            for mut t in roots.iter_mut(&mut app.world) {
+                *t = shift.transform(&t);
+            }
             app.world
-                .get_mut::<GlobalTransform>(e)
+                .get_mut::<Transform>(far[7])
                 .expect("crate")
-                .set_changed();
-        }
-        app.update();
-        assert_eq!(
-            (
-                diag(&app, "render.gi.unchanged"),
-                diag(&app, "render.gi.changed")
-            ),
-            (2000.0, 0.0),
-            "{name}: transforms written unchanged"
-        );
+                .translation
+                .y += 1.0;
+            app.world.write_message(shift);
+            app.update();
+            let (shifted, changed) = (
+                diag(&app, "render.gi.shifted"),
+                diag(&app, "render.gi.changed"),
+            );
+            eprintln!(
+                "{path} {name}: shifted {shifted}, changed {changed}, extract {:.2} ms",
+                diag(&app, "render.gi.extract_ms")
+            );
+            assert!(
+                shifted >= 2000.0,
+                "{path} {name}: {shifted} mesh entities taken as moved by the shift"
+            );
+            assert_eq!(
+                changed, 1.0,
+                "{path} {name}: only the crate that moved itself"
+            );
+            assert_eq!(diag(&app, "render.gi.full_gather"), 1.0);
+            assert_eq!(
+                diag(&app, "render.gi.instances"),
+                instances,
+                "{path} {name}"
+            );
 
-        // The shift, as `engine_world` applies it: every root transform moves.
-        let mut roots = app.world.query::<&mut Transform>();
-        for mut t in roots.iter_mut(&mut app.world) {
-            *t = shift.transform(&t);
+            // The probes start over after the jump; light that came in through the first frames'
+            // guesses bounces out over a few dozen frames (as after any jump).
+            app.update_n(60);
+            // The shift's frame and those after it went through with nothing lost (a loss
+            // shows in the diagnostics the frame after it).
+            assert_eq!(
+                on_hardware(&app),
+                hardware,
+                "{path} {name}: after the shift"
+            );
+            assert_eq!(
+                diag(&app, "render.gi.instances"),
+                instances,
+                "{path} {name}"
+            );
+            let after = brightness(&mut app, &format!("shift_{name}_after{tag}.png"), UPPER);
+            eprintln!("{path} {name}: the room {before:.1} before the shift, {after:.1} after");
+            assert!(
+                (after - before).abs() <= before * 0.15 + 2.0,
+                "{path} {name}: the room {before:.1} before the shift, {after:.1} after"
+            );
         }
-        app.world
-            .get_mut::<Transform>(far[7])
-            .expect("crate")
-            .translation
-            .y += 1.0;
-        app.world.write_message(shift);
-        app.update();
-        let (shifted, changed) = (
-            diag(&app, "render.gi.shifted"),
-            diag(&app, "render.gi.changed"),
-        );
-        eprintln!(
-            "{name}: shifted {shifted}, changed {changed}, extract {:.2} ms",
-            diag(&app, "render.gi.extract_ms")
-        );
-        assert!(
-            shifted >= 2000.0,
-            "{name}: {shifted} mesh entities taken as moved by the shift"
-        );
-        assert_eq!(changed, 1.0, "{name}: only the crate that moved itself");
-        assert_eq!(diag(&app, "render.gi.full_gather"), 1.0);
-        assert_eq!(diag(&app, "render.gi.instances"), instances, "{name}");
-
-        // The probes start over after the jump; light that came in through the first frames'
-        // guesses bounces out over a few dozen frames (as after any jump).
-        app.update_n(60);
-        assert_eq!(diag(&app, "render.gi.instances"), instances, "{name}");
-        let after = brightness(&mut app, &format!("shift_{name}_after.png"), UPPER);
-        eprintln!("{name}: the room {before:.1} before the shift, {after:.1} after");
-        assert!(
-            (after - before).abs() <= before * 0.15 + 2.0,
-            "{name}: the room {before:.1} before the shift, {after:.1} after"
-        );
     }
 }
 
@@ -958,5 +1070,244 @@ fn walking_with_a_small_budget_never_relights_the_room_in_rows() {
     assert!(
         (walking - still).abs() < still * 0.25 + 3.0,
         "walking {walking:.1}, standing there {still:.1}"
+    );
+}
+
+/// [`app`] with probe GI on and its rays on the GPU's ray-tracing hardware or in software
+/// (`RenderSettings::gi_hardware_rays`; the hardware needs a device with ray queries).
+fn app_rays(hardware: bool) -> App {
+    let mut app = app(true);
+    app.world.resource_mut::<RenderSettings>().gi_hardware_rays = hardware;
+    app
+}
+
+/// The picture after `frames` frames, and whether the rays traced on the hardware
+/// ([`on_hardware`]); `None` without a GPU.
+fn picture(mut app: App, frames: usize, name: &str) -> Option<(image::RgbImage, bool)> {
+    app.update_n(frames);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return None;
+    }
+    let hardware = on_hardware(&app);
+    let dir = std::env::temp_dir().join("engine-probe-gi");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(name);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+    }
+    Some((
+        image::open(&path).expect("read the shot").to_rgb8(),
+        hardware,
+    ))
+}
+
+/// Boxes turned, stretched unevenly and mirrored (an odd number of negative scales), every
+/// other one single-sided, in the room with the opening in its roof: the rays must find each
+/// box's faces, and which side of a one-sided face they hit, as the software walk does.
+fn turned_boxes(w: &mut World) {
+    room(w, DVec3::ZERO, 0.6, 0.7, Some((1.4, -0.5)));
+    ground(w);
+    sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
+    camera(w, EYE, TARGET, 12.0);
+    for i in 0..24 {
+        let f = i as f32;
+        let at = DVec3::new(
+            -2.4 + (i % 6) as f64 * 0.95,
+            0.4 + (i / 12) as f64 * 1.6,
+            -2.2 + ((i / 6) % 2) as f64 * 2.4,
+        );
+        let mirror = if i % 3 == 0 { -1.0 } else { 1.0 };
+        let scale = Vec3::new(
+            mirror * (0.5 + 0.35 * (f * 1.7).sin().abs()),
+            0.4 + 0.5 * (f * 0.9).cos().abs(),
+            0.3 + 0.6 * (f * 2.3).sin().abs(),
+        );
+        let rotation = Quat::from_euler(EulerRot::YXZ, f * 0.61, f * 0.37 - 1.0, f * 0.23);
+        let tint = 0.3 + 0.6 * (f * 0.5).sin().abs();
+        w.spawn((
+            Transform::from_translation(at)
+                .with_rotation(rotation)
+                .with_scale(scale),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [1.0, 1.0, 1.0],
+                },
+                StandardMaterial {
+                    double_sided: i % 2 == 0,
+                    ..StandardMaterial::color(tint, 0.9 - tint * 0.5, 0.5).with_roughness(0.8)
+                },
+            ),
+        ));
+    }
+}
+
+/// A scene drawn on both paths: its name, the frames before its picture, and the app with the
+/// rays on the hardware (`true`) or in software.
+type Scene = (&'static str, usize, fn(bool) -> App);
+
+/// On a GPU with ray queries (lavapipe has them) the rays trace through the GPU's acceleration
+/// structures (`rt.rs`) instead of the software walk: the same triangles, so the same light,
+/// pixel for pixel but for the output's dither and a ray through a triangle's very edge (which
+/// the hardware's watertight test and the software's Möller-Trumbore split differently). A room
+/// at noon, one lit by a sunlit patch on its floor, one by a lamp at night, a mirror's world
+/// reflections, and boxes turned, stretched and mirrored.
+#[test]
+fn the_hardware_rays_light_each_scene_as_the_software_walk_does() {
+    let scenes: [Scene; 5] = [
+        ("closed", 12, |hardware| {
+            let mut app = app_rays(hardware);
+            let w = &mut app.world;
+            room(w, DVec3::ZERO, 0.7, 0.5, None);
+            ground(w);
+            sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+            camera(w, EYE, TARGET, 12.0);
+            app
+        }),
+        ("patch", 16, |hardware| {
+            let mut app = app_rays(hardware);
+            let w = &mut app.world;
+            room(w, DVec3::ZERO, 0.7, 0.8, Some((1.4, -0.5)));
+            ground(w);
+            sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
+            camera(w, EYE, TARGET, 12.0);
+            app
+        }),
+        ("night", 16, |hardware| {
+            let mut app = night(true, false);
+            app.world.resource_mut::<RenderSettings>().gi_hardware_rays = hardware;
+            app
+        }),
+        ("mirror", 12, |hardware| {
+            let mut app = app_rays(hardware);
+            mirror(&mut app.world);
+            app
+        }),
+        ("boxes", 16, |hardware| {
+            let mut app = app_rays(hardware);
+            turned_boxes(&mut app.world);
+            app
+        }),
+    ];
+    for (name, frames, scene) in scenes {
+        let Some((soft, _)) = picture(scene(false), frames, &format!("rays_{name}_sw.png")) else {
+            return;
+        };
+        let (hard, hardware) =
+            picture(scene(true), frames, &format!("rays_{name}_hw.png")).expect("GPU");
+        if !hardware {
+            eprintln!("skipping: the GPU has no ray queries");
+            return;
+        }
+        let (mut over, mut most, mut sum) = (0u32, 0u8, 0u64);
+        for (a, b) in soft.pixels().zip(hard.pixels()) {
+            let d = (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
+            over += (d > DITHER) as u32;
+            most = most.max(d);
+            sum += d as u64;
+        }
+        let pixels = (W * H) as f32;
+        let share = over as f32 / pixels;
+        let mean = sum as f32 / pixels;
+        eprintln!(
+            "{name}: {over} pixels apart by more than the dither ({:.3}%), at most {most}, \
+             mean {mean:.3}",
+            share * 100.0,
+        );
+        assert!(
+            share <= HW_APART_SHARE && most <= HW_APART_MOST && mean <= HW_APART_MEAN,
+            "{name}: the hardware rays' picture is {:.3}% apart by more than the dither, at most \
+             {most}, mean {mean:.3}",
+            share * 100.0
+        );
+    }
+}
+
+/// Two pictures of one scene are this far apart (of 255) where only the output's dither
+/// differs: post.wgsl's dither moves each pixel a level either way, seeded by the clock, so two
+/// runs of the same path are as far apart.
+const DITHER: u8 = 2;
+/// How far the hardware rays' pictures may be from the software walk's: the share of pixels
+/// apart by more than the dither, the most any is, and the mean. On lavapipe (15 Nov) only the
+/// boxes had any: 5 to 7 pixels of 19 200, at most 9 levels, all on the nearest box at the
+/// picture's bottom edge (most likely a probe's ray through a box's very edge, which hits on one
+/// path and not the other). The means, 0.50 to 0.62, are the dither's (two runs of one path
+/// differ as much). A wrong face, side or transform moves whole regions by tens of levels.
+const HW_APART_SHARE: f32 = 0.005;
+const HW_APART_MOST: u8 = 32;
+const HW_APART_MEAN: f32 = 1.0;
+
+/// On ray-tracing hardware a scene starts with an empty structure (built before any ray reads
+/// it: a frame with no mesh near the grid traces nothing), a large mesh is in the rays the frame
+/// it shows up (the GPU builds it, no worker), its structure is compacted once built, and the
+/// rays see it: the sphere keeps most of the noon sky out.
+#[test]
+fn on_ray_tracing_hardware_a_large_mesh_is_in_the_rays_at_once() {
+    let mut app = app_rays(true);
+    {
+        let w = &mut app.world;
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+        camera(w, EYE, TARGET, 12.0);
+    }
+    app.update_n(2);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    let diag = |app: &App, name: &str| {
+        app.world
+            .resource::<Diagnostics>()
+            .get(name)
+            .unwrap_or(-1.0)
+    };
+    if !on_hardware(&app) {
+        eprintln!("skipping: the GPU has no ray queries");
+        return;
+    }
+    assert_eq!(diag(&app, "render.gi.instances"), 0.0);
+    large_sphere(&mut app.world);
+    app.update();
+    assert_eq!(
+        diag(&app, "render.gi.instances"),
+        1.0,
+        "the sphere is in the rays the frame it shows up"
+    );
+    assert_eq!(diag(&app, "render.gi.building"), 0.0, "no worker builds");
+    assert_eq!(diag(&app, "render.gi.rt_built"), 1.0);
+    let mut compacted_after = None;
+    for frame in 1..60 {
+        if diag(&app, "render.gi.rt_compacted") == 1.0 {
+            compacted_after = Some(frame);
+            break;
+        }
+        app.update();
+    }
+    eprintln!("compacted after {compacted_after:?} frames");
+    assert!(
+        compacted_after.is_some(),
+        "the sphere's structure was never compacted"
+    );
+    // The frames after the swap (its top-level build ordered after the copy by the fence, as
+    // nothing else is built) went through with nothing lost.
+    app.update_n(2);
+    assert!(on_hardware(&app));
+    assert_eq!(
+        diag(&app, "render.gi.rt_fences"),
+        1.0,
+        "the fence built for the swap"
+    );
+    let on = shoot(app, 12, "rt_large_sphere.png", UPPER).expect("GPU");
+    let off = {
+        let mut app = crate::app(false);
+        let w = &mut app.world;
+        large_sphere(w);
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+        camera(w, EYE, TARGET, 12.0);
+        shoot(app, 6, "rt_large_sphere_off.png", UPPER).expect("GPU")
+    };
+    assert!(
+        on < off * 0.7,
+        "inside the sphere: {on:.1}, {off:.1} without probes"
     );
 }

@@ -1,8 +1,10 @@
-//! Probe GI: dynamic diffuse global illumination (DDGI, Majercik et al. 2019) without
-//! ray-tracing hardware. A grid of probes scrolls with the camera; each frame a share of them
-//! shoots rays against a software hierarchy of the meshes around (`bvh.rs`): one per mesh, built
-//! when it first shows up (large meshes on a worker thread), and one over the instances near
-//! the grid. A hit
+//! Probe GI: dynamic diffuse global illumination (DDGI, Majercik et al. 2019). A grid of probes
+//! scrolls with the camera; each frame a share of them shoots rays against the meshes around. On
+//! a GPU with ray queries ([`GpuShared::ray_queries`], `RenderSettings::gi_hardware_rays`) the
+//! GPU builds a structure per mesh and one over the instances near the grid, and its
+//! ray-tracing cores walk them (`rt.rs`). Elsewhere the rays walk a software hierarchy
+//! (`bvh.rs`): one per mesh, built when it first shows up (large meshes on a worker thread), and
+//! one over the instances near the grid. Both paths see the same triangles. A hit
 //! is lit by the sun and the point lights through shadow rays, by its own glow and by last
 //! frame's probes (so light bounces more than once over frames); a miss sees the environment
 //! map. `cs_update` blends the rays into each probe's octahedral irradiance and distance maps
@@ -38,6 +40,7 @@
 //! rays' scene yet, and rays that miss see the environment map's ground below the horizon.
 
 mod bvh;
+mod rt;
 mod schedule;
 
 use std::collections::{HashMap, HashSet};
@@ -98,6 +101,9 @@ const UNMEASURED_PROBES_PER_FRAME: u32 = 512;
 const REBUILD_AFTER_FRAMES: u64 = 30;
 /// Frames a mesh's hierarchy stays after its last use.
 const KEEP_UNUSED_FRAMES: u64 = 600;
+/// Losses of the hardware rays' scene after which the rays trace in software
+/// (`ProbeGi::hw_losses`).
+const HW_LOSSES_MAX: u32 = 3;
 /// The extract's parts, timed as `render.gi.ms_<part>`: placing the grid, collecting the
 /// workers' builds, following shifts and reading change ticks; refreshing the changed entities'
 /// boxes and checking a share again; the region, entity count, asset and recheck lists; reading
@@ -122,6 +128,18 @@ const UPLOAD_BYTES_PER_FRAME: usize = 4 << 20;
 /// [`WorldShift`]) to count as unmoved (the shift and the transform propagation round
 /// differently).
 const UNMOVED: f64 = 1e-6;
+
+/// probe_gi.wgsl after the rays' walk it uses: ray queries on the hardware path
+/// (probe_gi_trace_hw.wgsl), the software walk of the hierarchies elsewhere
+/// (probe_gi_trace_sw.wgsl).
+fn shader_source(hardware: bool) -> String {
+    let walk = if hardware {
+        include_str!("../shaders/probe_gi_trace_hw.wgsl")
+    } else {
+        include_str!("../shaders/probe_gi_trace_sw.wgsl")
+    };
+    format!("{walk}\n{}", include_str!("../shaders/probe_gi.wgsl"))
+}
 
 /// `GiPass` in probe_gi.wgsl.
 #[repr(C)]
@@ -308,12 +326,23 @@ struct Record {
     instance: GpuInstance,
     /// Anchor-relative world box.
     bounds: (Vec3, Vec3),
+    /// Mesh -> anchor-relative world, rows of a 3x4 (the hardware structure's instance; zeros
+    /// on the software walk).
+    to_world: [f32; 12],
 }
 
 impl PartialEq for Record {
     fn eq(&self, other: &Self) -> bool {
         bytemuck::bytes_of(&self.instance) == bytemuck::bytes_of(&other.instance)
             && self.bounds == other.bounds
+            && bytemuck::bytes_of(&self.to_world) == bytemuck::bytes_of(&other.to_world)
+    }
+}
+
+impl Record {
+    /// Its mesh and placement in the hardware structure.
+    fn placement(&self) -> (u32, [f32; 12]) {
+        (self.instance.mesh[3], self.to_world)
     }
 }
 
@@ -327,26 +356,41 @@ struct Entry {
     record: Option<Record>,
 }
 
-/// The instances on the GPU, in the instance hierarchy's order, and that hierarchy.
+/// The instances on the GPU, in the instance hierarchy's order, and that hierarchy (the
+/// software walk's; the hardware's takes them in entity order).
 #[derive(Default)]
 struct Placed {
     entities: Vec<Entity>,
     instances: Vec<GpuInstance>,
     boxes: Vec<(Vec3, Vec3)>,
+    /// Each instance's mesh and placement, for the hardware structure.
+    placements: Vec<(u32, [f32; 12])>,
+    /// An instance's placement changed in place since the hardware structure last took them
+    /// (one whose material alone changed leaves the structure as it is).
+    placements_changed: bool,
     slot_of: EntityHashMap<u32>,
     tlas: Vec<bvh::Node>,
     /// Refits since it was built.
     refits: u32,
 }
 
-/// What reading an entity found.
-enum Read {
-    /// No longer a mesh entity the gather reads.
-    Gone,
-    /// Read; `true`: waiting on its hierarchy (a worker, the frame's build budget), read again
-    /// next frame.
-    Entry(Entry, bool),
+/// What the rays have of an instance's mesh ([`ProbeGi::read`]).
+enum Have {
+    /// Something to hit: its first node and first triangle in the software store (zeros for a
+    /// hardware structure), and whether to read the entity again next frame (an older version's
+    /// serves while the mesh's waits).
+    At([u32; 2], bool),
+    /// Nothing to hit (yet, when `true`: read the entity again next frame).
+    Nothing(bool),
+    /// Still uploading: the instance read before stays; read the entity again next frame.
+    KeepOld,
 }
+
+/// What reading an entity found: `None` when it's no longer a mesh entity the gather reads,
+/// else its entry and whether it waits on its hierarchy (a worker, the frame's build budget),
+/// to be read again next frame. (An option rather than an enum of two: the entry is large and
+/// the other case empty.)
+type Read = Option<(Entry, bool)>;
 
 /// The small meshes this frame's reads asked to have built (`BUILD_TRIANGLES_PER_FRAME`).
 #[derive(Default)]
@@ -490,6 +534,7 @@ struct Active {
     next_view: wgpu::TextureView,
     uniform: wgpu::Buffer,
     probe_state: wgpu::Buffer,
+    /// The software walk's hierarchies (unused, and empty, on the hardware path).
     tlas: GrowBuffer,
     instances: GrowBuffer,
     blas: GrowBuffer,
@@ -497,6 +542,8 @@ struct Active {
     rays: GrowBuffer,
     updates: GrowBuffer,
     group: Option<wgpu::BindGroup>,
+    /// The rays' scene in the GPU's acceleration structures, on the hardware path.
+    hw: Option<rt::HwScene>,
 }
 
 /// Probe GI's state, owned by the renderer for the main view (extra views go without).
@@ -556,6 +603,9 @@ pub(crate) struct ProbeGi {
     /// probe starts over (`light_jumped`).
     light: Option<(Vec3, f32)>,
     frame: u64,
+    /// Times the hardware rays' scene was lost (a submission holding its builds failed) and
+    /// started over; after `HW_LOSSES_MAX` the rays trace in software for the rest of the run.
+    hw_losses: u32,
     work: Option<Work>,
     stats: Stats,
     /// Last frame's world reflections, for the texels this frame doesn't trace
@@ -677,6 +727,16 @@ fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Ve
 }
 
 /// The world box of a mesh's local box under `affine`, relative to `origin`.
+/// The rows of `a` as a 3x4 in f32 (an instance's transform on the GPU).
+fn affine_rows(a: &DAffine3) -> [[f32; 4]; 3] {
+    let m = a.matrix3.as_mat3();
+    let t = a.translation.as_vec3();
+    [0, 1, 2].map(|i| {
+        let r = m.row(i);
+        [r.x, r.y, r.z, t[i]]
+    })
+}
+
 fn world_box(local: (Vec3, Vec3), affine: &DAffine3, origin: DVec3) -> (Vec3, Vec3) {
     let (lo, hi) = world_box_abs(local, affine);
     ((lo - origin).as_vec3(), (hi - origin).as_vec3())
@@ -765,6 +825,7 @@ impl ProbeGi {
             reflect_last: None,
             light: None,
             frame: 0,
+            hw_losses: 0,
             work: None,
             stats: Stats::default(),
         }
@@ -775,7 +836,9 @@ impl ProbeGi {
         &self.atlas_view
     }
 
-    fn activate(&mut self, shared: &GpuShared) {
+    /// Make the GPU resources: for the hardware path's rays (`hardware`, the device has ray
+    /// queries) or the software walk's.
+    fn activate(&mut self, shared: &GpuShared, hardware: bool) {
         let device = &shared.device;
         let size = TEXELS * TILES_X;
         self.atlas = atlas_texture(
@@ -797,35 +860,50 @@ impl ProbeGi {
             has_dynamic_offset: false,
             min_binding_size: None,
         };
+        let mut entries = vec![
+            layout_entry(
+                0,
+                S::COMPUTE,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ),
+            layout_entry(2, S::COMPUTE, storage(true)),
+            layout_entry(5, S::COMPUTE, storage(false)),
+            layout_entry(6, S::COMPUTE, storage(false)),
+            layout_entry(
+                7,
+                S::COMPUTE,
+                wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: ATLAS_FORMAT,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                },
+            ),
+            layout_entry(8, S::COMPUTE, storage(true)),
+        ];
+        if hardware {
+            // The instances' acceleration structure (probe_gi_trace_hw.wgsl `scene`).
+            entries.push(layout_entry(
+                1,
+                S::COMPUTE,
+                wgpu::BindingType::AccelerationStructure {
+                    vertex_return: true,
+                },
+            ));
+        } else {
+            // The instance hierarchy, the meshes' and their triangles
+            // (probe_gi_trace_sw.wgsl).
+            for binding in [1, 3, 4] {
+                entries.push(layout_entry(binding, S::COMPUTE, storage(true)));
+            }
+        }
+        entries.sort_by_key(|e| e.binding);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("probe gi"),
-            entries: &[
-                layout_entry(
-                    0,
-                    S::COMPUTE,
-                    wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-                layout_entry(1, S::COMPUTE, storage(true)),
-                layout_entry(2, S::COMPUTE, storage(true)),
-                layout_entry(3, S::COMPUTE, storage(true)),
-                layout_entry(4, S::COMPUTE, storage(true)),
-                layout_entry(5, S::COMPUTE, storage(false)),
-                layout_entry(6, S::COMPUTE, storage(false)),
-                layout_entry(
-                    7,
-                    S::COMPUTE,
-                    wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: ATLAS_FORMAT,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                    },
-                ),
-                layout_entry(8, S::COMPUTE, storage(true)),
-            ],
+            entries: &entries,
         });
         let reflect_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("world reflection inputs"),
@@ -878,7 +956,11 @@ impl ProbeGi {
                 ),
             ],
         });
-        let module = shared.shader("probe gi", include_str!("../shaders/probe_gi.wgsl"), true);
+        let module = if hardware {
+            shared.shader("probe gi rt", &shader_source(true), true)
+        } else {
+            shared.shader("probe gi", &shader_source(false), true)
+        };
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("probe gi"),
             bind_group_layouts: &[Some(&shared.frame_layout), Some(&layout)],
@@ -934,6 +1016,7 @@ impl ProbeGi {
             rays: GrowBuffer::new(device, "probe gi rays", usage, 1 << 20),
             updates: GrowBuffer::new(device, "probe gi updates", usage, 4096),
             group: None,
+            hw: hardware.then(|| rt::HwScene::new(device)),
         });
         // The new buffers hold nothing yet.
         self.store.gpu_nodes = 0;
@@ -1181,8 +1264,8 @@ impl ProbeGi {
         }
     }
 
-    /// Forget the hierarchies of meshes no instance used in a while, and close the gaps once
-    /// they're most of the store.
+    /// Forget the hierarchies (or structures) of meshes no instance used in a while, and close
+    /// the store's gaps once they're most of it.
     fn forget_unused(&mut self) {
         let frame = self.frame;
         let used: HashSet<u32> = self.placed.instances.iter().map(|i| i.mesh[3]).collect();
@@ -1201,9 +1284,16 @@ impl ProbeGi {
         if store.dead_nodes > 4096 && store.dead_nodes * 2 > store.nodes.len() {
             self.store.compact(&mut self.meshes);
         }
-        if self.bounds.len() > 4 * self.meshes.len() + 1024 {
+        let hw = self.active.as_mut().and_then(|a| a.hw.as_mut());
+        if let Some(hw) = hw {
+            hw.forget_unused(frame, &used);
+        }
+        let hw = self.active.as_ref().and_then(|a| a.hw.as_ref());
+        let known = hw.map_or(self.meshes.len(), |hw| hw.len());
+        if self.bounds.len() > 4 * known + 1024 {
             let meshes = &self.meshes;
-            self.bounds.retain(|k, _| meshes.contains_key(k));
+            self.bounds
+                .retain(|k, _| hw.map_or_else(|| meshes.contains_key(k), |hw| hw.has(*k)));
         }
         if self.texture_means.len() > 8192 {
             self.texture_means.clear();
@@ -1223,17 +1313,17 @@ impl ProbeGi {
         let read = if self.in_region.contains(&entity) {
             self.read(look, query, entity, builds)
         } else {
-            Read::Gone
+            None
         };
         let (old, new) = match read {
-            Read::Gone => {
+            None => {
                 // Gone from the world (one that only left the region stays cached).
                 if self.in_region.remove(&entity) {
                     self.cache.remove(&entity);
                 }
                 (self.entries.remove(&entity), None)
             }
-            Read::Entry(entry, waiting) => {
+            Some((entry, waiting)) => {
                 if waiting {
                     self.pending.push(entity);
                 }
@@ -1244,10 +1334,15 @@ impl ProbeGi {
         match (old.and_then(|e| e.record), new) {
             (None, None) => false,
             (Some(a), Some(b)) if a == b => false,
-            (Some(_), Some(b)) => match self.placed.slot_of.get(&entity) {
+            (Some(a), Some(b)) => match self.placed.slot_of.get(&entity) {
                 Some(&slot) => {
                     self.placed.instances[slot as usize] = b.instance;
                     self.placed.boxes[slot as usize] = b.bounds;
+                    let ((mesh_a, at_a), (mesh_b, at_b)) = (a.placement(), b.placement());
+                    if mesh_a != mesh_b || bytemuck::bytes_of(&at_a) != bytemuck::bytes_of(&at_b) {
+                        self.placed.placements[slot as usize] = (mesh_b, at_b);
+                        self.placed.placements_changed = true;
+                    }
                     moved.push(slot);
                     false
                 }
@@ -1267,7 +1362,7 @@ impl ProbeGi {
         builds: &mut Builds,
     ) -> Read {
         let Ok((_, transform, renderer, resolved)) = query.get(look.world, entity) else {
-            return Read::Gone;
+            return None;
         };
         let meshes = look.meshes;
         let handle = meshes.canonical(resolved.mesh);
@@ -1279,14 +1374,14 @@ impl ProbeGi {
             record: None,
         };
         if !renderer.visible {
-            return Read::Entry(entry, false);
+            return Some((entry, false));
         }
         let material = look
             .materials
             .and_then(|m| m.get(resolved.material))
             .unwrap_or(look.default_material);
         if material.unlit || matches!(material.alpha_mode, AlphaMode::Blend) {
-            return Read::Entry(entry, false);
+            return Some((entry, false));
         }
         // Swaying leaf cards: as solid triangles they made a roof of the crowns (and cost every
         // ray through them); the rays see the canopy map's leaves instead.
@@ -1294,14 +1389,82 @@ impl ProbeGi {
             && matches!(material.alpha_mode, AlphaMode::Mask(_))
             && material.wind_sway > 0.0
         {
-            return Read::Entry(entry, false);
+            return Some((entry, false));
         }
         let key = handle.index();
         let version = entry.mesh_version;
         let Some(local) = self.local_bounds(meshes, handle) else {
             // Not loaded: its version changes when it is.
-            return Read::Entry(entry, false);
+            return Some((entry, false));
         };
+        let hardware = self.active.as_ref().is_some_and(|a| a.hw.is_some());
+        let have = match self.active.as_mut().and_then(|a| a.hw.as_mut()) {
+            // Built now if the frame's budget allows (before the instances' structure, in the
+            // same build).
+            Some(hw) => match hw.want(
+                &look.shared.device,
+                key,
+                version,
+                meshes.get(handle),
+                self.frame,
+            ) {
+                rt::Want::Ready => Have::At([0, 0], false),
+                rt::Want::Older => Have::At([0, 0], true),
+                rt::Want::Waiting => Have::Nothing(true),
+                rt::Want::Empty => Have::Nothing(false),
+            },
+            None => self.software_mesh(meshes, handle, key, version, builds),
+        };
+        let ([root, first_triangle], waiting) = match have {
+            Have::At(at, waiting) => (at, waiting),
+            Have::Nothing(waiting) => return Some((entry, waiting)),
+            Have::KeepOld => {
+                // Its hierarchy is still uploading: the instance read before stays (an older
+                // version's, intact until a compaction re-reads everything).
+                entry.record = self.entries.get(&entity).and_then(|e| e.record);
+                return Some((entry, true));
+            }
+        };
+        // Anchor-relative -> mesh, and back.
+        let mut rel = transform.0;
+        rel.translation -= look.anchor;
+        let texture_mean = match (&material.base_color_texture, look.images) {
+            (Some(handle), Some(images)) => {
+                Self::texture_mean(&mut self.texture_means, look.shared, images, *handle)
+            }
+            _ => None,
+        };
+        let (albedo, emissive) = material_light(material, texture_mean);
+        entry.record = Some(Record {
+            instance: GpuInstance {
+                to_local: affine_rows(&rel.inverse()),
+                mesh: [root, first_triangle, material.double_sided as u32, key],
+                albedo: albedo.extend(0.0).to_array(),
+                emissive: emissive.extend(0.0).to_array(),
+            },
+            bounds: world_box(local, &transform.0, look.anchor),
+            // Only the hardware's structure takes it (so the software walk's records compare as
+            // they did without it).
+            to_world: if hardware {
+                bytemuck::cast(affine_rows(&rel))
+            } else {
+                [0.0; 12]
+            },
+        });
+        Some((entry, waiting))
+    }
+
+    /// Mesh `key`'s hierarchy in the software store for an instance of it: built here when
+    /// small and the frame's budget allows (after the reads, side by side), on a worker when
+    /// large.
+    fn software_mesh(
+        &mut self,
+        meshes: &Assets<Mesh>,
+        handle: Handle<Mesh>,
+        key: u32,
+        version: u64,
+        builds: &mut Builds,
+    ) -> Have {
         // Read again next frame: its hierarchy is building, waits for the frame's budget, or
         // is an older version's (the rays see that one meanwhile).
         let mut waiting = false;
@@ -1311,7 +1474,7 @@ impl ProbeGi {
             let recent = stored.is_some_and(|(_, at)| self.frame < at + REBUILD_AFTER_FRAMES);
             if !recent && !self.jobs.contains_key(&key) {
                 let Some(mesh) = meshes.get(handle) else {
-                    return Read::Entry(entry, false);
+                    return Have::Nothing(false);
                 };
                 let triangles = mesh.indices.len() / 3;
                 let positions =
@@ -1345,50 +1508,16 @@ impl ProbeGi {
             }
         }
         let Some(mesh_entry) = self.meshes.get_mut(&key) else {
-            return Read::Entry(entry, waiting);
+            return Have::Nothing(waiting);
         };
         mesh_entry.last_used = self.frame;
         if !mesh_entry.uploaded || mesh_entry.empty {
-            return Read::Entry(entry, waiting);
+            return Have::Nothing(waiting);
         }
         if !self.store.holds(mesh_entry) {
-            // Its hierarchy is still uploading: the instance read before stays (an older
-            // version's, intact until a compaction re-reads everything).
-            entry.record = self.entries.get(&entity).and_then(|e| e.record);
-            return Read::Entry(entry, true);
+            return Have::KeepOld;
         }
-        // Anchor-relative -> mesh.
-        let mut rel = transform.0;
-        rel.translation -= look.anchor;
-        let inv = rel.inverse();
-        let m = inv.matrix3.as_mat3();
-        let t = inv.translation.as_vec3();
-        let row = |i: usize| {
-            let r = m.row(i);
-            [r.x, r.y, r.z, t[i]]
-        };
-        let texture_mean = match (&material.base_color_texture, look.images) {
-            (Some(handle), Some(images)) => {
-                Self::texture_mean(&mut self.texture_means, look.shared, images, *handle)
-            }
-            _ => None,
-        };
-        let (albedo, emissive) = material_light(material, texture_mean);
-        entry.record = Some(Record {
-            instance: GpuInstance {
-                to_local: [row(0), row(1), row(2)],
-                mesh: [
-                    mesh_entry.root,
-                    mesh_entry.first_triangle,
-                    material.double_sided as u32,
-                    key,
-                ],
-                albedo: albedo.extend(0.0).to_array(),
-                emissive: emissive.extend(0.0).to_array(),
-            },
-            bounds: world_box(local, &transform.0, look.anchor),
-        });
-        Read::Entry(entry, waiting)
+        Have::At([mesh_entry.root, mesh_entry.first_triangle], waiting)
     }
 
     /// The main view's half on the main thread: place the grid, gather the instances near it,
@@ -1417,19 +1546,54 @@ impl ProbeGi {
     ) -> bool {
         self.work = None;
         self.frame += 1;
+        let lost = self
+            .active
+            .as_ref()
+            .and_then(|a| a.hw.as_ref())
+            .is_some_and(|hw| hw.lost());
+        let losses = self.hw_losses + lost as u32;
+        if lost {
+            tracing::warn!(
+                "probe GI: a submission holding the ray-tracing structures' builds failed; \
+                 starting the scene over{}",
+                if losses >= HW_LOSSES_MAX {
+                    " in software for the rest of the run"
+                } else {
+                    ""
+                }
+            );
+        }
         if !settings.probe_gi {
             if self.active.is_some() {
-                // Off: free the GPU memory, keep a one-tile stand-in.
+                // Off: free the GPU memory, keep a one-tile stand-in (and the count of losses,
+                // which holds for the rest of the run).
                 *self = Self::new(&shared.device);
+                self.hw_losses = losses;
                 return true;
             }
             return false;
         }
         let started = std::time::Instant::now();
         let mut recreated = false;
+        let hardware = settings.gi_hardware_rays && shared.ray_queries() && losses < HW_LOSSES_MAX;
+        if lost
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.hw.is_some() != hardware)
+        {
+            // The rays switched paths, or the GPU's copy of the scene is unknown: start over.
+            let frame = self.frame;
+            *self = Self::new(&shared.device);
+            self.frame = frame;
+        }
+        self.hw_losses = losses;
         if self.active.is_none() {
-            self.activate(shared);
+            self.activate(shared, hardware);
             recreated = true;
+        }
+        if let Some(hw) = self.active.as_mut().and_then(|a| a.hw.as_mut()) {
+            hw.begin_frame();
         }
 
         // The grid, centered on the camera and snapped to whole probes.
@@ -1731,11 +1895,16 @@ impl ProbeGi {
         let active = self.active.as_mut().expect("activated above");
         let device = &shared.device;
         let queue = &shared.queue;
+        let hardware = active.hw.is_some();
         let mut regroup = recreated || active.group.is_none();
-        regroup |= self.store.upload(active, device, queue);
+        if !hardware {
+            regroup |= self.store.upload(active, device, queue);
+        }
         part(5);
         let placed = &mut self.placed;
-        let rebuild = membership || (!moved.is_empty() && placed.refits >= REFITS_BEFORE_REBUILD);
+        // (A refit hierarchy slows the software walk; the hardware's is built new each time.)
+        let rebuild = membership
+            || (!hardware && !moved.is_empty() && placed.refits >= REFITS_BEFORE_REBUILD);
         if rebuild {
             // Sorted, so the same scene builds the same hierarchy.
             let mut list: Vec<(Entity, Record)> = self
@@ -1745,10 +1914,20 @@ impl ProbeGi {
                 .collect();
             list.sort_unstable_by_key(|(e, _)| *e);
             let boxes: Vec<(Vec3, Vec3)> = list.iter().map(|(_, r)| r.bounds).collect();
-            let (tlas, order) = bvh::build(&boxes);
+            // The software walk takes the instances in its hierarchy's order; the GPU builds
+            // its own over them as they come.
+            let (tlas, order) = if hardware {
+                (Vec::new(), (0..list.len() as u32).collect())
+            } else {
+                bvh::build(&boxes)
+            };
             placed.entities = order.iter().map(|&i| list[i as usize].0).collect();
             placed.instances = order.iter().map(|&i| list[i as usize].1.instance).collect();
             placed.boxes = order.iter().map(|&i| boxes[i as usize]).collect();
+            placed.placements = order
+                .iter()
+                .map(|&i| list[i as usize].1.placement())
+                .collect();
             placed.slot_of = placed
                 .entities
                 .iter()
@@ -1757,9 +1936,11 @@ impl ProbeGi {
                 .collect();
             placed.tlas = tlas;
             placed.refits = 0;
-            regroup |= active
-                .tlas
-                .write(device, queue, bytemuck::cast_slice(&placed.tlas));
+            if !hardware {
+                regroup |= active
+                    .tlas
+                    .write(device, queue, bytemuck::cast_slice(&placed.tlas));
+            }
             let none = [GpuInstance::zeroed()];
             let instances = if placed.instances.is_empty() {
                 &none[..]
@@ -1772,11 +1953,13 @@ impl ProbeGi {
         } else if !moved.is_empty() {
             // Same instances, some moved or changed: fit the hierarchy around them again and
             // write only what changed.
-            bvh::refit(&mut placed.tlas, &placed.boxes);
-            placed.refits += 1;
-            regroup |= active
-                .tlas
-                .write(device, queue, bytemuck::cast_slice(&placed.tlas));
+            if !hardware {
+                bvh::refit(&mut placed.tlas, &placed.boxes);
+                placed.refits += 1;
+                regroup |= active
+                    .tlas
+                    .write(device, queue, bytemuck::cast_slice(&placed.tlas));
+            }
             moved.sort_unstable();
             moved.dedup();
             if moved.len() * 4 > placed.instances.len() {
@@ -1795,8 +1978,17 @@ impl ProbeGi {
                 }
             }
         }
-        part(6);
         let gathered = rebuild || !moved.is_empty();
+        let placements_changed = std::mem::take(&mut placed.placements_changed) || rebuild;
+        if let Some(hw) = active.hw.as_mut() {
+            // The instances' structure, when they came, went or moved, or a mesh's structure
+            // they point at changed (built again, compacted); the GPU builds it in
+            // `encode_scene`.
+            if placements_changed || hw.tlas_dirty() {
+                regroup |= hw.place(device, &placed.placements);
+            }
+        }
+        part(6);
         let instance_count = placed.instances.len() as u32;
         regroup |= active
             .updates
@@ -1822,47 +2014,33 @@ impl ProbeGi {
             fn buffer(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
                 b.as_entire_binding()
             }
+            fn entry(
+                binding: u32,
+                resource: wgpu::BindingResource<'_>,
+            ) -> wgpu::BindGroupEntry<'_> {
+                wgpu::BindGroupEntry { binding, resource }
+            }
+            let mut entries = vec![
+                entry(0, buffer(&active.uniform)),
+                entry(2, buffer(&active.instances.buffer)),
+                entry(5, buffer(&active.rays.buffer)),
+                entry(6, buffer(&active.probe_state)),
+                entry(7, wgpu::BindingResource::TextureView(&active.next_view)),
+                entry(8, buffer(&active.updates.buffer)),
+            ];
+            match &active.hw {
+                Some(hw) => entries.push(entry(1, hw.binding())),
+                None => entries.extend([
+                    entry(1, buffer(&active.tlas.buffer)),
+                    entry(3, buffer(&active.blas.buffer)),
+                    entry(4, buffer(&active.triangles.buffer)),
+                ]),
+            }
+            entries.sort_by_key(|e| e.binding);
             active.group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("probe gi"),
                 layout: &active.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer(&active.uniform),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buffer(&active.tlas.buffer),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: buffer(&active.instances.buffer),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: buffer(&active.blas.buffer),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: buffer(&active.triangles.buffer),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: buffer(&active.rays.buffer),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: buffer(&active.probe_state),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(&active.next_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: buffer(&active.updates.buffer),
-                    },
-                ],
+                entries: &entries,
             }));
         }
 
@@ -1899,13 +2077,14 @@ impl ProbeGi {
         } else {
             rays_now
         };
+        let hw = self.active.as_ref().and_then(|a| a.hw.as_ref());
         self.stats = Stats {
             probes: traced,
             scrolled_in: plan.scrolled_in,
             cleared,
             instances: instance_count,
-            meshes: self.meshes.len() as u32,
-            built_triangles: built as u32,
+            meshes: hw.map_or(self.meshes.len(), |hw| hw.len()) as u32,
+            built_triangles: hw.map_or(built as u32, |hw| hw.stats().built_triangles),
             building: self.jobs.len() as u32,
             gathered,
             full,
@@ -1942,6 +2121,41 @@ impl ProbeGi {
             );
         }
         recreated
+    }
+
+    /// Build this frame's acceleration structures on the hardware path (before
+    /// [`encode`](Self::encode) and [`encode_reflections`](Self::encode_reflections) trace
+    /// through them): the meshes' new ones, and the instances' when they changed. Nothing on
+    /// the software path.
+    pub fn encode_scene(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(hw) = self.active.as_mut().and_then(|a| a.hw.as_mut()) {
+            hw.encode(encoder);
+        }
+    }
+
+    /// On the hardware path, swap the structures whose compaction is ready for their compacted
+    /// copies. Before [`extract`](Self::extract), while no other thread submits: wgpu's
+    /// compaction and a submit on another thread can deadlock (`rt::HwScene::swap_compacted`),
+    /// and the prepare threads that run the extract submit buffer copies.
+    pub fn swap_compacted(&mut self, queue: &wgpu::Queue) {
+        if let Some(hw) = self.active.as_mut().and_then(|a| a.hw.as_mut()) {
+            hw.swap_compacted(queue);
+        }
+    }
+
+    /// After a submit (`failed`: wgpu rejected it): the hardware path counts it (structures it
+    /// retired are freed once the GPU is past it), asks for its new structures' compaction (only
+    /// possible once their builds were submitted), and starts its scene over next frame if the
+    /// submission held its builds and failed.
+    pub fn after_submit(&mut self, queue: &wgpu::Queue, failed: bool) {
+        if let Some(hw) = self.active.as_mut().and_then(|a| a.hw.as_mut()) {
+            hw.after_submit(queue, failed);
+        }
+    }
+
+    /// Whether the rays trace on the GPU's ray-tracing hardware.
+    pub fn hardware_rays(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.hw.is_some())
     }
 
     /// Trace and update this frame's probes (after the environment map, before anything shades
@@ -2112,6 +2326,19 @@ impl ProbeGi {
             d.set(&format!("render.gi.ms_{name}"), ms as f64);
         }
         d.set("render.gi.extract_ms", s.extract_ms as f64);
+        let hw = self.active.as_ref().and_then(|a| a.hw.as_ref());
+        d.set("render.gi.hardware_rays", hw.is_some() as u8 as f64);
+        if let Some(hw) = hw {
+            let h = hw.stats();
+            d.set("render.gi.rt_triangles", h.triangles as f64);
+            d.set("render.gi.rt_built", h.built as f64);
+            d.set("render.gi.rt_instances", h.instances as f64);
+            d.set("render.gi.rt_tlas_built", h.tlas_built as u8 as f64);
+            d.set("render.gi.rt_compacted", hw.compacted() as f64);
+            d.set("render.gi.rt_retired", hw.retired() as f64);
+            d.set("render.gi.rt_fences", hw.fences() as f64);
+        }
+        d.set("render.gi.rt_losses", self.hw_losses as f64);
     }
 }
 
@@ -2150,8 +2377,11 @@ mod tests {
 
     #[test]
     fn shader_validates() {
-        let code = crate::features::compose_shader(include_str!("../shaders/probe_gi.wgsl"), true);
-        crate::features::validate_wgsl("probe gi", &code).unwrap();
+        for hardware in [false, true] {
+            let code = crate::features::compose_shader(&shader_source(hardware), true);
+            crate::features::validate_wgsl(&format!("probe gi (hardware {hardware})"), &code)
+                .unwrap();
+        }
     }
 
     #[test]
@@ -2177,6 +2407,42 @@ mod tests {
             sun(-14.0, 0.29),
             (Vec3::new(-0.5, 0.7, -0.5), 0.3)
         ));
+    }
+
+    /// The hardware structure's instance (mesh -> anchor-relative world) and the row the
+    /// shading reads (back to the mesh) undo each other, turned, stretched unevenly or
+    /// mirrored, as the software walk's row alone did.
+    #[test]
+    fn an_instances_two_transforms_undo_each_other() {
+        let transforms = [
+            DAffine3::IDENTITY,
+            DAffine3::from_scale_rotation_translation(
+                DVec3::new(2.0, 0.5, 1.25),
+                DQuat::from_euler(EulerRot::YXZ, 0.7, -0.4, 1.9),
+                DVec3::new(12.5, -3.0, 40.0),
+            ),
+            // Mirrored (an odd number of negative scales).
+            DAffine3::from_scale_rotation_translation(
+                DVec3::new(-1.0, 3.0, 0.3),
+                DQuat::from_euler(EulerRot::XYZ, -2.2, 0.1, 0.6),
+                DVec3::new(-30.0, 7.0, 2.0),
+            ),
+        ];
+        for a in transforms {
+            let to_world = affine_rows(&a);
+            let to_local = affine_rows(&a.inverse());
+            let mat = |r: [[f32; 4]; 3]| {
+                Mat4::from_cols_array_2d(&[r[0], r[1], r[2], [0.0, 0.0, 0.0, 1.0]]).transpose()
+            };
+            let both = mat(to_world) * mat(to_local);
+            assert!(both.abs_diff_eq(Mat4::IDENTITY, 1e-5), "{a:?}: {both:?}");
+            let flat: [f32; 12] = bytemuck::cast(to_world);
+            assert_eq!(
+                flat[3], a.translation.x as f32,
+                "row-major 3x4, translation last"
+            );
+            assert_eq!(flat[4], a.matrix3.row(1).x as f32);
+        }
     }
 
     #[test]

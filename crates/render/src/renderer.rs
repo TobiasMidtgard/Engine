@@ -2410,6 +2410,8 @@ impl Renderer {
         }
         if !is_extra {
             self.probe_gi.ensure_query(world);
+            // Here, as no other thread submits until the prepare threads start.
+            self.probe_gi.swap_compacted(&self.shared.queue);
         }
         self.prepare_shared.clear();
         self.prepare_shared
@@ -3164,6 +3166,12 @@ impl Renderer {
         }
         self.sky_camera.encode(&mut encoder);
         if !extra {
+            // On ray-tracing hardware, the GPU builds the rays' structures first (the meshes'
+            // new ones, the instances' when they changed).
+            if self.probe_gi.hardware_rays() {
+                self.perf.pass(&mut cpu, &mut encoder, "probe gi build");
+                self.probe_gi.encode_scene(&mut encoder);
+            }
             self.perf.pass(&mut cpu, &mut encoder, "probe gi");
             self.probe_gi.encode(&mut encoder, frame_group);
         }
@@ -3689,9 +3697,28 @@ impl Renderer {
         cpu.step("submit");
         let submitting = Instant::now();
         let side = self.shared.take_side_commands();
+        // Whether wgpu rejects the submission (none of its work runs then): probe GI's
+        // hardware rays build their scene in it, and start that over if it's lost. The scopes
+        // take the error from the device's handler, so it's logged here.
+        let out_of_memory = self
+            .shared
+            .device
+            .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = self
+            .shared
+            .device
+            .push_error_scope(wgpu::ErrorFilter::Validation);
         self.shared
             .queue
             .submit(side.commands.into_iter().chain(buffers));
+        let errors = [
+            pollster::block_on(validation.pop()),
+            pollster::block_on(out_of_memory.pop()),
+        ];
+        for e in errors.iter().flatten() {
+            tracing::error!("GPU error: {e}");
+        }
+        let submit_failed = errors.iter().any(Option::is_some);
         side.after.into_iter().for_each(|f| f());
         let side_work = if extra {
             Default::default()
@@ -3705,6 +3732,8 @@ impl Renderer {
         self.meter.after_submit();
         self.perf.after_submit();
         self.lens.after_submit();
+        self.probe_gi
+            .after_submit(&self.shared.queue, submit_failed);
         let mut present_ms = 0.0;
         if let Some(t) = surface_texture {
             cpu.step("present");
@@ -3798,6 +3827,9 @@ impl Renderer {
                 "render.backend",
                 self.shared.adapter_info.backend as u8 as f64,
             );
+            // Whether the device has ray queries (what probe GI's hardware rays need), so a
+            // test can tell a device without them from rays that fell back to software.
+            d.set("render.ray_queries", self.shared.ray_queries() as u8 as f64);
             d.set("render.cpu_ms", stats.cpu_ms as f64);
             d.set("render.frame_ms", self.perf.frame_ms as f64);
             d.set("render.acquire_ms", self.perf.acquire_ms as f64);
