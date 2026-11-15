@@ -957,7 +957,16 @@ impl ProbeGi {
 
     /// Probes to trace this frame: what fits `gi_budget_ms` at the measured cost, up to
     /// `gi_probes_per_frame` (always that many without a budget, timestamps or a hardware GPU).
-    fn probes_this_frame(&self, shared: &GpuShared, settings: &RenderSettings, count: u32) -> u32 {
+    /// `share` is the frame's [`crate::FramePacing::share`]: the settings come paced already,
+    /// and the floor and the count before a measurement are paced the same way, so a second
+    /// holds as many probes whatever the frame rate.
+    fn probes_this_frame(
+        &self,
+        shared: &GpuShared,
+        settings: &RenderSettings,
+        count: u32,
+        share: f32,
+    ) -> u32 {
         let most = settings.gi_probes_per_frame.clamp(1, count);
         let budgeted = settings.gi_budget_ms > 0.0
             && shared.adapter_info.device_type != wgpu::DeviceType::Cpu
@@ -968,9 +977,10 @@ impl ProbeGi {
         if !budgeted {
             return most;
         }
-        let least = MIN_PROBES_PER_FRAME.min(most);
+        let paced = |n: u32| ((n as f32 * share.clamp(0.25, 1.0)).round() as u32).max(1);
+        let least = paced(MIN_PROBES_PER_FRAME).min(most);
         if self.ms_per_kray <= 0.0 {
-            return UNMEASURED_PROBES_PER_FRAME.clamp(least, most);
+            return paced(UNMEASURED_PROBES_PER_FRAME).clamp(least, most);
         }
         let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS) as f32;
         let fit = settings.gi_budget_ms / self.ms_per_kray * 1000.0 / rays;
@@ -1436,7 +1446,10 @@ impl ProbeGi {
             origin,
         };
         let count = grid.count();
-        let per_frame = self.probes_this_frame(shared, settings, count);
+        let share = world
+            .get_resource::<crate::FramePacing>()
+            .map_or(1.0, |p| p.share);
+        let per_frame = self.probes_this_frame(shared, settings, count, share);
         let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS);
 
         // Probes that scrolled in go first, then the rest in turn; those that scrolled in and

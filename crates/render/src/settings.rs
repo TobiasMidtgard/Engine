@@ -619,10 +619,11 @@ pub struct RenderSettings {
     /// first set's 24 bits, all an f32 holds exactly, are taken.
     pub trial_cuts_more: u32,
     /// The frame rate the work spread over frames is set for: probe tracing's time a frame
-    /// (`gi_budget_ms`), the environment map's interval (`environment_interval`) and, in the
-    /// weather module, the share of the cloud image marched a frame. At a higher rate each frame
-    /// does less of it, so a second holds the same work whatever the rate ([`FramePacing`]):
-    /// at twice this rate, half the tracing time and the map every other interval. A frame at
+    /// (`gi_budget_ms`) and most probes a frame (`gi_probes_per_frame`), the environment map's
+    /// interval (`environment_interval`) and, in the weather module, the share of the cloud
+    /// image marched a frame. At a higher rate each frame does less of it, so a second holds the
+    /// same work whatever the rate ([`FramePacing`]): at twice this rate, half the tracing time,
+    /// half the probes at most and the map every other interval. A frame at
     /// 120 a second is a quarter as long as one at 30, and the light it spreads over frames
     /// changes no faster. 0 = the same work every frame, whatever the rate (the default).
     pub pacing_fps: f32,
@@ -1186,14 +1187,18 @@ impl RenderSettings {
 
 impl RenderSettings {
     /// Spread the work that is spread over frames for a frame doing `share` of it
-    /// ([`FramePacing::share`]): that share of the probe tracing time, the environment map
-    /// every 1/share intervals.
+    /// ([`FramePacing::share`]): that share of the probe tracing time and of the most probes
+    /// a frame traces (which is all that bounds the tracing where the time is not measured, or
+    /// where the probes that fit it are more than the most), the environment map every 1/share
+    /// intervals.
     fn paced(&mut self, share: f32) {
         let share = share.clamp(0.25, 1.0);
         if share >= 1.0 {
             return;
         }
         self.gi_budget_ms *= share;
+        self.gi_probes_per_frame =
+            ((self.gi_probes_per_frame as f32 * share).round() as u32).max(1);
         self.environment_interval =
             ((self.environment_interval.max(1) as f32 / share).round() as u32).max(1);
     }
@@ -1620,10 +1625,38 @@ mod pacing_tests {
         assert_eq!(s, base);
         s.paced(0.5);
         assert!((s.gi_budget_ms - base.gi_budget_ms * 0.5).abs() < 1e-6);
+        assert_eq!(s.gi_probes_per_frame, base.gi_probes_per_frame / 2);
         assert_eq!(s.environment_interval, base.environment_interval * 2);
         let mut s = base.clone();
         s.paced(0.25);
+        assert_eq!(s.gi_probes_per_frame, base.gi_probes_per_frame / 4);
         assert_eq!(s.environment_interval, base.environment_interval * 4);
+        // A frame traces at least one probe, however few it may.
+        let mut s = base.clone();
+        s.gi_probes_per_frame = 1;
+        s.paced(0.25);
+        assert_eq!(s.gi_probes_per_frame, 1);
+    }
+
+    #[test]
+    fn a_second_traces_as_many_probes_at_120_as_at_60() {
+        let base = RenderSettings::default();
+        let per_second = |fps: f32| {
+            let mut pacing = FramePacing::default();
+            for _ in 0..(fps as usize * 3) {
+                pacing.advance(1.0 / fps, 60.0);
+            }
+            let mut s = base.clone();
+            s.paced(pacing.share);
+            s.gi_probes_per_frame as f32 * fps
+        };
+        let at_60 = per_second(60.0);
+        assert_eq!(at_60, base.gi_probes_per_frame as f32 * 60.0);
+        let at_120 = per_second(120.0);
+        assert!(
+            (at_120 / at_60 - 1.0).abs() < 0.01,
+            "{at_60} vs {at_120} a second"
+        );
     }
 }
 
