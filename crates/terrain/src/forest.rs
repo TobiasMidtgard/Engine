@@ -230,7 +230,10 @@ mod tests {
             "for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - paint_base; }",
             "case 10u: { return M_FOREST; }",
             "let macro_v = tile_fbm(tp, 1.0 / 64.0, 3);",
-            "let mid_v = tile_fbm(tp, 1.0 / 8.0, 3);",
+            // (The shader leaves it out where `clump_fade` is 0 outside river beds, far beyond
+            // where woods are ported.)
+            "let clump_fade = 1.0 - smoothstep(1.0, 12.0, pixel);",
+            "var mid_v = 0.5; if (clump_fade > 0.0 || in.water.x > 0.002) { mid_v = tile_fbm(tp, 1.0 / 8.0, 3); }",
             "let patch_v = tile_fbm(tp, 1.0 / 32.0, 3);",
             "let conifer = smoothstep(11.0, 3.0, temp_c + (variety - 0.5) * 5.0 + (macro_v - 0.5) * 3.0 * macro_fade + (moisture - 0.5) * 2.0);",
             "let meadow_v = tile_fbm(tp, 1.0 / 512.0, 3);",

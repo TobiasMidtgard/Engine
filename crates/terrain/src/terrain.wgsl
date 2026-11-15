@@ -1994,8 +1994,14 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     var tint = in.tint;
     // Beyond the near patches the vertices are too far apart for roads and field edges: the
     // paint map draws them per pixel (blended in by vertex spacing, so patches don't seam).
-    let mp = map_paint(in.rel);
-    let by_map = mp.cover * smoothstep(1.2, 2.5, in.lod.x);
+    // (Read only where it can show: the near patches leave it out.)
+    let by_spacing = smoothstep(1.2, 2.5, in.lod.x);
+    var mp: MapPaint;
+    if (by_spacing > 0.0) {
+        mp = map_paint(in.rel);
+        cost_taps(8.0);
+    }
+    let by_map = mp.cover * by_spacing;
     if (by_map > 0.0) {
         var sum = 0.0;
         for (var l = 1u; l < 11u; l++) {
@@ -2049,7 +2055,13 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
         detail_f = mix(0.5, pnoise3(tp * 8.0, 4096.0 * 8.0), detail_keep);
     }
     let macro_v = tile_fbm(tp, 1.0 / 64.0, 3);
-    let mid_v = tile_fbm(tp, 1.0 / 8.0, 3);
+    // Meter-scale clumps: every use fades them out by `clump_fade` (pixels wider than 12 m)
+    // but the stones in river beds, so elsewhere they settle to their middle, uncomputed.
+    let clump_fade = 1.0 - smoothstep(1.0, 12.0, pixel);
+    var mid_v = 0.5;
+    if (clump_fade > 0.0 || in.water.x > 0.002) {
+        mid_v = tile_fbm(tp, 1.0 / 8.0, 3);
+    }
     let patch_v = tile_fbm(tp, 1.0 / 32.0, 3);
     let meadow_v = tile_fbm(tp, 1.0 / 512.0, 3);
 
@@ -2062,10 +2074,12 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     let coast_alt = altitude + coast_wander;
     let ocean = planet.params.w * saturate(0.5 - coast_alt / alt_width);
     // Waves, on the sea and on rivers' and lakes' ice, as far as they are drawn (pixels under
-    // 8 m): their height's change to the next pixel across and down.
+    // 8 m): their height's change to the next pixel across and down. (A bed shows them only
+    // frozen over: open water is drawn over it by `fs_water`.)
+    let frozen_beds = smoothstep(-2.0, -8.0, temp_c);
     var dw1 = 0.0;
     var dw2 = 0.0;
-    if ((ocean > 0.0 || in.water.x > 0.002) && pixel < 8.0) {
+    if ((ocean > 0.0 || (in.water.x > 0.002 && frozen_beds > 0.0)) && pixel < 8.0) {
         let wave_h = wave_height(tp);
         dw1 = wave_height(tp + dp1) - wave_h;
         dw2 = wave_height(tp + dp2) - wave_h;
@@ -2090,8 +2104,8 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
         cost_taps(5.0);
     }
     let layers = surface_layers(in.rel);
-    // (The weather grid, the wear map and the paint map's eight loads.)
-    cost_taps(1.0 + 2.0 + 8.0);
+    // (The weather grid and the wear map.)
+    cost_taps(1.0 + 2.0);
 
     // Worn paths: the wear, and its slope across the path (for the sunken bed's normal).
     let wear_raw = path_wear(in.rel) * (1.0 - ocean);
@@ -2146,7 +2160,6 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     let field = vegetation * smoothstep(0.56 - 0.06 * far, 0.64 + 0.06 * far, patches + (variety - 0.5) * 0.2 + (far_n.x - 0.5) * 0.5 * far)
         * smoothstep(4.0, 12.0, temp_c);
     grass = mix(grass, mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, 0.45), field * 0.35);
-    let clump_fade = 1.0 - smoothstep(1.0, 12.0, pixel);
     let worn = smoothstep(0.72, 0.84, patch_v + (patches - 0.5) * 0.3);
     grass = mix(grass, planet.colors[C_DRY].rgb, worn * 0.3 * smoothstep(0.1, 0.5, pixel));
     col[M_GRASS] = grass;
@@ -2258,9 +2271,11 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     // weathers back from its top edge, so its face leans out toward the bottom (in shadow) and
     // back toward the top (lit), with a dark notch at the bedding plane; harder beds stand out
     // more.
+    // (Only where rock can show: natural or painted. Elsewhere the rock's color goes unused.)
+    let rock_shows = rock > 0.0 || pw[6] > 0.0;
     var bed_tilt = 0.0;
     let bed_fade = steep * (1.0 - smoothstep(1.0, 6.0, pixel));
-    if (steep > 0.0) {
+    if (steep > 0.0 && rock_shows) {
         let bed_h = altitude + (macro_v - 0.5) * 40.0 * macro_fade + (patch_v - 0.5) * 4.0 * clump_fade;
         // (Uneven beds, five to thirteen meters.)
         let bh = (bed_h + 7.0 * sin(bed_h * 0.083 + 1.7)) / 9.0;
@@ -2276,7 +2291,7 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
         bed_tilt = profile * mix(0.3, 1.0, hard) * mix(0.55, 1.0, bedded) * bed_fade;
         col[M_ROCK] *= 1.0 + bed_tilt * 0.2;
     }
-    if (steep > 0.0) {
+    if (steep > 0.0 && rock_shows) {
         let s1 = pnoise3v(vec3<f32>(tp.x * 0.25, tp.y * 0.015625, tp.z * 0.25), vec3<f32>(1024.0, 64.0, 1024.0));
         let s2 = pnoise3v(vec3<f32>(tp.x * 0.0625, tp.y * 0.00390625 + 7.0, tp.z * 0.0625), vec3<f32>(256.0, 16.0, 256.0));
         let streak = ((s1 - 0.5) * (1.0 - smoothstep(1.0, 8.0, pixel)) + (s2 - 0.5) * 1.4) * steep;
@@ -2368,7 +2383,11 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     // Grass grows in clumps whatever its color (natural, painted or tinted): straw-colored
     // tufts next to dark, dense ones, a couple of meters and several meters across, and
     // sunburnt and lush blue-green stretches tens of meters across.
-    let tuft = (tile_fbm(tp, 0.5, 2) - 0.5) * 2.0 * (1.0 - smoothstep(0.05, 0.5, pixel));
+    let tuft_fade = 1.0 - smoothstep(0.05, 0.5, pixel);
+    var tuft = 0.0;
+    if (tuft_fade > 0.0) {
+        tuft = (tile_fbm(tp, 0.5, 2) - 0.5) * 2.0 * tuft_fade;
+    }
     let clump = (mid_v - 0.5) * 2.0 * clump_fade + tuft * 0.5;
     let sward = (patch_v - 0.5) * 2.0 * macro_fade;
     let straw = planet.colors[C_DRY].rgb * 1.1;
@@ -2938,7 +2957,7 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
         let shore = smoothstep(0.03, 0.3, river_in) * (1.0 - river) * crisp * (1.0 - in.water.y / max(river_in, 1e-3));
         albedo = mix(albedo, mix(col[M_SOIL], planet.colors[C_ROCK].rgb, 0.4) * 0.7, saturate(shore) * 0.7);
         roughness = mix(roughness, 0.5, saturate(shore) * 0.5);
-        let frozen = smoothstep(-2.0, -8.0, temp_c);
+        let frozen = frozen_beds;
         // The bed: dark wet silt and gravel in rivers, finer, paler silt on lake floors, with
         // stones showing in patches. Under ice, the ice.
         let lake_share = saturate(in.water.y / max(river_in, 1e-3));
