@@ -850,14 +850,18 @@ fn probe_gi_position(g: vec3<f32>) -> vec3<f32> {
     return frame.gi_volume.xyz + g * frame.gi_volume.w;
 }
 
-// Texel coordinates (in the atlas) of direction `dir` in the tile of the probe at grid `g`.
-fn probe_gi_texel(g: vec3<u32>, dir: vec3<f32>) -> vec2<f32> {
+// The corner (in atlas texels) of the tile of the probe stored at `c` (the grid scrolls through
+// storage: the probe at grid `g` is stored at `(g + frame.gi_grid.xyz) % frame.gi_size.xyz`).
+fn probe_gi_tile(c: vec3<u32>) -> vec2<f32> {
     let size = vec3<u32>(frame.gi_size.xyz);
-    let c = (g + vec3<u32>(frame.gi_grid.xyz)) % size;
     let slot = c.x + size.x * (c.y + size.y * c.z);
-    let tile = vec2<f32>(vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS);
+    return vec2<f32>(vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS);
+}
+
+// Texel coordinates of direction `dir` within a probe's tile.
+fn probe_gi_dir_texel(dir: vec3<f32>) -> vec2<f32> {
     let n = f32(PROBE_GI_TEXELS);
-    return tile + clamp((oct_encode(dir) * 0.5 + 0.5) * n, vec2<f32>(0.5), vec2<f32>(n - 0.5));
+    return clamp((oct_encode(dir) * 0.5 + 0.5) * n, vec2<f32>(0.5), vec2<f32>(n - 0.5));
 }
 
 // Irradiance (rgb, lux-like: diffuse light is albedo / PI times it) at camera-relative `rel`
@@ -882,23 +886,34 @@ fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
     let alpha = local - base;
     let atlas = vec2<f32>(textureDimensions(gi_atlas));
     // By an indoor volume, probes behind its closed faces see nothing of this side: a probe
-    // over a cave's rock sees the open sky, one in the rock around a room the room's dark.
-    let walled = near_sky_volume(p, 2.0 * spacing);
+    // over a cave's rock sees the open sky, one in the rock around a room the room's dark. A
+    // corner probe is at most sqrt(3) spacings away, so only the volumes within 2 can wall it.
+    let walls = near_sky_volumes(p, 2.0 * spacing);
+    // Where the corners are stored: the first corner's slot, and along each axis the next one
+    // (the grid wraps around in storage). The irradiance is read along the normal, the same
+    // texel of every corner's tile.
+    let sizes = vec3<u32>(size);
+    let first = (vec3<u32>(base) + vec3<u32>(frame.gi_grid.xyz)) % sizes;
+    let next = select(first + 1u, vec3<u32>(0u), first + 1u == sizes);
+    let along_n = probe_gi_dir_texel(n);
     var sum = vec3<f32>(0.0);
     var weights = 0.0;
     for (var i = 0u; i < 8u; i++) {
-        let offset = vec3<f32>(f32(i & 1u), f32((i >> 1u) & 1u), f32((i >> 2u) & 1u));
+        let corner = vec3<bool>((i & 1u) != 0u, (i & 2u) != 0u, (i & 4u) != 0u);
+        let offset = select(vec3<f32>(0.0), vec3<f32>(1.0), corner);
         let g = base + offset;
-        let gu = vec3<u32>(g);
         let probe = probe_gi_position(g);
         let to_probe = probe - p;
         let dist = max(length(to_probe), 1e-4);
         let dir = to_probe / dist;
-        if (walled && sky_volume_wall(p, dir, dist) < dist) { continue; }
+        // Both reads first: neither depends on the tests below, so they wait together.
+        let tile = probe_gi_tile(select(first, next, corner));
+        // Chebyshev: how likely the probe sees this point, from the distances it sees.
+        let m = textureSampleLevel(gi_atlas, linear_clamp, (tile + probe_gi_dir_texel(-dir)) / atlas, 1, 0.0);
+        let e = textureSampleLevel(gi_atlas, linear_clamp, (tile + along_n) / atlas, 0, 0.0).rgb;
+        if (walls != 0u && sky_volume_wall_among(walls, p, dir, dist) < dist) { continue; }
         let tri = mix(1.0 - alpha, alpha, offset);
         var w = sq((dot(dir, n) + 1.0) * 0.5) + 0.2;
-        // Chebyshev: how likely the probe sees this point, from the distances it sees.
-        let m = textureSampleLevel(gi_atlas, linear_clamp, probe_gi_texel(gu, -dir) / atlas, 1, 0.0);
         // Not lit yet (written in another epoch, or cleared as it scrolled in).
         if (abs(m.w - frame.gi_grid.w) > 0.5) {
             unlit += tri.x * tri.y * tri.z;
@@ -916,7 +931,6 @@ fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
         // Crush tiny weights (light leaks) further.
         if (w < 0.2) { w *= w * w * 25.0; }
         w *= tri.x * tri.y * tri.z;
-        let e = textureSampleLevel(gi_atlas, linear_clamp, probe_gi_texel(gu, n) / atlas, 0, 0.0).rgb;
         sum += e * w;
         weights += w;
     }
@@ -1182,16 +1196,18 @@ fn sky_volume_face_point(q: vec3<f32>, axis: u32) -> vec2<f32> {
 
 const SKY_VOLUME_NO_WALL: f32 = 1e30;
 
-// Whether camera-relative `rel` is within `margin` meters of an indoor volume's box.
-fn near_sky_volume(rel: vec3<f32>, margin: f32) -> bool {
-    if (shade_skip(SKIP_SKY_VOLUMES)) { return false; }
+// The indoor volumes (bit i for `frame.sky_volumes[i]`) whose boxes camera-relative `rel` is
+// within `margin` meters of, along each of the box's axes.
+fn near_sky_volumes(rel: vec3<f32>, margin: f32) -> u32 {
+    if (shade_skip(SKIP_SKY_VOLUMES)) { return 0u; }
     let p = vec4<f32>(rel, 1.0);
+    var near = 0u;
     for (var i = 0u; i < min(frame.counts.w, 16u); i++) {
         let v = frame.sky_volumes[i];
         let local = vec3<f32>(dot(v.to_local[0], p), dot(v.to_local[1], p), dot(v.to_local[2], p));
-        if (all(abs(local) < v.half_fade.xyz + margin)) { return true; }
+        if (all(abs(local) < v.half_fade.xyz + margin)) { near |= 1u << i; }
     }
-    return false;
+    return near;
 }
 
 // The first closed face of an indoor volume (`SkyLightVolume`) a ray crosses within `t_max`, or
@@ -1204,40 +1220,59 @@ fn near_sky_volume(rel: vec3<f32>, margin: f32) -> bool {
 fn sky_volume_wall(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
     var best = SKY_VOLUME_NO_WALL;
     for (var i = 0u; i < min(frame.counts.w, 16u); i++) {
-        let v = frame.sky_volumes[i];
-        let o = vec3<f32>(dot(v.to_local[0], vec4<f32>(origin, 1.0)), dot(v.to_local[1], vec4<f32>(origin, 1.0)), dot(v.to_local[2], vec4<f32>(origin, 1.0)));
-        let d = vec3<f32>(dot(v.to_local[0].xyz, dir), dot(v.to_local[1].xyz, dir), dot(v.to_local[2].xyz, dir));
-        let half = v.half_fade.xyz;
-        let tiny = select(vec3<f32>(-1e-20), vec3<f32>(1e-20), d >= vec3<f32>(0.0));
-        let inv = 1.0 / select(d, tiny, abs(d) < vec3<f32>(1e-20));
-        let t0 = (-half - o) * inv;
-        let t1 = (half - o) * inv;
-        let near = min(t0, t1);
-        let far = max(t0, t1);
-        let t_in = max(max(near.x, near.y), near.z);
-        let t_out = min(min(far.x, far.y), far.z);
-        if (t_out < 0.0 || t_in > t_out || t_in > min(t_max, best)) { continue; }
-        let mask = u32(v.params.y);
-        let opening = sky_volume_opening(v);
-        // Face bits: +x 1, -x 2, +y 4, -y 8, +z 16, -z 32. A ray going up an axis enters
-        // through the face at its low end and leaves through the one at its high end; an open
-        // face lets it through only within its opening.
-        if (t_in > 0.0) {
-            let axis = select(select(2u, 1u, near.y >= near.z), 0u, near.x >= near.y && near.x >= near.z);
-            let bit = 1u << (2u * axis + select(0u, 1u, d[axis] > 0.0));
-            let uv = sky_volume_face_point(o + d * t_in, axis);
-            if ((mask & bit) == 0u || any(uv < opening.xy) || any(uv > opening.zw)) {
-                best = t_in;
-                continue;
-            }
+        best = sky_volume_wall_of(i, origin, dir, t_max, best);
+    }
+    return best;
+}
+
+// `sky_volume_wall` among the volumes of bit mask `volumes` (bit i for `frame.sky_volumes[i]`):
+// the same distance where no other volume can be met within `t_max`.
+fn sky_volume_wall_among(volumes: u32, origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
+    var best = SKY_VOLUME_NO_WALL;
+    var left = volumes;
+    while (left != 0u) {
+        let i = firstTrailingBit(left);
+        left &= left - 1u;
+        best = sky_volume_wall_of(i, origin, dir, t_max, best);
+    }
+    return best;
+}
+
+// `best`, or the first closed face of indoor volume `i` the ray crosses within `t_max` where
+// that is nearer (`sky_volume_wall`, one volume).
+fn sky_volume_wall_of(i: u32, origin: vec3<f32>, dir: vec3<f32>, t_max: f32, best: f32) -> f32 {
+    let v = frame.sky_volumes[i];
+    let o = vec3<f32>(dot(v.to_local[0], vec4<f32>(origin, 1.0)), dot(v.to_local[1], vec4<f32>(origin, 1.0)), dot(v.to_local[2], vec4<f32>(origin, 1.0)));
+    let d = vec3<f32>(dot(v.to_local[0].xyz, dir), dot(v.to_local[1].xyz, dir), dot(v.to_local[2].xyz, dir));
+    let half = v.half_fade.xyz;
+    let tiny = select(vec3<f32>(-1e-20), vec3<f32>(1e-20), d >= vec3<f32>(0.0));
+    let inv = 1.0 / select(d, tiny, abs(d) < vec3<f32>(1e-20));
+    let t0 = (-half - o) * inv;
+    let t1 = (half - o) * inv;
+    let near = min(t0, t1);
+    let far = max(t0, t1);
+    let t_in = max(max(near.x, near.y), near.z);
+    let t_out = min(min(far.x, far.y), far.z);
+    if (t_out < 0.0 || t_in > t_out || t_in > min(t_max, best)) { return best; }
+    let mask = u32(v.params.y);
+    let opening = sky_volume_opening(v);
+    // Face bits: +x 1, -x 2, +y 4, -y 8, +z 16, -z 32. A ray going up an axis enters through
+    // the face at its low end and leaves through the one at its high end; an open face lets it
+    // through only within its opening.
+    if (t_in > 0.0) {
+        let axis = select(select(2u, 1u, near.y >= near.z), 0u, near.x >= near.y && near.x >= near.z);
+        let bit = 1u << (2u * axis + select(0u, 1u, d[axis] > 0.0));
+        let uv = sky_volume_face_point(o + d * t_in, axis);
+        if ((mask & bit) == 0u || any(uv < opening.xy) || any(uv > opening.zw)) {
+            return t_in;
         }
-        if (t_out <= t_max) {
-            let axis = select(select(2u, 1u, far.y <= far.z), 0u, far.x <= far.y && far.x <= far.z);
-            let bit = 1u << (2u * axis + select(1u, 0u, d[axis] > 0.0));
-            let uv = sky_volume_face_point(o + d * t_out, axis);
-            if ((mask & bit) == 0u || any(uv < opening.xy) || any(uv > opening.zw)) {
-                best = min(best, t_out);
-            }
+    }
+    if (t_out <= t_max) {
+        let axis = select(select(2u, 1u, far.y <= far.z), 0u, far.x <= far.y && far.x <= far.z);
+        let bit = 1u << (2u * axis + select(1u, 0u, d[axis] > 0.0));
+        let uv = sky_volume_face_point(o + d * t_out, axis);
+        if ((mask & bit) == 0u || any(uv < opening.xy) || any(uv > opening.zw)) {
+            return min(best, t_out);
         }
     }
     return best;
