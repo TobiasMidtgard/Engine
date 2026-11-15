@@ -502,6 +502,9 @@ pub struct CloudFeature {
     active: bool,
     replace_sky: bool,
     top_m: f32,
+    /// Whether any texel of the weather map last uploaded holds rain or snow. Without any, and
+    /// without any beyond the map, the march skips its search for rain (`veil.w`).
+    map_wet: bool,
     shadow_request: Option<CloudShadowRequest>,
     shadow_cache: Option<ShadowCache>,
     /// The block side the frame rate asked for last (`paced_side`).
@@ -1071,6 +1074,7 @@ impl RenderFeature for CloudFeature {
                 .unwrap_or(0) as f32
                 / 255.0;
             self.top_m = cloud_thickness_m(max_type.max(map.background.y));
+            self.map_wet = map.texels.iter().any(|t| t[2] > 0);
         }
 
         let sim = world.resource::<WeatherSim>();
@@ -1136,7 +1140,13 @@ impl RenderFeature for CloudFeature {
         let night = smoothstep(0.05, -0.25, sun_dir.y);
         let stars = smoothstep(-0.02, -0.25, sun_dir.y);
         let visibility = 1.0 - smoothstep(30_000.0, 120_000.0, view.origin.y as f32);
-        let veil = precipitation_veil(state.temperature_c);
+        let mut veil = precipitation_veil(state.temperature_c);
+        // Where no rain or snow is anywhere in the weather, no ray can meet any.
+        veil[3] = if self.map_wet || map.background.z > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
         let shadow_dimming = shadow_dimming(lights);
         self.shadow_request = world
             .get_resource::<Atmosphere>()

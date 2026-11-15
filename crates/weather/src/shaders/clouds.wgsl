@@ -13,7 +13,8 @@ struct Clouds {
     flash: vec4<f32>,       // lightning: position relative to the camera, luminous intensity (cd)
     params: vec4<f32>,      // visibility (fades out high above the planet), detail period (m), env steps, night (0 day .. 1 dark night)
     detail: vec4<f32>,      // detail noise origin xyz (wrapped), 1 = draw rain shafts
-    veil: vec4<f32>,        // falling rain or snow veils from x (m), fully from y (m); z = snow share 0..1
+    veil: vec4<f32>,        // falling rain or snow veils from x (m), fully from y (m); z = snow share 0..1;
+                            // w = 1 if the weather map or the background holds any rain or snow
     shadow: vec4<f32>,      // cloud shadow map: the shading light's dimming at the player, samples toward the light;
                             // share of the ambient fill left (the rest comes with the moon), moonlight's glow (0..1)
     far: vec4<f32>,         // far cloud layer drawn by another module: hand over from x to y m of ground distance, z = its weight
@@ -477,12 +478,35 @@ fn shaft_edge(i: i32, near: i32, t0: f32, tn: f32, t1: f32) -> f32 {
     return mix(tn, t1, f32(i - near) / 12.0);
 }
 
+// The light under the clouds that rain on `dir` is lit by: their underside's color, and how
+// much of a deck there is. `c` is the clouds' own march along `dir`, made with `steps`,
+// `light_steps` and `jitter`.
+fn rain_deck(dir: vec3<f32>, c: CloudResult, steps: i32, light_steps: i32, jitter: f32) -> vec4<f32> {
+    let cover = 1.0 - c.transmittance;
+    var deck = vec4<f32>(c.radiance / max(cover, 1e-3), smoothstep(0.05, 0.6, cover));
+    // Looking down from under the deck a ray sees no cloud, yet the rain there is lit by the
+    // same deck as the rain just above the horizon: take the deck from the mirrored ray. Without
+    // it the veil below the horizon was lit by the open sky and showed as a blue band.
+    let up = normalize(-frame.planet.xyz);
+    let down = dot(dir, up);
+    if (down < 0.0 && frame.planet.w > 0.0 && frame.camera_world.w < clouds.layer.x
+        && clouds.detail.w >= 0.5 && clouds.params.x > 0.001) {
+        let m = march_clouds(dir - 2.0 * down * up, max(steps / 2, 8), max(light_steps / 2, 1), jitter);
+        let mc = 1.0 - m.transmittance;
+        deck = vec4<f32>(m.radiance / max(mc, 1e-3), smoothstep(0.05, 0.6, mc));
+    }
+    return deck;
+}
+
 // Rain or snow falling below the clouds: grey curtains in the distance, and in snowfall a
 // white-out a few hundred meters away. Starts a little away from the camera (`clouds.veil`):
 // rain right around the player is particles and fog, snow only the flakes close by.
-// `deck` is the light under the clouds the ray meets (their underside's color), when it
-// meets any.
-fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
+// `c` is the clouds' own march along `dir` (made with `cloud_steps`, `light_steps` and `jitter`):
+// the rain stops at their front and is lit by their underside (`rain_deck`). The rain's light
+// is the same all along the ray, so the march only adds up how much of it reaches the camera,
+// and the light (a second march for rays below the horizon) is worked out only for rays that
+// meet any rain: most rays meet none, and in dry weather none do (`clouds.veil.w`).
+fn rain_shafts(dir: vec3<f32>, c: CloudResult, cloud_steps: i32, light_steps: i32, jitter: f32) -> CloudResult {
     var r: CloudResult;
     r.radiance = vec3(0.0);
     r.transmittance = 1.0;
@@ -493,9 +517,11 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
     // Climbing up into the cloud base the rain below fades out over 300 m instead of
     // vanishing the moment the camera crosses the base.
     let below_base = 1.0 - smoothstep(base, base + 300.0, h0);
-    if (clouds.detail.w < 0.5 || clouds.params.x <= 0.001 || frame.planet.w <= 0.0 || below_base <= 0.0) {
+    if (clouds.detail.w < 0.5 || clouds.veil.w < 0.5 || clouds.params.x <= 0.001
+        || frame.planet.w <= 0.0 || below_base <= 0.0) {
         return r;
     }
+    let max_t = c.front;
     var t0 = clouds.veil.x;
     var t1 = min(max_t, 40000.0);
     let shell = ray_shell(vec3(0.0), h0, dir, base);
@@ -509,13 +535,6 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
     let ground = ray_shell(vec3(0.0), h0, dir, 0.0);
     if (ground.x > 0.0) { t1 = min(t1, ground.x); }
     if (t1 <= t0) { return r; }
-    let sky = atmosphere(vec3(0.0), vec3<f32>(0.0, 1.0, 0.0), 1e12, 6).radiance * clouds.light.rgb;
-    // Rain is lit by the grey light under the clouds and a little by the sun from the side.
-    let open_sky = sky * 0.55 + clouds.light.rgb * saturate(clouds.light_dir.y) * INV_PI * 0.06 + frame.ambient.rgb;
-    // Under a deck the rain sees the deck above and the darker ground below: a little
-    // darker than the deck's underside, less so over fresh snow.
-    let below = mix(0.7, 0.9, saturate(frame.surface_open.z * SURFACE_SNOW_SCALE_M * 10.0));
-    let lit = mix(open_sky, deck.rgb * below + frame.ambient.rgb, deck.a);
     let snow = clouds.veil.z;
     // Snow hides the view within a few hundred meters, so it gets four more steps over its
     // first 2 km: the far steps are kilometers long.
@@ -528,6 +547,9 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
     var reach: array<f32, 17>;
     reach[0] = veil_reach(t0);
     var total = 0.0;
+    // The share of the rain's light that reaches the camera: each step's opacity, dimmed by
+    // the rain in front of it.
+    var seen = 0.0;
     for (var i = 0; i < steps; i++) {
         let a = shaft_edge(i, near, t0, tn, t1);
         let b = shaft_edge(i + 1, near, t0, tn, t1);
@@ -544,16 +566,24 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
                 * saturate(mm_h * 10.0) * below_base;
             od[i] = sigma * (reach[i + 1] - reach[i]);
             let tr = exp(-od[i]);
-            r.radiance += r.transmittance * (1.0 - tr) * lit;
+            seen += r.transmittance * (1.0 - tr);
             r.transmittance *= tr;
             total += od[i];
         }
     }
     if (total < 1e-5) {
-        r.radiance = vec3(0.0);
         r.transmittance = 1.0;
         return r;
     }
+    let deck = rain_deck(dir, c, cloud_steps, light_steps, jitter);
+    let sky = atmosphere(vec3(0.0), vec3<f32>(0.0, 1.0, 0.0), 1e12, 6).radiance * clouds.light.rgb;
+    // Rain is lit by the grey light under the clouds and a little by the sun from the side.
+    let open_sky = sky * 0.55 + clouds.light.rgb * saturate(clouds.light_dir.y) * INV_PI * 0.06 + frame.ambient.rgb;
+    // Under a deck the rain sees the deck above and the darker ground below: a little
+    // darker than the deck's underside, less so over fresh snow.
+    let below = mix(0.7, 0.9, saturate(frame.surface_open.z * SURFACE_SNOW_SCALE_M * 10.0));
+    let lit = mix(open_sky, deck.rgb * below + frame.ambient.rgb, deck.a);
+    r.radiance = lit * seen;
     // Where the rain's optical depth reaches 10% and 90% of its total, each step's share spread
     // evenly over the step's meters of rain. Unlike the first and last wet sample these slide
     // smoothly as the samples move along the ray from pixel to pixel, so far hills don't get
@@ -605,20 +635,7 @@ fn clouds_and_rain(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) ->
     var c = march_clouds(dir, steps, light_steps, jitter);
     c.rain_front = clouds.layer.w;
     c.rain_back = clouds.layer.w;
-    let cover = 1.0 - c.transmittance;
-    var deck = vec4<f32>(c.radiance / max(cover, 1e-3), smoothstep(0.05, 0.6, cover));
-    // Looking down from under the deck a ray sees no cloud, yet the rain there is lit by the
-    // same deck as the rain just above the horizon: take the deck from the mirrored ray. Without
-    // it the veil below the horizon was lit by the open sky and showed as a blue band.
-    let up = normalize(-frame.planet.xyz);
-    let down = dot(dir, up);
-    if (down < 0.0 && frame.planet.w > 0.0 && frame.camera_world.w < clouds.layer.x
-        && clouds.detail.w >= 0.5 && clouds.params.x > 0.001) {
-        let m = march_clouds(dir - 2.0 * down * up, max(steps / 2, 8), max(light_steps / 2, 1), jitter);
-        let mc = 1.0 - m.transmittance;
-        deck = vec4<f32>(m.radiance / max(mc, 1e-3), smoothstep(0.05, 0.6, mc));
-    }
-    let s = rain_shafts(dir, c.front, deck);
+    let s = rain_shafts(dir, c, steps, light_steps, jitter);
     if (s.transmittance >= 1.0) { return c; }
     c.radiance = s.radiance + c.radiance * s.transmittance;
     c.transmittance *= s.transmittance;
