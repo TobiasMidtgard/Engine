@@ -365,7 +365,7 @@ const CUT_SCREEN_FOG: u32 = 2048u;
 // (4096 and 8192: the ground's grid lines, CPU side.)
 const CUT_GROUND_ONCE: u32 = 16384u;
 // (32768: meshes work out their material once, mesh_feature.rs "once"; 65536: their scene
-// program after the depth test; 131072: their depth first in the pass of 32768; 262144:
+// program after the depth test; 131072: their depth first, in the shared prepass; 262144:
 // alpha-tested ones in that depth step too; 524288: meshes in bands of distance, nearest
 // first. CPU side.)
 const CUT_TERRAIN_ROCK_SINGLE: u32 = 1048576u;

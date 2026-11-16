@@ -18,6 +18,20 @@ const SLICES: i32 = 3;
 const STEPS: i32 = 4;
 const HALF_PI: f32 = 1.57079632679;
 
+// The occlusion fades out between these view depths (meters): past the far one a pixel is fully
+// open whatever is around it.
+const FADE_FROM: f32 = 150.0;
+const FADE_TO: f32 = 300.0;
+// From here on the main pass writes 1 without searching: a meter past the fade's end, so the
+// fade is 1 however the division inside smoothstep rounds.
+const OPEN_FROM: f32 = FADE_TO + 1.0;
+// The blur counts a neighbour only within `BLUR_DEPTH_SHARE * depth + BLUR_DEPTH_SLACK` of the
+// pixel's own depth. From this depth on, every neighbour it counts is past `OPEN_FROM` and holds
+// exactly 1, so their average is 1: the blur writes it without reading them.
+const BLUR_DEPTH_SHARE: f32 = 0.03;
+const BLUR_DEPTH_SLACK: f32 = 0.05;
+const BLUR_OPEN_FROM: f32 = (OPEN_FROM + BLUR_DEPTH_SLACK) / (1.0 - BLUR_DEPTH_SHARE) + 1.0;
+
 @vertex
 fn vs_ao(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.0);
@@ -53,6 +67,9 @@ fn fs_gtao(in: FullscreenOut) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0);
     }
     let pos = view_pos_at(px);
+    if (-pos.z >= OPEN_FROM) {
+        return vec4<f32>(1.0);
+    }
     let n = view_normal_at(px);
     let v = normalize(-pos);
     let radius = frame.effects.w;
@@ -123,7 +140,7 @@ fn fs_gtao(in: FullscreenOut) -> @location(0) vec4<f32> {
     }
     visibility = saturate(visibility / f32(SLICES));
     // Fade out with distance (the effect gets sub-pixel and noisy far away).
-    let fade = smoothstep(150.0, 300.0, -pos.z);
+    let fade = smoothstep(FADE_FROM, FADE_TO, -pos.z);
     return vec4<f32>(mix(visibility, 1.0, fade));
 }
 
@@ -139,6 +156,9 @@ fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
     }
     let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(size);
     let depth = scene_linear_depth(uv, z);
+    if (depth >= BLUR_OPEN_FROM) {
+        return vec4<f32>(1.0);
+    }
     let n = oct_decode(textureLoad(normal_input, px, 0).xy);
     var sum = 0.0;
     var weight = 0.0;
@@ -150,7 +170,7 @@ fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
             let uvq = (vec2<f32>(q) + 0.5) / vec2<f32>(size);
             let dq = scene_linear_depth(uvq, zq);
             let nq = oct_decode(textureLoad(normal_input, q, 0).xy);
-            let w = saturate(1.0 - abs(dq - depth) / (0.03 * depth + 0.05)) * saturate(dot(n, nq) * 4.0 - 3.0);
+            let w = saturate(1.0 - abs(dq - depth) / (BLUR_DEPTH_SHARE * depth + BLUR_DEPTH_SLACK)) * saturate(dot(n, nq) * 4.0 - 3.0);
             sum += textureLoad(ao_input, q, 0).r * w;
             weight += w;
         }

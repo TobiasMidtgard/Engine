@@ -1393,12 +1393,12 @@ fn fs_once(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceOutput 
     return once_fragment(in, front, true);
 }
 
-// `trial_cut::MESHES_DEPTH_FIRST`: the pass draws the meshes' depth first (`fs_once_depth`) and
-// then their material where the depth is equal, with the test before the program
-// (`fs_main_early` says why), so the material is worked out for the layer in view only, not
-// for every layer drawn. The depth step alone decides where an alpha-tested material has its
-// holes: no alpha test here, or a pixel the two disagree on by rounding would keep its depth
-// and get no material.
+// `trial_cut::MESHES_DEPTH_FIRST`: the shared prepass draws the meshes' depth first
+// (`fs_once_depth`) and their own pass then their material where the depth is equal, with the
+// test before the program (`fs_main_early` says why), so the material is worked out for the
+// layer in view only, not for every layer drawn. The depth step alone decides where an
+// alpha-tested material has its holes: no alpha test here, or a pixel the two disagree on by
+// rounding would keep its depth and get no material.
 @fragment @early_depth_test(force)
 fn fs_once_early(in: OnceVertexOut, @builtin(front_facing) front: bool) -> OnceOutput {
     return once_fragment(in, front, false);

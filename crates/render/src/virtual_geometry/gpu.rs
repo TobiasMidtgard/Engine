@@ -596,8 +596,9 @@ pub struct ClusterRenderer {
     /// The pipelines of the meshes' own prepass (`trial_cut::MESHES_ONCE`, mesh_once.rs),
     /// single- and double-sided: made when first asked for ([`ensure_once`](Self::ensure_once)).
     once: Option<[wgpu::RenderPipeline; 2]>,
-    /// The same with `trial_cut::MESHES_DEPTH_FIRST`: depth only, then the material where the
-    /// depth is equal.
+    /// The same with `trial_cut::MESHES_DEPTH_FIRST`: depth only, drawn into the shared prepass
+    /// (over its targets, which they leave alone), then the material in the meshes' own pass
+    /// where the depth is equal.
     once_first: Option<[[wgpu::RenderPipeline; 2]; 2]>,
     /// The scene pipelines whose program runs after the depth test
     /// (`trial_cut::MESHES_EARLY_Z`), single- and double-sided.
@@ -1914,7 +1915,8 @@ impl ClusterRenderer {
     }
 
     /// Make the pipelines of the meshes' own prepass, which draw into `targets`
-    /// (`mesh_once::color_targets`). False while nothing is drawn as clusters.
+    /// (`mesh_once::color_targets`); with the depth first, those of the depth step draw into
+    /// the shared prepass. False while nothing is drawn as clusters.
     pub fn ensure_once(
         &mut self,
         gpu: &GpuShared,
@@ -1938,7 +1940,7 @@ impl ClusterRenderer {
             depth_compare: Some(wgpu::CompareFunction::Equal),
             ..gpu.depth_state(false)
         };
-        let pipeline = |double: bool, draws: Draws| {
+        let pipeline = |double: bool, draws: Draws, targets: &[Option<wgpu::ColorTargetState>]| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("cluster once"),
@@ -1965,11 +1967,19 @@ impl ClusterRenderer {
                     cache: None,
                 })
         };
+        let pair = |draws: Draws, targets: &[Option<wgpu::ColorTargetState>]| {
+            [
+                pipeline(false, draws, targets),
+                pipeline(true, draws, targets),
+            ]
+        };
         if depth_first {
-            let pair = |draws| [pipeline(false, draws), pipeline(true, draws)];
-            self.once_first = Some([pair(Draws::Depth), pair(Draws::AtDepth)]);
+            self.once_first = Some([
+                pair(Draws::Depth, &gpu.prepass_targets()),
+                pair(Draws::AtDepth, targets),
+            ]);
         } else {
-            self.once = Some([pipeline(false, Draws::Whole), pipeline(true, Draws::Whole)]);
+            self.once = Some(pair(Draws::Whole, targets));
         }
         true
     }
@@ -2041,8 +2051,9 @@ impl ClusterRenderer {
         }
     }
 
-    /// Draw the camera's clusters into the meshes' own prepass (group 1 bound): those found
-    /// visible early, or with `late` those occlusion culling found visible late.
+    /// Draw the camera's clusters into the meshes' own prepass (group 1 bound), or their
+    /// depth step (`Draws::Depth`) into the shared prepass: those found visible early, or with
+    /// `late` those occlusion culling found visible late.
     pub(crate) fn draw_once<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'_>,

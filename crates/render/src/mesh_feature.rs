@@ -1486,10 +1486,10 @@ pub struct MeshFeature {
     /// when the cut is first on, dropped when it goes off.
     once: Option<crate::mesh_once::MeshOnce>,
     /// This view's opaque meshes are drawn that way this frame (`compute` decides): they skip
-    /// the shared prepass and the scene pass.
+    /// the scene pass, and the shared prepass too unless their depth goes first.
     once_now: bool,
-    /// With `once_now`: the pass draws the meshes' depth first and their material where it
-    /// is equal (`trial_cut::MESHES_DEPTH_FIRST`).
+    /// With `once_now`: the shared prepass draws the meshes' depth and their own pass draws
+    /// their material where it is equal (`trial_cut::MESHES_DEPTH_FIRST`).
     depth_first_now: bool,
     /// The opaque scene pipelines whose program runs after the depth test
     /// (`trial_cut::MESHES_EARLY_Z`, mesh.wgsl `fs_main_early`), indexed like `pipelines` and
@@ -1990,7 +1990,7 @@ impl MeshFeature {
             .as_ref()
             .and_then(|c| c.draws(crate::mesh_cull::Phase::Early));
         pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
-        // (With `once_now` the batches are drawn in `prepass_own`.)
+        // (With `once_now` the batches' material is drawn in `prepass_own`.)
         if !self.once_now {
             self.draw_batches(
                 pass,
@@ -2003,6 +2003,8 @@ impl MeshFeature {
                 |_| true,
                 culled.map(|c| (c.1, c.2)),
             );
+        } else {
+            self.draw_once_depth(pass, culled.map(|c| (c.1, c.2)));
         }
         if culled.is_some() {
             pass.set_vertex_buffer(1, instances.buffer.slice(..));
@@ -2010,8 +2012,14 @@ impl MeshFeature {
         if let Some(i) = &self.impostors {
             i.draw(pass, self.impostor_view, true);
         }
-        if let Some(clusters) = clusters.filter(|_| !self.once_now) {
-            clusters.draw_prepass(pass, |set| self.texture_group(set));
+        if let Some(clusters) = clusters {
+            if !self.once_now {
+                clusters.draw_prepass(pass, |set| self.texture_group(set));
+            } else if self.depth_first_now {
+                // (Their depth step, like the batches': `draw_once_depth`.)
+                let depth = crate::mesh_once::Draws::Depth;
+                clusters.draw_once(pass, |set| self.texture_group(set), false, depth);
+            }
         }
     }
 
@@ -2024,32 +2032,65 @@ impl MeshFeature {
         if let Some((instances, args, offset)) = self
             .culling
             .as_ref()
-            .filter(|_| !self.once_now)
             .and_then(|c| c.draws(crate::mesh_cull::Phase::Late))
         {
             pass.set_bind_group(1, group, &[]);
             pass.set_vertex_buffer(1, instances.slice(..));
-            self.draw_batches(
-                pass,
-                &self.opaque,
-                |p| {
-                    self.prepass_pipelines
-                        .get(variant_of(p))
-                        .and_then(Option::as_ref)
-                },
-                |_| true,
-                Some((args, offset)),
-            );
+            if !self.once_now {
+                self.draw_batches(
+                    pass,
+                    &self.opaque,
+                    |p| {
+                        self.prepass_pipelines
+                            .get(variant_of(p))
+                            .and_then(Option::as_ref)
+                    },
+                    |_| true,
+                    Some((args, offset)),
+                );
+            } else {
+                self.draw_once_depth(pass, Some((args, offset)));
+            }
         }
-        let Some(clusters) = self
-            .clusters
-            .as_ref()
-            .filter(|c| c.is_active() && !self.once_now)
-        else {
+        let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) else {
             return;
         };
         pass.set_bind_group(1, group, &[]);
-        clusters.draw_prepass_late(pass, |set| self.texture_group(set));
+        if !self.once_now {
+            clusters.draw_prepass_late(pass, |set| self.texture_group(set));
+        } else if self.depth_first_now {
+            let depth = crate::mesh_once::Draws::Depth;
+            clusters.draw_once(pass, |set| self.texture_group(set), true, depth);
+        }
+    }
+
+    /// With `once_now` and the depth first: the opaque batches' depth, into the shared prepass
+    /// (group 1 and the instances bound). Laid down there, it is in the depth buffer before
+    /// anything the prepasses draw after the meshes: the ground's stored pass, the grass and
+    /// the scenery work out and write nothing for the pixels a mesh covers. The batches'
+    /// material follows in `prepass_own`, where the depth is equal.
+    fn draw_once_depth(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        culled: Option<(&wgpu::Buffer, u64)>,
+    ) {
+        let Some(once) = self.once.as_ref().filter(|_| self.depth_first_now) else {
+            return;
+        };
+        self.draw_batches(
+            pass,
+            &self.opaque,
+            // (Alpha-tested batches, marked while the depth goes first: drawn whole with the
+            // material.)
+            |p| {
+                once.depth
+                    .get(variant_of(p))
+                    .and_then(Option::as_ref)
+                    .filter(|_| p & PIPE_MASKED == 0)
+            },
+            |_| true,
+            culled,
+        );
     }
 
     /// Whether this view's opaque meshes are drawn the `trial_cut::MESHES_ONCE` way this
@@ -2102,13 +2143,16 @@ impl MeshFeature {
             let once = self.once.get_or_insert_with(|| {
                 crate::mesh_once::MeshOnce::new(ctx.gpu, PIPELINE_VARIANTS as usize)
             });
+            // (The depth step is drawn in the shared prepass, over its targets.)
+            let shared = ctx.gpu.prepass_targets().to_vec();
             for (i, &(whole, depth_first)) in used.iter().enumerate() {
                 let build = |draws| Some(build_once_pipeline(&inputs, i as u8, &targets, draws));
                 if whole && once.pipelines[i].is_none() {
                     once.pipelines[i] = build(Draws::Whole);
                 }
                 if depth_first && once.depth[i].is_none() {
-                    once.depth[i] = build(Draws::Depth);
+                    once.depth[i] =
+                        Some(build_once_pipeline(&inputs, i as u8, &shared, Draws::Depth));
                 }
                 if depth_first && once.at_depth[i].is_none() {
                     once.at_depth[i] = build(Draws::AtDepth);
@@ -3528,7 +3572,8 @@ fn build_mesh_pipeline_with(
 
 /// The pipeline for `variant`'s `PIPE_*` bits in the meshes' own prepass
 /// (`trial_cut::MESHES_ONCE`, mesh_once.rs): the prepass pipeline's state, with the vertex and
-/// fragment programs that also store the material, into `targets`.
+/// fragment programs that also store the material, into `targets`. With `Draws::Depth` it is
+/// the depth step's, drawn in the shared prepass: `targets` are that pass's, none written.
 fn build_once_pipeline(
     inputs: &MeshPipelineInputs,
     variant: u8,
@@ -4600,7 +4645,7 @@ impl RenderFeature for MeshFeature {
         // Opaque.
         let items = &self.items;
         let ordered = || self.order.iter().map(|&(_, n)| (n, &items[n as usize]));
-        // (With the depth drawn first in the meshes' own pass, alpha-tested batches are told
+        // (With the depth drawn first, in the shared prepass, alpha-tested batches are told
         // apart: `PIPE_MASKED`. Not with `MESHES_HOLES_FIRST`, which sends them through the
         // depth step like the rest.)
         let both = crate::settings::trial_cut::MESHES_ONCE
@@ -5477,43 +5522,37 @@ impl RenderFeature for MeshFeature {
             crate::mesh_counts::PREPASS
         };
         pass.set_bind_group(1, group, &[]);
-        // Depth and material together, or the depth first and then the material where it is
-        // equal (`trial_cut::MESHES_DEPTH_FIRST`). The count is of the material's draws.
+        // Depth and material together; or, with the depth first
+        // (`trial_cut::MESHES_DEPTH_FIRST`), the material where the depth is equal to what the
+        // shared prepass drew (`draw_once_depth`, and the clusters' depth step beside it).
         use crate::mesh_once::Draws;
-        let steps: &[Draws] = if self.depth_first_now {
-            &[Draws::Depth, Draws::AtDepth]
+        let draws = if self.depth_first_now {
+            Draws::AtDepth
         } else {
-            &[Draws::Whole]
+            Draws::Whole
         };
-        let mut counted = false;
-        for &draws in steps {
-            // (Alpha-tested batches, marked while the depth goes first: left out of the depth
-            // step and drawn whole in the material's.)
-            let pipeline_for = |p: u8| {
-                let pipelines = match (draws, p & PIPE_MASKED != 0) {
-                    (Draws::Whole, _) | (Draws::AtDepth, true) => &once.pipelines,
-                    (Draws::Depth, true) => return None,
-                    (Draws::Depth, false) => &once.depth,
-                    (Draws::AtDepth, false) => &once.at_depth,
-                };
-                pipelines.get(variant_of(p)).and_then(Option::as_ref)
+        // (Alpha-tested batches, marked while the depth goes first: drawn whole.)
+        let pipeline_for = |p: u8| {
+            let pipelines = if draws == Draws::AtDepth && p & PIPE_MASKED == 0 {
+                &once.at_depth
+            } else {
+                &once.pipelines
             };
-            if draws != Draws::Depth {
-                counted = self.count_begin(&mut pass, query, true);
-            }
-            if !late || culled.is_some() {
-                pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
-                self.draw_batches(
-                    &mut pass,
-                    &self.opaque,
-                    pipeline_for,
-                    |_| true,
-                    culled.map(|c| (c.1, c.2)),
-                );
-            }
-            if let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) {
-                clusters.draw_once(&mut pass, |set| self.texture_group(set), late, draws);
-            }
+            pipelines.get(variant_of(p)).and_then(Option::as_ref)
+        };
+        let counted = self.count_begin(&mut pass, query, true);
+        if !late || culled.is_some() {
+            pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
+            self.draw_batches(
+                &mut pass,
+                &self.opaque,
+                pipeline_for,
+                |_| true,
+                culled.map(|c| (c.1, c.2)),
+            );
+        }
+        if let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) {
+            clusters.draw_once(&mut pass, |set| self.texture_group(set), late, draws);
         }
         if counted {
             crate::mesh_counts::MeshCounts::end(&mut pass);

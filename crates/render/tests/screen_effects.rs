@@ -156,6 +156,89 @@ fn ambient_occlusion_darkens_the_crease_but_not_open_ground() {
     assert!(crease < 0.75, "the crease is not occluded: {crease:.2}");
 }
 
+/// The crease at the foot of a 3 m crate `away` meters off, as the ambient occlusion view shows it
+/// through a lens long enough that the crate is as large on screen as `scene_app`'s.
+fn far_crease(away: f64) -> Option<f32> {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = W;
+        w.height = H;
+    }
+    app.add_plugins(RenderPlugin);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.debug_view = DebugView::AmbientOcclusion;
+        s.bloom_intensity = 0.0;
+        s.vignette = 0.0;
+        s.film_grain = 0.0;
+        s.sharpness = 0.0;
+        s.tonemapper = Tonemapper::None;
+        s.saturation = 1.0;
+        s.anti_aliasing = AntiAliasing::None;
+    }
+    let fov = 2.0 * (4.5 / away).atan().to_degrees() as f32;
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(fov)
+        },
+        Transform::from_xyz(0.0, away * 0.28, away).looking_at(DVec3::new(0.0, 1.5, 0.0), Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(-0.3, -1.0, -0.4), Vec3::Y),
+    ));
+    let gray = StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9);
+    w.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [200.0, 200.0],
+                subdivisions: 1,
+            },
+            gray,
+        ),
+    ));
+    w.spawn((
+        Transform::from_xyz(0.0, 1.5, 0.0),
+        MeshRenderer::new(Shape::Cuboid { size: [3.0; 3] }, gray),
+    ));
+    let img = render(&mut app, 2, &format!("ao_far_{away:.0}"))?;
+    Some(decode(luma_at(&app, &img, CREASE)))
+}
+
+/// The occlusion fades out between 150 and 300 m of view depth. Past the fade the passes write
+/// "open" without searching (gtao.wgsl `OPEN_FROM`, `BLUR_OPEN_FROM`), which is only the same
+/// picture while the fade ends where they start: a crease the search darkens at 100 m has to be
+/// open at 330 m, and partly open in between.
+#[test]
+fn ambient_occlusion_fades_out_with_distance() {
+    let (Some(near), Some(mid), Some(far)) =
+        (far_crease(100.0), far_crease(215.0), far_crease(330.0))
+    else {
+        return;
+    };
+    eprintln!(
+        "ambient visibility in the crease: {near:.2} at 100 m, {mid:.2} at 215 m, {far:.2} at 330 m"
+    );
+    assert!(
+        near < 0.82,
+        "the crease is not occluded at 100 m: {near:.2}"
+    );
+    assert!(
+        mid > near + 0.06 && mid < 0.97,
+        "the crease is not half faded at 215 m: {mid:.2} (100 m: {near:.2})"
+    );
+    assert!(
+        far > 0.97,
+        "the crease is still occluded past the fade: {far:.2}"
+    );
+}
+
 #[test]
 fn ambient_occlusion_off_shows_full_visibility() {
     let mut app = scene_app(DebugView::AmbientOcclusion, |s| {

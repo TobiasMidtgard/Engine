@@ -313,8 +313,7 @@ pub mod trial_cut {
     /// the opaque meshes leave the shared prepass for a pass of their own right after it,
     /// which also stores what lighting needs (36 bytes a pixel while it is on); the scene
     /// pass draws none of them and a triangle over the screen lights each pixel once, not
-    /// once for every triangle that touches its 2x2 block. Impostors and virtual geometry
-    /// keep the old way.
+    /// once for every triangle that touches its 2x2 block. Impostors keep the old way.
     pub const MESHES_ONCE: u32 = 32768;
     /// The opaque meshes' scene program asks for the depth test before it runs. Their
     /// programs contain a virtual texture request (a storage write), and a program that
@@ -325,10 +324,12 @@ pub mod trial_cut {
     /// removes dead code first tests early by itself (then this changes nothing). With it
     /// (a device with `SHADER_EARLY_DEPTH_TEST`: Vulkan), `fs_main_early` asks. Same picture.
     pub const MESHES_EARLY_Z: u32 = 65536;
-    /// With [`MESHES_ONCE`]: the meshes' own pass draws their depth first (a program that
-    /// only discards what the material would) and then their material where the depth is
-    /// equal, after the test, so the material is worked out for the layer in view only and
-    /// not for every layer drawn. Their vertices are drawn twice, as today. Alpha-tested
+    /// With [`MESHES_ONCE`]: the meshes' depth is drawn first, in the shared prepass at the
+    /// meshes' place (a program that only discards what the material would), and their own
+    /// pass then draws their material where the depth is equal, after the test, so the
+    /// material is worked out for the layer in view only and not for every layer drawn, and
+    /// what the shared prepass draws after the meshes (grass, scenery) and the ground's own
+    /// pass skip the pixels meshes cover. Their vertices are drawn twice, as today. Alpha-tested
     /// materials (leaves) are left out of the depth step and drawn whole, as with
     /// `MESHES_ONCE` alone: their depth takes their material.
     pub const MESHES_DEPTH_FIRST: u32 = 131072;

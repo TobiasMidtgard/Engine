@@ -13,9 +13,17 @@
 //! instead of two, the meshes' vertices are drawn once instead of twice, and the lighting runs
 //! once a pixel.
 //!
-//! Impostors and virtual geometry keep the usual way, as do extra views and debug views.
+//! With the depth first ([`trial_cut::MESHES_DEPTH_FIRST`]), only the material is left to that
+//! pass, drawn where the depth is equal. The depth itself is drawn in the shared prepass, at the
+//! meshes' place among the features: it is then in the depth buffer before the ground's stored
+//! pass and before the grass and the scenery, which used to work out and write every pixel a
+//! mesh was about to cover (69% of the plaza's picture at 2560x1440, 66% of the forest's).
+//! Meshes drawn as clusters (virtual geometry) go the same way.
+//!
+//! Impostors keep the usual way, as do extra views and debug views.
 //!
 //! [`trial_cut::MESHES_ONCE`]: crate::settings::trial_cut::MESHES_ONCE
+//! [`trial_cut::MESHES_DEPTH_FIRST`]: crate::settings::trial_cut::MESHES_DEPTH_FIRST
 //! [`RenderFeature::prepass_own`]: crate::features::RenderFeature::prepass_own
 
 use crate::features::{GpuShared, PrepassTargets};
@@ -68,8 +76,9 @@ pub(crate) struct MeshOnce {
     stored: Option<Stored>,
     /// The meshes' pipelines for the pass, indexed like `MeshFeature::pipelines`.
     pub(crate) pipelines: Vec<Option<wgpu::RenderPipeline>>,
-    /// With `trial_cut::MESHES_DEPTH_FIRST`: the pipelines that draw their depth only, and
-    /// those that then draw the material where the depth is equal.
+    /// With `trial_cut::MESHES_DEPTH_FIRST`: the pipelines that draw their depth only, into
+    /// the shared prepass (over its targets, which they leave alone), and those that then draw
+    /// the material in the pass of their own where the depth is equal.
     pub(crate) depth: Vec<Option<wgpu::RenderPipeline>>,
     pub(crate) at_depth: Vec<Option<wgpu::RenderPipeline>>,
 }
