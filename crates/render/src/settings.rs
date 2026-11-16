@@ -245,6 +245,12 @@ pub mod shade_skip {
     /// than a sixteenth), while hidden strands are still left out and the tiles drawn the new
     /// way: what drawing by the pixels saves by itself.
     pub const STRANDS_NEAR_COUNT: u32 = 134217728;
+    /// Grass in the scene pass as until 17 Nov 2026: its pipelines test for a depth nearer or
+    /// equal and write it (so the cut fronds' program, which discards, runs before the test at
+    /// every layer), and every run reads whether it is the prepass's surface (grass.rs,
+    /// grass.wgsl `fs_main_old`). The same picture: what lighting only the blades that show
+    /// saves in `scene: grass`. Read on the CPU.
+    pub const GRASS_OLD_WAY: u32 = 268435456;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the picture (lib_frame.wgsl

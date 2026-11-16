@@ -1366,6 +1366,14 @@ pub struct GrassFeature {
     /// The scene and prepass pipelines of fronds cut into pinnae ([`CUT_GROUP`]).
     cut_pipeline: Option<wgpu::RenderPipeline>,
     cut_prepass_pipeline: Option<wgpu::RenderPipeline>,
+    /// The scene pipelines as until 17 Nov 2026, of whole blades and of cut fronds
+    /// (`shade_skip::GRASS_OLD_WAY`): made when a frame first asks, and whether this one does.
+    old_pipelines: Option<[wgpu::RenderPipeline; 2]>,
+    old_way: bool,
+    /// Exact counts of the blades' shader work in the main view while they are asked for
+    /// (`shade_skip::COUNT_MESH_RUNS`, mesh_counts.rs), and whether this view is counted.
+    counts: Option<crate::mesh_counts::MeshCounts>,
+    counting: bool,
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     tiles_buffer: Option<GrowBuffer>,
     fields_buffer: Option<GrowBuffer>,
@@ -1469,7 +1477,103 @@ impl GrassFeature {
             pass.draw_indirect(args, g as u64 * 16);
         }
     }
+
+    /// The scene pipelines of whole blades and of cut fronds. As the frame is drawn they test
+    /// for the prepass's depth and write none (grass.wgsl `fs_main`); `old`: nearer or equal,
+    /// written (`fs_main_old`).
+    fn scene_pipelines(&self, gpu: &GpuShared, old: bool) -> Option<[wgpu::RenderPipeline; 2]> {
+        let layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("grass"),
+                bind_group_layouts: &[Some(&gpu.frame_layout), Some(self.records_layout.as_ref()?)],
+                immediate_size: 0,
+            });
+        let (fs, depth) = if old {
+            ("fs_main_old", gpu.depth_state(true))
+        } else {
+            (
+                "fs_main",
+                wgpu::DepthStencilState {
+                    depth_compare: Some(wgpu::CompareFunction::Equal),
+                    ..gpu.depth_state(false)
+                },
+            )
+        };
+        let hdr = [Some(wgpu::ColorTargetState {
+            format: gpu.formats.hdr,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let pipeline = |label, source: &str| {
+            let shader = gpu.shader(label, source, true);
+            blade_pipeline(
+                gpu,
+                &layout,
+                label,
+                &shader,
+                ("vs_main", fs),
+                depth.clone(),
+                &hdr,
+            )
+        };
+        Some([
+            pipeline("grass", &scene_source()),
+            pipeline("grass cut", &cut_source()),
+        ])
+    }
+
+    /// Count the blades' draws that follow in `pass` as `query` (mesh_counts.rs), when this
+    /// view is counted. True when counting began: end it after the draws.
+    fn count_begin(&self, pass: &mut wgpu::RenderPass<'_>, query: u32) -> bool {
+        self.counting && self.counts.as_ref().is_some_and(|c| c.begin(pass, query))
+    }
 }
+
+/// A pipeline that draws blades (strips, both faces) into the scene or the prepass.
+fn blade_pipeline(
+    gpu: &GpuShared,
+    layout: &wgpu::PipelineLayout,
+    label: &str,
+    shader: &wgpu::ShaderModule,
+    (vs, fs): (&str, &str),
+    depth: wgpu::DepthStencilState,
+    targets: &[Option<wgpu::ColorTargetState>],
+) -> wgpu::RenderPipeline {
+    gpu.device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some(vs),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: BLADE_STRIPS,
+            depth_stencil: Some(depth),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some(fs),
+                compilation_options: Default::default(),
+                targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
+/// Blades are triangle strips seen from both faces.
+const BLADE_STRIPS: wgpu::PrimitiveState = wgpu::PrimitiveState {
+    topology: wgpu::PrimitiveTopology::TriangleStrip,
+    strip_index_format: None,
+    front_face: wgpu::FrontFace::Ccw,
+    cull_mode: None,
+    unclipped_depth: false,
+    polygon_mode: wgpu::PolygonMode::Fill,
+    conservative: false,
+};
 
 impl RenderFeature for GrassFeature {
     fn name(&self) -> &str {
@@ -1571,66 +1675,20 @@ impl RenderFeature for GrassFeature {
             bind_group_layouts: &[Some(&gpu.shadow_view_layout), Some(&records_layout)],
             immediate_size: 0,
         });
-        let primitive = wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
-            cull_mode: None,
-            ..Default::default()
+        let primitive = BLADE_STRIPS;
+        let prepass_pipeline = |label, shader: &wgpu::ShaderModule| {
+            blade_pipeline(
+                gpu,
+                &layout,
+                label,
+                shader,
+                ("vs_prepass", "fs_prepass"),
+                gpu.depth_state(true),
+                &gpu.prepass_targets(),
+            )
         };
-        let scene_pipeline =
-            |label,
-             shader: &wgpu::ShaderModule,
-             vs,
-             fs,
-             targets: &[Option<wgpu::ColorTargetState>]| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: shader,
-                        entry_point: Some(vs),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    primitive,
-                    depth_stencil: Some(gpu.depth_state(true)),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: shader,
-                        entry_point: Some(fs),
-                        compilation_options: Default::default(),
-                        targets,
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            };
-        let hdr = [Some(wgpu::ColorTargetState {
-            format: gpu.formats.hdr,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        self.pipeline = Some(scene_pipeline("grass", &shader, "vs_main", "fs_main", &hdr));
-        self.prepass_pipeline = Some(scene_pipeline(
-            "grass prepass",
-            &shader,
-            "vs_prepass",
-            "fs_prepass",
-            &gpu.prepass_targets(),
-        ));
-        self.cut_pipeline = Some(scene_pipeline(
-            "grass cut",
-            &cut_shader,
-            "vs_main",
-            "fs_main",
-            &hdr,
-        ));
-        self.cut_prepass_pipeline = Some(scene_pipeline(
-            "grass cut prepass",
-            &cut_shader,
-            "vs_prepass",
-            "fs_prepass",
-            &gpu.prepass_targets(),
-        ));
+        self.prepass_pipeline = Some(prepass_pipeline("grass prepass", &shader));
+        self.cut_prepass_pipeline = Some(prepass_pipeline("grass cut prepass", &cut_shader));
         self.shadow_pipeline = Some(device.create_render_pipeline(
             &wgpu::RenderPipelineDescriptor {
                 label: Some("grass shadow"),
@@ -1686,6 +1744,10 @@ impl RenderFeature for GrassFeature {
         }));
         self.cull_layout = Some(cull_layout);
         self.records_layout = Some(records_layout);
+        if let Some([whole, cut]) = self.scene_pipelines(gpu, false) {
+            self.pipeline = Some(whole);
+            self.cut_pipeline = Some(cut);
+        }
         self.benders_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("grass benders"),
             size: std::mem::size_of::<GpuBenders>() as u64,
@@ -1722,6 +1784,11 @@ impl RenderFeature for GrassFeature {
         settings: &RenderSettings,
         _out: &mut PrepareOut,
     ) {
+        let old = settings.debug_skip & crate::settings::shade_skip::GRASS_OLD_WAY != 0;
+        if old && self.old_pipelines.is_none() {
+            self.old_pipelines = self.scene_pipelines(gpu, true);
+        }
+        self.old_way = old && self.old_pipelines.is_some();
         self.order.clear();
         self.tiles.clear();
         self.fields.clear();
@@ -2088,6 +2155,18 @@ impl RenderFeature for GrassFeature {
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        if !ctx.view.extra_view {
+            let count = ctx.settings.debug_skip & crate::settings::shade_skip::COUNT_MESH_RUNS != 0;
+            if !count {
+                self.counts = None;
+            } else if self.counts.is_none() {
+                self.counts = crate::mesh_counts::MeshCounts::new(ctx.gpu);
+            }
+            if let Some(counts) = &mut self.counts {
+                counts.begin_frame();
+            }
+        }
+        self.counting = !ctx.view.extra_view && self.counts.is_some();
         let (Some(pipeline), Some(group)) = (&self.cull_pipeline, &self.cull_group) else {
             return;
         };
@@ -2111,11 +2190,15 @@ impl RenderFeature for GrassFeature {
     }
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        let counted = self.count_begin(pass, crate::mesh_counts::PREPASS);
         if let Some(pipeline) = &self.prepass_pipeline {
             self.draw_kept(pass, pipeline, 0..CUT_GROUP);
         }
         if let Some(pipeline) = &self.cut_prepass_pipeline {
             self.draw_kept(pass, pipeline, CUT_GROUP..CUT_GROUP + 1);
+        }
+        if counted {
+            crate::mesh_counts::MeshCounts::end(pass);
         }
     }
 
@@ -2123,11 +2206,28 @@ impl RenderFeature for GrassFeature {
         if phase != RenderPhase::Opaque {
             return;
         }
-        if let Some(pipeline) = &self.pipeline {
+        // The prepass drew these blades: the scene pass lights them where its depth is theirs.
+        let (whole, cut) = match &self.old_pipelines {
+            Some([whole, cut]) if self.old_way => (Some(whole), Some(cut)),
+            _ => (self.pipeline.as_ref(), self.cut_pipeline.as_ref()),
+        };
+        let counted = self.count_begin(pass, crate::mesh_counts::SCENE);
+        if let Some(pipeline) = whole {
             self.draw_kept(pass, pipeline, 0..CUT_GROUP);
         }
-        if let Some(pipeline) = &self.cut_pipeline {
+        if let Some(pipeline) = cut {
             self.draw_kept(pass, pipeline, CUT_GROUP..CUT_GROUP + 1);
+        }
+        if counted {
+            crate::mesh_counts::MeshCounts::end(pass);
+        }
+    }
+
+    fn overlay(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        if !ctx.view.extra_view
+            && let Some(counts) = &mut self.counts
+        {
+            counts.end_frame(encoder);
         }
     }
 
@@ -2156,6 +2256,8 @@ impl RenderFeature for GrassFeature {
             "cull_jobs": self.jobs.len(),
             "blades": self.stats.instances,
             "draw_groups": self.groups.iter().filter(|g| **g).count(),
+            "old_way": self.old_way,
+            "grass_runs": self.counts.as_ref().map(crate::mesh_counts::MeshCounts::describe),
         })
     }
 }

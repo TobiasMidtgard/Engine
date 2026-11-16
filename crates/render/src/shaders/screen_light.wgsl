@@ -56,13 +56,15 @@ fn fs_light(in: FullscreenOut) -> LightOut {
     }
     if (!trial_cut(CUT_SCREEN_LIGHT)) { return out; }
 
-    // The sun: the shadow maps as seen from the side it is on, people's capsules, and the two
+    // The sun: the shadow maps as seen from the side it is on, people's capsules (kept apart:
+    // light through a blade of grass takes the maps alone, `ScreenLight::maps`), and the two
     // marches through the depth where anything of it is left.
     let capsules = capsule_occlusion(rel, n);
     if (dot(frame.sun_color.rgb, frame.sun_color.rgb) > 0.0) {
         let side = sunlit_side(n);
-        out.a.r = min(shadow_factor(rel, side), capsules.x);
-        if (out.a.r > 0.0) {
+        out.a.r = shadow_factor(rel, side);
+        out.b.a = capsules.x;
+        if (min(out.a.r, capsules.x) > 0.0) {
             out.a.g = contact_shadow(rel, side);
             out.a.b = distant_shadow(rel, side);
         }

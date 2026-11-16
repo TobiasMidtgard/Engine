@@ -108,8 +108,30 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
     return s;
 }
 
-@fragment
+// The scene pass draws the blades the prepass drew, at the same depth: the pipeline tests for
+// a depth equal to the prepass's and writes none, and the test is done before this runs (asked
+// for, as mesh.wgsl `fs_main_early`; `GpuShared::shader` drops the attribute on a device
+// without `SHADER_EARLY_DEPTH_TEST`, where a program that writes no depth is tested first
+// anyway). So a blade behind another, behind a trunk or under a cut-out is not lit at all,
+// and every run that is a pixel of the picture is the prepass's surface and says so
+// (`in_prepass_known`): its light comes from the screen light pass without asking, and the
+// runs a 2x2 block adds around a thin blade no longer work out the fallback lighting.
+@fragment @early_depth_test(force)
 fn fs_main(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    in_prepass_known(in.rel);
+    return grass_fragment(in, front, false);
+}
+
+// As until 17 Nov 2026 (`shade_skip::GRASS_OLD_WAY`, for timing): under a pipeline that tests
+// for a depth nearer or equal and writes it, so a program that discards (the cut fronds) runs
+// before the test, every layer of it; each run reads whether it is the prepass's surface, and
+// reads the shadow maps itself for the light through the blade (`own_sun`).
+@fragment
+fn fs_main_old(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return grass_fragment(in, front, true);
+}
+
+fn grass_fragment(in: GrassOut, front: bool, own_sun: bool) -> vec4<f32> {
     // GRASS_CUT main
     let s = grass_surface(in, front);
     // Debug views (RenderSettings.debug_view), as for meshes.
@@ -124,22 +146,28 @@ fn fs_main(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec
         case 6u: { return vec4<f32>(pre_expose(screen_gi(in.rel)), 1.0); }
         default: {}
     }
-    let color = shade_surface(s, in.rel) + grass_translucency(s, in.rel, in.glow);
+    var color = shade_surface(s, in.rel);
+    // The shadow maps from the blade's sunlit side: the screen light pass's answer for this
+    // pixel, which `shade_surface` has just loaded (-1 where there is none: read here).
+    let maps = select(shade_sun_maps, -1.0, own_sun);
+    color += grass_translucency(s, in.rel, in.glow, maps);
     return vec4<f32>(apply_fog(color, in.rel), 1.0);
 }
 
 // Sunlight through the blades. A blade is thin, so lit from behind it glows a deeper, yellower
 // green, strongest looking toward the sun and toward the tips (the lower parts sit in the
-// shade of the meadow).
-fn grass_translucency(s: Surface, rel: vec3<f32>, glow: f32) -> vec3<f32> {
+// shade of the meadow). `maps`: the shadow maps' answer from the blade's sunlit side where it
+// is known already (0..1), or below 0 to read them here.
+fn grass_translucency(s: Surface, rel: vec3<f32>, glow: f32, maps: f32) -> vec3<f32> {
     let l = frame.sun_dir.xyz;
     let v = normalize(-rel);
     let through = saturate(-dot(s.normal, l));
     let toward_sun = pow(saturate(dot(v, -l)), 3.0);
     let amount = (through * 0.35 + toward_sun * 0.9) * glow;
     if (amount <= 0.0) { return vec3<f32>(0.0); }
-    let lit_side = select(s.normal, -s.normal, dot(s.normal, l) < 0.0);
-    let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel) * shadow_factor(rel, lit_side);
+    var shadow = maps;
+    if (shadow < 0.0) { shadow = shadow_factor(rel, sunlit_side(s.normal)); }
+    let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel) * shadow;
     let tint = s.albedo * saturate3(s.albedo * 4.0);
     return pre_expose(sun * tint * amount * INV_PI);
 }

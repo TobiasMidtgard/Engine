@@ -261,6 +261,24 @@ fn variants() -> Vec<Variant> {
             "every groom draws the near rule's number of strands as before 17 Nov, hidden strands still left out: `before scene` costs this much MORE without the count by the pixels",
         ),
         v(
+            "grass_old_way",
+            r,
+            json!({"debug_skip": 268_435_456}),
+            "grass in the scene pass as before 17 Nov (its cut fronds lit at every layer before the depth test, and every run reads whether it is the prepass's surface): `scene: grass` costs this much MORE the old way",
+        ),
+        v(
+            "count_grass_runs",
+            r,
+            json!({"debug_skip": 262_144}),
+            "a count, not a cut: how many times the blades' vertex and pixel programs run in the prepass and the scene pass (exact, counted by the GPU; in the json as grass_runs)",
+        ),
+        v(
+            "count_grass_runs_old_way",
+            r,
+            json!({"debug_skip": 268_697_600}),
+            "the count with grass_old_way on",
+        ),
+        v(
             "no_grass",
             r,
             json!({"grass_density": 0.0}),
@@ -1032,12 +1050,13 @@ fn triangles(bridge: &mut Bridge) -> Option<u64> {
 }
 
 /// The meshes' exact shader runs of the last frame read back (`shade_skip::COUNT_MESH_RUNS`).
-fn mesh_runs(bridge: &mut Bridge) -> Option<Value> {
+/// A feature's shader run counts (`key`: `mesh_runs` or `grass_runs`), where one reports them.
+fn runs_of(bridge: &mut Bridge, key: &str) -> Option<Value> {
     let at = bridge.call("render.stats", json!({})).ok()?;
     at["renderer"]["features"]
         .as_array()?
         .iter()
-        .map(|f| &f["state"]["mesh_runs"])
+        .map(|f| &f["state"][key])
         .find(|runs| runs.is_object())
         .cloned()
 }
@@ -1304,11 +1323,11 @@ fn run(args: &Args) -> Result<(), String> {
             let s = sample(&mut bridge, args.secs)?;
             let tris = triangles(&mut bridge);
             let state = gi_and_memory(&mut bridge);
-            let runs = if v.name.starts_with("count_mesh_runs") {
-                mesh_runs(&mut bridge)
-            } else {
-                None
-            };
+            // (`count_mesh_runs*` and `count_grass_runs*` rows.)
+            let runs = ["mesh_runs", "grass_runs"]
+                .into_iter()
+                .find(|key| v.name.starts_with(&format!("count_{key}")))
+                .and_then(|key| Some((key, runs_of(&mut bridge, key)?)));
             bridge.call("resource.set", json!({"name": v.resource, "value": back}))?;
             wait(&mut bridge, args.settle)?;
             let after = sample(&mut bridge, args.secs)?;
@@ -1326,9 +1345,9 @@ fn run(args: &Args) -> Result<(), String> {
             if let Some(state) = state {
                 entry["state"] = state;
             }
-            if let Some(runs) = runs {
+            if let Some((key, runs)) = runs {
                 eprintln!("{stop}: {} {runs}", v.name);
-                entry["mesh_runs"] = runs;
+                entry[key] = runs;
             }
             entry["patch"] = patch;
             stop_json.insert(v.name.into(), entry);

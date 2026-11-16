@@ -63,9 +63,11 @@
 // The screen light maps (screen_light.wgsl, `screen_light`): what the shadow maps, the sky maps
 // and the probes give the surface the prepass drew at each pixel, worked out once per pixel.
 // 1x1 stand-ins in the prepass, in the pass that writes them and in views without them.
-// a: the sun through the shadow maps and people's capsules, its contact shadow, its far march,
-//    the sky the cover overhead leaves.
-// b: the sky people's capsules leave, the sky through the leaves, the sky a reflection sees.
+// a: the sun through the shadow maps, its contact shadow, its far march, the sky the cover
+//    overhead leaves.
+// b: the sky people's capsules leave, the sky through the leaves, the sky a reflection sees,
+//    the sun people's capsules leave (apart from the maps': light through a blade of grass
+//    takes the maps alone).
 // gi: the probes' irradiance and how much they cover the point (`probe_gi`).
 @group(0) @binding(28) var light_a: texture_2d<f32>;
 @group(0) @binding(29) var light_b: texture_2d<f32>;
@@ -140,6 +142,19 @@ fn in_prepass(rel: vec3<f32>, pixel: vec2<i32>) -> bool {
     in_prepass_pixel = pixel;
     in_prepass_answer = select(0, 1, seen);
     return seen;
+}
+
+// A fragment whose depth test says it is the prepass's surface (its pipeline tests for a depth
+// equal to the prepass's before the program runs, and its vertices are the prepass's) says so
+// here first, with the `rel` it will ask its light with: `in_prepass` then answers yes without
+// reading. Besides the two loads this spares the runs that are not a pixel of the picture: a
+// triangle that touches a 2x2 block of pixels runs the program for all four, and for the ones
+// it doesn't cover the read finds another surface there, so they would work out the whole
+// fallback lighting (shadow maps, both sun marches, the sky's rings, probes) to throw it away.
+fn in_prepass_known(rel: vec3<f32>) {
+    in_prepass_rel = rel;
+    in_prepass_pixel = vec2<i32>(floor(pixel_of(rel)));
+    in_prepass_answer = 1;
 }
 
 fn in_prepass_read(rel: vec3<f32>, pixel: vec2<i32>) -> bool {
@@ -1537,6 +1552,7 @@ fn surface_weather(rel: vec3<f32>) -> vec4<f32> {
 struct ScreenLight {
     on: bool,
     sun: f32,        // shadow maps and people's capsules (`shadow_factor`, `capsule_occlusion`.x)
+    maps: f32,       // the shadow maps alone, from the sunlit side (`shadow_factor`)
     contact: f32,    // `contact_shadow`
     distant: f32,    // `distant_shadow`
     sky: f32,        // `sky_visibility`
@@ -1555,7 +1571,8 @@ fn screen_light(rel: vec3<f32>) -> ScreenLight {
     let a = textureLoad(light_a, pixel, 0);
     let b = textureLoad(light_b, pixel, 0);
     out.on = true;
-    out.sun = a.r;
+    out.sun = min(a.r, b.a);
+    out.maps = a.r;
     out.contact = a.g;
     out.distant = a.b;
     out.sky = a.a;
@@ -1585,6 +1602,12 @@ fn dominant_reflection(n: vec3<f32>, v: vec3<f32>, roughness: f32) -> vec3<f32> 
 // opposed to what it scatters (diffuse) or gives off. A blended surface keeps it whole while
 // its diffuse light fades with its alpha (mesh.wgsl).
 var<private> shade_specular: vec3<f32>;
+
+// The shadow maps' answer for the surface the last of those shaded, from its sunlit side, where
+// the screen light pass had worked it out (`ScreenLight::maps`); -1 where it had not. For a
+// shader that adds sunlight of its own to the same point (light through a blade of grass) and
+// would read the maps a second time for it.
+var<private> shade_sun_maps: f32 = -1.0;
 
 // Returns pre-exposed radiance for a lit surface at camera-relative position `rel`.
 fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
@@ -1647,6 +1670,7 @@ fn thin_surface_sides(face: vec3<f32>, l: vec3<f32>) -> vec2<f32> {
 fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>, thin: bool) -> vec3<f32> {
     if (shade_skip(SKIP_LIGHTING)) {
         shade_specular = vec3<f32>(0.0);
+        shade_sun_maps = -1.0;
         return pre_expose(s.albedo * 3000.0 + s.emissive);
     }
     let v = normalize(-rel);
@@ -1670,6 +1694,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let in_fog = height_fog_sunlight(rel);
     // The terms the screen light pass has worked out for this pixel, if it has.
     let lit = screen_light(rel);
+    shade_sun_maps = select(-1.0, lit.maps, lit.on);
     // People's capsules: their shadow just above the point and the sky they hide.
     var capsules = vec2<f32>(1.0, lit.people_sky);
     // (A thin sheet's sun from the pass, or read here: `CUT_THIN_OWN_SUN`.)
