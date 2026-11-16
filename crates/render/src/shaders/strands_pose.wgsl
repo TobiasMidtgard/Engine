@@ -1,7 +1,9 @@
 // Strands, first pass (strands.rs): every drawn point posed by its guides, and its fibre's
 // projected area added to its instance's density volume, from which the shading reads how
 // much hair lies between a point and a light (as Unreal's grooms voxelize their strands for
-// self-shadowing, and AMD's TressFX its fur). Requires lib_types + strands_common.
+// self-shadowing, and AMD's TressFX its fur). A groom far away draws few strands, each many
+// times wider: too few to fill the volume evenly, so more of its strands are posed here than
+// are drawn (`more.z`), only to add their area. Requires lib_types + strands_common.
 
 @group(0) @binding(0) var<uniform> params: StrandParams;
 @group(0) @binding(1) var<storage, read> instances: array<StrandInst>;
@@ -18,7 +20,7 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
     let inst = instances[id.y];
     let per = inst.first.z;
     let i = id.x;
-    if (i >= inst.first.w * per) {
+    if (i >= inst.more.z * per) {
         return;
     }
     let s = i / per;
@@ -37,7 +39,10 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         p = vec4<f32>(p.xyz + off, p.w);
     }
-    posed[inst.out.x + i] = p;
+    // (Only a drawn strand has slots.)
+    if (s < inst.first.w) {
+        posed[inst.out.x + i] = p;
+    }
 
     // The fibre from this point to the next, spread over the cells it passes (a long hair's
     // segments are longer than a cell).
@@ -46,7 +51,10 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let next = rest[at + 1u];
     let len = distance(next.xyz, rest[at].xyz);
-    let area = 2.0 * p.w * inst.tint.w * len;
+    // The groom's whole cover (the drawn strands' widths add up to it), shared among the
+    // strands that fill the volume.
+    let drawn = f32(inst.first.w - 1u) + bitcast<f32>(inst.out.z);
+    let area = 2.0 * p.w * inst.tint.w * drawn / f32(inst.more.z) * len;
     let steps = u32(clamp(ceil(len / inst.grid.w), 1.0, 8.0));
     let d = i32(params.misc.w);
     // The next point's pose: its guides move it as they move this one, near enough.

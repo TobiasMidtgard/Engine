@@ -1,13 +1,14 @@
 // The strand renderer's shared types (strands.rs, characters week R2). Requires lib_types.
 //
 // Every drawn strand point has one slot in the frame's point buffers: instance `k`'s points
-// start at `inst.out.x`, strand `s` point `j` at `out.x + s * points_per + j`. The slots stay
-// put while the set of instances does (strands drawn or not), so last frame's positions
-// (`strand_history`) are found where this frame's go.
+// start at `inst.out.x`, strand `s` point `j` at `out.x + s * points_per + j`. An instance
+// keeps a few slots more than it draws, so the slots stay put while the number of strands it
+// draws drifts with its size on screen, and last frame's positions (`strand_history`) are
+// found where this frame's go.
 
 struct StrandParams {
     size: vec4<u32>,   // tiles across, tiles down, segment reference capacity, instances
-    misc: vec4<u32>,   // tile count, 1 when last frame's positions are no history, frame index, voxels per side
+    misc: vec4<u32>,   // tile count, the instances (from the first) whose slots hold last frame's positions, frame index, voxels per side
     tiles: vec4<u32>,  // offsets in `strand_tiles`: starts, fill cursors, block sums, active list
     screen: vec4<f32>, // width, height (px), the fibre opacity of hair, of fur
 };
@@ -16,10 +17,10 @@ struct StrandInst {
     rows: array<vec4<f32>, 3>, // model -> camera-relative (3x4, by rows)
     inv: array<vec4<f32>, 3>,  // camera-relative direction -> model direction (rows)
     grid: vec4<f32>,           // the density volume's corner (model space), w: its cell (m)
-    tint: vec4<f32>,           // color multiplier, w: width multiplier
+    tint: vec4<f32>,           // color multiplier, w: width multiplier (`strand_width`)
     first: vec4<u32>,          // groom's first rest point, first strand, points per strand, strands drawn
-    out: vec4<u32>,            // first point slot, guide offsets (u32::MAX: none), groom's first guide point, first voxel
-    more: vec4<u32>,           // first drawn strand (over all instances), fibre (0 hair, 1 fur), strands in the groom, 1: a thin layer
+    out: vec4<u32>,            // first point slot, guide offsets (u32::MAX: none), the last drawn strand's share of its width (f32 bits), first voxel
+    more: vec4<u32>,           // first drawn strand (over all instances), fibre (0 hair, 1 fur), strands that fill the density volume (those drawn or more), 1: a thin layer
     sphere: vec4<f32>,         // camera-relative bounds: center, radius
 };
 
@@ -47,6 +48,13 @@ const STRAND_ROOT: u32 = 2u;
 const STRAND_AREA_UNIT: f32 = 1e10;
 // Pixels per tile side.
 const STRAND_TILE: u32 = 8u;
+
+// How much wider than its fibre the instance's drawn strand `s` is. A groom far away draws
+// fewer strands, each as much wider (the same cover); the last one drawn comes in by degrees
+// as the number grows, so no strand appears at once.
+fn strand_width(inst: StrandInst, s: u32) -> f32 {
+    return inst.tint.w * select(1.0, bitcast<f32>(inst.out.z), s + 1u == inst.first.w);
+}
 
 fn strand_model_point(inst: StrandInst, m: vec3<f32>) -> vec3<f32> {
     let q = vec4<f32>(m, 1.0);

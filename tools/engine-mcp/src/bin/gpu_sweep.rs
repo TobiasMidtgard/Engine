@@ -225,6 +225,42 @@ fn variants() -> Vec<Variant> {
             "the shadow maps are put back to their still images only when those change (moving shadows leave trails): what putting back the tiles under moving casters costs in `shadows` and `sky occlusion` (with `--old-way`: what copying all six layers every frame cost)",
         ),
         v(
+            "no_strands",
+            r,
+            json!({"debug_skip": 16_777_216}),
+            "no hair or fur is drawn: what all of it costs (`compute strands`, `shadows: strands`, `before scene`)",
+        ),
+        v(
+            "skip_strand_light",
+            r,
+            json!({"debug_skip": 4_194_304}),
+            "hair and fur points take a flat color: what lighting them costs in `before scene`, apart from placing, sorting and drawing them",
+        ),
+        v(
+            "skip_strand_raster",
+            r,
+            json!({"debug_skip": 33_554_432}),
+            "the hair's tiles are not rasterized (the picture keeps old hair): what the raster costs in `before scene`, apart from placing, lighting and sorting the points",
+        ),
+        v(
+            "strands_old_way",
+            r,
+            json!({"debug_skip": 8_388_608}),
+            "hair and fur as before 17 Nov (a far coat draws a sixteenth of its strands however small it is; hidden strands are lit and sorted too): `before scene` costs this much MORE the old way",
+        ),
+        v(
+            "strands_sparse",
+            r,
+            json!({"debug_skip": 67_108_864}),
+            "a groom far away draws one strand a pixel of its square instead of four (coarser coats): what the finer number costs in `before scene`",
+        ),
+        v(
+            "strands_near_count",
+            r,
+            json!({"debug_skip": 134_217_728}),
+            "every groom draws the near rule's number of strands as before 17 Nov, hidden strands still left out: `before scene` costs this much MORE without the count by the pixels",
+        ),
+        v(
             "no_grass",
             r,
             json!({"grass_density": 0.0}),
@@ -1416,6 +1452,21 @@ fn run(args: &Args) -> Result<(), String> {
                     t["patches_resident"], t["shadow_patches_still"], t["shadow_images_drawn"]
                 ));
                 stop_json.insert("terrain".into(), t.clone());
+            }
+            // What the hair and fur report (instances, strands drawn of those their grooms
+            // hold, points), to read `before scene` against.
+            if let Some(strands) = at["renderer"]["features"]
+                .as_array()
+                .and_then(|f| f.iter().find(|f| f["name"] == "strands"))
+            {
+                let t = &strands["state"];
+                if t["instances"].as_u64().unwrap_or(0) > 0 {
+                    md.push_str(&format!(
+                        "Hair and fur: {} instances draw {} of their grooms' {} strands, {} points.\n\n",
+                        t["instances"], t["strands"], t["strands_in_grooms"], t["points"]
+                    ));
+                }
+                stop_json.insert("strands".into(), t.clone());
             }
         }
         md.push_str("| pass | ms |\n|---|---|\n");

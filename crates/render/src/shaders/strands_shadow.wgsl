@@ -1,7 +1,10 @@
 // Strands into the sun's shadow maps (strands.rs): each strand a ribbon at least a texel wide,
 // keeping the share of its texels its true width covers (hashed per texel and strand), so hair
 // shades the face and neck under it and itself. Cascades draw a quarter of the strands four
-// times as wide (their texels are centimeters across). Requires lib_types + strands_common.
+// times as wide (their texels are centimeters across). A groom far away draws few strands,
+// each many times wider (the same cover on screen, where a pixel is the limit): its ribbons
+// stop at two texels either side, so its shadow stays the coat's shape and not a fan of wide
+// strips. Requires lib_types + strands_common.
 
 struct ShadowView {
     view_proj: mat4x4<f32>,
@@ -21,8 +24,10 @@ struct ShadowOut {
     @location(1) keep: f32,
 };
 
-// Clip units of one texel of a 2048 map, the narrowest a ribbon is drawn.
+// Half widths in clip units: half a texel of a 2048 map (the narrowest ribbon is one texel
+// wide) and two texels (the widest is four).
 const MIN_HALF: f32 = 1.0 / 2048.0;
+const MAX_HALF: f32 = 4.0 / 2048.0;
 
 fn strand_shadow_vertex(v: u32, g: u32, boost: f32) -> ShadowOut {
     var out: ShadowOut;
@@ -56,12 +61,19 @@ fn strand_shadow_vertex(v: u32, g: u32, boost: f32) -> ShadowOut {
     let dir = cb.xy - ca.xy;
     let across = normalize(vec2<f32>(-dir.y, dir.x) + vec2<f32>(1e-9, 0.0));
     let scale = length(shadow_view.view_proj[0].xyz);
-    let r = select(pa.w, pb.w, end == 1u) * inst.tint.w * boost * scale;
-    let half = max(r, MIN_HALF);
+    // The strands' widths this ribbon stands for: `boost` of them, and the last ribbon what is
+    // left of the number drawn (a number with a fraction: strands_common `strand_width`), so the
+    // ribbons come in by degrees too and sum to the groom's cover.
+    let count = f32(inst.first.w - 1u) + bitcast<f32>(inst.out.z);
+    let wide = inst.tint.w * clamp(count - boost * f32(g - inst.more.x), 0.0, boost);
+    let r = select(pa.w, pb.w, end == 1u) * wide * scale;
+    let half = clamp(r, MIN_HALF, MAX_HALF);
     let c = select(ca, cb, end == 1u);
     out.clip = vec4<f32>(c.xy + across * half * side * c.w, c.z, c.w);
     out.keep = r / half;
-    out.seed = g * 61u + seg;
+    // (Seeded by the strand's place in its groom, which stays: its place in the frame moves
+    // whenever a nearer groom draws one strand more.)
+    out.seed = (inst.first.y + g - inst.more.x) * 61u + seg;
     return out;
 }
 

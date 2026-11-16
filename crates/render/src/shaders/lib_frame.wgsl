@@ -343,6 +343,14 @@ const SKIP_SCREEN_LIGHT_SUN: u32 = 16384u;
 const SKIP_SHOW_GROUND_ONCE: u32 = 65536u;
 // With `CUT_MESHES_ONCE`: the pixels lit from the stored material are drawn magenta.
 const SKIP_SHOW_MESHES_ONCE: u32 = 131072u;
+// (262144 to 2097152 are read on the CPU: settings.rs `shade_skip`.)
+// Hair and fur points take a flat color instead of their light (strands_raster.wgsl): what
+// lighting them costs, apart from placing, sorting and drawing them.
+const SKIP_STRAND_LIGHT: u32 = 4194304u;
+// Hair and fur as before 17 Nov 2026: strands hidden behind the scene are lit and sorted too,
+// and every pixel of a tile works out its distance to every segment in it (and far grooms
+// draw more strands, on the CPU). The highest bit the shaders are given.
+const SKIP_STRANDS_OLD_WAY: u32 = 8388608u;
 
 fn shade_skip(bit: u32) -> bool {
     return (u32(frame.shading.z) & bit) != 0u;

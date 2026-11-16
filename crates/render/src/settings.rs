@@ -220,6 +220,31 @@ pub mod shade_skip {
     /// The fog volume's froxels that are out of reach (`trial_cut_more::FOG_REACH`) glow
     /// magenta: anything on screen that reads one shows it. Nothing should.
     pub const MARK_FOG_OUT_OF_REACH: u32 = 2097152;
+    /// Hair and fur points take a flat color instead of their light (strand_feature.rs): what
+    /// lighting them costs in `before scene`, apart from placing, sorting and drawing them.
+    pub const STRAND_LIGHT: u32 = 4194304;
+    /// Hair and fur the way they were drawn until 17 Nov 2026, for the PC's before and after:
+    /// a groom far away draws a sixteenth of its strands however small it is on screen,
+    /// strands hidden behind the scene are lit and sorted with the rest, and every pixel of a
+    /// tile works out its distance to every segment in it. Near the camera the same picture;
+    /// far away many more strands than the pixels can show. (The highest bit the shaders are
+    /// given: `FrameUniform` carries the low 24.)
+    pub const STRANDS_OLD_WAY: u32 = 8388608;
+    /// No hair or fur is drawn: what all of it costs in `compute strands`, `shadows: strands`
+    /// and `before scene`. (Read on the CPU only, as any bit from here up must be.)
+    pub const STRANDS: u32 = 16777216;
+    /// The hair's tiles are not rasterized (the picture keeps the hair of the last frame that
+    /// was): what the raster costs in `before scene`, apart from placing, lighting and sorting
+    /// the points.
+    pub const STRAND_RASTER: u32 = 33554432;
+    /// A groom far away draws one strand for every pixel of the square its bounds are tall, a
+    /// quarter of what it draws without this bit: coarser coats (a deer's at 100 pixels is
+    /// twice as grainy), for the PC to say what the finer number costs.
+    pub const STRANDS_SPARSE: u32 = 67108864;
+    /// Every groom draws the near rule's number of strands, as until 17 Nov 2026 (never fewer
+    /// than a sixteenth), while hidden strands are still left out and the tiles drawn the new
+    /// way: what drawing by the pixels saves by itself.
+    pub const STRANDS_NEAR_COUNT: u32 = 134217728;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the picture (lib_frame.wgsl

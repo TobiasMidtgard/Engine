@@ -1,6 +1,6 @@
-// Strands, before the scene pass (strands.rs): shade every point once, bin the segments into
-// 8x8-pixel tiles, and rasterize each tile in compute with real coverage. Requires lib_types +
-// lib_frame + lib_atmosphere + strands_common.
+// Strands, before the scene pass (strands.rs): place every point on screen, light once the
+// points a pixel can show, bin the segments into 8x8-pixel tiles, and rasterize each tile in
+// compute with real coverage. Requires lib_types + lib_frame + lib_atmosphere + strands_common.
 //
 // As the shipped software hair rasterizers of 2023-2025 do (Frostbite's in Dragon Age: The
 // Veilguard, after Tafuri's "Strand-based hair rendering in Frostbite", SIGGRAPH 2019; the
@@ -11,6 +11,13 @@
 // a pixel wide covers a tenth of its pixels' area, every frame, instead of all of a tenth of
 // them on random frames (the screen-door hair it replaces): thin hair is soft and still, not
 // dotted and crawling.
+//
+// Where the time went, and what keeps it down (RTX 5080, 16 Nov 2026: 21 to 30 ms for herds
+// of furred animals far away): the raster costs a tile's segments times its 64 pixels, so the
+// frame draws no more strands than a groom's pixels can show (strand_feature.rs
+// `strands_wanted`), lists no segment in a tile where the scene hides it (`cs_tile_depth`),
+// lights no point that is listed nowhere, and tells each pixel thread with one bit which
+// segments can reach it (`segment_rows`).
 
 @group(1) @binding(0) var<uniform> params: StrandParams;
 @group(1) @binding(1) var<storage, read> instances: array<StrandInst>;
@@ -20,7 +27,8 @@
 @group(1) @binding(5) var<storage, read_write> history: array<vec4<f32>>;
 @group(1) @binding(6) var<storage, read_write> lit: array<StrandLit>;
 // Per tile: segment counts, then (from `params.tiles`) first references, fill cursors, block
-// sums, the active tiles; then the active tile count and the references wanted.
+// sums, the active tiles; then the active tile count and the references wanted; then per tile
+// the farthest opaque depth in it (`cs_tile_depth`, f32 bits).
 @group(1) @binding(7) var<storage, read_write> tiles: array<atomic<u32>>;
 @group(1) @binding(8) var<storage, read_write> refs: array<u32>;
 // The raster's dispatch (x, y, z), then the composite's draw (vertices, instances, 0, 0). A
@@ -39,6 +47,37 @@ const LAYERS: u32 = 4u;
 
 fn active_count_index() -> u32 {
     return params.tiles.w + params.misc.x;
+}
+
+fn tile_far_index() -> u32 {
+    return active_count_index() + 2u;
+}
+
+// ---------------------------------------------------------------- what is hidden
+
+// The farthest depth the prepass left in each tile (reverse-Z: the least). A segment farther
+// than that everywhere in a tile has no pixel to show in it: every fragment of it there fails
+// the raster's depth test. Such a segment is not listed for the tile, and a point both of
+// whose segments are listed nowhere is not lit: the animal behind a hill or a wall, and the
+// far side of a coat near enough for its body to fill whole tiles (a coat only a few tiles
+// tall keeps its far side: every tile it touches shows some ground behind it too).
+@compute @workgroup_size(8, 8)
+fn cs_tile_depth(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (any(id.xy >= params.size.xy)) {
+        return;
+    }
+    let size = vec2<u32>(frame.viewport.xy);
+    let corner = id.xy * STRAND_TILE;
+    var far = 1.0;
+    for (var y = 0u; y < STRAND_TILE; y++) {
+        for (var x = 0u; x < STRAND_TILE; x++) {
+            let p = corner + vec2<u32>(x, y);
+            if (all(p < size)) {
+                far = min(far, textureLoad(prepass_depth, vec2<i32>(p), 0));
+            }
+        }
+    }
+    atomicStore(&tiles[tile_far_index() + id.x + id.y * params.size.x], bitcast<u32>(far));
 }
 
 // ---------------------------------------------------------------- shading
@@ -229,28 +268,25 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     return apply_fog(pre_expose(color), rel);
 }
 
-// Shade every drawn point (x: point in the instance, y: instance).
+// Place every drawn point on screen (x: point in the instance, y: instance): where it is, how
+// wide, how it moved. Its light comes after (`cs_shade`), and only where a pixel can show it.
 @compute @workgroup_size(256)
-fn cs_shade(@builtin(global_invocation_id) id: vec3<u32>) {
+fn cs_project(@builtin(global_invocation_id) id: vec3<u32>) {
     let inst = instances[id.y];
     let per = inst.first.z;
     let i = id.x;
     if (i >= inst.first.w * per) {
         return;
     }
-    let s = i / per;
-    let j = i - s * per;
+    let j = i % per;
     let slot = inst.out.x + i;
     let p = posed[slot];
-    let m = p.xyz;
-    let rel = strand_model_point(inst, m);
-    let mp = posed[slot - select(0u, 1u, j > 0u)].xyz;
-    let mn = posed[slot + select(0u, 1u, j + 1u < per)].xyz;
-    let t = normalize(strand_model_dir(inst, mn - mp) + vec3<f32>(1e-7, 0.0, 0.0));
-    var flags = select(0u, STRAND_LAST, j + 1u == per) | select(0u, STRAND_ROOT, j == 0u);
+    let rel = strand_model_point(inst, p.xyz);
+    let flags = select(0u, STRAND_LAST, j + 1u == per) | select(0u, STRAND_ROOT, j == 0u);
 
     let prev = history[slot];
-    let fresh = params.misc.y != 0u || bitcast<u32>(prev.w) + 1u != params.misc.z;
+    // (Its slot held this point last frame: its instance kept its slots, and the point was drawn.)
+    let fresh = id.y >= params.misc.y || bitcast<u32>(prev.w) + 1u != params.misc.z;
     history[slot] = vec4<f32>(rel, bitcast<f32>(params.misc.z));
 
     let clip = frame.view_proj * vec4<f32>(rel, 1.0);
@@ -263,15 +299,7 @@ fn cs_shade(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let ndc = clip.xyz / clip.w;
     let pixel = (ndc.xy * vec2<f32>(0.5, -0.5) + 0.5) * frame.viewport.xy;
-    let half_px = p.w * inst.tint.w * frame.proj[1][1] * frame.viewport.y * 0.5 / clip.w;
-
-    let c = info[inst.first.y + s].color;
-    let root = vec4<f32>(unpack2x16float(c.x), unpack2x16float(c.y));
-    let tip = vec4<f32>(unpack2x16float(c.z), unpack2x16float(c.w));
-    let along = f32(j) / f32(max(per - 1u, 1u));
-    let base = max(mix(root.rgb, tip.rgb, along) * inst.tint.rgb, vec3<f32>(1e-4));
-    let color = strand_shade(inst, m, rel, t, base, root.w, tip.w, along);
-    let opacity = select(params.screen.z, params.screen.w, inst.more.y == 1u);
+    let half_px = p.w * strand_width(inst, i / per) * frame.proj[1][1] * frame.viewport.y * 0.5 / clip.w;
 
     let now = motion_clip(rel);
     let before = prev_motion_clip(select(prev.xyz, static_prev_rel(rel), fresh));
@@ -280,13 +308,54 @@ fn cs_shade(@builtin(global_invocation_id) id: vec3<u32>) {
         motion = (now.xy / now.w - before.xy / before.w) * vec2<f32>(0.5, -0.5);
     }
     out.pos = vec4<f32>(pixel, ndc.z, half_px);
-    out.shade = vec4<u32>(
-        pack2x16float(color.rg),
-        pack2x16float(vec2<f32>(color.b, opacity)),
-        pack2x16float(motion),
-        flags,
-    );
+    out.shade = vec4<u32>(0u, 0u, pack2x16float(motion), flags);
     lit[slot] = out;
+}
+
+// Light the points a pixel can show: those with a segment some tile lists (`segment_shows`;
+// the binning lists a segment by the same test, so every point the raster reads has its
+// light). The rest keep no color: nothing reads it.
+//
+// (This pass writes the points' `shade` and reads only their `pos`, its neighbors' too, so
+// no thread reads what another writes.)
+@compute @workgroup_size(256)
+fn cs_shade(@builtin(global_invocation_id) id: vec3<u32>) {
+    let inst = instances[id.y];
+    let per = inst.first.z;
+    let i = id.x;
+    if (i >= inst.first.w * per) {
+        return;
+    }
+    if (!shade_skip(SKIP_STRANDS_OLD_WAY)) {
+        var shows = segment_shows(strand_segment(id));
+        if (!shows && i > 0u) {
+            shows = segment_shows(strand_segment(vec3<u32>(i - 1u, id.y, 0u)));
+        }
+        if (!shows) {
+            return;
+        }
+    }
+    let s = i / per;
+    let j = i - s * per;
+    let slot = inst.out.x + i;
+    let m = posed[slot].xyz;
+    let rel = strand_model_point(inst, m);
+    let mp = posed[slot - select(0u, 1u, j > 0u)].xyz;
+    let mn = posed[slot + select(0u, 1u, j + 1u < per)].xyz;
+    let t = normalize(strand_model_dir(inst, mn - mp) + vec3<f32>(1e-7, 0.0, 0.0));
+
+    let c = info[inst.first.y + s].color;
+    let root = vec4<f32>(unpack2x16float(c.x), unpack2x16float(c.y));
+    let tip = vec4<f32>(unpack2x16float(c.z), unpack2x16float(c.w));
+    let along = f32(j) / f32(max(per - 1u, 1u));
+    let base = max(mix(root.rgb, tip.rgb, along) * inst.tint.rgb, vec3<f32>(1e-4));
+    var color = pre_expose(base * frame.ambient.rgb);
+    if (!shade_skip(SKIP_STRAND_LIGHT)) {
+        color = strand_shade(inst, m, rel, t, base, root.w, tip.w, along);
+    }
+    let opacity = select(params.screen.z, params.screen.w, inst.more.y == 1u);
+    lit[slot].shade.x = pack2x16float(color.rg);
+    lit[slot].shade.y = pack2x16float(vec2<f32>(color.b, opacity));
 }
 
 // ---------------------------------------------------------------- binning
@@ -296,6 +365,9 @@ struct Segment {
     b: vec4<f32>,
     // Reach beyond the line, px: the half width and the pixel filter.
     reach: f32,
+    // The nearest any of its fragments is (reverse-Z: the greatest depth), with room for the
+    // raster's rounding.
+    near: f32,
     lo: vec2<u32>,
     hi: vec2<u32>,
     ok: bool,
@@ -311,20 +383,22 @@ fn strand_segment(id: vec3<u32>) -> Segment {
         return seg;
     }
     let slot = inst.out.x + id.x;
-    let a = lit[slot];
-    if ((a.shade.w & STRAND_LAST) != 0u || a.pos.w < 0.0) {
+    // (Positions only: `cs_shade` calls this while it writes the points' other half.)
+    let a = lit[slot].pos;
+    if (id.x % per + 1u == per || a.w < 0.0) {
         return seg;
     }
-    let b = lit[slot + 1u];
-    if (b.pos.w < 0.0) {
+    let b = lit[slot + 1u].pos;
+    if (b.w < 0.0) {
         return seg;
     }
-    seg.a = a.pos;
-    seg.b = b.pos;
-    seg.reach = max(a.pos.w, b.pos.w) + 0.75;
+    seg.a = a;
+    seg.b = b;
+    seg.reach = max(a.w, b.w) + 0.75;
+    seg.near = max(a.z, b.z) * 1.000001;
     let size = frame.viewport.xy;
-    let lo = min(a.pos.xy, b.pos.xy) - seg.reach;
-    let hi = max(a.pos.xy, b.pos.xy) + seg.reach;
+    let lo = min(a.xy, b.xy) - seg.reach;
+    let hi = max(a.xy, b.xy) + seg.reach;
     if (any(hi < vec2<f32>(0.0)) || any(lo >= size)) {
         return seg;
     }
@@ -348,6 +422,34 @@ fn segment_touches(seg: Segment, tile: vec2<u32>) -> bool {
     return segment_distance(center, seg.a.xy, seg.b.xy) <= seg.reach + 0.7072 * f32(STRAND_TILE);
 }
 
+// Whether tile `tile` lists the segment: it comes near, and it is not behind everything
+// opaque in the tile (`cs_tile_depth`).
+fn segment_in_tile(seg: Segment, tile: vec2<u32>) -> bool {
+    if (!segment_touches(seg, tile)) {
+        return false;
+    }
+    if (shade_skip(SKIP_STRANDS_OLD_WAY)) {
+        return true;
+    }
+    let far = bitcast<f32>(atomicLoad(&tiles[tile_far_index() + tile.x + tile.y * params.size.x]));
+    return seg.near >= far;
+}
+
+// Whether any tile lists the segment.
+fn segment_shows(seg: Segment) -> bool {
+    if (!seg.ok) {
+        return false;
+    }
+    for (var y = seg.lo.y; y <= seg.hi.y; y++) {
+        for (var x = seg.lo.x; x <= seg.hi.x; x++) {
+            if (segment_in_tile(seg, vec2<u32>(x, y))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 @compute @workgroup_size(256)
 fn cs_count(@builtin(global_invocation_id) id: vec3<u32>) {
     let seg = strand_segment(id);
@@ -356,7 +458,7 @@ fn cs_count(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     for (var y = seg.lo.y; y <= seg.hi.y; y++) {
         for (var x = seg.lo.x; x <= seg.hi.x; x++) {
-            if (segment_touches(seg, vec2<u32>(x, y))) {
+            if (segment_in_tile(seg, vec2<u32>(x, y))) {
                 atomicAdd(&tiles[x + y * params.size.x], 1u);
             }
         }
@@ -372,7 +474,7 @@ fn cs_fill(@builtin(global_invocation_id) id: vec3<u32>) {
     let slot = instances[id.y].out.x + id.x;
     for (var y = seg.lo.y; y <= seg.hi.y; y++) {
         for (var x = seg.lo.x; x <= seg.hi.x; x++) {
-            if (segment_touches(seg, vec2<u32>(x, y))) {
+            if (segment_in_tile(seg, vec2<u32>(x, y))) {
                 let t = x + y * params.size.x;
                 let at = atomicLoad(&tiles[params.tiles.x + t]) + atomicAdd(&tiles[params.tiles.y + t], 1u);
                 if (at < params.size.z) {
@@ -471,6 +573,51 @@ var<workgroup> seg_ca: array<vec4<f32>, 64>;
 var<workgroup> seg_cb: array<vec4<f32>, 64>;
 var<workgroup> seg_motion: array<vec4<f32>, 64>;
 var<workgroup> seg_root: array<u32, 64>;
+var<workgroup> seg_rows: array<vec2<u32>, 64>;
+
+// The pixels of the 8x8 tile at `corner` whose centers the segment can cover, a bit a pixel
+// and a byte a row (rows 0 to 3 in x, 4 to 7 in y). Every pixel `cs_raster` finds coverage
+// for is among them (coverage is above zero only within the half width and half a pixel of
+// the axis; the 0.01 is room for rounding), and it passes over the rest without working out
+// their distance. That is most of the work it had: each of a tile's 64 threads walks the
+// tile's whole list, and a segment of fur far away covers two or three of the 64 pixels.
+fn segment_rows(a: vec4<f32>, b: vec4<f32>, corner: vec2<f32>) -> vec2<u32> {
+    let reach = max(a.w, b.w) + 0.51;
+    let ab = b.xy - a.xy;
+    var rows = vec2<u32>(0u);
+    for (var y = 0u; y < STRAND_TILE; y++) {
+        let cy = corner.y + f32(y) + 0.5;
+        // The part of the segment within reach of this row's height.
+        var t0 = 0.0;
+        var t1 = 1.0;
+        if (abs(ab.y) > 1e-6) {
+            let u = (cy - reach - a.y) / ab.y;
+            let v = (cy + reach - a.y) / ab.y;
+            t0 = max(min(u, v), 0.0);
+            t1 = min(max(u, v), 1.0);
+        } else if (abs(a.y - cy) > reach) {
+            continue;
+        }
+        if (t0 > t1) {
+            continue;
+        }
+        // Its columns: the pixel centers within reach of that part.
+        let x0 = a.x + ab.x * t0;
+        let x1 = a.x + ab.x * t1;
+        let first = u32(clamp(ceil(min(x0, x1) - reach - corner.x - 0.5), 0.0, 8.0));
+        let last = i32(clamp(floor(max(x0, x1) + reach - corner.x - 0.5), -1.0, 7.0));
+        if (i32(first) > last) {
+            continue;
+        }
+        let bits = ((2u << u32(last)) - (1u << first)) << ((y & 3u) * 8u);
+        if (y < 4u) {
+            rows.x |= bits;
+        } else {
+            rows.y |= bits;
+        }
+    }
+    return rows;
+}
 
 fn unpack_color(s: vec4<u32>) -> vec4<f32> {
     return vec4<f32>(unpack2x16float(s.x), unpack2x16float(s.y));
@@ -500,7 +647,9 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
     }
     let tile = wg_tile;
     let start = wg_start;
-    let pixel = vec2<u32>(tile % params.size.x, tile / params.size.x) * STRAND_TILE + local.xy;
+    let corner = vec2<u32>(tile % params.size.x, tile / params.size.x) * STRAND_TILE;
+    let pixel = corner + local.xy;
+    let all_rows = shade_skip(SKIP_STRANDS_OLD_WAY);
     let size = vec2<u32>(frame.viewport.xy);
     let inside = all(pixel < size);
     let pc = vec2<f32>(pixel) + 0.5;
@@ -527,11 +676,21 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
             seg_motion[lid] = vec4<f32>(unpack2x16float(a.shade.z), unpack2x16float(b.shade.z));
             // Root segment: covers its root's cap; tip segment: its tip's.
             seg_root[lid] = (a.shade.w & STRAND_ROOT) | select(0u, STRAND_LAST, (b.shade.w & STRAND_LAST) != 0u);
+            var rows = vec2<u32>(0xffffffffu);
+            if (!all_rows) {
+                rows = segment_rows(a.pos, b.pos, vec2<f32>(corner));
+            }
+            seg_rows[lid] = rows;
         }
         workgroupBarrier();
         let n = min(64u, count - base);
         if (inside) {
             for (var i = 0u; i < n; i++) {
+                // Out of the segment's reach: nothing to work out.
+                let rows = seg_rows[i];
+                if (((select(rows.x, rows.y, local.y >= 4u) >> ((local.y & 3u) * 8u + local.x)) & 1u) == 0u) {
+                    continue;
+                }
                 let a = seg_a[i];
                 let b = seg_b[i];
                 let ab = b.xy - a.xy;
