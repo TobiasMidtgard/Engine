@@ -964,6 +964,32 @@ fn shot(bridge: &mut Bridge, path: &str) -> Result<(), String> {
     wait(bridge, 1.0)
 }
 
+/// What the rows are read against that is not a pass: whether the device has ray queries, probe
+/// GI's numbers (`render.gi.*`: the path its rays trace on, its structures, what was lost) and
+/// the GPU memory in use and reserved.
+fn gi_and_memory(bridge: &mut Bridge) -> Option<Value> {
+    let stats = bridge
+        .call("engine.stats", json!({"prefix": "render."}))
+        .ok()?;
+    let kept: Map<String, Value> = stats
+        .get("metrics")?
+        .as_object()?
+        .iter()
+        .filter(|(key, _)| {
+            key.starts_with("render.gi.")
+                || matches!(
+                    key.as_str(),
+                    "render.ray_queries"
+                        | "render.backend"
+                        | "render.gpu_memory_mb"
+                        | "render.gpu_reserved_mb"
+                )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Some(Value::Object(kept))
+}
+
 /// Triangles drawn in the last frame.
 fn triangles(bridge: &mut Bridge) -> Option<u64> {
     bridge.call("render.stats", json!({})).ok()?["stats"]["triangles"].as_u64()
@@ -1214,6 +1240,10 @@ fn run(args: &Args) -> Result<(), String> {
             base.frame_ms()
         );
         let base_triangles = triangles(&mut bridge);
+        let base_state = gi_and_memory(&mut bridge);
+        if let Some(state) = &base_state {
+            stop_json.insert("state".into(), state.clone());
+        }
         // Every switch is read between two readings of the scene as it was (the one before it
         // and the one after it is switched back), so slow drift (clouds moving in, the sun,
         // people gathering) doesn't count as its cost.
@@ -1237,6 +1267,7 @@ fn run(args: &Args) -> Result<(), String> {
             wait(&mut bridge, args.settle)?;
             let s = sample(&mut bridge, args.secs)?;
             let tris = triangles(&mut bridge);
+            let state = gi_and_memory(&mut bridge);
             let runs = if v.name.starts_with("count_mesh_runs") {
                 mesh_runs(&mut bridge)
             } else {
@@ -1256,6 +1287,9 @@ fn run(args: &Args) -> Result<(), String> {
             entry["paired_baseline_gpu_ms"] = json!(round3(around.gpu_ms()));
             entry["saves_ms"] = json!(round3(around.gpu_ms() - s.gpu_ms()));
             entry["triangles"] = json!(tris);
+            if let Some(state) = state {
+                entry["state"] = state;
+            }
             if let Some(runs) = runs {
                 eprintln!("{stop}: {} {runs}", v.name);
                 entry["mesh_runs"] = runs;
@@ -1322,6 +1356,25 @@ fn run(args: &Args) -> Result<(), String> {
             low,
             high
         ));
+        if let Some(state) = &base_state {
+            let n = |key: &str| state.get(key).and_then(Value::as_f64).unwrap_or(-1.0);
+            md.push_str(&format!(
+                "Probe GI's rays: {} (device ray queries {}, lost {} times); {} instances over {} triangles in structures, {} compacted, {} waiting to be freed. GPU memory: {:.0} MB in use, {:.0} MB reserved.\n\n",
+                if n("render.gi.hardware_rays") == 1.0 {
+                    "on the RT cores"
+                } else {
+                    "in software"
+                },
+                n("render.ray_queries"),
+                n("render.gi.rt_losses"),
+                n("render.gi.rt_instances"),
+                n("render.gi.rt_triangles"),
+                n("render.gi.rt_compacted"),
+                n("render.gi.rt_retired"),
+                n("render.gpu_memory_mb"),
+                n("render.gpu_reserved_mb"),
+            ));
+        }
         if let Ok(at) = bridge.call("render.stats", json!({})) {
             let s = &at["stats"];
             md.push_str(&format!(

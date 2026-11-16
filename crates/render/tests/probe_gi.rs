@@ -1238,6 +1238,68 @@ const HW_APART_SHARE: f32 = 0.005;
 const HW_APART_MOST: u8 = 32;
 const HW_APART_MEAN: f32 = 1.0;
 
+/// The rays change paths while the game runs (`RenderSettings::gi_hardware_rays`, as the GPU
+/// sweep's `software_rays` row does at every stop): the scene starts over on the other path,
+/// nothing is lost, and each path lights the room and the mirror as before the switch, to
+/// within what the probes' light moves from frame to frame while it settles (the two paths
+/// started fresh are the same frame for frame: 145.21, 146.57, 144.70, 145.78 and 147.95 of
+/// 255 at frames 16, 24, 32, 48 and 80 on both; 16 frames after a switch the software walk
+/// read 141.37, and 148.63 after 48). In between, a switch every frame, each dropping a scene
+/// the GPU may still be tracing.
+#[test]
+fn the_rays_change_paths_while_the_game_runs() {
+    type Build = fn(&mut World);
+    let scenes: [(&str, Build); 2] = [
+        ("patch", |w| {
+            room(w, DVec3::ZERO, 0.7, 0.8, Some((1.4, -0.5)));
+            ground(w);
+            sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
+            camera(w, EYE, TARGET, 12.0);
+        }),
+        ("mirror", mirror),
+    ];
+    for (name, scene) in scenes {
+        let mut app = app_rays(true);
+        scene(&mut app.world);
+        app.update_n(16);
+        if app.world.get_resource::<RenderDisabled>().is_some() {
+            eprintln!("skipping: no GPU");
+            return;
+        }
+        if !on_hardware(&app) {
+            eprintln!("skipping: the GPU has no ray queries");
+            return;
+        }
+        let set = |app: &mut App, hardware: bool| {
+            app.world.resource_mut::<RenderSettings>().gi_hardware_rays = hardware;
+        };
+        let whole = [0.0, 0.0, 1.0, 1.0];
+        let hard = brightness(&mut app, &format!("switch_{name}_hw.png"), whole);
+        set(&mut app, false);
+        app.update_n(16);
+        assert!(!on_hardware(&app));
+        let soft = brightness(&mut app, &format!("switch_{name}_sw.png"), whole);
+        for frame in 0..6 {
+            set(&mut app, frame % 2 == 0);
+            app.update();
+        }
+        set(&mut app, true);
+        app.update_n(16);
+        assert!(on_hardware(&app), "{name}: back on the hardware");
+        let again = brightness(&mut app, &format!("switch_{name}_hw_again.png"), whole);
+        eprintln!("{name}: hardware {hard:.2}, software {soft:.2}, hardware again {again:.2}");
+        assert!(
+            hard > 3.0,
+            "{name}: the picture is dark ({hard:.2}): nothing to compare"
+        );
+        let near = |a: f32| (a - hard).abs() <= hard * 0.06 + 1.0;
+        assert!(
+            near(soft) && near(again),
+            "{name}: hardware {hard:.2}, software {soft:.2}, hardware again {again:.2}"
+        );
+    }
+}
+
 /// On ray-tracing hardware a scene starts with an empty structure (built before any ray reads
 /// it: a frame with no mesh near the grid traces nothing), a large mesh is in the rays the frame
 /// it shows up (the GPU builds it, no worker), its structure is compacted once built, and the
