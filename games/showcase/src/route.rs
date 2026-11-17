@@ -17,7 +17,9 @@
 //! 15 m up, sprinting on the long stretches, so each zone streams in ahead of the camera and
 //! the ones behind go, as when a player flies about. It is the route for streaming stutters:
 //! with `--profile`, `engine-hitches.txt` names what held each slow frame. `--route dash`
-//! is the same lap sprinting all the way.
+//! is the same lap sprinting all the way. Neither takes pictures unless `ENGINE_ROUTE_SHOTS=1`:
+//! saving one holds the frame after it for 60 to 140 ms at 2560x1440, which on the PC was every
+//! one of a flight's longest waits for the render thread (28 of them, 2026-11-17).
 //!
 //! Headless runs (`--headless`) step time by 1/60 s, so the camera flies as it would at 60 fps
 //! and the per-frame costs are comparable; in a window it flies in real time. `--exe` keeps the
@@ -262,6 +264,8 @@ pub(crate) struct Route {
     wall: Option<std::time::Instant>,
     /// Sprint on every leg (`--route dash`).
     dash: bool,
+    /// Take the pictures (not on a lap, which measures frame times; see the module docs).
+    shots: bool,
 }
 
 /// Seconds the route leaves the exe's start screen up (`--exe`) before it flies.
@@ -307,6 +311,8 @@ pub fn install(app: &mut App, which: Option<&str>) {
         done_frames: 0,
         wall: None,
         dash: which == Some("dash"),
+        shots: !matches!(which, Some("lap" | "dash"))
+            || std::env::var("ENGINE_ROUTE_SHOTS").is_ok_and(|v| v == "1"),
     });
     app.add_systems(Update, run.before(camera::fly));
 }
@@ -502,7 +508,7 @@ fn run(world: &mut World) {
         } else {
             r.in_leg += dt;
         }
-        shot
+        shot.filter(|_| r.shots)
     };
     if let Some(path) = shot {
         world.resource_mut::<Screenshots>().request(path);

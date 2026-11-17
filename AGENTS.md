@@ -244,7 +244,8 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   `scripts/hitch-summary.py` adds up what held them.
   `showcase --route lap` flies round every zone as a streaming benchmark (its leg lines
   count zone loads and the ones never needed; `ENGINE_STREAM_LEADS=old` flies it with the
-  look-ahead as it was, for a before/after in one build). So:
+  look-ahead as it was, for a before/after in one build). The lap takes no pictures
+  (`ENGINE_ROUTE_SHOTS=1` for them): saving one holds the next frame 60 to 140 ms. So:
   - A `&mut World` system runs with nothing beside it, and the executor can only start it
     (or skip it on its `run_if`) once nothing else is running, and systems ordered after it
     wait for that too. Keep heavy work out of them (take the queries you need in a normal
