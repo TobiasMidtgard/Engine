@@ -39,7 +39,6 @@ use tracing_subscriber::layer::{Context, Filter, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static TOTALS: OnceLock<Mutex<HashMap<String, Stat>>> = OnceLock::new();
 
 /// Seconds between reports.
 const REPORT_SECS: f64 = 5.0;
@@ -109,7 +108,7 @@ const HANG_REPEAT_SECS: u64 = 60;
 /// One thread's open (entered, not yet exited) timed spans, innermost last.
 /// Each with its span's id: a span entered on several threads at once (a system's span
 /// re-entered by its own parallel tasks) is timed per thread, from that thread's own entry.
-type OpenSpans = Arc<Mutex<Vec<(String, Instant, u64)>>>;
+type OpenSpans = Arc<Mutex<Vec<(u32, Instant, u64)>>>;
 
 /// Every thread that has entered a timed span, with its open spans.
 fn threads() -> &'static Mutex<Vec<(String, OpenSpans)>> {
@@ -184,7 +183,7 @@ fn hang_report(frames: u64, stuck: Duration) -> String {
             .map(|(key, at, _)| {
                 format!(
                     "{} ({:.1} s)",
-                    key.trim_start_matches(INNER),
+                    key_name(*key).trim_start_matches(INNER),
                     (now - *at).as_secs_f64()
                 )
             })
@@ -194,8 +193,128 @@ fn hang_report(frames: u64, stuck: Duration) -> String {
     out
 }
 
-fn totals() -> &'static Mutex<HashMap<String, Stat>> {
-    TOTALS.get_or_init(|| Mutex::new(HashMap::new()))
+/// Every key a span's time is filed under, numbered: the hot path files time by number, in
+/// a store of its own thread's, and only a report puts the names back.
+#[derive(Default)]
+struct Keys {
+    names: Vec<Arc<str>>,
+    ids: HashMap<Arc<str>, u32>,
+}
+
+fn keys() -> &'static Mutex<Keys> {
+    static KEYS: OnceLock<Mutex<Keys>> = OnceLock::new();
+    KEYS.get_or_init(Default::default)
+}
+
+/// The number of `name`, given it the first time.
+fn key_id(name: &str) -> (u32, Arc<str>) {
+    let mut keys = keys().lock();
+    if let Some((name, id)) = keys.ids.get_key_value(name) {
+        return (*id, name.clone());
+    }
+    let id = keys.names.len() as u32;
+    let name: Arc<str> = name.into();
+    keys.names.push(name.clone());
+    keys.ids.insert(name.clone(), id);
+    (id, name)
+}
+
+fn key_name(id: u32) -> Arc<str> {
+    keys()
+        .lock()
+        .names
+        .get(id as usize)
+        .cloned()
+        .unwrap_or_else(|| "?".into())
+}
+
+/// A span key worked out once: its number, its name, and whether it is a system's.
+type MadeKey = (u32, Arc<str>, bool);
+
+/// One thread's totals, by key number (the thread's own lock, so never waited for in a frame).
+type ThreadStats = Arc<Mutex<Vec<Stat>>>;
+
+fn stat_stores() -> &'static Mutex<Vec<ThreadStats>> {
+    static STORES: OnceLock<Mutex<Vec<ThreadStats>>> = OnceLock::new();
+    STORES.get_or_init(Default::default)
+}
+
+thread_local! {
+    static STATS: ThreadStats = {
+        let stats = ThreadStats::default();
+        stat_stores().lock().push(stats.clone());
+        stats
+    };
+}
+
+/// File `elapsed` under key `id` on this thread.
+fn add_stat(id: u32, elapsed: Duration) {
+    STATS.with(|stats| {
+        let mut stats = stats.lock();
+        let i = id as usize;
+        if stats.len() <= i {
+            stats.resize(i + 1, Stat::default());
+        }
+        let stat = &mut stats[i];
+        stat.total += elapsed;
+        stat.calls += 1;
+        stat.max = stat.max.max(elapsed);
+    });
+}
+
+/// Everything filed since the last call, by name: every thread's totals, and the time systems
+/// ran alone and none ran. `take`: clear them (a report); otherwise only read (tests).
+fn gather_totals(take: bool) -> HashMap<String, Stat> {
+    let mut by_id: Vec<Stat> = Vec::new();
+    let mut add = |i: usize, s: &Stat| {
+        if by_id.len() <= i {
+            by_id.resize(i + 1, Stat::default());
+        }
+        let t = &mut by_id[i];
+        t.total += s.total;
+        t.calls += s.calls;
+        t.max = t.max.max(s.max);
+    };
+    for store in stat_stores().lock().iter() {
+        let mut stats = store.lock();
+        for (i, s) in stats.iter().enumerate() {
+            add(i, s);
+        }
+        if take {
+            stats.clear();
+        }
+    }
+    let (alone, idle) = {
+        let mut run = running().lock();
+        if take {
+            (
+                std::mem::take(&mut run.alone),
+                std::mem::take(&mut run.idle),
+            )
+        } else {
+            (run.alone.clone(), run.idle)
+        }
+    };
+    let names = keys().lock().names.clone();
+    let mut out = HashMap::new();
+    for (i, stat) in by_id.into_iter().enumerate() {
+        if stat.calls > 0 || stat.total > Duration::ZERO {
+            out.insert(names[i].to_string(), stat);
+        }
+    }
+    for (i, total) in alone.into_iter().enumerate() {
+        if total > Duration::ZERO {
+            out.entry(format!("{ALONE}{}", names[i]))
+                .or_insert_with(Stat::default)
+                .total += total;
+        }
+    }
+    if idle > Duration::ZERO {
+        out.entry(IDLE.to_string())
+            .or_insert_with(Stat::default)
+            .total += idle;
+    }
+    out
 }
 
 /// Which spans the profiler times: the ECS's per-system and per-schedule spans.
@@ -228,22 +347,26 @@ const IDLE: &str = "  idle";
 /// executor really spreads systems over the pool.
 const THREAD: &str = "  thread ";
 
-/// This thread's key under [`THREAD`], made once per thread.
-fn thread_key() -> String {
+/// This thread's key number under [`THREAD`], made once per thread.
+fn thread_key() -> u32 {
     thread_local! {
-        static KEY: String = format!(
+        static KEY: u32 = key_id(&format!(
             "{THREAD}{}",
             std::thread::current().name().unwrap_or("unnamed")
-        );
+        )).0;
     }
-    KEY.with(Clone::clone)
+    KEY.with(|k| *k)
 }
 
 /// Systems running right now, across threads, to file the time each one ran alone.
 struct Running {
-    keys: Vec<String>,
+    keys: Vec<u32>,
     /// When the set last changed.
     since: Instant,
+    /// Time each system (by key number) ran with no other system running.
+    alone: Vec<Duration>,
+    /// Time no system ran.
+    idle: Duration,
 }
 
 fn running() -> &'static Mutex<Running> {
@@ -252,6 +375,8 @@ fn running() -> &'static Mutex<Running> {
         Mutex::new(Running {
             keys: Vec::new(),
             since: Instant::now(),
+            alone: Vec::new(),
+            idle: Duration::ZERO,
         })
     })
 }
@@ -263,21 +388,23 @@ fn is_system(key: &str) -> bool {
 
 /// A system span `key` starts (`enter`) or ends: file the time since the running set last
 /// changed as one system's time alone, or as idle, then update the set.
-fn system_moved(key: &str, enter: bool, now: Instant) {
+fn system_moved(key: u32, enter: bool, now: Instant) {
     let mut run = running().lock();
     let span = now.saturating_duration_since(run.since);
-    let credit = match run.keys.as_slice() {
-        [] => Some(IDLE.to_string()),
-        [only] => Some(format!("{ALONE}{only}")),
-        _ => None,
-    };
-    if let Some(credit) = credit {
-        let mut totals = totals().lock();
-        totals.entry(credit).or_default().total += span;
+    match *run.keys.as_slice() {
+        [] => run.idle += span,
+        [only] => {
+            let i = only as usize;
+            if run.alone.len() <= i {
+                run.alone.resize(i + 1, Duration::ZERO);
+            }
+            run.alone[i] += span;
+        }
+        _ => {}
     }
     if enter {
-        run.keys.push(key.to_string());
-    } else if let Some(i) = run.keys.iter().rposition(|k| k == key) {
+        run.keys.push(key);
+    } else if let Some(i) = run.keys.iter().rposition(|k| *k == key) {
         run.keys.swap_remove(i);
     }
     run.since = now;
@@ -302,7 +429,13 @@ impl<S> Filter<S> for ProfileFilter {
 /// The key a span's time is filed under, kept in the span's extensions, and the span's other
 /// fields as a JSON object for the trace's `args` (so a trace says which body or chunk a span
 /// was for).
-struct Key(String, Option<Box<str>>);
+struct Key {
+    id: u32,
+    name: Arc<str>,
+    /// A system's span (not a schedule's or a module's span inside a system).
+    system: bool,
+    args: Option<Box<str>>,
+}
 
 struct NameVisitor(Option<String>);
 
@@ -362,23 +495,42 @@ where
         attrs.record(&mut visitor);
         let name = visitor.0.unwrap_or_default();
         let meta = attrs.metadata();
-        let key = if !meta.target().starts_with("bevy_ecs") {
-            let module = meta.target().split("::").next().unwrap_or("");
-            // A `name` field tells apart spans that share one span name ("render_step").
-            if name.is_empty() {
-                format!("{INNER}{module}: {}", meta.name())
+        // Spans made inside systems are made anew each call: their key is worked out once per
+        // thread, callsite and name, not formatted and looked up every time.
+        thread_local! {
+            static MADE: std::cell::RefCell<HashMap<(usize, String), MadeKey>> =
+                Default::default();
+        }
+        let callsite = meta as *const tracing::Metadata<'_> as usize;
+        let (key_id_, key_name_, system) = MADE.with(|made| {
+            let mut made = made.borrow_mut();
+            if let Some(found) = made.get(&(callsite, name.clone())) {
+                return found.clone();
+            }
+            let key = if !meta.target().starts_with("bevy_ecs") {
+                let module = meta.target().split("::").next().unwrap_or("");
+                // A `name` field tells apart spans that share one span name ("render_step").
+                if name.is_empty() {
+                    format!("{INNER}{module}: {}", meta.name())
+                } else {
+                    format!("{INNER}{module}: {name}")
+                }
             } else {
-                format!("{INNER}{module}: {name}")
-            }
-        } else {
-            match meta.name() {
-                "schedule" => format!("schedule {name}"),
-                "system_commands" => format!("{} (commands)", short_name(&name)),
-                _ => short_name(&name),
-            }
-        };
-        // Fields besides `name`, kept for the trace (engine spans only: bevy's carry none).
-        let args = (!meta.target().starts_with("bevy_ecs")
+                match meta.name() {
+                    "schedule" => format!("schedule {name}"),
+                    "system_commands" => format!("{} (commands)", short_name(&name)),
+                    _ => short_name(&name),
+                }
+            };
+            let (id, key_name) = key_id(&key);
+            let entry = (id, key_name, is_system(&key));
+            made.insert((callsite, name), entry.clone());
+            entry
+        });
+        // Fields besides `name`, kept for the trace (engine spans only: bevy's carry none),
+        // only while a trace records.
+        let args = (trace::recording()
+            && !meta.target().starts_with("bevy_ecs")
             && meta.fields().iter().any(|f| f.name() != "name"))
         .then(|| {
             let mut visitor = ArgsVisitor::default();
@@ -388,21 +540,24 @@ where
         .filter(|map| !map.is_empty())
         .and_then(|map| serde_json::to_string(&map).ok());
         if let Some(span) = ctx.span(id) {
-            span.extensions_mut()
-                .insert(Key(key, args.map(String::into_boxed_str)));
+            span.extensions_mut().insert(Key {
+                id: key_id_,
+                name: key_name_,
+                system,
+                args: args.map(String::into_boxed_str),
+            });
         }
     }
 
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id) {
             let now = Instant::now();
-            let mut ext = span.extensions_mut();
-            if let Some(Key(key, _)) = ext.get_mut::<Key>() {
-                let key = key.clone();
-                if is_system(&key) {
-                    system_moved(&key, true, now);
+            let ext = span.extensions();
+            if let Some(key) = ext.get::<Key>() {
+                if key.system {
+                    system_moved(key.id, true, now);
                 }
-                OPEN.with(|open| open.lock().push((key, now, id.into_u64())));
+                OPEN.with(|open| open.lock().push((key.id, now, id.into_u64())));
             }
         }
     }
@@ -411,8 +566,8 @@ where
         let Some(span) = ctx.span(id) else {
             return;
         };
-        let mut ext = span.extensions_mut();
-        let Some(Key(key, args)) = ext.get_mut::<Key>() else {
+        let ext = span.extensions();
+        let Some(key) = ext.get::<Key>() else {
             return;
         };
         // This thread's own entry: one span stored per span (as before) was overwritten when
@@ -427,24 +582,20 @@ where
             return;
         };
         let elapsed = start.elapsed();
-        let mut totals = if is_system(key) {
-            system_moved(key, false, start + elapsed);
-            let mut totals = totals().lock();
-            totals.entry(thread_key()).or_default().total += elapsed;
-            totals
-        } else {
-            totals().lock()
-        };
-        let stat = match totals.get_mut(key.as_str()) {
-            Some(stat) => stat,
-            None => totals.entry(key.clone()).or_default(),
-        };
-        stat.total += elapsed;
-        stat.calls += 1;
-        stat.max = stat.max.max(elapsed);
-        drop(totals);
-        trace::span(key, args.as_deref(), start, elapsed);
-        hitch::span(key, elapsed);
+        if key.system {
+            system_moved(key.id, false, start + elapsed);
+            let i = thread_key() as usize;
+            STATS.with(|stats| {
+                let mut stats = stats.lock();
+                if stats.len() <= i {
+                    stats.resize(i + 1, Stat::default());
+                }
+                stats[i].total += elapsed;
+            });
+        }
+        add_stat(key.id, elapsed);
+        trace::span(&key.name, key.args.as_deref(), start, elapsed);
+        hitch::span(&key.name, elapsed);
     }
 }
 
@@ -773,6 +924,11 @@ mod trace {
         NUMBER.with(|n| *n)
     }
 
+    /// Whether a trace is being written now.
+    pub(super) fn recording() -> bool {
+        RECORDING.load(Ordering::Relaxed)
+    }
+
     pub(super) fn span(key: &str, args: Option<&str>, start: Instant, dur: Duration) {
         if !RECORDING.load(Ordering::Relaxed) {
             return;
@@ -1061,7 +1217,7 @@ pub(crate) fn profile_report_system(
     window.frame_max = window.frame_max.max(frame);
     let since_snapshot = now - window.snapshot_started;
     if since_snapshot.as_secs_f64() >= SNAPSHOT_SECS {
-        let stats = std::mem::take(&mut *totals().lock());
+        let stats = gather_totals(true);
         *snapshot = make_snapshot(&stats, window.snapshot_frames, since_snapshot);
         for (key, stat) in stats {
             let total = window.report.entry(key).or_default();
@@ -1678,7 +1834,12 @@ mod tests {
         // This thread's entries for the span still open (the old code left the first
         // thread's open for good: its exit found the other thread's start gone).
         let open_after = |_: std::sync::Arc<_>, _: tracing::Span| {
-            OPEN.with(|o| o.lock().iter().filter(|e| e.0.contains("shared")).count())
+            OPEN.with(|o| {
+                o.lock()
+                    .iter()
+                    .filter(|e| key_name(e.0).contains("shared"))
+                    .count()
+            })
         };
         let (s1, sp1) = (subscriber.clone(), span.clone());
         let first = std::thread::spawn(move || {
@@ -1779,7 +1940,7 @@ mod tests {
         for w in workers {
             w.join().unwrap();
         }
-        let totals = totals().lock();
+        let totals = gather_totals(false);
         let alone = |name: &str| {
             totals
                 .get(&format!("{ALONE}{name}"))
