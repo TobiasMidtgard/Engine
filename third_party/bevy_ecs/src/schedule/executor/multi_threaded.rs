@@ -30,6 +30,9 @@ struct Environment<'env, 'sys> {
     systems: &'sys [SyncUnsafeCell<SystemWithAccess>],
     conditions: SyncUnsafeCell<Conditions<'sys>>,
     world_cell: UnsafeWorldCell<'env>,
+    /// Engine patch (PATCHES.md 2): the thread running the schedule (the scope's), where
+    /// exclusive systems run.
+    scope_thread: std::thread::ThreadId,
 }
 
 struct Conditions<'a> {
@@ -55,6 +58,7 @@ impl<'env, 'sys> Environment<'env, 'sys> {
                 systems_in_sets_with_conditions: &schedule.systems_in_sets_with_conditions,
             }),
             world_cell: world.as_unsafe_world_cell(),
+            scope_thread: std::thread::current().id(),
         }
     }
 }
@@ -520,6 +524,21 @@ impl ExecutorState {
                 self.num_running_systems += 1;
 
                 if self.system_task_metadata[system_index].is_exclusive {
+                    // Engine patch (PATCHES.md 2): ticking on the scope's thread already, run
+                    // it here instead of waking that thread for a task (a command sync point
+                    // is usually microseconds of work).
+                    if inline_ns() > 0
+                        && std::thread::current().id() == context.environment.scope_thread
+                    {
+                        // SAFETY: `can_run` returned true for this system, so no system is
+                        // running or borrowed, and this is the scope's thread, where the
+                        // task would have run.
+                        unsafe {
+                            self.run_exclusive_inline(context, system_index);
+                        }
+                        check_for_new_ready_systems = true;
+                        continue;
+                    }
                     // SAFETY: `can_run` returned true for this system,
                     // which means no systems are currently borrowed.
                     unsafe {
@@ -780,6 +799,45 @@ impl ExecutorState {
         self.local_thread_running = true;
     }
 
+    /// Engine patch (PATCHES.md 2): [`Self::spawn_exclusive_system_task`]'s work, done at once
+    /// on the scope's thread.
+    ///
+    /// # Safety
+    /// Caller must ensure no systems are currently borrowed and that this is the scope's thread.
+    unsafe fn run_exclusive_inline(&mut self, context: &Context, system_index: usize) {
+        let system = &context.environment.systems[system_index];
+        // SAFETY: no system is running, so the executor's world access is whole.
+        let world = unsafe { context.environment.world_cell.world_mut() };
+        // SAFETY: this system is not running, no other reference exists
+        let res = if is_apply_deferred(unsafe { &*(*system.get()).system }) {
+            let res = apply_deferred(
+                &self.unapplied_systems,
+                context.environment.systems,
+                world,
+                context.error_handler,
+            );
+            self.unapplied_systems.clear();
+            res
+        } else {
+            handle_errors(
+                |system| __rust_begin_short_backtrace::run(system, world),
+                // SAFETY: this system is not running, no other reference exists
+                unsafe { &mut (*system.get()).system },
+                context.error_handler,
+                "Exclusive system panicked",
+            )
+        };
+        if let Err(payload) = res {
+            *context.environment.executor.panic_payload.lock().unwrap() = Some(payload);
+        }
+        self.exclusive_running = true;
+        self.local_thread_running = true;
+        self.finish_system_and_handle_dependents(SystemResult {
+            system_index,
+            ns: u32::MAX,
+        });
+    }
+
     fn finish_system_and_handle_dependents(&mut self, result: SystemResult) {
         let SystemResult { system_index, ns } = result;
         let cost = &mut self.system_task_metadata[system_index].cost_ns;
@@ -825,7 +883,8 @@ impl ExecutorState {
 
 /// Engine patch (PATCHES.md 1): systems whose recent runs took less than this many
 /// nanoseconds run inline on the thread ticking the executor. `ENGINE_INLINE_SYSTEMS_US`
-/// sets it in microseconds (`0` turns inlining off); 20 µs by default.
+/// sets it in microseconds (`0` turns inlining off, and the inline exclusive systems of
+/// PATCHES.md 2 with it); 20 µs by default.
 fn inline_ns() -> u32 {
     static NS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *NS.get_or_init(|| {

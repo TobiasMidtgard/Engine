@@ -29,3 +29,18 @@ To go back to stock bevy_ecs: delete the `bevy_ecs` line under `[patch.crates-io
   task's is. Non-`Send` and exclusive systems are never inlined.
 - **Measured**: `crates/core` bench of 400 idle systems (half writing one component, half
   reading another), cloud machine: 1,333 µs a run before, 373 after.
+
+## 2. Exclusive systems run inline when the scope's thread ticks the executor (same file)
+
+- **What**: an exclusive system (a command sync point, `apply_deferred`, or any `&mut World`
+  system) that becomes ready while the schedule's own thread is the one ticking the executor
+  runs there and then, instead of being spawned as a task on that same thread, and the pass
+  goes on to its dependents. When another thread ticks, it is spawned as before.
+  `ENGINE_INLINE_SYSTEMS_US=0` turns this off with patch 1.
+- **Why**: the showcase has about 60 of them a frame (FixedUpdate 20 sync points a step,
+  Update 16 plus 3, PostUpdate 6 plus 4, Last 3). Once patch 1 runs the small systems on the
+  ticking thread, that is usually the scope's thread already, and each sync point still cost
+  a task spawn and a wake. Cloud plaza trace (same stand as patch 1): First 0.22 -> 0.06 ms a
+  frame, Last 0.78 -> 0.20, PostUpdate 1.55 -> 1.35, a fixed step 2.97 -> 2.71.
+- **Safety**: it is chosen only when `can_run` says nothing is running, so it has the whole
+  world as the task would, and on the thread the task would have run on.
