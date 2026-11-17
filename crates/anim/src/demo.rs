@@ -868,7 +868,31 @@ pub fn give_humanoid_body(world: &mut World, person: Entity, outfit: humanoid::O
 /// A fetched file (`assets/fetched/<relative>`, see `assets/manifests/animation.toml`):
 /// under `ENGINE_ASSET_ROOT`, the working directory's `assets`, or this workspace's `assets`
 /// (tests and examples run from the crate folder). `None` if it hasn't been fetched.
+///
+/// Answers are remembered for the run: a fetched person asks for 32 files, and on Windows
+/// looking each up again for every townsperson cost a frame tens of milliseconds when a
+/// zone's crowd came in. (Fetching is a separate tool run before the game.)
 pub fn fetched_path(relative: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static FOUND: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let found = FOUND.get_or_init(Default::default);
+    if let Some(known) = found
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(relative)
+    {
+        return known.clone();
+    }
+    let path = look_for_fetched(relative);
+    found
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(relative.to_string(), path.clone());
+    path
+}
+
+fn look_for_fetched(relative: &str) -> Option<String> {
     let roots = [
         std::env::var("ENGINE_ASSET_ROOT")
             .ok()
