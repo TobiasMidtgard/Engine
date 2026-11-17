@@ -26,6 +26,8 @@ pub enum Occ {
 pub struct Grid {
     pub cells: HashMap<IVec2, Occ>,
     pub roads: HashSet<IVec2>,
+    /// The road cells that are paved (the rest are dirt).
+    pub paved: HashSet<IVec2>,
 }
 
 impl Grid {
@@ -40,6 +42,10 @@ impl Grid {
 
     pub fn is_road(&self, c: IVec2) -> bool {
         self.roads.contains(&c)
+    }
+
+    pub fn is_paved(&self, c: IVec2) -> bool {
+        self.paved.contains(&c)
     }
 }
 

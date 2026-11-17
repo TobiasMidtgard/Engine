@@ -7,7 +7,7 @@
 use engine::prelude::*;
 use serde::Serialize;
 
-use crate::defs::{Good, Kind, NEED_PER_PERSON_MIN, TREAT_TAX, Tier};
+use crate::defs::{Good, Kind, MAX_SERVICES, NEED_PER_PERSON_MIN, Need, Tier};
 use crate::island;
 
 /// A placed building.
@@ -85,7 +85,11 @@ pub struct House {
     /// Seconds its needs have all been met while full (it moves up a tier after a while).
     pub content_s: f32,
     /// Which of its tier's services are in reach.
-    pub services: [bool; 2],
+    pub services: [bool; MAX_SERVICES],
+    /// Coins a minute it pays right now: the sum of what each met need is worth.
+    pub income: f32,
+    /// Its door is on a paved road.
+    pub paved: bool,
 }
 
 impl House {
@@ -94,7 +98,9 @@ impl House {
             tier,
             residents: 2.0,
             content_s: 0.0,
-            services: [false; 2],
+            services: [false; MAX_SERVICES],
+            income: 0.0,
+            paved: false,
         }
     }
 }
@@ -250,45 +256,46 @@ pub fn step(
             *s += (ratio - *s) * k;
         }
     }
-    // Houses: fill toward what their needs allow, pay taxes, move up.
+    // Houses: each met need brings its people and pays its coins; then they move up.
     let mut taxes = 0.0f64;
     for (b, mut h) in houses.iter_mut() {
         let books = &econ.islands[b.island];
-        let (needs, basic) = h.tier.needs();
-        let services = h.tier.services();
-        let mut met = 0.0;
-        let total = (basic + services.len()) as f32;
-        for g in &needs[..basic] {
-            met += books.supply[g.index()].min(1.0);
-        }
-        for (s, _) in services.iter().enumerate() {
-            if h.services[s] {
-                met += 1.0;
+        let mut people = 0.0;
+        let mut coins = 0.0;
+        // Of the needs that bring people: how many there are and how well they are met.
+        let (mut basic, mut basic_met) = (0.0, 0.0);
+        // Of the home-made luxuries: the same.
+        let (mut lux, mut lux_met) = (0.0, 0.0);
+        let mut service = 0;
+        for w in h.tier.wants() {
+            let met = match w.need {
+                Need::Good(g) => books.supply[g.index()].min(1.0),
+                Need::Service(_) => {
+                    service += 1;
+                    if h.services[service - 1] { 1.0 } else { 0.0 }
+                }
+            };
+            people += w.people * met;
+            coins += w.coins * met;
+            if w.people > 0.0 {
+                basic += 1.0;
+                basic_met += met;
+            } else if let Need::Good(g) = w.need
+                && !g.overseas()
+            {
+                lux += 1.0;
+                lux_met += met;
             }
         }
-        let share = met / total;
         let cap = h.tier.capacity();
-        let target = cap * (0.2 + 0.8 * share);
+        let target = people.max(0.2 * cap);
         let rate = 0.4 * dt;
         h.residents += (target - h.residents).clamp(-rate, rate);
-        // Luxuries of the home isles make the house happy; overseas treats pay extra.
-        let lux: Vec<f32> = needs[basic..]
-            .iter()
-            .filter(|g| !g.overseas())
-            .map(|g| books.supply[g.index()])
-            .collect();
-        let happy = if lux.is_empty() {
-            1.0
-        } else {
-            lux.iter().sum::<f32>() / lux.len() as f32
-        };
-        let treats: f32 = needs[basic..]
-            .iter()
-            .filter(|g| g.overseas())
-            .map(|g| books.supply[g.index()].min(1.0))
-            .sum();
-        taxes += (h.residents * h.tier.tax() * (0.6 + 0.4 * happy + TREAT_TAX * treats) / 60.0 * dt)
-            as f64;
+        // A house that is not full pays for the people it has.
+        h.income = coins * (h.residents / cap).min(1.0);
+        taxes += (h.income / 60.0 * dt) as f64;
+        let share = basic_met / basic;
+        let happy = if lux > 0.0 { lux_met / lux } else { 1.0 };
         let content = h.residents >= cap - 0.25 && share > 0.95 && happy > 0.8;
         h.content_s = if content { h.content_s + dt } else { 0.0 };
     }
@@ -300,6 +307,9 @@ pub fn step(
         let Some((next, cost)) = h.tier.next() else {
             continue;
         };
+        if next.wants_paving() && !h.paved {
+            continue;
+        }
         let books = &mut econ.islands[b.island];
         // Don't empty the workshops of the tier they leave.
         let t = h.tier.index();
@@ -357,9 +367,15 @@ pub fn step(
         if let Some(inp) = def.input
             && !p.input_ready
         {
-            if books.take(inp, 1.0) {
+            // Both goods of a batch or neither.
+            let second = def.input2.is_none_or(|g| books.get(g) >= 1.0);
+            if second && books.take(inp, 1.0) {
                 p.input_ready = true;
                 shipments.carts.push((e, inp, false));
+                if let Some(g) = def.input2 {
+                    books.take(g, 1.0);
+                    shipments.carts.push((e, g, false));
+                }
             } else {
                 p.status = Status::NoInput;
                 p.efficiency = 0.0;

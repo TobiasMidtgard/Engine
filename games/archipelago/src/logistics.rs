@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use engine::prelude::*;
 
-use crate::defs::Good;
+use crate::defs::{Good, PAVED_SPEED};
 use crate::draw::{Art, Body, spawn_model};
 use crate::globe::Frame;
+use crate::grid::Grid;
 use crate::island;
 use crate::sim::{Building, Economy, RoadLink, Shipments};
 
@@ -113,10 +114,19 @@ pub fn drive_carts(world: &mut World) {
         world.resource::<Time>().delta_secs() as f64 * world.resource::<Economy>().speed as f64;
     let mut done = Vec::new();
     let frame = *world.resource::<Frame>();
+    // Carts drive faster where the road under them is paved.
+    let paved = std::mem::take(&mut world.resource_mut::<Grid>().paved);
     let mut q = world.query::<(Entity, &mut Cart, &mut Transform)>();
     for (e, mut c, mut t) in q.iter_mut(world) {
-        c.s += CART_SPEED * dt;
         let total = *c.lengths.last().unwrap_or(&0.0);
+        let here = along(
+            &c.path,
+            &c.lengths,
+            if c.reverse { total - c.s } else { c.s },
+        )
+        .0;
+        let fast = paved.contains(&crate::grid::cell_of(here.x, here.z));
+        c.s += CART_SPEED * if fast { PAVED_SPEED } else { 1.0 } * dt;
         if c.s >= total {
             done.push((e, c.island, c.good, c.deliver));
             continue;
@@ -132,6 +142,7 @@ pub fn drive_carts(world: &mut World) {
         }
         *t = frame.stand(DVec3::new(p.x, ground + 0.02, p.z), c.yaw);
     }
+    world.resource_mut::<Grid>().paved = paved;
     for (e, isle, g, deliver) in done {
         if deliver {
             world.resource_mut::<Economy>().islands[isle].add(g, 1.0);

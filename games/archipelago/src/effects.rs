@@ -165,12 +165,20 @@ pub fn chimneys(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<(Vec3, &
     match kind {
         // Far houses: no hearth smoke in the heat; a stone chimney in the north.
         Kind::House if matches!(biome, Biome::Tropical | Biome::Arid) => vec![],
+        Kind::Glassworks => vec![(Vec3::new(4.0, 11.5, -2.5), "isle.stack")],
+        Kind::Saltery => vec![(Vec3::new(-3.2, 7.5, -5.8), "isle.chimney")],
+        Kind::Confectioner => vec![(Vec3::new(-3.0, 9.6, -3.3), "isle.chimney")],
+        Kind::Furrier => vec![(Vec3::new(3.0, 10.8, -3.8), "isle.chimney")],
+        Kind::LampMaker => vec![(Vec3::new(-2.8, 8.4, -3.3), "isle.chimney")],
+        Kind::School => vec![(Vec3::new(4.2, 10.2, -3.0), "isle.chimney")],
+        Kind::Tavern => vec![(Vec3::new(4.45, 11.9, -1.4), "isle.chimney")],
         Kind::House if biome == Biome::Arctic => match tier {
             Tier::Fisherfolk => {
                 let x = if v == 2 { -1.98 } else { 1.98 };
                 vec![(Vec3::new(x, 6.2, -0.2), "isle.chimney")]
             }
             Tier::Labourers => vec![(Vec3::new(2.4, 9.9, -0.4), "isle.chimney")],
+            Tier::Burghers => burgher_smoke(biome),
         },
         Kind::Distillery => vec![(Vec3::new(6.6, 13.7, -7.0), "isle.stack")],
         Kind::OilWorks => vec![(Vec3::new(6.9, 12.2, -6.9), "isle.stack")],
@@ -181,12 +189,20 @@ pub fn chimneys(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<(Vec3, &
                 vec![(Vec3::new(x, 7.6, 1.2), "isle.chimney")]
             }
             Tier::Labourers => vec![(Vec3::new(3.7, 10.9, 0.8), "isle.chimney")],
+            Tier::Burghers => burgher_smoke(biome),
         },
         Kind::Bakery => vec![(Vec3::new(-4.1, 9.2, 0.0), "isle.stack")],
         Kind::Brewery => vec![(Vec3::new(4.6, 16.2, -3.6), "isle.stack")],
         Kind::Brickworks => vec![(Vec3::new(5.5, 19.5, -1.5), "isle.stack")],
         _ => vec![],
     }
+}
+
+fn burgher_smoke(biome: Biome) -> Vec<(Vec3, &'static str)> {
+    crate::burgher::house_chimney(biome)
+        .map(|at| (at, "isle.chimney"))
+        .into_iter()
+        .collect()
 }
 
 /// Spawn the plumes of a building just placed.

@@ -61,6 +61,9 @@ const SPEEDS: [(f32, &str, &str); 4] = [
 fn kind_icon(k: Kind) -> &'static str {
     match k {
         Kind::Road => "isle_road",
+        Kind::PavedRoad => "isle_paved",
+        Kind::School => "isle_school",
+        Kind::Tavern => "isle_tavern",
         Kind::Harbour => "isle_anchor",
         Kind::House => "isle_house",
         Kind::Market => "isle_market",
@@ -380,6 +383,7 @@ fn bar_items(category: usize, tool: Tool, isle: usize) -> Vec<El> {
             let sel = match tool {
                 Tool::Build { kind, .. } => kind == k,
                 Tool::Road => k == Kind::Road,
+                Tool::Paving => k == Kind::PavedRoad,
                 _ => false,
             };
             let not_here = (!grows(k)).then(|| here.map_or("", |i| i.name));
@@ -870,6 +874,14 @@ fn update_data_now(world: &mut World) {
         );
         if let Some(h) = world.get::<House>(e) {
             let (needs, basic) = h.tier.needs();
+            // What each need is worth to this tier, in coins a minute.
+            let worth = |n: crate::defs::Need| {
+                h.tier
+                    .wants()
+                    .iter()
+                    .find(|w| w.need == n)
+                    .map_or(0.0, |w| w.coins)
+            };
             sub = format!(
                 "{} house · {}",
                 h.tier.name(),
@@ -880,12 +892,17 @@ fn update_data_now(world: &mut World) {
                 format!("{:.1} of {:.0}", h.residents, h.tier.capacity()),
             );
             let books = &econ.islands[b.island];
-            let need_list: Vec<String> = needs[..basic]
+            let _ = basic;
+            let need_list: Vec<String> = needs
                 .iter()
                 .map(|g| {
-                    let pct = books.supply[g.index()] * 100.0;
-                    let s = format!("{} {:.0}%", g.name(), pct);
-                    if pct >= 99.0 { good(&s) } else { bad(&s) }
+                    let met = books.supply[g.index()].min(1.0);
+                    let s = format!(
+                        "{} +{:.1}",
+                        g.name(),
+                        worth(crate::defs::Need::Good(*g)) * met
+                    );
+                    if met >= 0.99 { good(&s) } else { bad(&s) }
                 })
                 .collect();
             rows[1] = ("Needs".into(), need_list.join(", "));
@@ -895,8 +912,9 @@ fn update_data_now(world: &mut World) {
                 .iter()
                 .enumerate()
                 .map(|(i, k)| {
+                    let coins = worth(crate::defs::Need::Service(*k));
                     if h.services[i] {
-                        good(&format!("{} ✓", k.def().name))
+                        good(&format!("{} +{coins:.1}", k.def().name))
                     } else {
                         bad(&format!("{} ✗", k.def().name))
                     }
@@ -904,8 +922,12 @@ fn update_data_now(world: &mut World) {
                 .collect();
             rows[2] = ("Services".into(), svc.join(", "));
             rows[3] = (
-                "Taxes".into(),
-                format!("{:.1} coins a minute", h.residents * h.tier.tax()),
+                "Income".into(),
+                format!(
+                    "{:.1} of {:.1} coins a minute",
+                    h.income,
+                    h.tier.full_income()
+                ),
             );
             rows[4] = (
                 "Next tier".into(),
@@ -915,7 +937,16 @@ fn update_data_now(world: &mut World) {
                             .iter()
                             .map(|(g, n)| format!("{n} {}", g.name().to_lowercase()))
                             .collect();
-                        format!("{} when full and content ({})", next.name(), c.join(", "))
+                        let road = if next.wants_paving() && !h.paved {
+                            ", needs a paved road at the door"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "{} when full and content ({}){road}",
+                            next.name(),
+                            c.join(", ")
+                        )
                     }
                     None => "Top tier for now".into(),
                 },

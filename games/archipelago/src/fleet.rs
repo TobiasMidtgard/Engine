@@ -567,26 +567,61 @@ fn arrive(world: &mut World, v: &mut Vessel) {
 fn trade(world: &mut World, v: &mut Vessel, b: &Building, stop: &Stop) {
     let (slots, per) = v.craft.hold();
     let mut econ = world.resource_mut::<Economy>();
-    let books = &mut econ.islands[b.island];
-    // Unload.
-    v.cargo.retain(|(g, n)| {
-        if stop.unload.contains(g) {
-            books.add(*g, *n as f64);
-            false
-        } else {
-            true
+    exchange(
+        &mut econ.islands[b.island],
+        &mut v.cargo,
+        &stop.load,
+        &stop.unload,
+        slots,
+        per,
+    );
+}
+
+/// What a warehouse takes of a good from a ship: above this the rest stays aboard for the
+/// next call, so one island does not hoard what the whole route lives on.
+pub const WAREHOUSE_WANTS: f64 = 40.0;
+/// What a ship leaves an island of each good it loads.
+pub const ISLAND_KEEPS: f64 = 8.0;
+
+/// A ship's call at a quay: land what the stop takes (up to [`WAREHOUSE_WANTS`] in stock),
+/// then load what it gives (down to [`ISLAND_KEEPS`]), `per` to a slot of the hold.
+pub fn exchange(
+    books: &mut crate::sim::IslandBooks,
+    cargo: &mut Vec<(Good, u32)>,
+    load: &[Good],
+    unload: &[Good],
+    slots: u32,
+    per: u32,
+) {
+    for (g, n) in cargo.iter_mut() {
+        if unload.contains(g) {
+            let room = (WAREHOUSE_WANTS - books.get(*g)).floor().max(0.0) as u32;
+            let k = (*n).min(room);
+            books.add(*g, k as f64);
+            *n -= k;
         }
-    });
-    // Load what the stop gives, leaving the island a reserve.
-    for g in &stop.load {
-        if v.cargo.len() as u32 >= slots {
-            break;
+    }
+    cargo.retain(|(_, n)| *n > 0);
+    for g in load {
+        // (Never load what was just landed: a good both ways on one stop stays ashore.)
+        if unload.contains(g) {
+            continue;
         }
-        let have = books.get(*g) - 8.0;
-        let n = have.floor().clamp(0.0, per as f64) as u32;
-        if n > 0 {
-            books.take(*g, n as f64);
-            v.cargo.push((*g, n));
+        let aboard = cargo.iter().position(|c| c.0 == *g);
+        if aboard.is_none() && cargo.len() as u32 >= slots {
+            continue;
+        }
+        let room = per - aboard.map_or(0, |i| cargo[i].1.min(per));
+        let n = (books.get(*g) - ISLAND_KEEPS)
+            .floor()
+            .clamp(0.0, room as f64) as u32;
+        if n == 0 {
+            continue;
+        }
+        books.take(*g, n as f64);
+        match aboard {
+            Some(i) => cargo[i].1 += n,
+            None => cargo.push((*g, n)),
         }
     }
 }

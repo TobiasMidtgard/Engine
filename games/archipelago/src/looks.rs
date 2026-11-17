@@ -167,6 +167,27 @@ pub const MODELS: &[ModelKey] = &[
     "chapel_arctic",
     "sacks",
     "torch",
+    "burgher_0",
+    "burgher_1",
+    "burgher_2",
+    "villa_0",
+    "villa_1",
+    "villa_2",
+    "mansion_0",
+    "mansion_1",
+    "mansion_2",
+    "merchant_0",
+    "merchant_1",
+    "merchant_2",
+    "glassworks",
+    "saltery",
+    "confectioner",
+    "furrier",
+    "lamp_maker",
+    "school",
+    "tavern",
+    "sand_heap",
+    "glass_rack",
 ];
 
 /// Which of a model's three variants a building with this seed gets.
@@ -185,7 +206,20 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
     );
     let mut out = Vec::new();
     match kind {
-        Kind::Road => {}
+        Kind::Road | Kind::PavedRoad => {}
+        // Burghers' houses of every climate, the manufactories, the school and the tavern.
+        Kind::House if tier == Tier::Burghers => {
+            crate::burgher::house_look(biome, seed, &mut out);
+        }
+        Kind::Glassworks
+        | Kind::Saltery
+        | Kind::Confectioner
+        | Kind::Furrier
+        | Kind::LampMaker
+        | Kind::School
+        | Kind::Tavern => {
+            crate::burgher::look(kind, seed, &mut out);
+        }
         Kind::House if biome != Biome::Temperate => {
             crate::regional::house_look(biome, tier, seed, &mut out);
         }
@@ -206,6 +240,7 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
                 (Tier::Labourers, 0) => "townhouse_0",
                 (Tier::Labourers, 1) => "townhouse_1",
                 (Tier::Labourers, _) => "townhouse_2",
+                (Tier::Burghers, _) => crate::burgher::house_model(biome, v),
             };
             let t = 0.9 + 0.2 * h01(seed, 2);
             out.push(Piece::at(key, Vec3::ZERO).tint([t, t * (0.97 + 0.06 * h01(seed, 3)), t]));
@@ -430,7 +465,12 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
         }
     }
     // What the climate adds to any building: snow drifted into the corners of a northern lot.
-    if biome == Biome::Arctic && !matches!(kind, Kind::Road | Kind::House | Kind::Harbour) {
+    if biome == Biome::Arctic
+        && !matches!(
+            kind,
+            Kind::Road | Kind::PavedRoad | Kind::House | Kind::Harbour
+        )
+    {
         for k in 0..3u64 {
             if h01(seed, 880 + k) < 0.55 {
                 let sx = if h01(seed, 884 + k) < 0.5 { -1.0 } else { 1.0 };
@@ -2050,9 +2090,9 @@ fn chapel() -> Parts {
     let (l, w, wall) = (7.5, 13.0, 6.5);
     let c = v3(0.0, 0.0, -1.5);
     plinth(&mut p, l + 0.5, w + 0.5, 0.6);
-    let stone = hexc(0xc8c0b0);
+    let stone = hexc(0xe2dccf);
     p.cuboid(
-        Mat::Stone,
+        Mat::Cobble,
         c + v3(-l * 0.5, 0.6, -w * 0.5),
         c + v3(l * 0.5, wall, w * 0.5),
         stone,
@@ -2060,7 +2100,7 @@ fn chapel() -> Parts {
     );
     p.gable_roof(
         Mat::Slate,
-        Mat::Stone,
+        Mat::Cobble,
         c + v3(0.0, wall, 0.0),
         w,
         l,
@@ -2076,7 +2116,7 @@ fn chapel() -> Parts {
         for (x, n) in [(l * 0.5, 1.0f32), (-l * 0.5, -1.0)] {
             let (x0, x1) = if n > 0.0 { (x, x + 0.6) } else { (x - 0.6, x) };
             p.cuboid(
-                Mat::Stone,
+                Mat::Cobble,
                 c + v3(x0, 0.6, z - 0.35),
                 c + v3(x1, wall - 1.5, z + 0.35),
                 stone,
@@ -2098,14 +2138,14 @@ fn chapel() -> Parts {
     // Tower with a spire at the front.
     let t = c + v3(0.0, 0.0, w * 0.5 + 2.0);
     p.cuboid(
-        Mat::Stone,
+        Mat::Cobble,
         t + v3(-2.2, 0.6, -2.2),
         t + v3(2.2, 15.0, 2.2),
         stone,
         false,
     );
     p.cuboid(
-        Mat::Stone,
+        Mat::Cobble,
         t + v3(-2.4, 14.6, -2.4),
         t + v3(2.4, 15.3, 2.4),
         shade(stone, 0.9),
@@ -2783,6 +2823,7 @@ pub fn build_model(key: ModelKey) -> Parts {
         "tub_shrub" => tub_shrub(),
         _ => crate::regional::build(key)
             .or_else(|| crate::civic::build(key))
+            .or_else(|| crate::burgher::build(key))
             .or_else(|| crate::walkers::build(key))
             .unwrap_or_default(),
     }
@@ -2809,7 +2850,7 @@ mod tests {
     #[test]
     fn every_kind_has_a_look() {
         for d in crate::defs::DEFS {
-            if d.kind == Kind::Road {
+            if matches!(d.kind, Kind::Road | Kind::PavedRoad) {
                 continue;
             }
             for biome in [
@@ -2829,7 +2870,11 @@ mod tests {
                 }
             }
         }
-        for key in crate::regional::MODELS.iter().chain(crate::civic::MODELS) {
+        for key in crate::regional::MODELS
+            .iter()
+            .chain(crate::civic::MODELS)
+            .chain(crate::burgher::MODELS)
+        {
             assert!(MODELS.contains(key), "{key} is not listed");
         }
     }

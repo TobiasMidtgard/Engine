@@ -9,7 +9,7 @@ use engine::prelude::*;
 use engine::world::SurfaceMaterials;
 use engine::world::terrain::{EditOp, EditShape, TerrainEdit};
 
-use crate::defs::{CELL_M, Good, Kind, Site, Tier};
+use crate::defs::{CELL_M, Good, Kind, MAX_SERVICES, PAVED_REACH_COST, PAVING_BRICKS, Site, Tier};
 use crate::draw::{Art, Drawn, Look, Spin, spawn_model};
 use crate::globe::{Biome, Frame};
 use crate::grid::{self, Grid, Occ};
@@ -168,14 +168,68 @@ pub fn place_road(world: &mut World, c: IVec2, charge: bool) -> Result<(), Strin
     Ok(())
 }
 
+/// Pave a cell: over a dirt road, or a new road where there is none.
+pub fn place_paving(world: &mut World, c: IVec2, charge: bool) -> Result<(), String> {
+    if world.resource::<Grid>().is_paved(c) {
+        return Ok(());
+    }
+    if !world.resource::<Grid>().is_road(c) {
+        // The price of paving covers the road bed under it.
+        place_road(world, c, false)?;
+    }
+    if charge {
+        let p = grid::cell_center(c);
+        let isle = island::island_at(p.x, p.y);
+        let mut econ = world.resource_mut::<Economy>();
+        let cost = Kind::PavedRoad.def().coins as f64;
+        if econ.coins < cost {
+            return Err("Not enough coins for paving.".into());
+        }
+        if let Some(books) = isle.and_then(|i| econ.islands.get_mut(i))
+            && !books.take(Good::Bricks, PAVING_BRICKS)
+        {
+            return Err("Paving needs bricks in this island's warehouse.".into());
+        }
+        econ.coins -= cost;
+    }
+    world.resource_mut::<Grid>().paved.insert(c);
+    crate::streets::mark(world, c);
+    world.resource_mut::<Changed>().any = true;
+    Ok(())
+}
+
+/// Pave every road cell within `radius` meters of `center` (the starting towns, free).
+pub fn pave_round(world: &mut World, center: DVec2, radius: f64) {
+    let cells: Vec<IVec2> = world
+        .resource::<Grid>()
+        .roads
+        .iter()
+        .copied()
+        .filter(|c| (grid::cell_center(*c) - center).length() <= radius)
+        .collect();
+    for c in cells {
+        let _ = place_paving(world, c, false);
+    }
+}
+
 /// Roads along an L from `a` to `b` (x first), skipping cells that are already road; stops
-/// at the first cell that can't take one.
-pub fn place_road_line(world: &mut World, a: IVec2, b: IVec2, charge: bool) -> Result<u32, String> {
+/// at the first cell that can't take one. `paved`: lay setts (over dirt too).
+pub fn place_road_line(
+    world: &mut World,
+    a: IVec2,
+    b: IVec2,
+    paved: bool,
+    charge: bool,
+) -> Result<u32, String> {
     let mut n = 0;
     let mut c = a;
     let step = |v: i32| v.signum();
     loop {
-        place_road(world, c, charge)?;
+        if paved {
+            place_paving(world, c, charge)?;
+        } else {
+            place_road(world, c, charge)?;
+        }
         n += 1;
         if c == b {
             break;
@@ -199,6 +253,10 @@ pub fn place(
 ) -> Result<Entity, String> {
     if kind == Kind::Road {
         place_road(world, origin, charge)?;
+        return Ok(Entity::PLACEHOLDER);
+    }
+    if kind == Kind::PavedRoad {
+        place_paving(world, origin, charge)?;
         return Ok(Entity::PLACEHOLDER);
     }
     let isle = grid::check(world.resource::<Grid>(), kind, origin, rot)
@@ -493,6 +551,7 @@ pub fn remove_road(world: &mut World, c: IVec2) {
         let r = g.roads.remove(&c);
         if r {
             g.cells.remove(&c);
+            g.paved.remove(&c);
         }
         r
     };
@@ -544,6 +603,54 @@ fn spawn_stalls(world: &mut World, owner: Entity, origin: IVec2, rot: u8, base_y
 /// Materials for market stalls (the UI module's market art).
 #[derive(Resource, Clone, Copy)]
 pub struct StallKit(pub engine_ui::demo::art::stall::StallMats);
+
+/// The public buildings houses ask for, in the order of `House::services`.
+pub const SERVICES: [Kind; MAX_SERVICES] = [Kind::Market, Kind::Chapel, Kind::School, Kind::Tavern];
+
+/// How much further than its radius a public building reaches along a dirt road.
+const STREET_REACH: f32 = 1.25;
+
+/// The road cells a public building serves along the streets from its door: its reach in
+/// cells times [`STREET_REACH`], a paved cell costing [`PAVED_REACH_COST`] of a dirt one.
+fn street_reach(
+    b: &Building,
+    roads: &HashSet<IVec2>,
+    paved: &HashSet<IVec2>,
+    out: &mut HashSet<IVec2>,
+) {
+    let budget = b.kind.def().reach as f32 * STREET_REACH;
+    let cost = |c: &IVec2| {
+        if paved.contains(c) {
+            PAVED_REACH_COST
+        } else {
+            1.0
+        }
+    };
+    let mut best: HashMap<IVec2, f32> = HashMap::new();
+    let mut queue = VecDeque::new();
+    for c in grid::ring(b.kind, b.origin, b.rot) {
+        if roads.contains(&c) {
+            best.insert(c, 0.0);
+            queue.push_back(c);
+        }
+    }
+    // Costs are 0.5 or 1, so a plain queue with re-relaxing settles fast.
+    while let Some(c) = queue.pop_front() {
+        let d = best[&c];
+        for n in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
+            let nc = c + n;
+            if !roads.contains(&nc) {
+                continue;
+            }
+            let nd = d + cost(&nc);
+            if nd <= budget && best.get(&nc).is_none_or(|old| nd < *old) {
+                best.insert(nc, nd);
+                queue.push_back(nc);
+            }
+        }
+    }
+    out.extend(best.into_keys());
+}
 
 /// After a change: road links, house services, woodcutters' trees.
 pub fn refresh(world: &mut World) {
@@ -633,10 +740,11 @@ pub fn refresh(world: &mut World) {
             l.path = path;
         }
     }
-    // Services within reach.
+    // Services within reach: as the crow flies, or further along paved streets.
+    let paved = world.resource::<Grid>().paved.clone();
     let services: Vec<(Kind, usize, DVec2, f64)> = all
         .iter()
-        .filter(|(_, b)| matches!(b.kind, Kind::Market | Kind::Chapel))
+        .filter(|(_, b)| SERVICES.contains(&b.kind))
         .map(|(_, b)| {
             (
                 b.kind,
@@ -646,14 +754,22 @@ pub fn refresh(world: &mut World) {
             )
         })
         .collect();
+    let mut by_road: [HashSet<IVec2>; MAX_SERVICES] = Default::default();
+    for (_, b) in all.iter().filter(|(_, b)| SERVICES.contains(&b.kind)) {
+        let i = SERVICES.iter().position(|k| *k == b.kind).unwrap_or(0);
+        street_reach(b, &roads, &paved, &mut by_road[i]);
+    }
     let mut q = world.query::<(&Building, &mut House)>();
     for (b, mut h) in q.iter_mut(world) {
         let c = grid::footprint_center(b.kind, b.origin, b.rot);
-        for (i, kind) in [Kind::Market, Kind::Chapel].into_iter().enumerate() {
+        let door = grid::ring(b.kind, b.origin, b.rot);
+        for (i, kind) in SERVICES.into_iter().enumerate() {
             h.services[i] = services
                 .iter()
-                .any(|(k, isle, p, r)| *k == kind && *isle == b.island && (*p - c).length() <= *r);
+                .any(|(k, isle, p, r)| *k == kind && *isle == b.island && (*p - c).length() <= *r)
+                || door.iter().any(|c| by_road[i].contains(c));
         }
+        h.paved = door.iter().any(|c| paved.contains(c));
     }
     // Woodcutters: wooded cells in reach that nothing stands on (the trees planted there
     // follow the same woods field).
@@ -708,4 +824,37 @@ pub fn starting_stock() -> Vec<(Good, f64)> {
         (Good::Clothes, 10.0),
         (Good::Bricks, 30.0),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paving_carries_a_market_further_along_the_street() {
+        let market = Building {
+            kind: Kind::Market,
+            origin: IVec2::ZERO,
+            rot: 0,
+            island: 0,
+            base_y: 0.0,
+            seed: 1,
+            id: 1,
+        };
+        // One straight street from the market's front.
+        let roads: HashSet<IVec2> = (5..120).map(|z| IVec2::new(2, z)).collect();
+        assert!(grid::ring(market.kind, market.origin, market.rot).contains(&IVec2::new(2, 5)));
+        let mut dirt = HashSet::new();
+        street_reach(&market, &roads, &HashSet::new(), &mut dirt);
+        let mut paved = HashSet::new();
+        street_reach(&market, &roads, &roads, &mut paved);
+        let reach = Kind::Market.def().reach as f32 * STREET_REACH;
+        assert_eq!(dirt.len(), reach as usize + 1);
+        assert_eq!(paved.len(), (reach / PAVED_REACH_COST) as usize + 1);
+        // Half paved: the paved half costs half.
+        let half: HashSet<IVec2> = (5..15).map(|z| IVec2::new(2, z)).collect();
+        let mut mixed = HashSet::new();
+        street_reach(&market, &roads, &half, &mut mixed);
+        assert!(dirt.len() < mixed.len() && mixed.len() < paved.len());
+    }
 }

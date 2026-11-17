@@ -109,7 +109,8 @@ pub fn build(key: ModelKey) -> Option<Parts> {
 /// The house model of a climate and tier (the home isles' own are in `looks`).
 pub fn house_model(biome: Biome, tier: Tier, v: usize) -> Option<ModelKey> {
     let set: [ModelKey; 3] = match (biome, tier) {
-        (Biome::Temperate, _) => return None,
+        // (Burghers' houses of every climate are in `burgher`.)
+        (Biome::Temperate, _) | (_, Tier::Burghers) => return None,
         (Biome::Tropical, Tier::Fisherfolk) => ["stilt_0", "stilt_1", "stilt_2"],
         (Biome::Tropical, Tier::Labourers) => ["gallery_0", "gallery_1", "gallery_2"],
         (Biome::Arid, Tier::Fisherfolk) => ["adobe_0", "adobe_1", "adobe_2"],
@@ -2826,7 +2827,7 @@ mod tests {
     #[test]
     fn every_far_house_has_a_model_and_the_home_isles_keep_their_own() {
         for biome in [Biome::Tropical, Biome::Arid, Biome::Arctic] {
-            for tier in Tier::ALL {
+            for tier in [Tier::Fisherfolk, Tier::Labourers] {
                 for v in 0..3 {
                     let key = house_model(biome, tier, v).unwrap();
                     assert!(MODELS.contains(&key));

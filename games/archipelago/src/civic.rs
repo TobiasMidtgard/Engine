@@ -277,7 +277,7 @@ pub fn look(kind: Kind, biome: Biome, seed: u64, out: &mut Vec<Piece>) -> bool {
 // ------------------------------------------------------------------------------ helpers
 
 /// A dome standing on `base`: `r` across at its foot, `h` high.
-fn dome(p: &mut Parts, m: Mat, base: Vec3, r: f32, h: f32, col: Vec4) {
+pub(crate) fn dome(p: &mut Parts, m: Mat, base: Vec3, r: f32, h: f32, col: Vec4) {
     let rings = 5;
     for k in 0..rings {
         let a0 = k as f32 / rings as f32 * PI * 0.5;
@@ -296,7 +296,7 @@ fn dome(p: &mut Parts, m: Mat, base: Vec3, r: f32, h: f32, col: Vec4) {
 }
 
 /// A sheet seen from both sides (a sail, an awning, a net).
-fn sheet(p: &mut Parts, m: Mat, a: Vec3, b: Vec3, c: Vec3, d: Vec3, col: Vec4) {
+pub(crate) fn sheet(p: &mut Parts, m: Mat, a: Vec3, b: Vec3, c: Vec3, d: Vec3, col: Vec4) {
     p.quad(m, a, b, c, d, col);
     p.quad(m, d, c, b, a, shade(col, 0.85));
 }

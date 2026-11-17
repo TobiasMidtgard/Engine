@@ -34,7 +34,7 @@ struct Sample {
     clock_s: f64,
     coins: f64,
     /// People per island and tier.
-    people: Vec<[f32; 2]>,
+    people: Vec<[f32; Tier::COUNT]>,
 }
 
 /// The ledger's state and the history its charts draw.
@@ -379,7 +379,8 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
                 .pick_ignore(),
         )
         .child(workforce(Tier::Fisherfolk))
-        .child(workforce(Tier::Labourers));
+        .child(workforce(Tier::Labourers))
+        .child(workforce(Tier::Burghers));
     let book = brass::plate()
         .with_style(|s| {
             s.direction(Direction::Column)

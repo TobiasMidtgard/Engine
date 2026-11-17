@@ -25,6 +25,8 @@ enum Aim {
     /// The first building of this kind on an island, seen from its front: yaw 0 looks
     /// straight at the front, a positive yaw walks round to its left.
     Front(crate::defs::Kind, usize),
+    /// The first house of this tier on an island, seen from its front like [`Aim::Front`].
+    Home(crate::defs::Tier, usize),
     /// The first vessel of this craft.
     Craft(Craft),
     At(f64, f64),
@@ -43,6 +45,8 @@ struct View {
     clean: bool,
     /// Draw the fog of war (off for views of lands not yet explored).
     fog: bool,
+    /// Select the building the view aims at, so its card shows.
+    card: bool,
 }
 
 const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
@@ -55,11 +59,12 @@ const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
         pitch_deg: None,
         clean: false,
         fog: true,
+        card: false,
     }
 }
 
 fn views() -> Vec<View> {
-    use crate::defs::Kind as K;
+    use crate::defs::{Kind as K, Tier as T};
     vec![
         View {
             pitch_deg: Some(52.0),
@@ -318,6 +323,80 @@ fn views() -> Vec<View> {
             pitch_deg: Some(20.0),
             ..v("gardens", Aim::Kind(K::House, 0), 0.75, 40.0)
         },
+        // Round 6: the paved middle, the Burghers and what they live on.
+        View {
+            clean: true,
+            pitch_deg: Some(38.0),
+            ..v("paved_centre", Aim::Town, 0.9, 170.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(24.0),
+            ..v("burghers", Aim::Home(T::Burghers, 0), -0.45, 40.0)
+        },
+        View {
+            card: true,
+            pitch_deg: Some(24.0),
+            ..v("burgher_card", Aim::Home(T::Burghers, 0), -0.5, 60.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(42.0),
+            ..v("school", Aim::Front(K::School, 0), 0.4, 44.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(42.0),
+            ..v("tavern", Aim::Front(K::Tavern, 0), -0.4, 42.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("glassworks", Aim::Front(K::Glassworks, 0), 0.6, 34.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("saltery", Aim::Front(K::Saltery, 0), 0.6, 30.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("furrier", Aim::Front(K::Furrier, 0), -0.6, 28.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("lamp_maker", Aim::Front(K::LampMaker, 0), 0.6, 26.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("confectioner", Aim::Front(K::Confectioner, 1), 0.6, 28.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(24.0),
+            ..v("dirt_lane", Aim::Kind(K::SheepFarm, 0), 4.0, 70.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("villas", Aim::Home(T::Burghers, 5), 0.5, 46.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("mansions", Aim::Home(T::Burghers, 9), 0.5, 46.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("merchants", Aim::Home(T::Burghers, 12), 0.5, 46.0)
+        },
         v("harbour", Aim::Kind(K::Harbour, 0), 3.4, 190.0),
         v("market", Aim::Kind(K::Market, 0), 1.2, 90.0),
         View {
@@ -373,13 +452,8 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
             let (_, c) = crate::town::far_site(*i)?;
             DVec3::new(c.x, 0.0, c.y)
         }
-        Aim::Kind(k, isle) | Aim::Front(k, isle) => {
-            let mut q = world.query::<&Building>();
-            let b = q
-                .iter(world)
-                .filter(|b| b.kind == *k && b.island == *isle)
-                .min_by_key(|b| b.id)?
-                .clone();
+        Aim::Kind(..) | Aim::Front(..) | Aim::Home(..) => {
+            let b = aimed_building(world, aim)?;
             let c = crate::grid::footprint_center(b.kind, b.origin, b.rot);
             DVec3::new(c.x, b.base_y, c.y)
         }
@@ -391,6 +465,28 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
     })
 }
 
+/// The building a view aims at: the first of its kind (or the first house of its tier) on
+/// the island.
+fn aimed_building(world: &mut World, aim: &Aim) -> Option<Building> {
+    match aim {
+        Aim::Kind(k, isle) | Aim::Front(k, isle) => {
+            let mut q = world.query::<&Building>();
+            q.iter(world)
+                .filter(|b| b.kind == *k && b.island == *isle)
+                .min_by_key(|b| b.id)
+                .cloned()
+        }
+        Aim::Home(tier, isle) => {
+            let mut q = world.query::<(&Building, &crate::sim::House)>();
+            q.iter(world)
+                .filter(|(b, h)| h.tier == *tier && b.island == *isle)
+                .min_by_key(|(b, _)| b.id)
+                .map(|(b, _)| b.clone())
+        }
+        _ => None,
+    }
+}
+
 /// The heading of the craft a view follows (0 for other views).
 fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
     if let Aim::FarTown(i) = aim {
@@ -400,17 +496,12 @@ fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
             (-d.x).atan2(-d.y) as f32
         });
     }
-    if let Aim::Front(k, isle) = aim {
+    if matches!(aim, Aim::Front(..) | Aim::Home(..)) {
         // The yaw that looks at the building's front from before it.
-        let mut q = world.query::<&Building>();
-        return q
-            .iter(world)
-            .filter(|b| b.kind == *k && b.island == *isle)
-            .min_by_key(|b| b.id)
-            .map_or(0.0, |b| {
-                let fd = crate::grid::front_dir(b.rot).as_vec2();
-                fd.x.atan2(fd.y)
-            });
+        return aimed_building(world, aim).map_or(0.0, |b| {
+            let fd = crate::grid::front_dir(b.rot).as_vec2();
+            fd.x.atan2(fd.y)
+        });
     }
     let Aim::Craft(c) = aim else {
         return 0.0;
@@ -512,6 +603,15 @@ pub fn run(mut app: App, only: Option<&str>) {
             }
         }
         set_hud(&mut app.world, !view.clean);
+        let chosen = if view.card {
+            aimed_building(&mut app.world, &view.aim).and_then(|b| {
+                let mut q = app.world.query::<(Entity, &Building)>();
+                q.iter(&app.world).find(|(_, x)| x.id == b.id).map(|x| x.0)
+            })
+        } else {
+            None
+        };
+        crate::tools::select(&mut app.world, chosen);
         if let Some(mut fog) = app.world.get_resource_mut::<crate::fog::FogOfWar>() {
             fog.shown = view.fog;
         }

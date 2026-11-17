@@ -132,13 +132,42 @@ fn street_grid(world: &mut World, center: DVec2, radius: f64, block: i32, yaw_ce
     let r = (radius / CELL_M) as i32;
     let _ = yaw_cells;
     let inside = |p: IVec2| (grid::cell_center(p) - center).length() < radius;
+    let mut laid: Vec<IVec2> = Vec::new();
     for k in (-r..=r).step_by(block as usize) {
         for i in -r..=r {
             for p in [c + IVec2::new(i, k), c + IVec2::new(k, i)] {
-                if inside(p) && grid::cell_roadable(p) && world.resource::<Grid>().is_free(p) {
-                    let _ = place_road(world, p, false);
+                if inside(p)
+                    && grid::cell_roadable(p)
+                    && world.resource::<Grid>().is_free(p)
+                    && place_road(world, p, false).is_ok()
+                {
+                    laid.push(p);
                 }
             }
+        }
+    }
+    // Take up the bits a cliff or a beach cut off from the rest: a building that joined one
+    // of them would have a road at its door that leads nowhere.
+    let roads = world.resource::<Grid>().roads.clone();
+    let Some(seed) = roads
+        .iter()
+        .copied()
+        .min_by_key(|p| ((*p - c).as_i64vec2().length_squared(), p.x, p.y))
+    else {
+        return;
+    };
+    let mut seen: HashSet<IVec2> = HashSet::from([seed]);
+    let mut q = VecDeque::from([seed]);
+    while let Some(p) = q.pop_front() {
+        for n in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
+            if roads.contains(&(p + n)) && seen.insert(p + n) {
+                q.push_back(p + n);
+            }
+        }
+    }
+    for p in laid {
+        if !seen.contains(&p) {
+            build::remove_road(world, p);
         }
     }
 }
@@ -521,6 +550,7 @@ fn far_town(
     street: i32,
     radius: f64,
     houses: usize,
+    burghers: usize,
 ) -> Option<(Entity, DVec2)> {
     let (coast, middle) = far_site(isle)?;
     let Some(h) = place_near(world, Kind::Harbour, coast, 40, false) else {
@@ -542,7 +572,28 @@ fn far_town(
         );
     }
     place_near(world, Kind::Market, village, 15, true);
+    if burghers > 0 {
+        // The merchants' quarter: a school, a tavern, a paved middle and the first big houses.
+        place_near(
+            world,
+            Kind::School,
+            village + DVec2::new(36.0, 30.0),
+            15,
+            true,
+        );
+        place_near(
+            world,
+            Kind::Tavern,
+            village + DVec2::new(-36.0, 28.0),
+            15,
+            true,
+        );
+        fill_houses(world, village, 55.0, burghers, Tier::Burghers);
+    }
     fill_houses(world, village, radius + 25.0, houses, Tier::Fisherfolk);
+    if burghers > 0 {
+        build::pave_round(world, village, 62.0);
+    }
     Some((h, village))
 }
 
@@ -577,7 +628,7 @@ fn far_lands(world: &mut World) -> FarLands {
         move |a: f64, r: f64| town + DVec2::from_angle(a).rotate(inland) * r
     };
     // --- Sarrowmere: stilt houses on the jungle coast, cane and rum.
-    if let Some((h, town)) = far_town(world, 5, 14, 85.0, 44) {
+    if let Some((h, town)) = far_town(world, 5, 14, 85.0, 44, 5) {
         out.sarrow = Some(h);
         let at = ring(5, town);
         place_near(world, Kind::Chapel, at(2.2, 70.0), 20, true);
@@ -592,7 +643,7 @@ fn far_lands(world: &mut World) -> FarLands {
         }
         out.sarrow_mast = place_near(world, Kind::AirshipMast, at(-1.9, 150.0), 40, true);
     }
-    if let Some((h, town)) = far_town(world, 6, 9, 50.0, 14) {
+    if let Some((h, town)) = far_town(world, 6, 9, 50.0, 14, 0) {
         out.palm = Some(h);
         let at = ring(6, town);
         along_shore(world, h, Kind::Fishery, 1, 70.0);
@@ -600,7 +651,7 @@ fn far_lands(world: &mut World) -> FarLands {
         woodcutters_near(world, 6, town, 1);
     }
     // --- The Amber Reach: mud-brick towns, dates under the palms, salt from the shore.
-    if let Some((h, town)) = far_town(world, 9, 14, 85.0, 40) {
+    if let Some((h, town)) = far_town(world, 9, 14, 85.0, 40, 5) {
         out.amber = Some(h);
         let at = ring(9, town);
         place_near(world, Kind::Chapel, at(2.2, 70.0), 20, true);
@@ -612,7 +663,7 @@ fn far_lands(world: &mut World) -> FarLands {
         place_near(world, Kind::Weaver, at(-1.5, 140.0), 30, true);
         out.amber_mast = place_near(world, Kind::AirshipMast, at(1.7, 160.0), 40, true);
     }
-    if let Some((h, town)) = far_town(world, 10, 9, 50.0, 16) {
+    if let Some((h, town)) = far_town(world, 10, 9, 50.0, 16, 0) {
         out.salt = Some(h);
         let at = ring(10, town);
         along_shore(world, h, Kind::Fishery, 1, 70.0);
@@ -622,7 +673,7 @@ fn far_lands(world: &mut World) -> FarLands {
         place_near(world, Kind::DateGrove, at(0.0, 210.0), 40, true);
     }
     // --- Frostholm: cabins under snow, furs from the spruce woods, oil from the ice edge.
-    if let Some((h, town)) = far_town(world, 12, 14, 85.0, 38) {
+    if let Some((h, town)) = far_town(world, 12, 14, 85.0, 38, 5) {
         out.frost = Some(h);
         let at = ring(12, town);
         place_near(world, Kind::Chapel, at(2.2, 70.0), 20, true);
@@ -638,7 +689,7 @@ fn far_lands(world: &mut World) -> FarLands {
         }
         out.frost_mast = place_near(world, Kind::AirshipMast, at(-1.8, 150.0), 40, true);
     }
-    if let Some((h, _)) = far_town(world, 13, 9, 50.0, 14) {
+    if let Some((h, _)) = far_town(world, 13, 9, 50.0, 14, 0) {
         out.rock = Some(h);
         along_shore(world, h, Kind::Fishery, 1, 70.0);
         along_shore(world, h, Kind::OilWorks, 2, 130.0);
@@ -669,9 +720,25 @@ pub fn build_start(world: &mut World) {
         25,
         true,
     );
-    let inner = fill_houses(world, town, 95.0, 16, Tier::Labourers);
+    // What Burghers ask for, and Burghers round the market.
+    place_near(
+        world,
+        Kind::School,
+        town + DVec2::new(-58.0, -46.0),
+        25,
+        true,
+    );
+    place_near(
+        world,
+        Kind::Tavern,
+        town + DVec2::new(-52.0, 44.0),
+        25,
+        true,
+    );
+    let core = fill_houses(world, town, 75.0, 8, Tier::Burghers);
+    let inner = fill_houses(world, town, 100.0, 16, Tier::Labourers);
     let outer = fill_houses(world, town, 190.0, 44, Tier::Fisherfolk);
-    let _ = (inner, outer);
+    let _ = (core, inner, outer);
     let hb = world.get::<Building>(h_harbour).cloned().unwrap();
     let hc = grid::footprint_center(hb.kind, hb.origin, hb.rot);
     let along = DVec2::new(
@@ -680,7 +747,7 @@ pub fn build_start(world: &mut World) {
     );
     let mut boats = 0;
     for k in [-1.0, 1.0, -2.0, 2.0, -3.0, 3.0] {
-        if boats < 3
+        if boats < 5
             && let Some(e) = place_near(world, Kind::Fishery, hc + along * (80.0 * k), 25, false)
         {
             join_to_roads(world, e);
@@ -699,16 +766,22 @@ pub fn build_start(world: &mut World) {
     place_near(world, Kind::Sawmill, toward(0.6, 210.0), 30, true);
     place_near(world, Kind::Sawmill, toward(0.9, 230.0), 30, true);
     place_near(world, Kind::Weaver, toward(2.4, 215.0), 30, true);
+    place_near(world, Kind::Weaver, toward(2.65, 235.0), 30, true);
     place_near(world, Kind::SheepFarm, toward(2.9, 300.0), 40, true);
     place_near(world, Kind::SheepFarm, toward(3.4, 320.0), 40, true);
     place_near(world, Kind::ClayPit, toward(4.2, 260.0), 40, true);
     place_near(world, Kind::Brickworks, toward(4.5, 230.0), 30, true);
     let h_mast = place_near(world, Kind::AirshipMast, toward(5.4, 240.0), 40, true);
+    // The manufactories: glass from sand, and what the packets land made into Burghers' goods.
+    place_near(world, Kind::Glassworks, toward(1.5, 250.0), 35, true);
+    place_near(world, Kind::Saltery, toward(0.25, 205.0), 30, true);
+    place_near(world, Kind::Furrier, toward(2.0, 255.0), 30, true);
+    place_near(world, Kind::LampMaker, toward(1.15, 205.0), 30, true);
     // --- Brannsey: grain, flour, bread, hops and ale.
     let b_harbour = harbour_toward(world, 1, isles[0].center);
     if let Some(bh) = b_harbour {
         let village = street_inland(world, bh, 16);
-        street_grid(world, village, 90.0, 7, false);
+        street_grid(world, village, 135.0, 7, false);
         place_near(world, Kind::Market, village, 15, true);
         place_near(
             world,
@@ -717,14 +790,29 @@ pub fn build_start(world: &mut World) {
             20,
             true,
         );
-        fill_houses(world, village, 100.0, 20, Tier::Labourers);
-        fill_houses(world, village, 130.0, 4, Tier::Fisherfolk);
+        fill_houses(world, village, 140.0, 48, Tier::Labourers);
+        fill_houses(world, village, 150.0, 4, Tier::Fisherfolk);
         // Farms out on the open land behind the village, where their fields have room.
         let inland = (isles[1].center - village).normalize();
         let out = |a: f64, r: f64| village + DVec2::from_angle(a).rotate(inland) * r;
-        for (a, r) in [(-0.8, 240.0), (0.05, 300.0), (0.85, 250.0)] {
+        for (a, r) in [
+            (-0.8, 240.0),
+            (0.05, 300.0),
+            (0.85, 250.0),
+            (-0.4, 380.0),
+            (0.5, 390.0),
+        ] {
             place_near(world, Kind::GrainFarm, out(a, r), 40, true);
         }
+        // (Brannsey bakes for all the home isles: four mills, four bakeries.)
+        for (a, r) in [(-0.35, 175.0), (0.45, 185.0), (1.1, 170.0)] {
+            place_near(world, Kind::Mill, out(a, r), 40, true);
+        }
+        for d in [DVec2::new(75.0, -35.0), DVec2::new(-20.0, -100.0)] {
+            place_near(world, Kind::Bakery, village + d, 45, true);
+        }
+        place_near(world, Kind::Brewery, out(-1.0, 165.0), 40, true);
+        place_near(world, Kind::HopFarm, out(0.0, 190.0), 40, true);
         place_near(
             world,
             Kind::Mill,
@@ -861,6 +949,26 @@ pub fn build_start(world: &mut World) {
             true,
         );
     }
+    // Brannsey has the flour: its confectioner bakes the dates the steamers bring.
+    let brannsey_market = {
+        let mut q = world.query::<&Building>();
+        q.iter(world)
+            .filter(|b| b.kind == Kind::Market && b.island == 1)
+            .min_by_key(|b| b.id)
+            .map(|b| grid::footprint_center(b.kind, b.origin, b.rot))
+    };
+    if let Some(m) = brannsey_market {
+        place_near(
+            world,
+            Kind::Confectioner,
+            m + DVec2::new(45.0, 35.0),
+            25,
+            true,
+        );
+        build::pave_round(world, m, 60.0);
+    }
+    // Haverholm's centre is paved; villages and the far towns keep their earth streets.
+    build::pave_round(world, town, 118.0);
     // --- The far regions: a first town and an outpost in each (see `far_town`).
     // (ARCH_NO_FAR leaves their shores empty, for "before" pictures.)
     let far = if std::env::var_os("ARCH_NO_FAR").is_some() {
@@ -897,10 +1005,28 @@ pub fn build_start(world: &mut World) {
             // Far from the weavers of home.
             books.add(Good::Clothes, 40.0);
             books.add(Good::Fish, 20.0);
+            if matches!(isle, 5 | 9 | 12) {
+                // What the merchants' quarter brought out with it.
+                books.add(Good::SaltFish, 12.0);
+                books.add(Good::Coats, 12.0);
+            }
         } else {
             // The last packets left a little of everything from overseas.
             for g in Good::ALL.into_iter().filter(|g| g.overseas()) {
-                books.add(g, 14.0);
+                // (Haverholm's manufactories work them up; the next packet is weeks out.)
+                books.add(g, if k == 0 { 40.0 } else { 14.0 });
+            }
+            if k == 0 {
+                // Haverholm's manufactories have been at work.
+                for (g, n) in [
+                    (Good::Glass, 14.0),
+                    (Good::SaltFish, 14.0),
+                    (Good::DateCakes, 10.0),
+                    (Good::Coats, 12.0),
+                    (Good::Lamps, 8.0),
+                ] {
+                    books.add(g, n);
+                }
             }
         }
     }
@@ -933,7 +1059,7 @@ pub fn build_start(world: &mut World) {
         lines.push((
             pair(
                 "Bread and ale run",
-                (b, &[Good::Bread, Good::Ale]),
+                (b, &[Good::Bread, Good::Ale, Good::DateCakes]),
                 (h, &[Good::Planks, Good::Clothes, Good::Fish]),
                 false,
             ),
@@ -967,7 +1093,7 @@ pub fn build_start(world: &mut World) {
                     },
                     Stop {
                         at: b,
-                        load: vec![Good::Bread, Good::Ale, Good::Grain],
+                        load: vec![Good::Bread, Good::Ale],
                         unload: to_brannsey,
                     },
                 ],
@@ -991,7 +1117,7 @@ pub fn build_start(world: &mut World) {
         ));
     }
     // The packets: out with cloth and brick, home with what only the far lands give.
-    let out: &[Good] = &[Good::Clothes, Good::Bricks];
+    let out: &[Good] = &[Good::Clothes, Good::Bricks, Good::SaltFish, Good::Coats];
     if let (Some(h), Some(f)) = (h_id, id(world, far.sarrow)) {
         lines.push((
             pair(
@@ -1022,7 +1148,10 @@ pub fn build_start(world: &mut World) {
             pair(
                 "Amber Reach packet",
                 (f, &[Good::Dates, Good::Salt]),
-                (h, &[Good::Planks, Good::Bricks]),
+                (
+                    h,
+                    &[Good::Planks, Good::Bricks, Good::SaltFish, Good::Coats],
+                ),
                 false,
             ),
             &[
@@ -1172,6 +1301,32 @@ pub fn prewarm(world: &mut World, seconds: f32) {
         )>,
         ResMut<crate::sim::Shipments>,
     )>::new(world);
+    // Each route as (island, loads, unloads) per stop.
+    let isle_of: std::collections::HashMap<u32, usize> = world
+        .query::<&Building>()
+        .iter(world)
+        .map(|b| (b.id, b.island))
+        .collect();
+    type PaperStop = (usize, Vec<Good>, Vec<Good>);
+    let routes: Vec<Vec<PaperStop>> = world
+        .get_resource::<Routes>()
+        .map(|r| {
+            r.0.iter()
+                .filter_map(|route| {
+                    route
+                        .stops
+                        .iter()
+                        .map(|s| {
+                            isle_of
+                                .get(&s.at)
+                                .map(|i| (*i, s.load.clone(), s.unload.clone()))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut holds: Vec<Vec<(Good, u32)>> = vec![Vec::new(); routes.len()];
     let mut t = 0.0;
     while t < seconds {
         let Ok((mut econ, mut houses, mut producers, mut ship)) = sys.get_mut(world) else {
@@ -1187,6 +1342,23 @@ pub fn prewarm(world: &mut World, seconds: f32) {
             }
         }
         t += 1.0;
+        // The ships are not sailing yet: every minute and a half each route makes one round
+        // on paper (an ocean route every third time), so islands start with what the
+        // routes bring them.
+        if t % 90.0 == 0.0 {
+            let round = (t / 90.0) as u32;
+            for (k, route) in routes.iter().enumerate() {
+                let far = route.iter().any(|s| s.0 >= 4) && route.iter().any(|s| s.0 < 4);
+                if far && !round.is_multiple_of(3) {
+                    continue;
+                }
+                let cargo = &mut holds[k];
+                // Twice round, so what the last stop loads reaches the first.
+                for (isle, load, unload) in route.iter().chain(route.iter()) {
+                    crate::fleet::exchange(&mut econ.islands[*isle], cargo, load, unload, 4, 24);
+                }
+            }
+        }
     }
     sys.apply(world);
 }
@@ -1231,7 +1403,7 @@ pub mod tests {
             .collect();
         kinds.sort();
         assert!(total >= 30, "only {total} workshops: {kinds:?}");
-        let mut tiers = vec![[0; 2]; islands().len()];
+        let mut tiers = vec![[0; Tier::COUNT]; islands().len()];
         for (b, h) in w.query::<(&Building, &House)>().iter(&w) {
             tiers[b.island][h.tier.index()] += 1;
         }
@@ -1299,6 +1471,63 @@ pub mod tests {
                 assert!(on.contains(k), "no {k:?} on {name}: {on:?}");
             }
         }
+        // Brannsey bakes and brews for the home isles.
+        for (kind, n) in [
+            (Kind::GrainFarm, 5),
+            (Kind::Mill, 4),
+            (Kind::Bakery, 4),
+            (Kind::HopFarm, 3),
+            (Kind::Brewery, 2),
+        ] {
+            let have = w
+                .query::<&Building>()
+                .iter(&w)
+                .filter(|b| b.island == 1 && b.kind == kind)
+                .count();
+            assert!(have >= n, "{have} {kind:?} on Brannsey");
+        }
+        // Haverholm's centre is paved and Burghers live on it, with what they ask for; the
+        // villages keep earth streets.
+        let (roads, paved) = {
+            let g = w.resource::<Grid>();
+            (g.roads.len(), g.paved.len())
+        };
+        assert!(
+            paved > 100 && paved * 2 < roads,
+            "{paved} of {roads} road cells paved"
+        );
+        assert!(tiers[0][Tier::Burghers.index()] >= 6, "{:?}", tiers[0]);
+        for (isle, kinds) in [
+            (
+                0,
+                &[
+                    Kind::Glassworks,
+                    Kind::Saltery,
+                    Kind::Furrier,
+                    Kind::LampMaker,
+                    Kind::School,
+                    Kind::Tavern,
+                ][..],
+            ),
+            (1, &[Kind::Confectioner]),
+        ] {
+            for k in kinds {
+                assert!(
+                    w.query::<&Building>()
+                        .iter(&w)
+                        .any(|b| b.island == isle && b.kind == *k),
+                    "no {k:?} on {}",
+                    islands()[isle].name
+                );
+            }
+        }
+        build::refresh(&mut w);
+        for (b, h) in w.query::<(&Building, &House)>().iter(&w) {
+            if h.tier == Tier::Burghers {
+                assert!(h.paved, "a Burghers' house off the paving on {}", b.island);
+                assert_eq!(h.services, [true; 4], "house {} lacks a service", b.id);
+            }
+        }
         // The sea joins the two ends of every shipping route.
         for route in routes.iter().filter(|r| !r.air) {
             let ends: Vec<DVec2> = route
@@ -1360,7 +1589,7 @@ pub mod tests {
         let (a, b) = (*legs[0].last().unwrap(), legs[1][0]);
         assert!(crate::globe::distance(a, b) < 1.0);
         assert!(
-            linked * 10 >= total * 9,
+            unlinked.is_empty(),
             "{linked} of {total} linked; not: {unlinked:?}"
         );
         prewarm(&mut w, 600.0);
@@ -1374,8 +1603,25 @@ pub mod tests {
             .filter(|(_, p)| p.status != Status::Working)
             .map(|(b, p)| format!("{:?}@{}: {}", b.kind, b.island, p.status.text()))
             .collect();
+        // Every house pays the plain sum of its met needs: never more than its tier's full
+        // income, and a full Fisherfolk house with fish, clothes and a market pays just that.
+        let mut paid = 0.0;
+        let mut full_fisher = 0;
+        for h in w.query::<&House>().iter(&w) {
+            assert!(h.income <= h.tier.full_income() + 1e-3);
+            paid += h.income;
+            if h.tier == Tier::Fisherfolk && h.residents > 9.9 && h.income > 1.99 {
+                full_fisher += 1;
+            }
+        }
+        assert!(full_fisher > 20, "{full_fisher} full Fisherfolk houses");
         let econ = w.resource::<Economy>();
-        let pop: Vec<[f32; 2]> = econ.islands.iter().map(|b| b.population).collect();
+        assert!(
+            (paid as f64 - econ.taxes_per_min).abs() < econ.taxes_per_min * 0.25,
+            "houses pay {paid:.0}, the books say {:.0}",
+            econ.taxes_per_min
+        );
+        let pop: Vec<[f32; Tier::COUNT]> = econ.islands.iter().map(|b| b.population).collect();
         assert!(
             working * 4 >= total * 3,
             "{working} of {total} working: {idle:?}; people {pop:?}"

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::build;
 use crate::camera::StrategyCam;
-use crate::defs::{DEFS, Good, Kind};
+use crate::defs::{DEFS, Good, Kind, Tier};
 use crate::fleet::{Roam, Route, Routes, Stop, Vessel, mast_point, mooring, spawn_vessel};
 use crate::globe;
 use crate::grid::{self, Grid};
@@ -72,17 +72,43 @@ pub fn register(app: &mut App) {
                         "people": population(b),
                         "fisherfolk": b.population[0],
                         "labourers": b.population[1],
+                        "burghers": b.population[2],
                         "harbours": b.harbours,
                         "stock": stock,
                         "workforce": b.workforce,
                     })
                 })
                 .collect();
-            let mut houses = [0usize; 2];
+            let mut houses = [0usize; Tier::COUNT];
+            let mut house_income = 0.0f32;
             let mut q = world.query::<&House>();
             for h in q.iter(world) {
                 houses[h.tier.index()] += 1;
+                house_income += h.income;
             }
+            // What every need is worth, tier by tier: people into a full house and coins a
+            // minute. Plain values; nothing in the game is a percentage of taxes.
+            let needs: Vec<Value> = Tier::ALL
+                .iter()
+                .map(|t| {
+                    let wants: Vec<Value> = t
+                        .wants()
+                        .iter()
+                        .map(|w| {
+                            let (what, name) = match w.need {
+                                crate::defs::Need::Good(g) => ("good", g.name()),
+                                crate::defs::Need::Service(k) => ("service", k.def().name),
+                            };
+                            json!({"need": name, "kind": what, "people": w.people, "coins": w.coins})
+                        })
+                        .collect();
+                    json!({"tier": t.name(), "house": t.capacity(), "full_income": t.full_income(), "wants": wants})
+                })
+                .collect();
+            let (roads, paved) = {
+                let g = world.resource::<crate::grid::Grid>();
+                (g.roads.len(), g.paved.len())
+            };
             let mut q = world.query::<&Producer>();
             let working = q.iter(world).filter(|p| p.efficiency > 0.5).count();
             let carts = world.query::<&crate::logistics::Cart>().iter(world).count();
@@ -95,7 +121,10 @@ pub fn register(app: &mut App) {
                 "balance_per_min": econ.balance_per_min,
                 "clock_s": econ.clock_s,
                 "speed": econ.speed,
-                "houses": {"fisherfolk": houses[0], "labourers": houses[1]},
+                "houses": {"fisherfolk": houses[0], "labourers": houses[1], "burghers": houses[2]},
+                "house_income_per_min": house_income,
+                "needs": needs,
+                "roads": {"cells": roads, "paved": paved},
                 "workshops_working": working,
                 "carts": carts,
                 "walkers": walkers,
@@ -117,7 +146,7 @@ pub fn register(app: &mut App) {
                         json!({
                             "kind": d.kind, "name": d.name, "size": [d.size.0, d.size.1], "coins": d.coins,
                             "cost": d.cost.iter().map(|(g, n)| json!([g.name(), n])).collect::<Vec<_>>(),
-                            "input": d.input.map(Good::name), "output": d.output.map(Good::name), "cycle_s": d.cycle_s,
+                            "input": d.input.map(Good::name), "input2": d.input2.map(Good::name), "output": d.output.map(Good::name), "cycle_s": d.cycle_s,
                         })
                     })
                     .collect(),
@@ -140,10 +169,11 @@ pub fn register(app: &mut App) {
     )
     .register_api(
         "isle.road",
-        "Lay road from one cell to another (x first, then z).",
-        r#"{"from": [10, 4], "to": [18, 9]}"#,
+        "Lay road from one cell to another (x first, then z); paved lays setts, over dirt too.",
+        r#"{"from": [10, 4], "to": [18, 9], "paved": false}"#,
         |world, args| {
-            let n = build::place_road_line(world, cell(&args, "from")?, cell(&args, "to")?, !args["free"].as_bool().unwrap_or(false))?;
+            let paved = args["paved"].as_bool().unwrap_or(false);
+            let n = build::place_road_line(world, cell(&args, "from")?, cell(&args, "to")?, paved, !args["free"].as_bool().unwrap_or(false))?;
             Ok(json!({"cells": n}))
         },
     )
@@ -171,6 +201,7 @@ pub fn register(app: &mut App) {
                         "id": b.id, "kind": b.kind, "island": b.island, "at": [b.origin.x, b.origin.y], "rot": b.rot,
                         "status": p.map(|p| p.status.text()), "efficiency": p.map(|p| p.efficiency),
                         "tier": h.map(|h| h.tier.name()), "residents": h.map(|h| h.residents),
+                        "income": h.map(|h| h.income), "paved": h.map(|h| h.paved),
                     })
                 })
                 .collect();

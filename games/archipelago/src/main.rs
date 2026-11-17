@@ -14,6 +14,7 @@
 mod api;
 mod art;
 mod build;
+mod burgher;
 mod camera;
 mod civic;
 mod defs;

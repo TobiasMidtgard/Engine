@@ -27,6 +27,8 @@ pub enum Tool {
         rot: u8,
     },
     Road,
+    /// The road tool laying setts: over dirt, or a new paved road.
+    Paving,
     Demolish,
 }
 
@@ -63,7 +65,7 @@ fn set_tool(world: &mut World, tool: Tool) {
     crate::hud::tool_changed(world);
 }
 
-fn select(world: &mut World, e: Option<Entity>) {
+pub(crate) fn select(world: &mut World, e: Option<Entity>) {
     world.resource_mut::<Hand>().selected = e;
     crate::hud::show_card(world);
 }
@@ -93,12 +95,20 @@ pub fn action(world: &mut World, a: &str) {
         };
         set_tool(
             world,
-            if k == Kind::Road {
-                Tool::Road
-            } else {
-                Tool::Build { kind: k, rot }
+            match k {
+                Kind::Road => Tool::Road,
+                Kind::PavedRoad => Tool::Paving,
+                _ => Tool::Build { kind: k, rot },
             },
         );
+    } else if a == "isle.tool.paved" {
+        // The road tool's other mode: dirt and paved in turn.
+        let next = if *world.resource::<Tool>() == Tool::Paving {
+            Tool::Road
+        } else {
+            Tool::Paving
+        };
+        set_tool(world, next);
     } else if a == "isle.tool:demolish" {
         set_tool(world, Tool::Demolish);
     } else if let Some(v) = a
@@ -285,14 +295,14 @@ pub fn input(world: &mut World) {
                 }
             }
         }
-        Tool::Road => {
+        tool @ (Tool::Road | Tool::Paving) => {
             let cell = camera::pick(world).map(|h| grid::cell_of(h.x, h.z));
             if buttons.just_pressed(MouseButton::Left) {
                 world.resource_mut::<Hand>().road_from = cell;
             }
             if buttons.just_released(MouseButton::Left)
                 && let (Some(a), Some(b)) = (world.resource_mut::<Hand>().road_from.take(), cell)
-                && let Err(msg) = build::place_road_line(world, a, b, true)
+                && let Err(msg) = build::place_road_line(world, a, b, tool == Tool::Paving, true)
             {
                 toast(world, "Road", &msg);
             }
@@ -366,7 +376,7 @@ fn preview(world: &mut World, tool: Tool) -> Option<Preview> {
                 msg,
             ))
         }
-        Tool::Road => {
+        tool @ (Tool::Road | Tool::Paving) => {
             let b = camera::pick(world).map(|h| grid::cell_of(h.x, h.z))?;
             let a = world.resource::<Hand>().road_from.unwrap_or(b);
             let mut cells = vec![a];
@@ -383,11 +393,20 @@ fn preview(world: &mut World, tool: Tool) -> Option<Preview> {
             let ok = cells
                 .iter()
                 .all(|c| g.is_road(*c) || (g.is_open(*c) && grid::cell_roadable(*c)));
-            let n = cells.iter().filter(|c| !g.is_road(**c)).count();
-            let msg = format!(
-                "Road: drag to lay {n} cells for {} coins.",
-                n * Kind::Road.def().coins as usize
-            );
+            let msg = if tool == Tool::Paving {
+                let n = cells.iter().filter(|c| !g.is_paved(**c)).count();
+                format!(
+                    "Paved road: drag to pave {n} cells for {} coins and {:.0} bricks.",
+                    n * Kind::PavedRoad.def().coins as usize,
+                    (n as f64 * crate::defs::PAVING_BRICKS).ceil()
+                )
+            } else {
+                let n = cells.iter().filter(|c| !g.is_road(**c)).count();
+                format!(
+                    "Dirt road: drag to lay {n} cells for {} coins.",
+                    n * Kind::Road.def().coins as usize
+                )
+            };
             Some((cells, ok, None, msg))
         }
         Tool::Demolish => {

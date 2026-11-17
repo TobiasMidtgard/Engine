@@ -1,5 +1,5 @@
-//! Laid streets: in town every road cell is a cobbled street with kerbstones, out in the
-//! country an earth lane with wheel ruts. The surfaces follow the ground and are rebuilt in
+//! Laid streets: a paved road cell is a cobbled street with kerbstones, a dirt one a bed of
+//! trodden earth with wheel ruts. The surfaces follow the ground and are rebuilt in
 //! 16 × 16 cell chunks, only where roads changed.
 
 use std::collections::{HashMap, HashSet};
@@ -8,18 +8,20 @@ use engine::prelude::*;
 use engine::render::{Mesh, Vertex};
 
 use crate::art::{Mat, hexc};
-use crate::defs::{CELL_M, Kind};
+use crate::defs::CELL_M;
 use crate::draw::Art;
 use crate::globe::{Frame, Local};
 use crate::grid::{self, Grid};
 use crate::island;
-use crate::sim::Building;
 
 const CHUNK: i32 = 16;
 /// Half the cobbled carriageway's width (a 4 m cell leaves a little verge).
 const HALF: f32 = 1.75;
 const KERB_W: f32 = 0.28;
 const KERB_H: f32 = 0.14;
+/// A dirt road's wheel tracks: how wide each is and how far from the middle.
+const TRACK_W: f32 = 0.62;
+const TRACK_GAP: f32 = 0.78;
 /// How far surfaces sit above the analytic ground (the terrain mesh is a little coarser).
 const LIFT: f32 = 0.07;
 
@@ -48,22 +50,6 @@ pub fn mark_all(world: &mut World) {
     }
 }
 
-/// Places that make the roads round them town streets: markets and harbours.
-fn town_spots(world: &mut World) -> Vec<(DVec2, f64)> {
-    let mut q = world.query::<&Building>();
-    q.iter(world)
-        .filter_map(|b| {
-            let r = match b.kind {
-                Kind::Market => 120.0,
-                Kind::Harbour => 70.0,
-                Kind::Chapel => 60.0,
-                _ => return None,
-            };
-            Some((grid::footprint_center(b.kind, b.origin, b.rot), r))
-        })
-        .collect()
-}
-
 /// Rebuild the street meshes of chunks whose roads changed.
 pub fn redraw_streets(world: &mut World) {
     let Some(art) = world.get_resource::<Art>().cloned() else {
@@ -88,9 +74,9 @@ pub fn redraw_streets(world: &mut World) {
         }
     };
     let roads = world.resource::<Grid>().roads.clone();
-    let towns = town_spots(world);
+    let paved = world.resource::<Grid>().paved.clone();
     let built: Vec<Vec<(Mat, Mesh)>> =
-        engine_ui::demo::art::par_map(chunks.len(), |i| chunk_meshes(chunks[i], &roads, &towns));
+        engine_ui::demo::art::par_map(chunks.len(), |i| chunk_meshes(chunks[i], &roads, &paved));
     let frame = *world.resource::<Frame>();
     for (chunk, meshes) in chunks.into_iter().zip(built) {
         let stand = frame.local(&chunk_space(chunk).1);
@@ -210,7 +196,7 @@ impl Builder {
     /// A kerb along an axis-aligned rectangle: a raised top and faces down into the ground on
     /// both long sides.
     fn kerb(&mut self, x0: f32, z0: f32, x1: f32, z1: f32, col: Vec4) {
-        self.rect(Mat::Stone, x0, z0, x1, z1, KERB_H, col);
+        self.rect(Mat::Plaster, x0, z0, x1, z1, KERB_H, col);
         // Faces on both long sides, from the kerb top down below the ground.
         let along_x = (x1 - x0) > (z1 - z0);
         let n = ((if along_x { x1 - x0 } else { z1 - z0 }) / 1.0)
@@ -248,7 +234,7 @@ impl Builder {
                 ];
                 let nrm = Vec3::new(face.x, 0.0, face.y);
                 let placed = quad.map(|p| self.put(p.x, p.y, p.z));
-                let mesh = self.mesh(Mat::Stone);
+                let mesh = self.mesh(Mat::Plaster);
                 let base = mesh.vertices.len() as u32;
                 for (p, at) in quad.iter().zip(placed) {
                     let along = if along_x { p.x } else { p.z };
@@ -295,16 +281,17 @@ fn hash01(c: IVec2, k: u32) -> f32 {
 }
 
 /// The street surfaces of one chunk, by material.
-fn chunk_meshes(chunk: IVec2, roads: &HashSet<IVec2>, towns: &[(DVec2, f64)]) -> Vec<(Mat, Mesh)> {
+fn chunk_meshes(chunk: IVec2, roads: &HashSet<IVec2>, paved: &HashSet<IVec2>) -> Vec<(Mat, Mesh)> {
     let (o, space) = chunk_space(chunk);
     let mut b = Builder {
         meshes: HashMap::new(),
         o,
         space,
     };
-    let cobble = hexc(0xb8b0a4);
-    let kerb = hexc(0xc8c4bc);
-    let rut = hexc(0x6a5640);
+    let cobble = hexc(0xe4e0d8);
+    let kerb = hexc(0xd6d2c8);
+    let track = hexc(0x8f7e68);
+    let grass = hexc(0x5c7438);
     let lo = chunk * CHUNK;
     let half_cell = CELL_M as f32 * 0.5;
     for z in lo.y..lo.y + CHUNK {
@@ -317,8 +304,7 @@ fn chunk_meshes(chunk: IVec2, roads: &HashSet<IVec2>, towns: &[(DVec2, f64)]) ->
             let (cx, cz) = ((m.x - o.x) as f32, (m.y - o.y) as f32);
             let link =
                 [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y].map(|d| roads.contains(&(c + d)));
-            let in_town = towns.iter().any(|(p, r)| (*p - m).length() < *r);
-            if in_town {
+            if paved.contains(&c) {
                 // Cobbles: a slightly different stone tone per cell, like relaid patches.
                 let t = 0.9 + 0.14 * hash01(c, 1);
                 let col = Vec4::new(cobble.x * t, cobble.y * t, cobble.z * t, 1.0);
@@ -462,41 +448,86 @@ fn chunk_meshes(chunk: IVec2, roads: &HashSet<IVec2>, towns: &[(DVec2, f64)]) ->
                     }
                 }
             } else {
-                // An earth lane: two wheel ruts along each linked direction, through the middle.
-                let col = Vec4::new(rut.x, rut.y, rut.z, 1.0) * (0.9 + 0.2 * hash01(c, 2));
-                let col = col.with_w(1.0);
-                let (w, gap) = (0.32f32, 0.72f32);
+                // A dirt road: the ground's own bare earth shows under it; on that, two pale
+                // wheel tracks worn smooth along each linked direction and a strip of grass
+                // left standing between them.
+                let tone = |k: u32| 0.9 + 0.2 * hash01(c, k);
+                let tint = |v: Vec4, t: f32| Vec4::new(v.x * t, v.y * t, v.z * t, 1.0);
                 let along_x = link[0] || link[1];
                 let along_z = link[2] || link[3];
+                let crossing = along_x && along_z;
+                if crossing {
+                    // Where tracks meet, the whole middle is trodden bare.
+                    b.rect(
+                        Mat::Plaster,
+                        cx - TRACK_GAP - TRACK_W * 0.5,
+                        cz - TRACK_GAP - TRACK_W * 0.5,
+                        cx + TRACK_GAP + TRACK_W * 0.5,
+                        cz + TRACK_GAP + TRACK_W * 0.5,
+                        LIFT * 0.6,
+                        tint(track, tone(3)),
+                    );
+                }
+                // (A lone cell gets a short stub of track along x.)
+                let (x0, x1) = (
+                    if link[1] { cx - half_cell } else { cx - 0.9 },
+                    if link[0] { cx + half_cell } else { cx + 0.9 },
+                );
+                let (z0, z1) = (
+                    if link[3] { cz - half_cell } else { cz - 0.9 },
+                    if link[2] { cz + half_cell } else { cz + 0.9 },
+                );
                 if along_x || !along_z {
-                    let x0 = if link[1] { cx - half_cell } else { cx - gap };
-                    let x1 = if link[0] { cx + half_cell } else { cx + gap };
-                    for s in [-1.0f32, 1.0] {
-                        let z = cz + s * gap;
+                    for (k, s) in [-1.0f32, 1.0].into_iter().enumerate() {
+                        let z = cz + s * TRACK_GAP;
+                        let w = TRACK_W * (0.85 + 0.3 * hash01(c, 20 + k as u32));
                         b.rect(
-                            Mat::Stone,
+                            Mat::Plaster,
                             x0,
                             z - w * 0.5,
                             x1,
                             z + w * 0.5,
-                            LIFT * 0.6,
-                            col,
+                            LIFT * 0.5,
+                            tint(track, tone(4 + k as u32)),
+                        );
+                    }
+                    if !crossing && hash01(c, 8) < 0.6 {
+                        let w = 0.12 + 0.14 * hash01(c, 9);
+                        b.rect(
+                            Mat::Plaster,
+                            x0,
+                            cz - w,
+                            x1,
+                            cz + w,
+                            LIFT * 0.5,
+                            tint(grass, tone(10)),
                         );
                     }
                 }
                 if along_z {
-                    let z0 = if link[3] { cz - half_cell } else { cz - gap };
-                    let z1 = if link[2] { cz + half_cell } else { cz + gap };
-                    for s in [-1.0f32, 1.0] {
-                        let x = cx + s * gap;
+                    for (k, s) in [-1.0f32, 1.0].into_iter().enumerate() {
+                        let x = cx + s * TRACK_GAP;
+                        let w = TRACK_W * (0.85 + 0.3 * hash01(c, 22 + k as u32));
                         b.rect(
-                            Mat::Stone,
+                            Mat::Plaster,
                             x - w * 0.5,
                             z0,
                             x + w * 0.5,
                             z1,
-                            LIFT * 0.6,
-                            col,
+                            LIFT * 0.5,
+                            tint(track, tone(6 + k as u32)),
+                        );
+                    }
+                    if !crossing && hash01(c, 11) < 0.6 {
+                        let w = 0.12 + 0.14 * hash01(c, 12);
+                        b.rect(
+                            Mat::Plaster,
+                            cx - w,
+                            z0,
+                            cx + w,
+                            z1,
+                            LIFT * 0.5,
+                            tint(grass, tone(13)),
                         );
                     }
                 }
