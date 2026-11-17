@@ -106,6 +106,27 @@ const PAINTED: &[(&str, &str)] = &[
     ("isle_salt", include_str!("../assets/icons/isle_salt.svg")),
     ("isle_furs", include_str!("../assets/icons/isle_furs.svg")),
     ("isle_oil", include_str!("../assets/icons/isle_oil.svg")),
+    // Goods and buildings of the burghers' tier.
+    ("isle_glass", include_str!("../assets/icons/isle_glass.svg")),
+    (
+        "isle_saltfish",
+        include_str!("../assets/icons/isle_saltfish.svg"),
+    ),
+    (
+        "isle_datecakes",
+        include_str!("../assets/icons/isle_datecakes.svg"),
+    ),
+    ("isle_coats", include_str!("../assets/icons/isle_coats.svg")),
+    ("isle_lamps", include_str!("../assets/icons/isle_lamps.svg")),
+    ("isle_paved", include_str!("../assets/icons/isle_paved.svg")),
+    (
+        "isle_school",
+        include_str!("../assets/icons/isle_school.svg"),
+    ),
+    (
+        "isle_tavern",
+        include_str!("../assets/icons/isle_tavern.svg"),
+    ),
 ];
 
 /// Every icon as (name, svg).
