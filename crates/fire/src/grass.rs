@@ -244,6 +244,14 @@ impl GrassBurn {
 /// Seconds between a far meadow's updates ([`update_grass`]).
 const FAR_GRASS_SECS: f32 = 0.25;
 
+/// Seconds between the updates of a meadow that burns in range but that nobody is within
+/// [`CLOSE_GRASS_M`] of: from there a tenth of a second between steps of its grass lying
+/// down or standing up doesn't show.
+const AWAY_GRASS_SECS: f32 = 0.1;
+
+/// Within this of someone, a meadow's grass eases every frame, meters.
+const CLOSE_GRASS_M: f64 = 40.0;
+
 /// Read the fire field into every meadow's [`GrassBurn`] (Update). Replaces the old
 /// per-entity grass: collapse while burning, stubble, regrowth.
 /// A normal system (not `&mut World`), so it runs beside other modules' systems.
@@ -253,7 +261,7 @@ pub fn update_grass(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     clock: Option<Res<crate::sim::FireClock>>,
-    mut far_owed: Local<f32>,
+    mut owed: Local<[f32; 2]>,
     mut q: Query<(
         Entity,
         &GrassMeadow,
@@ -271,11 +279,19 @@ pub fn update_grass(
     // a few times a second instead of every frame: a demo that relights itself keeps its
     // meadow regrowing for minutes, a pass over every cell and a new texture each frame
     // wherever the camera was (0.3 to 0.7 ms a frame at every stop of the PC sweep, 16 Nov).
-    *far_owed += dt;
-    let far_dt = (*far_owed >= FAR_GRASS_SECS).then_some(*far_owed);
-    if far_dt.is_some() {
-        *far_owed = 0.0;
-    }
+    // One in range but with nobody close eases ten times a second: seen from the plaza or the
+    // market the field's burning meadow still cost 0.4 to 0.5 ms a frame (PC, 17 Nov).
+    let due = |owed: &mut f32, every: f32| {
+        *owed += dt;
+        let run = (*owed >= every).then_some(*owed);
+        if run.is_some() {
+            *owed = 0.0;
+        }
+        run
+    };
+    let [away_owed, far_owed] = &mut *owed;
+    let away_dt = due(away_owed, AWAY_GRASS_SECS);
+    let far_dt = due(far_owed, FAR_GRASS_SECS);
     {
         let cell_m = field.cell_m;
         for (entity, meadow, gt, burn) in &mut q {
@@ -300,13 +316,14 @@ pub fn update_grass(
                     if b.settled.as_ref() == Some(&under) {
                         continue;
                     }
-                    let far = clock
-                        .as_ref()
-                        .is_some_and(|c| c.rests(min, min + half * 2.0));
-                    let dt = match (far, far_dt) {
-                        (false, _) => dt,
-                        (true, Some(owed)) => owed,
-                        (true, None) => continue,
+                    let max = min + half * 2.0;
+                    let rate = match clock.as_deref() {
+                        Some(c) if c.rests(min, max) => far_dt,
+                        Some(c) if c.nobody_within(CLOSE_GRASS_M, min, max) => away_dt,
+                        _ => Some(dt),
+                    };
+                    let Some(dt) = rate else {
+                        continue;
                     };
                     let mut changed = false;
                     let mut settled = true;
@@ -1369,8 +1386,9 @@ mod tests {
         assert_eq!(burn.settled, None);
     }
 
-    /// A meadow nobody is within the simulation range of eases its grass a few times a second;
-    /// with someone near it does every frame.
+    /// A meadow nobody is within the simulation range of eases its grass a few times a second,
+    /// one in range that nobody is close to ten times a second; with someone near it does
+    /// every frame.
     #[test]
     fn a_far_meadow_is_walked_a_few_times_a_second() {
         engine_core::tasks::init_task_pools();
@@ -1417,6 +1435,9 @@ mod tests {
         };
         let far = walked_in_a_second(&mut app, DVec3::new(400.0, 2.0, 0.0));
         assert!((3..=5).contains(&far), "{far}");
+        // In range but not close: ten times a second.
+        let away = walked_in_a_second(&mut app, DVec3::new(100.0, 2.0, 0.0));
+        assert!((9..=11).contains(&away), "{away}");
         let near = walked_in_a_second(&mut app, DVec3::new(30.0, 2.0, 0.0));
         assert_eq!(near, 60);
     }

@@ -97,12 +97,17 @@ impl FireClock {
     /// Whether the rectangle `min..max` (world X/Z) lies beyond where fire is awake: nobody is
     /// within the simulation range of it, so what burns there rests.
     pub(crate) fn rests(&self, min: DVec2, max: DVec2) -> bool {
-        let Awake { at, radius } = &self.awake;
-        radius.is_finite()
-            && !at.is_empty()
+        self.awake.radius.is_finite() && self.nobody_within(self.awake.radius, min, max)
+    }
+
+    /// Whether everyone fire is awake for is farther than `meters` (across the ground) from
+    /// the rectangle `min..max` (world X/Z). False when it is awake for no one in particular.
+    pub(crate) fn nobody_within(&self, meters: f64, min: DVec2, max: DVec2) -> bool {
+        let at = &self.awake.at;
+        !at.is_empty()
             && at.iter().all(|p| {
                 let q = DVec2::new(p.x, p.z);
-                (q - q.clamp(min, max)).length() > *radius
+                (q - q.clamp(min, max)).length() > meters
             })
     }
 

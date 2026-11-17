@@ -286,13 +286,21 @@ impl SmokeDomain {
         self.shown_dt = dt;
     }
 
-    /// Do `c` to the air, and again to the step running in the background when it lands.
+    /// Do `c` to the air. While a step runs in the background, `c` is kept and done to that
+    /// step's air when it lands instead: the air on show is replaced then, and the picture
+    /// only changes then, so doing it to both cost the frame every puff, bullet and fan twice
+    /// (in play a step is nearly always running). Clearing shows at once.
     pub fn change(&mut self, c: Change) {
-        self.domain.apply(&c);
         let b = &mut self.background;
         if b.running() {
+            if c == Change::Clear {
+                self.domain.apply(&c);
+            }
             b.pending.push(c);
-        } else if b.ahead.is_some() {
+            return;
+        }
+        self.domain.apply(&c);
+        if b.ahead.is_some() {
             if c == Change::Clear {
                 b.since.clear();
             }
@@ -311,8 +319,21 @@ impl SmokeDomain {
     /// can hold them all up.
     pub fn drop_running(&mut self) {
         self.background.job = None;
-        self.background.pending.clear();
+        self.settle_pending();
         self.background.forget_ahead();
+    }
+
+    /// Do what was kept for a step that will not land to the air on show (what came before
+    /// a clearing is gone with it, and the clearing itself shows already).
+    fn settle_pending(&mut self) {
+        let pending = std::mem::take(&mut self.background.pending);
+        let from = pending
+            .iter()
+            .rposition(|c| *c == Change::Clear)
+            .map_or(0, |i| i + 1);
+        for c in &pending[from..] {
+            self.domain.apply(c);
+        }
     }
 
     /// Put the background step in place if it is done (or `wait` for it); true when none
@@ -332,8 +353,11 @@ impl SmokeDomain {
             }
         };
         self.background.job = None;
+        // A step that died leaves the air as it is, with what was done meanwhile.
+        if stepped.is_none() {
+            self.settle_pending();
+        }
         let pending = std::mem::take(&mut self.background.pending);
-        // A step that died leaves the air as it is.
         if let Some(Stepped {
             air: mut stepped,
             ahead,
@@ -1077,7 +1101,13 @@ pub fn step(
     for d in &mut domains.list {
         // A step done in the background since the last tick shows now.
         d.shown_secs += dt;
-        let ready = d.land(false);
+        let ready = {
+            let _span = d
+                .background
+                .running()
+                .then(|| tracing::info_span!("smoke step: land").entered());
+            d.land(false)
+        };
         let c = d.domain.center();
         let size = d.domain.size();
         let reach = 0.5 * DVec2::new(size.x, size.z).length();
@@ -1268,9 +1298,11 @@ mod tests {
         let params = SmokeSettings::default().step_params(0.05, 15.0);
         let wind = |_: DVec3| Vec3::new(2.0, 0.0, 0.0);
         d.start(pool, params, wind);
-        // The air shows as it was until the step lands, plus what is done to it.
+        // The air shows as it was until the step lands; what is done meanwhile lands with it.
+        let shown = d.domain.mass_kg;
         d.change(puff(3.0));
         assert!(d.background.running());
+        assert_eq!(d.domain.mass_kg, shown);
         let before = d.domain.version;
         d.land(true);
         assert!(!d.background.running());
@@ -1312,8 +1344,8 @@ mod tests {
         let params = SmokeSettings::default().step_params(0.05, 15.0);
         let wind = |_: DVec3| Vec3::new(2.0, 0.0, 0.5);
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
-        let (mut start, mut land, mut snap, mut copy_air, mut copy_density) =
-            (0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut start, mut land, mut snap, mut copy_air, mut copy_density, mut twice) =
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut scratch = domains.list[0].domain.clone();
         let rounds = 60;
         for round in 0..rounds {
@@ -1327,7 +1359,13 @@ mod tests {
             if round > 0 {
                 start += ms(t);
             }
-            d.change(puff(0.0));
+            // What is released while the step runs (a fire's front: forty puffs) lands with it.
+            let meanwhile: Vec<_> = (0..40).map(|i| puff(-40.0 + 2.0 * i as f64)).collect();
+            let t = std::time::Instant::now();
+            for c in &meanwhile {
+                d.change(*c);
+            }
+            land += ms(t);
             // The task runs off the clock: the frame doesn't wait for it.
             std::thread::sleep(std::time::Duration::from_millis(80));
             let t = std::time::Instant::now();
@@ -1345,17 +1383,64 @@ mod tests {
             let v = crate::obscurance::densities(&d.domain.voxels, d.domain.dims);
             copy_density += ms(t);
             drop(v);
+            let t = std::time::Instant::now();
+            for c in &meanwhile {
+                scratch.apply(c);
+            }
+            twice += ms(t);
         }
         let n = rounds as f64;
         println!(
-            "per step, ms: start {:.3}, land {:.3}, snapshot {:.3}; before, on the frame: \
-             air copy {:.3}, density copy {:.3}",
+            "per step, ms: start {:.3}, forty puffs and landing {:.3}, snapshot {:.3}; before, \
+             on the frame too: air copy {:.3}, density copy {:.3}, the puffs a second time {:.3}",
             start / n,
             land / n,
             snap / n,
             copy_air / n,
-            copy_density / n
+            copy_density / n,
+            twice / n
         );
+    }
+
+    /// A step given up (the world shifted, the floor changed) must not take what was done
+    /// meanwhile with it.
+    #[test]
+    fn a_dropped_step_leaves_what_was_done_meanwhile() {
+        engine_core::tasks::init_task_pools();
+        let pool = AsyncComputeTaskPool::get();
+        let mut empty = Domain::new(DVec3::new(-8.0, 0.0, -8.0), 0.5, UVec3::new(32, 32, 32));
+        empty.set_floor(|_, _| Some(0.0));
+        let mut domains = SmokeDomains::default();
+        let i = domains.add(None, empty.clone());
+        let d = &mut domains.list[i];
+        let puff = |x: f64| Change::Splat {
+            at: DVec3::new(x, 2.0, 0.0),
+            radius: 1.0,
+            mass_kg: 0.2,
+            heat_c: 300.0,
+            vel: Vec3::Y,
+            albedo: Vec3::splat(0.5),
+        };
+        d.change(puff(-2.0));
+        let params = SmokeSettings::default().step_params(0.05, 15.0);
+        d.start(pool, params, |_| Vec3::X);
+        d.change(puff(3.0));
+        d.drop_running();
+        let mut want = empty.clone();
+        want.apply(&puff(-2.0));
+        want.apply(&puff(3.0));
+        assert!(d.domain.voxels == want.voxels);
+        // Cleared meanwhile: only what came after the clearing is left.
+        d.start(pool, params, |_| Vec3::X);
+        d.change(puff(1.0));
+        d.change(Change::Clear);
+        assert_eq!(d.domain.mass_kg, 0.0);
+        d.change(puff(4.0));
+        d.drop_running();
+        let mut want = empty;
+        want.apply(&puff(4.0));
+        assert!(d.domain.voxels == want.voxels);
+        assert!(d.domain.mass_kg > 0.0);
     }
 
     /// From the second step on, a step works on the copy the step before it made, with what

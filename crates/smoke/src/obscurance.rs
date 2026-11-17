@@ -50,7 +50,10 @@ impl Frozen {
             {
                 density.clone()
             }
-            _ => Arc::new(densities(&d.voxels, d.dims)),
+            _ => {
+                let _span = tracing::info_span!("smoke snapshot: copy densities").entered();
+                Arc::new(densities(&d.voxels, d.dims))
+            }
         };
         Self {
             origin: d.origin,
