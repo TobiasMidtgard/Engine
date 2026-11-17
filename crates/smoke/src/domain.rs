@@ -505,9 +505,38 @@ impl Domain {
         let hi = (qa.max(qb) + rv).ceil().min(self.dims.as_vec3()).as_uvec3();
         let ab = qb - qa;
         let len2 = ab.length_squared().max(1e-9);
+        // Only the run of each row the capsule passes through: a voxel within `rv` of the
+        // segment has its nearest segment point within `rv` of it on every axis, so on this row
+        // that point's t lies where the segment is within `rv` of the row's y and z, and the
+        // voxel's x within `rv` of the segment's x there. Looping over the whole box around
+        // the segment cost a diagonal bullet or fan most of the volume (`smoke::disturb`, 3 ms
+        // a frame on the PC, 16 Nov).
+        let slab = |p0: f32, d: f32, c: f32| -> Option<(f32, f32)> {
+            if d.abs() < 1e-6 {
+                return ((p0 - c).abs() <= rv + 0.5).then_some((0.0, 1.0));
+            }
+            let (t0, t1) = ((c - rv - 0.5 - p0) / d, (c + rv + 0.5 - p0) / d);
+            Some((t0.min(t1).max(0.0), t0.max(t1).min(1.0)))
+        };
         for z in lo.z..hi.z {
+            let Some((za, zb)) = slab(qa.z, ab.z, z as f32 + 0.5) else {
+                continue;
+            };
+            if za > zb {
+                continue;
+            }
             for y in lo.y..hi.y {
-                for x in lo.x..hi.x {
+                let Some((ya, yb)) = slab(qa.y, ab.y, y as f32 + 0.5) else {
+                    continue;
+                };
+                let (t0, t1) = (za.max(ya), zb.min(yb));
+                if t0 > t1 {
+                    continue;
+                }
+                let (xa, xb) = (qa.x + ab.x * t0, qa.x + ab.x * t1);
+                let x_lo = ((xa.min(xb) - rv - 0.5).floor().max(lo.x as f32) as u32).max(lo.x);
+                let x_hi = ((xa.max(xb) + rv + 0.5).ceil().max(0.0) as u32).min(hi.x);
+                for x in x_lo..x_hi {
                     if self.is_solid(x, y, z) {
                         continue;
                     }
@@ -1627,6 +1656,97 @@ fn region_max_density(voxels: &[Voxel], dims: UVec3, r: &Region) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a bullet across a volume costs (run by hand: `cargo test --release -p engine_smoke
+    /// --lib -- --ignored --nocapture bullet_cost`): a 30 m trace on the diagonal of a 32 m
+    /// auto volume, against visiting its whole bounding box as before 17 Nov.
+    #[test]
+    #[ignore]
+    fn bullet_cost() {
+        let mut d = Domain::new(DVec3::new(-16.0, -2.0, -16.0), 0.5, UVec3::new(64, 32, 64));
+        let (a, b) = (DVec3::new(-12.0, 0.0, -12.0), DVec3::new(9.0, 10.0, 9.0));
+        let n = 200;
+        let started = std::time::Instant::now();
+        for _ in 0..n {
+            d.carve(a, b, 0.02, 0.99, 420.0);
+        }
+        let now_ms = started.elapsed().as_secs_f64() * 1e3 / n as f64;
+        let (qa, qb, rv) = (d.local(a), d.local(b), 0.75 / d.cell);
+        let started = std::time::Instant::now();
+        let mut hits = 0u64;
+        for _ in 0..n {
+            let lo = (qa.min(qb) - rv).floor().max(Vec3::ZERO).as_uvec3();
+            let hi = (qa.max(qb) + rv).ceil().min(d.dims.as_vec3()).as_uvec3();
+            let ab = qb - qa;
+            for z in lo.z..hi.z {
+                for y in lo.y..hi.y {
+                    for x in lo.x..hi.x {
+                        let c = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        let t = ((c - qa).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+                        if (c - (qa + ab * t)).length() < rv && !d.is_solid(x, y, z) {
+                            hits += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let box_ms = started.elapsed().as_secs_f64() * 1e3 / n as f64;
+        println!("a bullet: {now_ms:.3} ms now, {box_ms:.3} ms over its box ({hits} hits)");
+    }
+
+    /// A capsule visits exactly the voxels within its radius of the segment (as the loop over
+    /// its whole bounding box did), for segments along the axes, diagonal ones, ones that
+    /// start or end outside the box and ones shorter than a voxel.
+    #[test]
+    fn a_capsule_visits_exactly_the_voxels_near_its_segment() {
+        let mut d = Domain::new(DVec3::new(-10.0, -2.0, -8.0), 0.5, UVec3::new(40, 24, 32));
+        let mut rng = engine_core::math::Rng::new(7);
+        let r = |rng: &mut engine_core::math::Rng, lo: f32, hi: f32| lo + (hi - lo) * rng.f32();
+        let mut cases: Vec<(DVec3, DVec3, f32)> = vec![
+            (
+                DVec3::new(-12.0, 3.0, -9.0),
+                DVec3::new(12.0, 3.0, 9.0),
+                0.3,
+            ),
+            (
+                DVec3::new(-11.0, -3.0, -9.0),
+                DVec3::new(11.0, 11.0, 9.0),
+                1.0,
+            ),
+            (DVec3::new(0.0, -5.0, 0.0), DVec3::new(0.0, 15.0, 0.0), 0.75),
+            (DVec3::new(1.1, 2.2, 3.3), DVec3::new(1.12, 2.21, 3.3), 0.6),
+        ];
+        for _ in 0..40 {
+            let p = |rng: &mut engine_core::math::Rng| {
+                DVec3::new(
+                    r(rng, -13.0, 13.0) as f64,
+                    r(rng, -4.0, 12.0) as f64,
+                    r(rng, -10.0, 10.0) as f64,
+                )
+            };
+            let (a, b) = (p(&mut rng), p(&mut rng));
+            cases.push((a, b, r(&mut rng, 0.1, 2.5)));
+        }
+        for (a, b, radius) in cases {
+            let mut seen = vec![false; d.voxels.len()];
+            let (qa, qb) = (d.local(a), d.local(b));
+            d.visit_capsule(a, b, radius, |v, _, _| v.density += 1.0);
+            for z in 0..d.dims.z {
+                for y in 0..d.dims.y {
+                    for x in 0..d.dims.x {
+                        let i = d.index(x, y, z);
+                        seen[i] = d.voxels[i].density > 0.0;
+                        d.voxels[i].density = 0.0;
+                        let c = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        let ab = qb - qa;
+                        let t = ((c - qa).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+                        let near = (c - (qa + ab * t)).length() * d.cell < radius.max(0.0);
+                        assert_eq!(seen[i], near, "{a} {b} {radius} at {x} {y} {z}");
+                    }
+                }
+            }
+        }
+    }
 
     /// How long a step of the meadow's volume takes with a plume in it (run by hand:
     /// `cargo test --release -p engine_smoke --lib -- --ignored --nocapture step_cost`).

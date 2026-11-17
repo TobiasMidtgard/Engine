@@ -94,6 +94,18 @@ pub(crate) struct Awake {
 }
 
 impl FireClock {
+    /// Whether the rectangle `min..max` (world X/Z) lies beyond where fire is awake: nobody is
+    /// within the simulation range of it, so what burns there rests.
+    pub(crate) fn rests(&self, min: DVec2, max: DVec2) -> bool {
+        let Awake { at, radius } = &self.awake;
+        radius.is_finite()
+            && !at.is_empty()
+            && at.iter().all(|p| {
+                let q = DVec2::new(p.x, p.z);
+                (q - q.clamp(min, max)).length() > *radius
+            })
+    }
+
     /// Start a demo's fresh fire from the same random sequence every time, so it burns the same
     /// way whatever ran before it.
     pub(crate) fn reset_for_demo(&mut self) {

@@ -241,6 +241,9 @@ impl GrassBurn {
     }
 }
 
+/// Seconds between a far meadow's updates ([`update_grass`]).
+const FAR_GRASS_SECS: f32 = 0.25;
+
 /// Read the fire field into every meadow's [`GrassBurn`] (Update). Replaces the old
 /// per-entity grass: collapse while burning, stubble, regrowth.
 /// A normal system (not `&mut World`), so it runs beside other modules' systems.
@@ -249,6 +252,8 @@ pub fn update_grass(
     field: Option<Res<FireField>>,
     ground: Option<Res<Ground>>,
     time: Res<Time>,
+    clock: Option<Res<crate::sim::FireClock>>,
+    mut far_owed: Local<f32>,
     mut q: Query<(
         Entity,
         &GrassMeadow,
@@ -262,6 +267,15 @@ pub fn update_grass(
     static GROUND_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let ground: Option<&Ground> = ground.as_deref();
     let dt = time.delta_secs();
+    // A meadow beyond the simulation range of everyone (its fire rests there) eases its grass
+    // a few times a second instead of every frame: a demo that relights itself keeps its
+    // meadow regrowing for minutes, a pass over every cell and a new texture each frame
+    // wherever the camera was (0.3 to 0.7 ms a frame at every stop of the PC sweep, 16 Nov).
+    *far_owed += dt;
+    let far_dt = (*far_owed >= FAR_GRASS_SECS).then_some(*far_owed);
+    if far_dt.is_some() {
+        *far_owed = 0.0;
+    }
     {
         let cell_m = field.cell_m;
         for (entity, meadow, gt, burn) in &mut q {
@@ -286,6 +300,14 @@ pub fn update_grass(
                     if b.settled.as_ref() == Some(&under) {
                         continue;
                     }
+                    let far = clock
+                        .as_ref()
+                        .is_some_and(|c| c.rests(min, min + half * 2.0));
+                    let dt = match (far, far_dt) {
+                        (false, _) => dt,
+                        (true, Some(owed)) => owed,
+                        (true, None) => continue,
+                    };
                     let mut changed = false;
                     let mut settled = true;
                     for (i, cell) in b.cells.iter_mut().enumerate() {
@@ -1345,6 +1367,58 @@ mod tests {
         schedule.run(&mut world);
         let burn = world.get::<GrassBurn>(meadow).unwrap();
         assert_eq!(burn.settled, None);
+    }
+
+    /// A meadow nobody is within the simulation range of eases its grass a few times a second;
+    /// with someone near it does every frame.
+    #[test]
+    fn a_far_meadow_is_walked_a_few_times_a_second() {
+        engine_core::tasks::init_task_pools();
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.add_plugins(crate::FirePlugin);
+        app.world.init_resource::<engine_world::SimulationRange>();
+        let viewer = app
+            .world
+            .spawn((
+                Transform::default(),
+                engine_world::SimulationFocus::default(),
+            ))
+            .id();
+        let meadow = app
+            .world
+            .spawn((
+                GrassMeadow {
+                    half_extents: [20.0, 12.0],
+                    ..Default::default()
+                },
+                Transform::from_xyz(5.0, 0.0, -3.0),
+            ))
+            .id();
+        let walked_in_a_second = |app: &mut App, focus: DVec3| {
+            app.world.get_mut::<Transform>(viewer).unwrap().translation = focus;
+            app.update_n(3);
+            let mut walked = 0;
+            for _ in 0..60 {
+                // As if the fire under it kept changing: a cell off its target, tiles unlike
+                // the ones it settled on.
+                let mut burn = app.world.get_mut::<GrassBurn>(meadow).unwrap();
+                burn.cells[7].height = 0.2;
+                burn.settled = Some(Vec::new());
+                app.update();
+                let burn = app.world.get::<GrassBurn>(meadow).unwrap();
+                walked += (burn.cells[7].height != 0.2) as u32;
+            }
+            walked
+        };
+        let far = walked_in_a_second(&mut app, DVec3::new(400.0, 2.0, 0.0));
+        assert!((3..=5).contains(&far), "{far}");
+        let near = walked_in_a_second(&mut app, DVec3::new(30.0, 2.0, 0.0));
+        assert_eq!(near, 60);
     }
 
     #[test]

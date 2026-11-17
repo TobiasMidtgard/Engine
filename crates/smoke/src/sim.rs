@@ -788,7 +788,8 @@ fn auto_domain(settings: &SmokeSettings, p: DVec3, ground: &Ground) -> Domain {
     d
 }
 
-/// Bullets, blasts and moving things push the smoke.
+/// Bullets, blasts and moving things push the smoke. A volume resting beyond the simulation
+/// range is left as it is: it doesn't step, so what was done to it would only pile up unseen.
 #[allow(clippy::too_many_arguments)]
 pub fn disturb(
     settings: Res<SmokeSettings>,
@@ -801,10 +802,11 @@ pub fn disturb(
     mut tunnels: ResMut<SmokeTunnels>,
     mut wind: ResMut<WindField>,
 ) {
+    let span = tracing::info_span!("smoke disturb: bullets").entered();
     for b in bullets.read() {
         let mut hit = false;
         for d in &mut domains.list {
-            if d.domain.clip(b.from, b.to).is_some() && d.domain.mass_kg > 0.0 {
+            if !d.resting && d.domain.clip(b.from, b.to).is_some() && d.domain.mass_kg > 0.0 {
                 d.change(Change::Carve {
                     from: b.from,
                     to: b.to,
@@ -824,6 +826,8 @@ pub fn disturb(
             });
         }
     }
+    drop(span);
+    let span = tracing::info_span!("smoke disturb: blasts").entered();
     for i in impulses.read() {
         if i.strength <= 0.0 {
             continue;
@@ -832,7 +836,7 @@ pub fn disturb(
             let c = d.domain.center();
             let half = d.domain.size() * 0.5 + DVec3::splat(i.radius as f64);
             let o = (i.center - c).abs();
-            if o.x < half.x && o.y < half.y && o.z < half.z {
+            if !d.resting && o.x < half.x && o.y < half.y && o.z < half.z {
                 d.change(Change::Blast {
                     at: i.center,
                     radius: i.radius,
@@ -841,6 +845,8 @@ pub fn disturb(
             }
         }
     }
+    drop(span);
+    let span = tracing::info_span!("smoke disturb: fans").entered();
     let dt = time.delta_secs();
     for (gt, fan) in &fans {
         if !fan.on || fan.speed == 0.0 || dt <= 0.0 {
@@ -856,7 +862,10 @@ pub fn disturb(
             let c = d.domain.center();
             let half = d.domain.size() * 0.5 + DVec3::splat(reach as f64);
             let o = (mid - c).abs();
-            if o.x < half.x && o.y < half.y && o.z < half.z {
+            // (Air with no smoke in it isn't stepped; once smoke comes a fan has it up to
+            // speed in a few steps.)
+            if !d.resting && d.domain.mass_kg > 0.0 && o.x < half.x && o.y < half.y && o.z < half.z
+            {
                 d.change(Change::Jet {
                     from,
                     dir,
@@ -868,6 +877,8 @@ pub fn disturb(
             }
         }
     }
+    drop(span);
+    let _span = tracing::info_span!("smoke disturb: obstacles").entered();
     for (gt, o, mut track) in &mut obstacles {
         let p = gt.translation();
         let vel = match track.last {
@@ -879,7 +890,7 @@ pub fn disturb(
             continue;
         }
         for d in &mut domains.list {
-            if d.domain.contains(p) && d.domain.mass_kg > 0.0 {
+            if !d.resting && d.domain.contains(p) && d.domain.mass_kg > 0.0 {
                 d.change(Change::Obstacle {
                     at: p,
                     radius: o.radius,
