@@ -35,6 +35,12 @@
 //! is what a launch with an environment switch such as `TERRAIN_SHADER_OFF=1` wants, with
 //! `--label` to name it). `--list` prints the variants. Stops are `showcase.goto` places; with
 //! `--no-goto` the camera stays where it is (any game, one "stop" named `here`).
+//!
+//! Besides the GPU rows each stop notes the main thread's own time a frame (`frame.main_ms`,
+//! with the profiler on or off) and keeps the soft bodies' numbers (`softbody.*`) in the JSON.
+//! `--call a.method,b.method` calls those bridge methods once at each stop, after its baseline,
+//! and keeps what they answer under the stop's `calls` (`--call softbody.list`: what every
+//! cloth and rope costs there).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -1092,6 +1098,55 @@ fn gi_and_memory(bridge: &mut Bridge) -> Option<Value> {
     Some(Value::Object(kept))
 }
 
+/// The main thread's own time a frame at a stop: its work through the schedules
+/// (`frame.main_ms`), of that the fixed steps (`frame.main_fixed_ms`), and its wait for the
+/// render thread (`frame.main_wait_ms`; engine_core's `frame_cost`, measured with the profiler
+/// on or off), as means over the distinct frames of `secs`. `None` from a game that does not
+/// report them.
+fn main_thread(bridge: &mut Bridge, secs: f32) -> Option<Value> {
+    const KEYS: [&str; 3] = ["frame.main_ms", "frame.main_fixed_ms", "frame.main_wait_ms"];
+    let mut sums = [0.0f64; 3];
+    let mut frames = 0u32;
+    let start = Instant::now();
+    let mut last_frame = u64::MAX;
+    while start.elapsed().as_secs_f32() < secs || frames == 0 {
+        let stats = bridge
+            .call("engine.stats", json!({"prefix": "frame."}))
+            .ok()?;
+        let frame = stats.get("frame").and_then(Value::as_u64).unwrap_or(0);
+        if frame == last_frame {
+            if start.elapsed().as_secs_f32() > secs.max(1.0) * 20.0 {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        last_frame = frame;
+        let metrics = stats.get("metrics")?;
+        for (sum, key) in sums.iter_mut().zip(KEYS) {
+            *sum += metrics.get(key)?.as_f64()?;
+        }
+        frames += 1;
+    }
+    let mean = |sum: f64| round3(sum / f64::from(frames));
+    Some(json!({
+        "frames": frames,
+        "main_ms": mean(sums[0]),
+        "fixed_ms": mean(sums[1]),
+        "wait_ms": mean(sums[2]),
+    }))
+}
+
+/// The soft bodies' numbers as they stand (`softbody.*`: what the cloth solved beside the
+/// frame waits and holds), for the stop's JSON. `None` where there are none.
+fn softbody_numbers(bridge: &mut Bridge) -> Option<Value> {
+    let stats = bridge
+        .call("engine.stats", json!({"prefix": "softbody."}))
+        .ok()?;
+    let metrics = stats.get("metrics")?.as_object()?;
+    (!metrics.is_empty()).then(|| Value::Object(metrics.clone()))
+}
+
 /// Triangles drawn in the last frame.
 fn triangles(bridge: &mut Bridge) -> Option<u64> {
     bridge.call("render.stats", json!({})).ok()?["stats"]["triangles"].as_u64()
@@ -1195,6 +1250,8 @@ struct Args {
     shots_only: bool,
     /// Read everything against the frame as it was before the cuts became the default.
     old_way: bool,
+    /// Bridge methods called once at each stop, their answers kept in the JSON.
+    calls: Vec<String>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -1213,6 +1270,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         variant_shots: Vec::new(),
         shots_only: false,
         old_way: false,
+        calls: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -1247,6 +1305,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-goto" => a.goto = false,
             "--shots-only" => a.shots_only = true,
             "--old-way" => a.old_way = true,
+            "--call" => {
+                a.calls = value("--call")?
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
             "--shots" => a.shots = true,
             "--variant-shots" => {
                 a.shots = true;
@@ -1368,6 +1433,30 @@ fn run(args: &Args) -> Result<(), String> {
         if let Some(state) = &base_state {
             stop_json.insert("state".into(), state.clone());
         }
+        // What the renderer reports of the stop (in view, meshes, ground, hair and fur), read
+        // with the baseline: before any switch has changed what it draws or holds.
+        let base_stats = bridge.call("render.stats", json!({})).ok();
+        // The main thread's own time here, the soft bodies' numbers, and what was asked of
+        // the game at each stop (`--call`).
+        let main = main_thread(&mut bridge, 1.0);
+        if let Some(main) = &main {
+            stop_json.insert("main_thread".into(), main.clone());
+        }
+        if let Some(soft) = softbody_numbers(&mut bridge) {
+            stop_json.insert("softbody".into(), soft);
+        }
+        let mut answers = Map::new();
+        for method in &args.calls {
+            match bridge.call(method, json!({})) {
+                Ok(answer) => {
+                    answers.insert(method.clone(), answer);
+                }
+                Err(e) => eprintln!("{stop}: {method} not answered ({e})"),
+            }
+        }
+        if !answers.is_empty() {
+            stop_json.insert("calls".into(), Value::Object(answers));
+        }
         // Every switch is read between two readings of the scene as it was (the one before it
         // and the one after it is switched back), so slow drift (clouds moving in, the sun,
         // people gathering) doesn't count as its cost.
@@ -1480,6 +1569,16 @@ fn run(args: &Args) -> Result<(), String> {
             low,
             high
         ));
+        if let Some(main) = &main {
+            let n = |key: &str| main.get(key).and_then(Value::as_f64).unwrap_or(-1.0);
+            md.push_str(&format!(
+                "Main thread: {:.1} ms of its own work a frame (fixed steps {:.1} ms), {:.1} ms waiting for the render thread; mean of {} frames.\n\n",
+                n("main_ms"),
+                n("fixed_ms"),
+                n("wait_ms"),
+                main["frames"]
+            ));
+        }
         if let Some(state) = &base_state {
             let n = |key: &str| state.get(key).and_then(Value::as_f64).unwrap_or(-1.0);
             md.push_str(&format!(
@@ -1499,7 +1598,7 @@ fn run(args: &Args) -> Result<(), String> {
                 n("render.gpu_reserved_mb"),
             ));
         }
-        if let Ok(at) = bridge.call("render.stats", json!({})) {
+        if let Some(at) = &base_stats {
             let s = &at["stats"];
             md.push_str(&format!(
                 "In view: {} triangles, {} draw calls, {} instances, {} point lights.\n\n",
@@ -1552,6 +1651,20 @@ fn run(args: &Args) -> Result<(), String> {
                     md.push_str(&format!(
                         "Hair and fur: {} instances draw {} of their grooms' {} strands, {} points.\n\n",
                         t["instances"], t["strands"], t["strands_in_grooms"], t["points"]
+                    ));
+                }
+                // The grooms the GPU holds: a groom is sent when an instance that wears it is
+                // drawn, so the count sent stands still at a stop (it rose about once a second
+                // until 17 Nov 2026, each time a frame of 0.3 s).
+                if let Some(sent) = t["groom_uploads"].as_u64() {
+                    md.push_str(&format!(
+                        "Grooms on the GPU: {} in {:.0} MB of {:.0} MB; {} sent so far, {} dropped, arrays made {} times.\n\n",
+                        t["grooms"],
+                        t["groom_mb_used"].as_f64().unwrap_or(0.0),
+                        t["groom_mb"].as_f64().unwrap_or(0.0),
+                        sent,
+                        t["groom_evictions"],
+                        t["groom_repacks"]
                     ));
                 }
                 stop_json.insert("strands".into(), t.clone());

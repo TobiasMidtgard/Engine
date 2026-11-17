@@ -5,8 +5,12 @@
 //!
 //! 1. `prepare` copies the instances out of the world: transform, level of detail, guides
 //!    (those of the instances it draws: a [`StrandGuidesWhenDrawn`] is asked only for them).
-//! 2. `prepare_frame` uploads new grooms (strands shuffled once, so any prefix of them spreads
-//!    over the whole groom and a level of detail is a prefix), the instances and the guides'
+//!    A groom the frame draws that the GPU does not hold is packed here ([`pack_groom`]: its
+//!    strands in [`spread_order`], so any prefix of them spreads over the whole groom and a
+//!    level of detail is a prefix), within the frame's upload allowance. A groom nobody
+//!    draws is never packed or sent.
+//! 2. `prepare_frame` sends the packed grooms into free room in the shared groom arrays (no
+//!    other groom is sent again when one comes or goes), then the instances and the guides'
 //!    offsets from rest.
 //! 3. `compute`: every drawn point posed by its guides (`strands_pose.wgsl`), its fibre added to
 //!    its instance's density volume (64³ cells over the groom).
@@ -91,8 +95,33 @@ const SLOT_KEEP: f32 = 1.6;
 const OPACITY: [f32; 2] = [0.85, 0.9];
 /// Strands cast into the cascades: one in this many, as much wider.
 const CASCADE_SHARE: u32 = 4;
-/// Grooms nobody drew in this many frames leave the GPU.
+/// Grooms nobody drew in this many frames leave the GPU, the longest unseen first, while the
+/// grooms held that nobody draws are more than [`KEEP_POINTS`].
 const EVICT_FRAMES: u64 = 600;
+/// Points of grooms the GPU keeps although nobody draws them, beside those it draws: animals
+/// that walk out of view and back are not sent again (each return was a coat packed and 19 MB
+/// written, and fur missing until its turn came). 16 bytes a point and 32 a strand: 770 MB of
+/// short coats at the most, where the showcase's 30 coats are 24 M points, 580 MB. Where the
+/// device's largest buffer holds less, what nobody draws leaves as soon as a groom in view
+/// needs its room ([`StrandFeature::grooms_in_the_way`]).
+const KEEP_POINTS: u32 = 32 << 20;
+/// The shared groom arrays start with room for this many points and strands and double...
+const FIRST_POINTS: u32 = 1 << 16;
+const FIRST_STRANDS: u32 = 1 << 13;
+/// ...up to this many bytes, and grow by as much from there (twice 300 MB of coats would
+/// reserve 200 MB that nothing uses).
+const ARRAY_STEP_BYTES: u64 = 64 << 20;
+/// Bytes a point and a strand take in them.
+const POINT_BYTES: u64 = 16;
+const STRAND_BYTES: u64 = std::mem::size_of::<GpuInfo>() as u64;
+/// The upload allowance's key for a groom ([`crate::features::UploadBudget`]), beside
+/// `MESH_UPLOAD_KEY` and the skins' 1 << 62.
+pub(crate) const GROOM_UPLOAD_KEY: u64 = 1 << 61;
+/// Strands a thread packs at a time ([`pack_groom`]).
+const PACK_CHUNK: usize = 8192;
+/// A groom the arrays had no room for (they are as large as the device lets a buffer be) is
+/// tried again after this many frames, not packed in vain every frame.
+const NO_ROOM_FRAMES: u64 = 120;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
@@ -123,13 +152,11 @@ struct GpuInfo {
     follow: [u32; 4],
 }
 
-/// A groom as uploaded: where its strands are in the shared arrays.
+/// A groom as uploaded: where its strands are in the shared arrays. (Its points and strands
+/// are on the GPU only: no copy is kept here.)
 struct GroomSlot {
     version: u64,
-    /// Strands shuffled, as uploaded.
-    rest: Vec<[f32; 4]>,
-    info: Vec<GpuInfo>,
-    /// Guides' rest points (not shuffled: `follow` indexes them).
+    /// Guides' rest points (not reordered: `follow` indexes them).
     guides: Vec<Vec3>,
     points_per: u32,
     strands: u32,
@@ -138,17 +165,188 @@ struct GroomSlot {
     /// Model-space bounds of the rest points (with their radii).
     lo: Vec3,
     hi: Vec3,
-    /// The thickest fibre's radius (m).
-    max_radius: f32,
     first_point: u32,
     first_strand: u32,
     last_seen: u64,
 }
 
+impl GroomSlot {
+    fn points(&self) -> u32 {
+        self.strands * self.points_per
+    }
+}
+
+/// What `prepare` learns of a groom when an instance first wears it, and again when the asset
+/// changes: whether its arrays agree, and its bounds. Kept for every groom worn, on the GPU
+/// or not, so an instance out of view is found to be so without its groom being sent.
+struct GroomFacts {
+    version: u64,
+    valid: bool,
+    /// Model-space bounds of the rest points (with their radii; `lo > hi`: no points).
+    lo: Vec3,
+    hi: Vec3,
+    /// The thickest fibre's radius (m).
+    max_radius: f32,
+    /// The arrays had no room for it: not packed again before this frame ([`NO_ROOM_FRAMES`]).
+    no_room_until: u64,
+}
+
+impl GroomFacts {
+    fn of(groom: &StrandGroom, version: u64) -> Self {
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let mut max_radius = 0.0f32;
+        let valid = groom.is_valid();
+        if valid {
+            for p in &groom.points {
+                let v = Vec3::new(p[0], p[1], p[2]);
+                lo = lo.min(v - p[3]);
+                hi = hi.max(v + p[3]);
+                max_radius = max_radius.max(p[3]);
+            }
+        }
+        Self {
+            version,
+            valid,
+            lo,
+            hi,
+            max_radius,
+            no_room_until: 0,
+        }
+    }
+}
+
+/// A groom's arrays as the GPU holds them: its strands in [`spread_order`].
+struct PackedGroom {
+    rest: Vec<[f32; 4]>,
+    info: Vec<GpuInfo>,
+    guides: Vec<Vec3>,
+    points_per: u32,
+    fiber: StrandFiber,
+    thin: bool,
+    lo: Vec3,
+    hi: Vec3,
+}
+
+/// Free room in one of the shared groom arrays, in elements (points or strands).
+#[derive(Default, Debug, Clone)]
+struct Spans {
+    /// Elements the array holds.
+    capacity: u32,
+    /// The free spans (start, length) by start; no two touch.
+    free: Vec<(u32, u32)>,
+}
+
+impl Spans {
+    /// An array of `capacity` elements whose first `used` are taken.
+    fn new(capacity: u32, used: u32) -> Self {
+        let mut free = Vec::new();
+        if used < capacity {
+            free.push((used, capacity - used));
+        }
+        Self { capacity, free }
+    }
+
+    /// `len` elements taken from the first free span that has them: where they start.
+    fn take(&mut self, len: u32) -> Option<u32> {
+        if len == 0 {
+            return Some(0);
+        }
+        let at = self.free.iter().position(|&(_, n)| n >= len)?;
+        let (start, n) = self.free[at];
+        if n == len {
+            self.free.remove(at);
+        } else {
+            self.free[at] = (start + len, n - len);
+        }
+        Some(start)
+    }
+
+    /// `len` elements from `start` given back (they join the free spans beside them).
+    fn give(&mut self, start: u32, len: u32) {
+        if len == 0 {
+            return;
+        }
+        let at = self.free.partition_point(|&(s, _)| s < start);
+        self.free.insert(at, (start, len));
+        if at + 1 < self.free.len() && start + len == self.free[at + 1].0 {
+            self.free[at].1 += self.free[at + 1].1;
+            self.free.remove(at + 1);
+        }
+        if at > 0 && self.free[at - 1].0 + self.free[at - 1].1 == start {
+            self.free[at - 1].1 += self.free[at].1;
+            self.free.remove(at);
+        }
+    }
+
+    fn used(&self) -> u32 {
+        self.capacity - self.free.iter().map(|&(_, n)| n).sum::<u32>()
+    }
+}
+
+/// How many of `sizes` (a groom's points and strands) find room in the two arrays, taken in
+/// order, each from the first free span that has it.
+fn placed(mut points: Spans, mut strands: Spans, sizes: &[(u32, u32)]) -> usize {
+    sizes
+        .iter()
+        .filter(|&&(p, s)| {
+            let Some(at) = points.take(p) else {
+                return false;
+            };
+            if strands.take(s).is_some() {
+                return true;
+            }
+            points.give(at, p);
+            false
+        })
+        .count()
+}
+
+/// Elements of `bytes` each that a buffer of `most_bytes` holds (the largest the device binds).
+fn most_elements(bytes: u64, most_bytes: u64) -> u32 {
+    (most_bytes / bytes).min(1 << 31) as u32
+}
+
+/// Room for `want` elements of `bytes` each in a shared groom array: `first` at least, a power
+/// of two up to [`ARRAY_STEP_BYTES`] and whole steps of that beyond, and no more than a buffer
+/// of `most_bytes` holds.
+fn capacity_for(want: u64, first: u32, bytes: u64, most_bytes: u64) -> u32 {
+    let step = ARRAY_STEP_BYTES / bytes;
+    let want = want.max(first as u64);
+    let size = if want <= step {
+        want.next_power_of_two()
+    } else {
+        want.div_ceil(step) * step
+    };
+    size.min(most_elements(bytes, most_bytes) as u64) as u32
+}
+
+/// Whether making the shared arrays again places more of `sizes` than their room does as it
+/// lies: when they would be larger (`capacities`: what [`capacity_for`] gives them now), or
+/// when their free room, gathered in one piece, holds more. Arrays as large as the device lets
+/// them be, and full, are left as they are: making them again copies every groom held.
+fn worth_making_again(
+    points: &Spans,
+    strands: &Spans,
+    sizes: &[(u32, u32)],
+    capacities: (u32, u32),
+) -> bool {
+    if capacities.0 > points.capacity || capacities.1 > strands.capacity {
+        return true;
+    }
+    let gathered = placed(
+        Spans::new(points.capacity, points.used()),
+        Spans::new(strands.capacity, strands.used()),
+        sizes,
+    );
+    gathered > placed(points.clone(), strands.clone(), sizes)
+}
+
 /// One instance this frame, as `prepare` copied it.
 struct Draw {
     entity: Entity,
+    /// Its groom asset's index, and the version of it this frame draws.
     groom: u32,
+    version: u64,
     /// Model -> camera-relative.
     rotation_scale: Mat3,
     translation: Vec3,
@@ -241,11 +439,21 @@ struct Groups {
 #[derive(Default)]
 pub(crate) struct StrandFeature {
     pipelines: Option<Pipelines>,
+    /// The grooms on the GPU, by asset index.
     grooms: HashMap<u32, GroomSlot>,
-    /// The shared groom arrays need building again (a groom came, changed or left).
-    grooms_dirty: bool,
-    /// Grooms waiting for `prepare_frame` (new or changed this frame).
-    incoming: Vec<(u32, u64, StrandGroom)>,
+    /// What is known of every groom an instance wears, on the GPU or not.
+    facts: HashMap<u32, GroomFacts>,
+    /// Free room in the shared groom arrays: points (`buffers.rest`), strands (`buffers.info`).
+    point_room: Spans,
+    strand_room: Spans,
+    /// Grooms `prepare` packed for `prepare_frame` to send (drawn, and new or changed), and
+    /// how long packing them took (ms).
+    incoming: Vec<(u32, u64, PackedGroom)>,
+    pack_ms: f32,
+    /// Grooms sent and grooms dropped so far, and how often the arrays were made again.
+    groom_uploads: u64,
+    groom_evictions: u64,
+    groom_repacks: u64,
     draws: Option<Vec<Draw>>,
     /// Last frame's layout (entity, groom, point slots): history is valid while it holds.
     layout: Vec<(Entity, u32, u32)>,
@@ -255,33 +463,37 @@ pub(crate) struct StrandFeature {
     groups: Option<Groups>,
     frame: Option<FrameDraws>,
     frame_index: u32,
+    /// Frames prepared with the strands on (what a groom's `last_seen` counts in).
     frames: u64,
     stats: FeatureStats,
+    /// Warned once of a groom whose arrays do not agree, and once of one without room.
     warned: bool,
+    warned_no_room: bool,
 }
 
-impl StrandFeature {
-    fn upload_groom(&mut self, index: u32, version: u64, groom: StrandGroom) {
-        let per = groom.points_per as usize;
-        let strands = groom.strand_count();
-        let order = spread_order(&groom);
-        let default_rough = match groom.fiber {
-            StrandFiber::Human => 0.33,
-            StrandFiber::Fur => 0.42,
-        };
-        let mut rest = Vec::with_capacity(groom.points.len());
-        let mut info = Vec::with_capacity(strands);
-        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        let mut max_radius = 0.0f32;
-        for &s in &order {
+/// `groom` as the GPU holds it: its strands in [`spread_order`], their colours and guides
+/// packed. `lo` and `hi` are its bounds ([`GroomFacts`]). The loops run on the frame's leaf
+/// threads, a few thousand strands to each.
+fn pack_groom(groom: &StrandGroom, lo: Vec3, hi: Vec3) -> PackedGroom {
+    let per = (groom.points_per as usize).max(1);
+    let order = spread_order(groom);
+    let default_rough = match groom.fiber {
+        StrandFiber::Human => 0.33,
+        StrandFiber::Fur => 0.42,
+    };
+    let mut rest = vec![[0.0f32; 4]; order.len() * per];
+    engine_core::tasks::par_chunks_mut(&mut rest, PACK_CHUNK * per, |chunk, out| {
+        let order = &order[chunk * PACK_CHUNK..];
+        for (points, &s) in out.chunks_exact_mut(per).zip(order) {
             let s = s as usize;
-            for p in &groom.points[s * per..(s + 1) * per] {
-                let v = Vec3::new(p[0], p[1], p[2]);
-                lo = lo.min(v - p[3]);
-                hi = hi.max(v + p[3]);
-                max_radius = max_radius.max(p[3]);
-                rest.push(*p);
-            }
+            points.copy_from_slice(&groom.points[s * per..(s + 1) * per]);
+        }
+    });
+    let mut info = vec![GpuInfo::default(); order.len()];
+    engine_core::tasks::par_chunks_mut(&mut info, PACK_CHUNK, |chunk, out| {
+        let order = &order[chunk * PACK_CHUNK..];
+        for (info, &s) in out.iter_mut().zip(order) {
+            let s = s as usize;
             let root = groom.roots[s];
             let tip =
                 groom
@@ -292,7 +504,7 @@ impl StrandFeature {
             let pack = |a: f32, b: f32| f16_bits(a) | (f16_bits(b) << 16);
             let follow = groom.follow.get(s).copied().unwrap_or_default();
             let unorm = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u32;
-            info.push(GpuInfo {
+            *info = GpuInfo {
                 color: [
                     pack(root[0], root[1]),
                     pack(root[2], root[3]),
@@ -305,73 +517,305 @@ impl StrandFeature {
                     follow.guides[2],
                     unorm(follow.weights[0]) | (unorm(follow.weights[1]) << 16),
                 ],
+            };
+        }
+    });
+    PackedGroom {
+        rest,
+        info,
+        guides: groom
+            .guides
+            .iter()
+            .map(|g| Vec3::new(g[0], g[1], g[2]))
+            .collect(),
+        points_per: groom.points_per,
+        fiber: groom.fiber,
+        thin: groom.thin,
+        lo,
+        hi,
+    }
+}
+
+impl StrandFeature {
+    /// The grooms `prepare` packed, into the shared arrays: each into free room of its own, so
+    /// no other groom is sent again. (Until 17 Nov 2026 every groom's strands were kept here
+    /// and both arrays were built and sent whole whenever one groom came or left, and grooms
+    /// came whether drawn or not and left 600 frames later: with the showcase's 30 coats,
+    /// 500 MB again about once a second, each time a frame of 0.3 to 0.4 s on the PC.)
+    fn send_grooms(&mut self, gpu: &GpuShared) {
+        let incoming = std::mem::take(&mut self.incoming);
+        if incoming.is_empty() {
+            return;
+        }
+        // A changed groom's old strands leave first.
+        for (index, _, _) in &incoming {
+            self.drop_groom(*index);
+        }
+        // Room for all of them, or the arrays again where that makes room: larger, or with
+        // their free room in one piece.
+        let sizes: Vec<(u32, u32)> = incoming
+            .iter()
+            .map(|(_, _, p)| (p.rest.len() as u32, p.info.len() as u32))
+            .collect();
+        let fit = placed(self.point_room.clone(), self.strand_room.clone(), &sizes) == sizes.len();
+        if !fit || self.buffers.rest.is_none() {
+            let more = |of: fn(&(u32, u32)) -> u32| sizes.iter().map(|s| of(s) as u64).sum::<u64>();
+            let coming = (more(|s| s.0), more(|s| s.1));
+            let most = most_bytes(gpu);
+            // (Arrays that may grow no further: what nobody draws leaves for what is drawn.)
+            for index in self.grooms_in_the_way(coming, most) {
+                self.drop_groom(index);
+                self.groom_evictions += 1;
+            }
+            let points = self.point_room.used() as u64 + coming.0;
+            let strands = self.strand_room.used() as u64 + coming.1;
+            let capacities = (
+                capacity_for(points, FIRST_POINTS, POINT_BYTES, most),
+                capacity_for(strands, FIRST_STRANDS, STRAND_BYTES, most),
+            );
+            if self.buffers.rest.is_none()
+                || worth_making_again(&self.point_room, &self.strand_room, &sizes, capacities)
+            {
+                self.repack(gpu, points, strands);
+            }
+        }
+        let (Some(rest), Some(info)) = (&self.buffers.rest, &self.buffers.info) else {
+            return;
+        };
+        for (index, version, packed) in incoming {
+            let (points, strands) = (packed.rest.len() as u32, packed.info.len() as u32);
+            let room = self.point_room.take(points).and_then(|first_point| {
+                let first_strand = self.strand_room.take(strands);
+                if first_strand.is_none() {
+                    self.point_room.give(first_point, points);
+                }
+                Some((first_point, first_strand?))
             });
+            let Some((first_point, first_strand)) = room else {
+                // (`prepare` packs only what has room beside the grooms in view, and those out
+                // of view have left for it: not expected. Asked for again in a while, so a
+                // groom is not packed in vain every frame.)
+                if let Some(facts) = self.facts.get_mut(&index) {
+                    facts.no_room_until = self.frames + NO_ROOM_FRAMES;
+                }
+                if !self.warned_no_room {
+                    engine_core::log::warn!(
+                        "strands: no room for a groom of {strands} strands on the GPU; not drawn"
+                    );
+                    self.warned_no_room = true;
+                }
+                continue;
+            };
+            if points > 0 {
+                gpu.queue.write_buffer(
+                    rest,
+                    first_point as u64 * POINT_BYTES,
+                    bytemuck::cast_slice(&packed.rest),
+                );
+                gpu.queue.write_buffer(
+                    info,
+                    first_strand as u64 * STRAND_BYTES,
+                    bytemuck::cast_slice(&packed.info),
+                );
+            }
+            self.grooms.insert(
+                index,
+                GroomSlot {
+                    version,
+                    guides: packed.guides,
+                    points_per: packed.points_per,
+                    strands,
+                    fiber: packed.fiber,
+                    thin: packed.thin,
+                    lo: packed.lo,
+                    hi: packed.hi,
+                    first_point,
+                    first_strand,
+                    last_seen: self.frames,
+                },
+            );
+            self.groom_uploads += 1;
         }
-        if rest.is_empty() {
-            (lo, hi) = (Vec3::ZERO, Vec3::ZERO);
-        }
-        self.grooms.insert(
-            index,
-            GroomSlot {
-                version,
-                rest,
-                info,
-                guides: groom
-                    .guides
-                    .iter()
-                    .map(|g| Vec3::new(g[0], g[1], g[2]))
-                    .collect(),
-                points_per: groom.points_per,
-                strands: strands as u32,
-                fiber: groom.fiber,
-                thin: groom.thin,
-                lo,
-                hi,
-                max_radius,
-                first_point: 0,
-                first_strand: 0,
-                last_seen: self.frames,
-            },
-        );
-        self.grooms_dirty = true;
     }
 
-    /// The groom arrays again, every groom in turn.
-    fn rebuild_grooms(&mut self, gpu: &GpuShared) {
-        let mut rest: Vec<[f32; 4]> = Vec::new();
-        let mut info: Vec<GpuInfo> = Vec::new();
-        let mut keys: Vec<u32> = self.grooms.keys().copied().collect();
-        keys.sort_unstable();
-        for k in keys {
-            let g = self.grooms.get_mut(&k).expect("listed");
-            g.first_point = rest.len() as u32;
-            g.first_strand = info.len() as u32;
-            rest.extend_from_slice(&g.rest);
-            info.extend_from_slice(&g.info);
+    /// Takes a groom off the GPU: its room in the arrays is free again (nothing is copied).
+    fn drop_groom(&mut self, index: u32) {
+        if let Some(g) = self.grooms.remove(&index) {
+            self.point_room.give(g.first_point, g.points());
+            self.strand_room.give(g.first_strand, g.strands);
         }
-        if rest.is_empty() {
-            rest.push([0.0; 4]);
-            info.push(GpuInfo::default());
-        }
-        use wgpu::util::DeviceExt;
-        let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-        self.buffers.rest = Some(gpu.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("strand rest points"),
-                contents: bytemuck::cast_slice(&rest),
-                usage: storage,
-            },
-        ));
-        self.buffers.info = Some(gpu.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("strand info"),
-                contents: bytemuck::cast_slice(&info),
-                usage: storage,
-            },
-        ));
-        self.groups = None;
-        self.grooms_dirty = false;
     }
+
+    /// The grooms to take off the GPU so that `coming` more points and strands have room in
+    /// arrays no larger than a buffer of `most_bytes` (the largest the device binds): of those
+    /// this frame does not draw, the longest unseen first, and no more than it takes. None
+    /// where the arrays may still grow to hold everything. (`prepare` packs a groom only where
+    /// it has room beside what the frame draws, so what leaves here is always enough.)
+    fn grooms_in_the_way(&self, coming: (u64, u64), most_bytes: u64) -> Vec<u32> {
+        let most = (
+            most_elements(POINT_BYTES, most_bytes) as u64,
+            most_elements(STRAND_BYTES, most_bytes) as u64,
+        );
+        let mut held = (
+            self.point_room.used() as u64 + coming.0,
+            self.strand_room.used() as u64 + coming.1,
+        );
+        let frames = self.frames;
+        let mut unseen: Vec<(u64, u32)> = self
+            .grooms
+            .iter()
+            .filter(|(_, g)| g.last_seen < frames)
+            .map(|(&index, g)| (g.last_seen, index))
+            .collect();
+        unseen.sort_unstable();
+        let mut leaving = Vec::new();
+        for (_, index) in unseen {
+            if held.0 <= most.0 && held.1 <= most.1 {
+                break;
+            }
+            let g = &self.grooms[&index];
+            held.0 -= g.points() as u64;
+            held.1 -= g.strands as u64;
+            leaving.push(index);
+        }
+        leaving
+    }
+
+    /// The grooms to take off the GPU now: those nobody drew for [`EVICT_FRAMES`], the longest
+    /// unseen first, for as long as more than [`KEEP_POINTS`] are held that this frame does
+    /// not draw. (What the frame draws is not counted: with a herd in view that alone is
+    /// several times `KEEP_POINTS`, and every animal that walked out of view would leave the
+    /// GPU 600 frames later and be sent again on its way back.)
+    fn grooms_to_drop(&self) -> Vec<u32> {
+        let frames = self.frames;
+        let mut held: u64 = self
+            .grooms
+            .values()
+            .filter(|g| g.last_seen < frames)
+            .map(|g| g.points() as u64)
+            .sum();
+        if held <= KEEP_POINTS as u64 {
+            return Vec::new();
+        }
+        let mut stale: Vec<(u64, u32, u32)> = self
+            .grooms
+            .iter()
+            .filter(|(_, g)| g.last_seen + EVICT_FRAMES < frames)
+            .map(|(&index, g)| (g.last_seen, index, g.points()))
+            .collect();
+        stale.sort_unstable();
+        let mut leaving = Vec::new();
+        for (_, index, points) in stale {
+            if held <= KEEP_POINTS as u64 {
+                break;
+            }
+            held -= points as u64;
+            leaving.push(index);
+        }
+        leaving
+    }
+
+    /// Drops [`Self::grooms_to_drop`]; arrays that are then three quarters empty are made
+    /// again at twice what they hold.
+    fn evict_grooms(&mut self, gpu: &GpuShared) {
+        let leaving = self.grooms_to_drop();
+        if leaving.is_empty() {
+            return;
+        }
+        for index in leaving {
+            self.drop_groom(index);
+            self.groom_evictions += 1;
+        }
+        let (points, strands) = (self.point_room.used(), self.strand_room.used());
+        if points as u64 * 4 <= self.point_room.capacity as u64
+            && self.point_room.capacity > FIRST_POINTS
+        {
+            self.repack(gpu, points as u64 * 2, strands as u64 * 2);
+        }
+    }
+
+    /// The shared groom arrays made again with room for `points` and `strands`
+    /// ([`capacity_for`]: at most what the device lets a storage buffer hold), and the grooms
+    /// held copied into them one after another, on the GPU: to grow, or to close the gaps of
+    /// grooms that left. Nothing crosses from the CPU.
+    fn repack(&mut self, gpu: &GpuShared, points: u64, strands: u64) {
+        let most = most_bytes(gpu);
+        let point_capacity = capacity_for(points, FIRST_POINTS, POINT_BYTES, most);
+        let strand_capacity = capacity_for(strands, FIRST_STRANDS, STRAND_BYTES, most);
+        let make = |label: &'static str, size: u64| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        };
+        let rest = make("strand rest points", point_capacity as u64 * POINT_BYTES);
+        let info = make("strand info", strand_capacity as u64 * STRAND_BYTES);
+        let mut order: Vec<u32> = self.grooms.keys().copied().collect();
+        order.sort_unstable_by_key(|index| self.grooms[index].first_point);
+        let mut encoder = None;
+        let (mut point, mut strand) = (0u32, 0u32);
+        for index in order {
+            let g = &self.grooms[&index];
+            let (points, strands) = (g.points(), g.strands);
+            if point as u64 + points as u64 > point_capacity as u64
+                || strand as u64 + strands as u64 > strand_capacity as u64
+            {
+                // (No room in arrays the device caps: it leaves, and is sent again later.)
+                self.grooms.remove(&index);
+                continue;
+            }
+            if points > 0
+                && let (Some(old_rest), Some(old_info)) = (&self.buffers.rest, &self.buffers.info)
+            {
+                let encoder = encoder.get_or_insert_with(|| {
+                    gpu.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("strand grooms"),
+                        })
+                });
+                encoder.copy_buffer_to_buffer(
+                    old_rest,
+                    g.first_point as u64 * POINT_BYTES,
+                    &rest,
+                    point as u64 * POINT_BYTES,
+                    points as u64 * POINT_BYTES,
+                );
+                encoder.copy_buffer_to_buffer(
+                    old_info,
+                    g.first_strand as u64 * STRAND_BYTES,
+                    &info,
+                    strand as u64 * STRAND_BYTES,
+                    strands as u64 * STRAND_BYTES,
+                );
+            }
+            let g = self.grooms.get_mut(&index).expect("listed");
+            g.first_point = point;
+            g.first_strand = strand;
+            point += points;
+            strand += strands;
+        }
+        if let Some(encoder) = encoder {
+            gpu.queue.submit([encoder.finish()]);
+        }
+        self.buffers.rest = Some(rest);
+        self.buffers.info = Some(info);
+        self.point_room = Spans::new(point_capacity, point);
+        self.strand_room = Spans::new(strand_capacity, strand);
+        self.groups = None;
+        self.groom_repacks += 1;
+    }
+}
+
+/// The largest storage buffer the device binds, bytes: what a shared groom array may grow to.
+fn most_bytes(gpu: &GpuShared) -> u64 {
+    let limits = gpu.device.limits();
+    limits
+        .max_buffer_size
+        .min(limits.max_storage_buffer_binding_size)
 }
 
 /// `v` as a half float's bits (round to nearest; tiny values flush to 0, huge ones clamp), as
@@ -746,7 +1190,7 @@ pub(crate) fn spread_order(groom: &StrandGroom) -> Vec<u32> {
             (part(q.x) | (part(q.y) << 1) | (part(q.z) << 2), s as u32)
         })
         .collect();
-    line.sort_unstable();
+    sort_line(&mut line);
     let bits = strands.next_power_of_two().trailing_zeros();
     let mut order = Vec::with_capacity(strands);
     for i in 0..(1u64 << bits) {
@@ -760,6 +1204,53 @@ pub(crate) fn spread_order(groom: &StrandGroom) -> Vec<u32> {
         }
     }
     order
+}
+
+/// `line` (a strand's place on the curve, the strand) sorted, as `sort_unstable` leaves it,
+/// on the frame's leaf threads: the curve's first six bits cut a long line into 64 runs, and
+/// each run is sorted on its own. (A coat of 200 000 hairs: 5 ms on one thread.)
+fn sort_line(line: &mut Vec<(u64, u32)>) {
+    const RUNS: usize = 64;
+    if line.len() < 4 * PACK_CHUNK {
+        line.sort_unstable();
+        return;
+    }
+    // (A place on the curve has 63 bits.)
+    let run = |place: u64| (place >> 57) as usize;
+    let mut starts = [0usize; RUNS + 1];
+    for &(place, _) in line.iter() {
+        starts[run(place) + 1] += 1;
+    }
+    for r in 0..RUNS {
+        starts[r + 1] += starts[r];
+    }
+    let mut placed = vec![(0u64, 0u32); line.len()];
+    let mut next = starts;
+    for &entry in line.iter() {
+        let r = run(entry.0);
+        placed[next[r]] = entry;
+        next[r] += 1;
+    }
+    let mut runs = Vec::with_capacity(RUNS);
+    let mut left = placed.as_mut_slice();
+    for r in 0..RUNS {
+        let (run, after) = left.split_at_mut(starts[r + 1] - starts[r]);
+        left = after;
+        if run.len() > 1 {
+            runs.push(run);
+        }
+    }
+    match engine_core::tasks::split_pool() {
+        Some(pool) if runs.len() > 1 => {
+            pool.scope(|scope| {
+                for run in runs {
+                    scope.spawn(async move { run.sort_unstable() });
+                }
+            });
+        }
+        _ => runs.into_iter().for_each(|run| run.sort_unstable()),
+    }
+    *line = placed;
 }
 
 /// The near rule's number: [`strand_share`] of a groom's `strands`, whole.
@@ -837,7 +1328,7 @@ impl RenderFeature for StrandFeature {
     fn prepare(
         &mut self,
         world: &mut World,
-        _gpu: &GpuShared,
+        gpu: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
     ) {
@@ -845,12 +1336,15 @@ impl RenderFeature for StrandFeature {
             return;
         }
         self.draws = None;
-        self.frames += 1;
+        self.incoming.clear();
         if settings.debug_skip & shade_skip::STRANDS != 0 {
-            // (No draws, not no word: the slots and their history end here.)
+            // (No draws, not no word: the slots and their history end here. The frame is not
+            // counted: with the strands switched off the grooms held do not grow old, or a
+            // sweep's `no_strands` row would send them away and the next row fetch them.)
             self.draws = Some(Vec::new());
             return;
         }
+        self.frames += 1;
         let near_count = settings.debug_skip
             & (shade_skip::STRANDS_OLD_WAY | shade_skip::STRANDS_NEAR_COUNT)
             != 0;
@@ -870,7 +1364,8 @@ impl RenderFeature for StrandFeature {
             return;
         };
         let mut draws = Vec::new();
-        let mut incoming = Vec::new();
+        // The grooms the draws wear, by asset index.
+        let mut worn: HashMap<u32, &StrandGroom> = HashMap::new();
         let origin = view.origin;
         let px_per_m = view.proj.y_axis.y * view.height as f32 * 0.5;
         for (entity, inst, gt, posed, when_drawn) in q.iter(world) {
@@ -882,42 +1377,25 @@ impl RenderFeature for StrandFeature {
             };
             let index = inst.groom.index();
             let version = assets.version(inst.groom);
-            let known = self
-                .grooms
-                .get(&index)
-                .is_some_and(|g| g.version == version)
-                || incoming
-                    .iter()
-                    .any(|(i, _, _): &(u32, u64, StrandGroom)| *i == index);
-            if !known {
-                if !groom.is_valid() {
-                    if !self.warned {
-                        engine_core::log::warn!(
-                            "strands: a groom's arrays don't agree with its points_per; not drawn"
-                        );
-                        self.warned = true;
-                    }
-                    continue;
-                }
-                incoming.push((index, version, groom.clone()));
+            // Its bounds, read from the groom once (not from the GPU's copy: a groom out of
+            // view has none).
+            let facts = self
+                .facts
+                .entry(index)
+                .or_insert_with(|| GroomFacts::of(groom, version));
+            if facts.version != version {
+                *facts = GroomFacts::of(groom, version);
             }
-            // Bounds from the groom itself when it is new this frame.
-            let (lo, hi, max_radius) =
-                match self.grooms.get(&index).filter(|g| g.version == version) {
-                    Some(g) => (g.lo, g.hi, g.max_radius),
-                    None => {
-                        let mut lo = Vec3::splat(f32::MAX);
-                        let mut hi = Vec3::splat(f32::MIN);
-                        let mut max_radius = 0.0f32;
-                        for p in &groom.points {
-                            let v = Vec3::new(p[0], p[1], p[2]);
-                            lo = lo.min(v - p[3]);
-                            hi = hi.max(v + p[3]);
-                            max_radius = max_radius.max(p[3]);
-                        }
-                        (lo, hi, max_radius)
-                    }
-                };
+            if !facts.valid {
+                if !self.warned {
+                    engine_core::log::warn!(
+                        "strands: a groom's arrays don't agree with its points_per; not drawn"
+                    );
+                    self.warned = true;
+                }
+                continue;
+            }
+            let (lo, hi, max_radius) = (facts.lo, facts.hi, facts.max_radius);
             if lo.x > hi.x {
                 continue;
             }
@@ -954,9 +1432,11 @@ impl RenderFeature for StrandFeature {
             let pose = when_drawn
                 .filter(|_| guides.is_none() && !groom.guides.is_empty())
                 .map(|w| (*w, groom.guides.len()));
+            worn.insert(index, groom);
             draws.push(Draw {
                 entity,
                 groom: index,
+                version,
                 rotation_scale,
                 translation,
                 tint: inst.tint,
@@ -970,6 +1450,74 @@ impl RenderFeature for StrandFeature {
         }
         draws.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         draws.truncate(MAX_INSTANCES);
+        // The grooms these wear that the GPU does not hold (or holds as they were before a
+        // change) are packed now, the nearest first, as far as the frame's upload allowance
+        // goes (all of them while loading or headless). An instance whose groom has to wait
+        // is not drawn until it is there. Nor is one whose groom has no room beside those the
+        // frame draws, in arrays as large as the device lets a buffer be: asked before the
+        // allowance is taken and the groom packed, so it costs nothing while that lasts.
+        let most = most_bytes(gpu);
+        let most = (
+            most_elements(POINT_BYTES, most) as u64,
+            most_elements(STRAND_BYTES, most) as u64,
+        );
+        // Points and strands of the grooms held that the frame draws, and of those it packs.
+        let mut in_view = (0u64, 0u64);
+        let mut counted: Vec<u32> = Vec::new();
+        for d in &draws {
+            let held = self.grooms.get(&d.groom).filter(|g| g.version == d.version);
+            if let Some(g) = held
+                && !counted.contains(&d.groom)
+            {
+                counted.push(d.groom);
+                in_view.0 += g.points() as u64;
+                in_view.1 += g.strands as u64;
+            }
+        }
+        let mut packing: Vec<(u32, u64, &StrandGroom)> = Vec::new();
+        let mut no_room = None;
+        draws.retain(|d| {
+            let held = self.grooms.get(&d.groom).map(|g| g.version);
+            if held == Some(d.version) || packing.iter().any(|p| p.0 == d.groom) {
+                return true;
+            }
+            if self.facts[&d.groom].no_room_until > self.frames {
+                return false;
+            }
+            let groom = worn[&d.groom];
+            let (points, strands) = (groom.points.len() as u64, groom.strand_count() as u64);
+            if in_view.0 + points > most.0 || in_view.1 + strands > most.1 {
+                no_room.get_or_insert(strands);
+                return false;
+            }
+            let bytes = points * POINT_BYTES + strands * STRAND_BYTES;
+            if !gpu
+                .uploads
+                .take(GROOM_UPLOAD_KEY | d.groom as u64, bytes, held.is_some())
+            {
+                return false;
+            }
+            in_view.0 += points;
+            in_view.1 += strands;
+            packing.push((d.groom, d.version, groom));
+            true
+        });
+        if let Some(strands) = no_room
+            && !self.warned_no_room
+        {
+            engine_core::log::warn!(
+                "strands: no room on the GPU for a groom of {strands} strands beside those in \
+                 view; not drawn until some of them leave it"
+            );
+            self.warned_no_room = true;
+        }
+        let packing_since = std::time::Instant::now();
+        for (index, version, groom) in packing {
+            let facts = &self.facts[&index];
+            self.incoming
+                .push((index, version, pack_groom(groom, facts.lo, facts.hi)));
+        }
+        self.pack_ms = packing_since.elapsed().as_secs_f32() * 1000.0;
         // Guides posed when drawn: only now, for what the frame draws, side by side (a coat
         // out of view costs nothing; one in view the same skinning it cost every frame).
         let world: &World = world;
@@ -984,7 +1532,6 @@ impl RenderFeature for StrandFeature {
                 }
             }
         }));
-        self.incoming = incoming;
         self.draws = Some(draws);
     }
 
@@ -1000,23 +1547,60 @@ impl RenderFeature for StrandFeature {
         }
         self.frame = None;
         self.stats = FeatureStats::default();
-        for (index, version, groom) in std::mem::take(&mut self.incoming) {
-            self.upload_groom(index, version, groom);
-        }
-        let Some(draws) = self.draws.take() else {
-            return;
-        };
+        let grooms = (!self.incoming.is_empty()).then(std::time::Instant::now);
+        // (Grooms, strands and bytes on their way, for the log.)
+        let coming = self
+            .incoming
+            .iter()
+            .fold((0u32, 0u64, 0u64), |sum, (_, _, p)| {
+                (
+                    sum.0 + 1,
+                    sum.1 + p.info.len() as u64,
+                    sum.2 + p.rest.len() as u64 * POINT_BYTES + p.info.len() as u64 * STRAND_BYTES,
+                )
+            });
+        let repacks = self.groom_repacks;
+        // What the frame draws is seen now, before anything is sent: room for what comes is
+        // never made of a groom in view.
         let frames = self.frames;
-        for d in &draws {
+        for d in self.draws.iter().flatten() {
             if let Some(g) = self.grooms.get_mut(&d.groom) {
                 g.last_seen = frames;
             }
         }
-        let before = self.grooms.len();
-        self.grooms
-            .retain(|_, g| g.last_seen + EVICT_FRAMES >= frames);
-        if self.grooms.len() != before {
-            self.grooms_dirty = true;
+        self.send_grooms(gpu);
+        let Some(draws) = self.draws.take() else {
+            return;
+        };
+        self.evict_grooms(gpu);
+        if let Some(started) = grooms {
+            // (Named in the slow-frame log, inside "prepare on the render thread".)
+            let sent_ms = started.elapsed().as_secs_f32() * 1000.0;
+            gpu.prepare_steps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(("strands: grooms", sent_ms));
+            // A groom's first sight is rare and is what a frame pays for it: one line each
+            // time, so a log shows grooms that come again and again, what each cost, and
+            // what making the arrays again for them cost.
+            let mb = |bytes: u64| bytes as f64 / (1 << 20) as f64;
+            engine_core::log::info!(
+                "strands: {} groom(s) of {} strands to the GPU ({:.1} MB): packed in {:.1} ms, \
+                 sent in {:.1} ms{}; {} held in arrays of {:.0} MB",
+                coming.0,
+                coming.1,
+                mb(coming.2),
+                self.pack_ms,
+                sent_ms,
+                if self.groom_repacks != repacks {
+                    " with the arrays made again"
+                } else {
+                    ""
+                },
+                self.grooms.len(),
+                mb(self.point_room.capacity as u64 * POINT_BYTES
+                    + self.strand_room.capacity as u64 * STRAND_BYTES)
+            );
         }
         if draws.is_empty() {
             self.layout.clear();
@@ -1026,15 +1610,15 @@ impl RenderFeature for StrandFeature {
         if self.pipelines.is_none() {
             self.pipelines = Some(Pipelines::new(gpu));
         }
-        if self.grooms_dirty || self.buffers.rest.is_none() {
-            self.rebuild_grooms(gpu);
-        }
 
         // Points drawn per instance, scaled down together past the budget.
         let wanted: usize = draws
             .iter()
             .filter_map(|d| {
-                let g = self.grooms.get(&d.groom)?;
+                let g = self
+                    .grooms
+                    .get(&d.groom)
+                    .filter(|g| g.version == d.version)?;
                 Some(d.wanted.ceil() as usize * g.points_per as usize)
             })
             .sum();
@@ -1055,7 +1639,7 @@ impl RenderFeature for StrandFeature {
         let (mut widest, mut widest_pose) = (0u32, 0u32);
         let (mut drawn_points, mut groom_strands) = (0u64, 0u64);
         for d in &draws {
-            let Some(g) = self.grooms.get(&d.groom) else {
+            let Some(g) = self.grooms.get(&d.groom).filter(|g| g.version == d.version) else {
                 continue;
             };
             // The strands drawn, as a number with a fraction: the last of them is drawn that
@@ -1586,7 +2170,18 @@ impl RenderFeature for StrandFeature {
     fn describe(&self) -> serde_json::Value {
         let f = self.frame.as_ref();
         serde_json::json!({
+            // On the GPU: grooms, the megabytes their arrays take and what of that is in
+            // use, and how many were sent, dropped, and how often the arrays were made again.
             "grooms": self.grooms.len(),
+            "groom_mb": (self.point_room.capacity as u64 * POINT_BYTES
+                + self.strand_room.capacity as u64 * STRAND_BYTES) as f64
+                / (1 << 20) as f64,
+            "groom_mb_used": (self.point_room.used() as u64 * POINT_BYTES
+                + self.strand_room.used() as u64 * STRAND_BYTES) as f64
+                / (1 << 20) as f64,
+            "groom_uploads": self.groom_uploads,
+            "groom_evictions": self.groom_evictions,
+            "groom_repacks": self.groom_repacks,
             "instances": f.map_or(0, |f| f.instances.len()),
             // Drawn this frame, and the strands their grooms hold.
             "points": f.map_or(0, |f| f.points),
@@ -1749,6 +2344,331 @@ mod tests {
         assert!(seen.iter().copied().eq(0..3001));
         assert!(spread_order(&groom_of(&[])).is_empty());
         assert_eq!(spread_order(&groom_of(&[[0.3, 0.1]])), [0]);
+    }
+
+    #[test]
+    fn a_long_line_sorts_on_threads_as_a_short_one_does_on_one() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rand = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Places of 63 bits; most of them crowded into a few of the 64 runs, some runs empty,
+        // and many places twice (told apart by their strand).
+        let line: Vec<(u64, u32)> = (0..100_000u32)
+            .map(|s| {
+                let r = rand();
+                let run = [0u64, 1, 1, 1, 17, 17, 40, 63][(r % 8) as usize];
+                let place = (run << 57) | ((r >> 8) & ((1 << 57) - 1));
+                (if s % 5 == 0 { place & !0xffff } else { place }, s)
+            })
+            .collect();
+        let mut plain = line.clone();
+        plain.sort_unstable();
+        let mut runs = line.clone();
+        sort_line(&mut runs);
+        assert!(
+            runs == plain,
+            "the runs, each sorted, are the whole line sorted"
+        );
+        // A short line is sorted as it always was.
+        let mut short = line[..1000].to_vec();
+        let mut short_plain = short.clone();
+        sort_line(&mut short);
+        short_plain.sort_unstable();
+        assert_eq!(short, short_plain);
+        sort_line(&mut Vec::new());
+    }
+
+    #[test]
+    fn a_packed_groom_holds_every_strand_once_in_spread_order() {
+        // More strands than a thread packs at a time, three points each, with tips and guides.
+        const STRANDS: usize = 2 * PACK_CHUNK + 777;
+        let mut state = 4242u32;
+        let mut rand = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as f32 / u32::MAX as f32
+        };
+        let mut groom = StrandGroom {
+            points_per: 3,
+            fiber: StrandFiber::Fur,
+            guides: vec![[0.0, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.2, 0.0]],
+            ..Default::default()
+        };
+        for s in 0..STRANDS {
+            let (x, y) = (rand(), rand() * 0.5);
+            for j in 0..3 {
+                groom
+                    .points
+                    .push([x, y, j as f32 * 0.01, 1e-4 + s as f32 * 1e-9]);
+            }
+            groom
+                .roots
+                .push([0.25, 0.5, 0.75, s as f32 / STRANDS as f32]);
+            groom.tips.push([1.0, 0.5, 0.25, 0.4]);
+            groom.follow.push(crate::strands::StrandFollow {
+                guides: [0, u32::MAX, u32::MAX],
+                weights: [1.0, 0.0, 0.0],
+            });
+        }
+        assert!(groom.is_valid());
+        let facts = GroomFacts::of(&groom, 7);
+        assert!(facts.valid && facts.version == 7);
+        assert!(facts.lo.x >= -1e-3 && facts.hi.x <= 1.001 && facts.hi.z > 0.019);
+        assert!((facts.max_radius - (1e-4 + (STRANDS - 1) as f32 * 1e-9)).abs() < 1e-9);
+        let packed = pack_groom(&groom, facts.lo, facts.hi);
+        let order = spread_order(&groom);
+        assert_eq!(packed.rest.len(), STRANDS * 3);
+        assert_eq!(packed.info.len(), STRANDS);
+        assert_eq!(packed.guides.len(), 3);
+        for (k, &s) in order.iter().enumerate() {
+            let s = s as usize;
+            assert_eq!(
+                packed.rest[k * 3..k * 3 + 3],
+                groom.points[s * 3..s * 3 + 3],
+                "strand {s} at place {k}"
+            );
+            let random = f16_bits(s as f32 / STRANDS as f32);
+            assert_eq!(
+                packed.info[k].color,
+                [
+                    f16_bits(0.25) | (f16_bits(0.5) << 16),
+                    f16_bits(0.75) | (random << 16),
+                    f16_bits(1.0) | (f16_bits(0.5) << 16),
+                    f16_bits(0.25) | (f16_bits(0.4) << 16),
+                ]
+            );
+            assert_eq!(packed.info[k].follow, [0, u32::MAX, u32::MAX, 65535]);
+        }
+        // A groom whose arrays don't agree is known as such, and has no bounds.
+        groom.roots.pop();
+        let facts = GroomFacts::of(&groom, 8);
+        assert!(!facts.valid && facts.lo.x > facts.hi.x);
+    }
+
+    #[test]
+    fn room_in_the_groom_arrays_is_taken_first_fit_and_joins_when_given_back() {
+        let mut room = Spans::new(100, 0);
+        assert_eq!(room.take(30), Some(0));
+        assert_eq!(room.take(30), Some(30));
+        assert_eq!(room.take(30), Some(60));
+        assert_eq!(room.take(30), None, "ten are left");
+        assert_eq!(room.used(), 90);
+        // The middle one leaves: its room is found again, by a smaller one first.
+        room.give(30, 30);
+        assert_eq!(room.free, [(30, 30), (90, 10)]);
+        assert_eq!(room.take(20), Some(30));
+        assert_eq!(room.take(10), Some(50));
+        assert_eq!(room.take(10), Some(90));
+        assert_eq!(room.used(), 100);
+        assert!(room.free.is_empty());
+        // Given back in any order, neighbours join: one span when all is free.
+        room.give(60, 30);
+        room.give(0, 30);
+        assert_eq!(room.free, [(0, 30), (60, 30)]);
+        room.give(50, 10);
+        assert_eq!(room.free, [(0, 30), (50, 40)]);
+        room.give(90, 10);
+        room.give(30, 20);
+        assert_eq!(room.free, [(0, 100)]);
+        assert_eq!(room.used(), 0);
+        // Nothing asked takes nothing; arrays partly full from the start.
+        assert_eq!(room.take(0), Some(0));
+        assert_eq!(room.free, [(0, 100)]);
+        let mut room = Spans::new(64, 40);
+        assert_eq!(
+            (room.used(), room.take(24), room.take(1)),
+            (40, Some(40), None)
+        );
+        assert_eq!(Spans::new(8, 8).free, []);
+    }
+
+    /// A groom of `strands` strands, four points each, held by `f` as last drawn in frame
+    /// `seen`.
+    fn hold(f: &mut StrandFeature, index: u32, strands: u32, seen: u64) {
+        let first_point = f.point_room.take(strands * 4).expect("room for its points");
+        let first_strand = f.strand_room.take(strands).expect("room for its strands");
+        f.grooms.insert(
+            index,
+            GroomSlot {
+                version: 1,
+                guides: Vec::new(),
+                points_per: 4,
+                strands,
+                fiber: StrandFiber::Fur,
+                thin: false,
+                lo: Vec3::ZERO,
+                hi: Vec3::ONE,
+                first_point,
+                first_strand,
+                last_seen: seen,
+            },
+        );
+    }
+
+    #[test]
+    fn grooms_leave_the_gpu_only_when_too_much_is_held_and_the_longest_unseen_first() {
+        // (Grooms of two million strands here, 8 M points each, ten coats' worth: so that a
+        // few of them are more than is kept.)
+        const STRANDS: u32 = 2_000_000;
+        const POINTS: u32 = STRANDS * 4;
+        let mut f = StrandFeature {
+            point_room: Spans::new(1 << 30, 0),
+            strand_room: Spans::new(1 << 28, 0),
+            ..Default::default()
+        };
+        // Three of them, 24 M points: under the 32 M kept.
+        for index in 0..3 {
+            hold(&mut f, index, STRANDS, 10 + index as u64);
+        }
+        f.frames = 100_000;
+        assert_eq!(
+            f.grooms_to_drop(),
+            [] as [u32; 0],
+            "little is held: all stay"
+        );
+        // Seven in all, 56 M points: over what is kept. Nothing leaves while all were drawn
+        // lately...
+        for index in 3..7 {
+            hold(&mut f, index, STRANDS, 10 + index as u64);
+        }
+        f.frames = 500;
+        assert_eq!(f.grooms_to_drop(), [] as [u32; 0], "all were drawn lately");
+        // ...then those unseen for 600 frames go, and only those...
+        f.frames = 10 + 1 + EVICT_FRAMES + 1;
+        assert_eq!(f.grooms_to_drop(), [0, 1], "the rest were drawn since");
+        // ...the longest unseen first, until 32 M are held: three of the seven.
+        f.frames = 100_000;
+        assert_eq!(f.grooms_to_drop(), [0, 1, 2], "no more than it takes");
+        // One drawn again stays, and the next unseen goes in its place.
+        f.grooms.get_mut(&0).unwrap().last_seen = 99_999;
+        assert_eq!(f.grooms_to_drop(), [1, 2, 3]);
+        for index in f.grooms_to_drop() {
+            f.drop_groom(index);
+        }
+        assert_eq!(f.grooms.len(), 4);
+        assert_eq!(f.point_room.used(), 4 * POINTS);
+        assert_eq!(f.strand_room.used(), 4 * STRANDS);
+        // Their room is one span again (they lay side by side), ahead of the free end.
+        assert_eq!(f.point_room.free[0], (POINTS, 3 * POINTS));
+        assert_eq!(f.grooms_to_drop(), [] as [u32; 0]);
+        // What the frame draws is not counted. Seven are held again, four of them drawn now:
+        // 24 M points wait undrawn, and all stay however long they were unseen...
+        for index in 1..4 {
+            hold(&mut f, index, STRANDS, 10 + index as u64);
+        }
+        for index in [0, 4, 5, 6] {
+            f.grooms.get_mut(&index).unwrap().last_seen = f.frames;
+        }
+        assert_eq!(f.point_room.used(), 7 * POINTS);
+        assert_eq!(
+            f.grooms_to_drop(),
+            [] as [u32; 0],
+            "a herd in view sends nobody away"
+        );
+        // ...and with two of the herd out of view for long, 40 M wait: the longest unseen
+        // goes, and no more.
+        for (index, seen) in [(4, 14), (5, 15)] {
+            f.grooms.get_mut(&index).unwrap().last_seen = seen;
+        }
+        assert_eq!(f.grooms_to_drop(), [1]);
+        // The showcase's thirty coats of 200 000 hairs, none in view: all are kept.
+        let mut f = StrandFeature {
+            point_room: Spans::new(1 << 30, 0),
+            strand_room: Spans::new(1 << 28, 0),
+            frames: 100_000,
+            ..Default::default()
+        };
+        for index in 0..30 {
+            hold(&mut f, index, 200_000, index as u64);
+        }
+        assert_eq!(f.point_room.used(), 24_000_000);
+        assert_eq!(f.grooms_to_drop(), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn grooms_nobody_draws_leave_for_one_in_view_where_the_arrays_can_grow_no_more() {
+        // A device whose largest buffer is 16 000 bytes: a thousand points, 500 strands.
+        let most = 16_000;
+        let mut f = StrandFeature {
+            point_room: Spans::new(1000, 0),
+            strand_room: Spans::new(500, 0),
+            frames: 50,
+            ..Default::default()
+        };
+        // Four grooms of 50 strands, 200 points: two drawn this frame, two not.
+        hold(&mut f, 0, 50, 50);
+        hold(&mut f, 1, 50, 20);
+        hold(&mut f, 2, 50, 50);
+        hold(&mut f, 3, 50, 10);
+        // One more has room as things are: nobody leaves.
+        assert_eq!(f.grooms_in_the_way((200, 50), most), [] as [u32; 0]);
+        // Two more make 1200 points: the longest unseen leaves, which is enough...
+        assert_eq!(f.grooms_in_the_way((400, 100), most), [3]);
+        // ...three more take both that nobody draws...
+        assert_eq!(f.grooms_in_the_way((600, 150), most), [3, 1]);
+        // ...and those in view never leave, whatever is asked.
+        assert_eq!(f.grooms_in_the_way((5000, 150), most), [3, 1]);
+        // The strands can be what is short: 200 held and 350 coming, where 500 fit.
+        assert_eq!(f.grooms_in_the_way((0, 350), most), [3]);
+        // A device whose arrays may still grow sends nobody away.
+        assert_eq!(f.grooms_in_the_way((600, 150), 1 << 30), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn the_groom_arrays_are_made_again_only_where_that_makes_room() {
+        // Free room in two pieces of 15 points, of 100; strands to spare.
+        let points = Spans {
+            capacity: 100,
+            free: vec![(10, 15), (60, 15)],
+        };
+        let strands = Spans::new(50, 10);
+        // A groom of 30 points fits neither piece, and the two together hold it...
+        assert_eq!(placed(points.clone(), strands.clone(), &[(30, 5)]), 0);
+        assert!(worth_making_again(&points, &strands, &[(30, 5)], (100, 50)));
+        // ...one of 40 does not fit even then: arrays as large as they may be stay as they
+        // are (they were made again, every groom copied, each time it asked)...
+        assert!(!worth_making_again(
+            &points,
+            &strands,
+            &[(40, 5)],
+            (100, 50)
+        ));
+        // ...and are made again where they may grow.
+        assert!(worth_making_again(&points, &strands, &[(40, 5)], (128, 50)));
+        // The strands can be what is short: a groom with room for its points only takes none.
+        let few = Spans::new(50, 48);
+        assert_eq!(placed(points.clone(), few.clone(), &[(10, 5), (10, 2)]), 1);
+        assert!(!worth_making_again(&points, &few, &[(10, 5)], (100, 50)));
+        assert!(worth_making_again(&points, &few, &[(10, 5)], (100, 64)));
+        // What fits as the room lies needs nothing made again.
+        assert_eq!(
+            placed(points.clone(), strands.clone(), &[(15, 5), (15, 5)]),
+            2
+        );
+        assert!(!worth_making_again(
+            &points,
+            &strands,
+            &[(15, 5), (15, 5)],
+            (100, 50)
+        ));
+        // An array's size: a power of two, the first size at least, the device's most at most.
+        assert_eq!(capacity_for(0, 64, 16, 1 << 30), 64);
+        assert_eq!(capacity_for(65, 64, 16, 1 << 30), 128);
+        assert_eq!(capacity_for(1 << 40, 64, 16, 16 * 1000), 1000);
+        assert_eq!(capacity_for(1 << 40, 64, 16, u64::MAX), 1 << 31);
+        // Past 64 MB (4 M points, 2 M strands) it grows by as much, not to twice its size:
+        // thirty coats' 24 M points get room for 24 M and no more.
+        assert_eq!(capacity_for(4 << 20, 64, 16, u64::MAX), 4 << 20);
+        assert_eq!(capacity_for((4 << 20) + 1, 64, 16, u64::MAX), 8 << 20);
+        assert_eq!(capacity_for((8 << 20) + 1, 64, 16, u64::MAX), 12 << 20);
+        assert_eq!(capacity_for(24_000_000, 64, 16, u64::MAX), 24 << 20);
+        assert_eq!(capacity_for(6_000_000, 64, 32, u64::MAX), 6 << 20);
+        assert_eq!(capacity_for(24_000_000, 64, 16, 128 << 20), 8 << 20);
     }
 
     #[test]

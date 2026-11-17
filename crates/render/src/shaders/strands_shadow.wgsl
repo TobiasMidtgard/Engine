@@ -72,8 +72,9 @@ fn strand_shadow_vertex(v: u32, g: u32, boost: f32) -> ShadowOut {
     out.clip = vec4<f32>(c.xy + across * half * side * c.w, c.z, c.w);
     out.keep = r / half;
     // (Seeded by the strand's place in its groom, which stays: its place in the frame moves
-    // whenever a nearer groom draws one strand more.)
-    out.seed = (inst.first.y + g - inst.more.x) * 61u + seg;
+    // whenever a nearer groom draws one strand more, and its groom's place in the shared
+    // arrays when they are made again.)
+    out.seed = (g - inst.more.x) * 61u + seg;
     return out;
 }
 

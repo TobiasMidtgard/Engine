@@ -5312,6 +5312,16 @@ fn log_uploads(world: &mut World, report: &crate::features::UploadReport) {
                 })
                 .unwrap_or_else(|| "no entity draws it".into());
             format!("mesh {index} [{components}]")
+        } else if key & crate::strand_feature::GROOM_UPLOAD_KEY != 0 {
+            let index = (key & !crate::strand_feature::GROOM_UPLOAD_KEY) as u32;
+            let strands = world
+                .get_resource::<engine_assets::Assets<crate::StrandGroom>>()
+                .and_then(|a| a.get(engine_assets::Handle::from_index(index)))
+                .map_or_else(
+                    || "gone".into(),
+                    |g| format!("{} strands", g.strand_count()),
+                );
+            format!("groom {index} ({strands})")
         } else {
             let index = (key / crate::image_cache::VIEW_SLOTS as u64) as u32;
             let size = world

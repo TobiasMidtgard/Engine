@@ -940,3 +940,239 @@ fn a_coat_far_away_is_as_smooth_as_with_the_near_rule() {
         );
     }
 }
+
+/// The curtain before the dark wall, a small patch of fur beside it and nearer the camera, and
+/// a third groom on an instance behind the camera; with an upload allowance of `budget_mb`
+/// megabytes a frame when given (headless apps have none otherwise). Returns the app and the
+/// fur's groom.
+fn groom_scene(budget_mb: Option<f32>) -> (App, engine_assets::Handle<StrandGroom>) {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = W;
+        w.height = H;
+    }
+    app.add_plugins(RenderPlugin);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.anti_aliasing = AntiAliasing::None;
+        s.tonemapper = Tonemapper::None;
+        s.bloom_intensity = 0.0;
+        s.vignette = 0.0;
+        s.film_grain = 0.0;
+        s.sharpness = 0.0;
+        s.screen_space_reflections = false;
+        s.screen_space_gi = false;
+        if let Some(mb) = budget_mb {
+            s.upload_budget_headless = true;
+            s.upload_mb_per_frame = mb;
+        }
+    }
+    let (hair, fur, behind) = {
+        let mut grooms = app.world.resource_mut::<Assets<StrandGroom>>();
+        (
+            grooms.add(curtain()),
+            grooms.add(pelt(2000)),
+            grooms.add(pelt(500)),
+        )
+    };
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(40.0)
+        },
+        Transform::from_xyz(0.0, 0.0, 0.5).looking_at(DVec3::ZERO, Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.3, -0.5, -1.0), Vec3::Y),
+    ));
+    w.spawn((
+        Transform::from_xyz(0.0, 0.0, -0.3),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [2.0, 2.0, 0.02],
+            },
+            StandardMaterial::color(0.05, 0.06, 0.08),
+        ),
+    ));
+    w.spawn((Transform::default(), StrandInstance::new(hair)));
+    // (8 cm square, right of the curtain and 10 cm nearer: the nearest groom is sent first.)
+    w.spawn((
+        Transform::from_xyz(0.15, 0.0, 0.1).with_scale(Vec3::splat(0.4)),
+        StrandInstance::new(fur),
+    ));
+    w.spawn((
+        Transform::from_xyz(0.0, 0.0, 5.0),
+        StrandInstance::new(behind),
+    ));
+    (app, fur)
+}
+
+/// What the strand renderer says of itself.
+fn strand_state(app: &App) -> serde_json::Value {
+    let describe = app.world.resource::<Renderer>().describe();
+    describe["features"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["name"] == "strands"))
+        .map(|f| f["state"].clone())
+        .unwrap_or_default()
+}
+
+/// The app's picture now.
+fn shoot(app: &mut App, shot: &str) -> RgbImage {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(shot);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(shot));
+    }
+    image::open(&path).expect("read the shot").to_rgb8()
+}
+
+/// [`differing`] over the pixels of `columns` and `rows` alone.
+fn differing_in(
+    a: &RgbImage,
+    b: &RgbImage,
+    columns: std::ops::Range<u32>,
+    rows: std::ops::Range<u32>,
+) -> (u32, i32) {
+    let (mut differ, mut worst) = (0, 0);
+    for y in rows {
+        for x in columns.clone() {
+            let (a, b) = (a.get_pixel(x, y), b.get_pixel(x, y));
+            let d = (0..3)
+                .map(|c| (a.0[c] as i32 - b.0[c] as i32).abs())
+                .max()
+                .unwrap_or(0);
+            worst = worst.max(d);
+            differ += (d > 2) as u32;
+        }
+    }
+    (differ, worst)
+}
+
+#[test]
+fn a_groom_goes_to_the_gpu_when_it_is_drawn_and_moves_no_other() {
+    // Until 17 Nov 2026 every groom an instance wore went to the GPU, drawn or not, left
+    // again 600 frames after it was last drawn, and each coming and going built and sent
+    // every groom's strands anew: with the showcase's thirty coats, a frame of 0.3 to 0.4 s
+    // about once a second on the PC. Now a groom is sent when an instance that wears it is
+    // drawn, into room of its own, and the others stay where they are; when the arrays must
+    // grow, the grooms in them are copied across on the GPU.
+    //
+    // The curtain's part of the picture (it hangs from row 54 to 186; the wall below it
+    // carries the fur's shadow too, soft and wide), and the fur's columns.
+    const CURTAIN: (std::ops::Range<u32>, std::ops::Range<u32>) = (90..238, 40..194);
+    const FUR: (std::ops::Range<u32>, std::ops::Range<u32>) = (246..W, 0..H);
+    let count = |state: &serde_json::Value, key: &str| state[key].as_u64().unwrap_or(u64::MAX);
+
+    let (mut app, fur) = groom_scene(None);
+    app.update_n(6);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let first = shoot(&mut app, "strands_grooms_first.png");
+    let state = strand_state(&app);
+    eprintln!("the curtain and the fur drawn: {state}");
+    // The two in view are on the GPU, in arrays made once; the groom behind the camera never
+    // went.
+    assert_eq!(count(&state, "instances"), 2, "{state}");
+    assert_eq!(count(&state, "grooms"), 2, "{state}");
+    assert_eq!(count(&state, "groom_uploads"), 2, "{state}");
+    assert_eq!(count(&state, "groom_repacks"), 1, "{state}");
+
+    // Frames later nothing more was sent.
+    app.update_n(4);
+    let later = shoot(&mut app, "strands_grooms_later.png");
+    let state = strand_state(&app);
+    let (drift, drift_worst) = differing_in(&first, &later, CURTAIN.0, CURTAIN.1);
+    assert_eq!(count(&state, "groom_uploads"), 2, "{state}");
+    assert_eq!(count(&state, "groom_repacks"), 1, "{state}");
+
+    // The fur grows to ten times the hairs: its old strands leave, the new ones do not fit
+    // in the arrays, and the curtain's move into larger ones on the GPU, to another place
+    // than they had. Only the fur was sent, and the curtain is drawn as it was.
+    app.world
+        .resource_mut::<Assets<StrandGroom>>()
+        .set(fur, pelt(20_000));
+    app.update_n(4);
+    let grown = shoot(&mut app, "strands_grooms_grown.png");
+    let state = strand_state(&app);
+    let (moved, moved_worst) = differing_in(&later, &grown, CURTAIN.0, CURTAIN.1);
+    let (denser, _) = differing_in(&later, &grown, FUR.0, FUR.1);
+    eprintln!(
+        "the fur grown tenfold: {state}; the curtain's part differs in {moved} pixels by more than 2/255 (the worst by {moved_worst}; between two pictures with nothing changed {drift}, the worst by {drift_worst}), the fur's in {denser}"
+    );
+    assert_eq!(count(&state, "instances"), 2, "{state}");
+    assert_eq!(count(&state, "grooms"), 2, "{state}");
+    assert_eq!(
+        count(&state, "groom_uploads"),
+        3,
+        "only the fur was sent: {state}"
+    );
+    assert_eq!(
+        count(&state, "groom_repacks"),
+        2,
+        "the arrays grew once: {state}"
+    );
+    assert_eq!(count(&state, "groom_evictions"), 0, "{state}");
+    assert_eq!(
+        state["groom_mb"].as_f64(),
+        Some(3.0),
+        "131072 points and 32768 strands of room: {state}"
+    );
+    assert!(
+        denser > 500,
+        "ten times the hairs should show in the fur: {denser} pixels changed"
+    );
+    assert_eq!(
+        moved, 0,
+        "the curtain's strands moved on the GPU and it is drawn differently (worst {moved_worst}/255)"
+    );
+
+    // With an upload allowance that lets one new thing through a frame, the grooms arrive
+    // one a frame, the nearest first, and are drawn from then on; the picture ends the same.
+    let (mut app, _) = groom_scene(Some(0.0001));
+    let mut held = Vec::new();
+    for _ in 0..40 {
+        app.update_n(1);
+        let state = strand_state(&app);
+        held.push((count(&state, "grooms"), count(&state, "instances")));
+        if held.last() == Some(&(2, 2)) {
+            break;
+        }
+    }
+    eprintln!(
+        "grooms on the GPU and instances drawn, frame by frame, on a tiny allowance: {held:?}"
+    );
+    assert_eq!(held.last(), Some(&(2, 2)), "both arrive: {held:?}");
+    assert!(
+        held.windows(2).all(|w| w[1].0 <= w[0].0 + 1) && held[0].0 <= 1,
+        "never two grooms in a frame: {held:?}"
+    );
+    assert!(
+        held.iter().all(|&(grooms, instances)| instances <= grooms),
+        "an instance is drawn once its groom is there: {held:?}"
+    );
+    assert!(
+        held.iter().any(|&(grooms, _)| grooms == 1),
+        "there was a frame with one of the two: {held:?}"
+    );
+    app.update_n(6);
+    let late = shoot(&mut app, "strands_grooms_one_a_frame.png");
+    let state = strand_state(&app);
+    let (differ, worst) = differing(&first, &late);
+    eprintln!(
+        "arrived one a frame: {state}; {differ} pixels differ from the picture with no allowance by more than 2/255, the worst by {worst}"
+    );
+    assert_eq!(count(&state, "groom_uploads"), 2, "{state}");
+    assert_eq!(count(&state, "grooms"), 2, "{state}");
+    assert_eq!(
+        differ, 0,
+        "grooms that came one a frame are drawn differently (worst {worst}/255)"
+    );
+}
