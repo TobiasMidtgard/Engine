@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use engine::prelude::*;
 use engine::world::character::{FaceControls, HandControls, HandPose, HandShape};
+use engine::world::{HairGuides, HairGuidesPosed};
 use engine_character::{
     Appearance, AppearanceExt, BuiltCharacter, CharacterBuild, CharacterDebug,
     CharacterPipelinesReady,
@@ -18,6 +19,13 @@ use crate::studio::{CameraFocus, Orbit};
 /// Frames rendered after a change before a shot (temporal anti-aliasing and screen-space
 /// lighting settle).
 const SETTLE_FRAMES: u32 = 20;
+/// Moving hair is shot once its guides move less than this between frames (m), or after
+/// [`HAIR_WAIT_FRAMES`] more frames: a long groom swings for seconds after the pose is set.
+const HAIR_CALM_M: f32 = 0.002;
+const HAIR_WAIT_FRAMES: u32 = 150;
+/// World time a shot frame steps (s): eight fixed steps, the most a frame takes, so moving
+/// hair settles in few of a slow renderer's frames.
+pub const SHOT_STEP_SECS: f64 = 8.0 / 60.0;
 
 #[derive(Debug, Clone)]
 struct Shot {
@@ -53,6 +61,9 @@ pub struct ShotPlan {
     /// (as the combat module writes them), and whether they're on it yet.
     injuries: Option<engine::world::combat::BodyInjuries>,
     injured: bool,
+    /// The subject's hair guides last frame, and frames waited for them to calm.
+    hair_last: Vec<Vec3>,
+    hair_wait: u32,
 }
 
 fn view(name: &str) -> Option<(Orbit, u8)> {
@@ -430,6 +441,8 @@ impl ShotPlan {
             handle_cm,
             injuries,
             injured: false,
+            hair_last: Vec::new(),
+            hair_wait: 0,
         })
     }
 }
@@ -497,6 +510,7 @@ pub fn run_shots(
     mut cams: Query<&mut Orbit>,
     ready: Option<Res<CharacterPipelinesReady>>,
     mut exit: MessageWriter<AppExit>,
+    hair: Query<(&HairGuides, Option<&HairGuidesPosed>), With<Subject>>,
 ) {
     let Some(shot) = plan.shots.get(plan.next).cloned() else {
         if !shots.has_pending() {
@@ -619,7 +633,40 @@ pub fn run_shots(
         plan.settled = 0;
     }
     plan.settled += 1;
+    // Hair that moves: how far its guides moved since last frame.
+    let swing = match hair.single() {
+        Ok((guides, Some(posed))) if posed.version == guides.version => {
+            let moved = if posed.points.len() == plan.hair_last.len() {
+                posed
+                    .points
+                    .iter()
+                    .zip(&plan.hair_last)
+                    .map(|(a, b)| a.distance(*b))
+                    .fold(0.0, f32::max)
+            } else {
+                f32::MAX
+            };
+            plan.hair_last.clone_from(&posed.points);
+            moved
+        }
+        // Guides not simulated yet.
+        Ok(_) => f32::MAX,
+        Err(_) => 0.0,
+    };
+    if plan.settled >= SETTLE_FRAMES && swing > HAIR_CALM_M && plan.hair_wait < HAIR_WAIT_FRAMES {
+        plan.hair_wait += 1;
+        return;
+    }
     if plan.settled >= SETTLE_FRAMES {
+        if plan.hair_wait > 0 {
+            tracing::info!(
+                "{}: hair calm after {} more frames ({:.1} mm a frame)",
+                shot.file,
+                plan.hair_wait,
+                swing * 1000.0
+            );
+        }
+        plan.hair_wait = 0;
         let _ = std::fs::create_dir_all(&plan.dir);
         let path = plan.dir.join(&shot.file);
         plan.completed_before = shots.completed;

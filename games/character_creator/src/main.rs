@@ -68,6 +68,15 @@ fn main() {
     let ui = std::env::args().any(|a| a == "--ui");
     let shooting = shots.is_some();
     if let Some(plan) = shots {
+        // Shots step the world by fixed steps of their own (`shots::SHOT_STEP_SECS` a frame),
+        // as the showcase's tour does, so a slow renderer (lavapipe takes seconds a frame)
+        // neither drops steps past the step budget nor shoots long hair still swinging after
+        // the pose was set (`shots::run_shots` waits for it too).
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine::core::time::TimeSource::Manual {
+                step_secs: shots::SHOT_STEP_SECS,
+            });
         app.insert_resource(plan)
             .add_systems(Update, shots::run_shots.after(studio::orbit_camera));
     }
