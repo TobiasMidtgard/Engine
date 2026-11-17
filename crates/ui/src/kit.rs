@@ -534,6 +534,92 @@ pub mod brass {
             .pick_ignore()
     }
 
+    /// How rare an item is: its socket's rim colour and glow.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Rank {
+        Common,
+        Fine,
+        Rare,
+        Storied,
+    }
+
+    impl Rank {
+        pub const ALL: [Rank; 4] = [Rank::Common, Rank::Fine, Rank::Rare, Rank::Storied];
+
+        /// Pewter, verdigris green, sapphire and gold.
+        pub fn color(self) -> Color {
+            match self {
+                Rank::Common => Color::hex(0xa8a496),
+                Rank::Fine => Color::hex(0x5fa25a),
+                Rank::Rare => Color::hex(0x4f86d6),
+                Rank::Storied => Color::hex(0xf0b43c),
+            }
+        }
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Rank::Common => "Common",
+                Rank::Fine => "Fine",
+                Rank::Rare => "Rare",
+                Rank::Storied => "Storied",
+            }
+        }
+    }
+
+    /// An item socket `size` px across: a sunken brass-ringed hollow, empty (a faint cross, for
+    /// "put an item here"), or holding `item` on an enamel badge rimmed and lit in its rank's
+    /// colour. Clicking sends `action`.
+    pub fn socket(item: Option<(&str, Rank)>, size: f32, action: &str) -> El {
+        let hollow = El::new().on_click(action).with_style(move |s| {
+            s.size(size, size)
+                .radius(Corners::all(999.0))
+                .background(Fill::vertical(
+                    Color::hexa(0x050b10e0),
+                    Color::hexa(0x1a2c38e0),
+                ))
+                .inset_shadow(Shadow::new(Color::hexa(0x000000f0), size * 0.14, 2.0))
+                .border(1.5, Colors::brass_dark())
+                .bevel(Bevel::sunken(1.5, 0.2, 0.0))
+                .justify(Justify::Center)
+                .align_items(Align::Center)
+                .transition(0.15)
+                .pick(Pick::Block)
+        });
+        match item {
+            None => hollow.child(
+                El::text("+")
+                    .text_style(move |t| t.bold().size(size * 0.42))
+                    .with_style(|s| s.color(Colors::brass().with_alpha(0.45)))
+                    .pick_ignore(),
+            ),
+            Some((icon, rank)) => {
+                let c = rank.color();
+                let lit = matches!(rank, Rank::Rare | Rank::Storied);
+                hollow.child(
+                    El::new()
+                        .class("brass_badge")
+                        .with_style(move |s| {
+                            let s = s.size(size * 0.84, size * 0.84).border(2.5, c).shadow(
+                                Shadow::new(
+                                    c.with_alpha(if lit { 0.75 } else { 0.3 }),
+                                    size * if lit { 0.3 } else { 0.12 },
+                                    0.0,
+                                ),
+                            );
+                            if rank == Rank::Storied {
+                                s.sheen(0.8)
+                            } else {
+                                s
+                            }
+                        })
+                        .child(El::icon(icon).with_style(move |s| {
+                            s.size(size * 0.62, size * 0.62).pick(Pick::Ignore)
+                        })),
+                )
+            }
+        }
+    }
+
     /// A progress bar `width` px wide, `frac` full.
     pub fn meter(width: f32, frac: f32) -> El {
         El::new()

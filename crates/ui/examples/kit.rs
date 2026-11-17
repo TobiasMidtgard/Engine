@@ -298,6 +298,45 @@ fn card() -> El {
         .child(c)
 }
 
+/// Item sockets: empty, then one of each rank.
+fn sockets() -> El {
+    let items = [None]
+        .into_iter()
+        .chain(
+            brass::Rank::ALL
+                .iter()
+                .zip(["herb", "cloak", "coin", "cloak"])
+                .map(|(r, i)| Some((i, *r))),
+        )
+        .map(|item| {
+            El::new()
+                .class("col")
+                .with_style(|s| s.gap(6.0).align_items(Align::Center))
+                .child(brass::socket(item, 58.0, "slot"))
+                .child(brass::label(item.map_or("Empty", |(_, r)| r.name()), false))
+        });
+    let p = brass::plate()
+        .with_style(|s| {
+            s.position(Position::Absolute)
+                .left(22.0)
+                .top(130.0)
+                .padding([16.0, 22.0])
+                .gap(12.0)
+                .direction(Direction::Column)
+                .align_items(Align::Center)
+        })
+        .child(El::text("Item sockets").class("brass_title").pick_ignore())
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(14.0))
+                .children(items),
+        );
+    El::new()
+        .with_style(|s| s.fill_parent().pick(Pick::Ignore))
+        .child(p)
+}
+
 fn main() {
     engine_core::log::init("warn");
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -352,6 +391,7 @@ fn main() {
     spawn(&mut app, "kit_top", 0, &top_bar());
     spawn(&mut app, "kit_bar", 0, &build_bar());
     spawn(&mut app, "kit_card", 1, &card());
+    spawn(&mut app, "kit_sockets", 1, &sockets());
     app.update_n(60);
     // Hover the third tile for its lift and tooltip.
     let e = engine_ui::input::find_id(&mut app.world, "tile:3");
