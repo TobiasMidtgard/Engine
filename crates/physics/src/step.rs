@@ -807,7 +807,34 @@ fn overlap_override() -> Option<bool> {
 /// Rapier's step running beside the frame (`PhysicsSettings::overlap_frame`): kicked by
 /// [`kick_step`], finished by [`finish_step`].
 #[derive(Resource, Default)]
-pub(crate) struct InFlight(Option<std::thread::JoinHandle<StepCarry>>);
+pub(crate) struct InFlight(Option<std::sync::Mutex<StepResult>>);
+
+/// Where a step beside the frame hands its carry back (or its panic).
+type StepResult = std::sync::mpsc::Receiver<std::thread::Result<StepCarry>>;
+
+type StepJob = Box<dyn FnOnce() + Send>;
+
+/// The one long-lived thread the steps beside the frame run on. A thread started for each
+/// step (as until 17 Nov 2026) cost a thread start a step, and with the profiler on each left
+/// its span tables behind in the profiler's per-thread lists, which grew by a hundred a second.
+fn step_thread() -> Option<&'static std::sync::mpsc::Sender<StepJob>> {
+    static TX: std::sync::OnceLock<Option<std::sync::mpsc::Sender<StepJob>>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<StepJob>();
+        std::thread::Builder::new()
+            .name("physics step".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    job();
+                }
+            })
+            .map_err(|e| tracing::warn!("physics: no thread for the steps beside the frame: {e}"))
+            .ok()
+            .map(|_| tx)
+    })
+    .as_ref()
+}
 
 /// `Extract`, first: with the frame's own work done (gameplay, cameras, transforms, debug
 /// drawing, every query that `Update` and `PostUpdate` make), start the step that
@@ -825,19 +852,21 @@ pub(crate) fn kick_step(
     }
     let shared = shared.0.clone();
     let mut taken = std::mem::take(&mut *carry);
-    let spawned = std::thread::Builder::new()
-        .name("physics step".into())
-        .spawn(move || {
+    let (done, result) = std::sync::mpsc::sync_channel(1);
+    let job: StepJob = Box::new(move || {
+        let stepped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _span = tracing::info_span!("physics step beside the frame").entered();
             simulate(shared.write(), &mut taken);
             taken.deferred = false;
             taken
-        });
-    match spawned {
-        Ok(h) => flight.0 = Some(h),
-        // (No thread to be had: the step is finished in the next frame instead.)
-        // (The carry went with the closure: the bodies hold still for this step.)
-        Err(e) => tracing::warn!("physics: no thread for the step beside the frame: {e}"),
+        }));
+        let _ = done.send(stepped);
+    });
+    match step_thread() {
+        Some(tx) if tx.send(job).is_ok() => flight.0 = Some(std::sync::Mutex::new(result)),
+        // (No thread to be had: the carry went with the job, so the bodies hold still for
+        // this step.)
+        _ => tracing::warn!("physics: no thread for the step beside the frame"),
     }
 }
 
@@ -857,11 +886,12 @@ fn complete(
         let waited = Instant::now();
         let joined = {
             let _span = tracing::info_span!("wait for physics step").entered();
-            h.join()
+            h.into_inner().unwrap_or_else(|p| p.into_inner()).recv()
         };
         match joined {
-            Ok(c) => *carry = c,
-            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(Ok(c)) => *carry = c,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(_) => panic!("physics: the step thread went away mid-step"),
         }
         Some(Some(waited.elapsed().as_secs_f64() * 1000.0))
     } else if carry.deferred {
