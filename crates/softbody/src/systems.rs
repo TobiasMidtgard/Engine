@@ -1253,22 +1253,19 @@ pub fn snapshot_frames(
     poses: Query<&'static SkeletonPose>,
     movers: Query<(Option<&RigidBody>, Has<CharacterController>)>,
     mut physical: Local<HashMap<Entity, bool>>,
-    (time, fixed, engine, job): (
-        Res<Time>,
-        Res<FixedTime>,
-        Option<Res<EngineConfig>>,
-        Res<FrameJob>,
-    ),
+    (time, engine, job): (Res<Time>, Option<Res<EngineConfig>>, Res<FrameJob>),
 ) {
     let range = range.map_or_else(SimulationRange::default, |r| *r);
     let beside = beside_frame(&config, engine.as_deref(), &time);
-    // Only the frame's last step sends bodies beside the frame, as physics overlaps only its
-    // last step: a step with another after it in this frame steps them here, beside the
-    // physics step. Kicked there, the next step would begin at once with a job that had no
-    // time, and wait for it or (build 5) hold the cloth still a step and jump the next, a
-    // stutter in every frame of two steps. While last step's job still runs, nothing new
-    // joins it (see `join_heavy_bodies`).
-    let kick = fixed.is_last_step() && !job.job.is_pending();
+    // Heavy bodies are solved beside the frame, once a frame: on a step with another after it
+    // in this frame they only count it ([`kick_heavy_bodies`]), and the frame's last step
+    // sends them off with the steps they owe, solved one after another on the job, as
+    // physics overlaps only its last step. Stepped here on those steps instead (6c9e212),
+    // they were softbody's 9.8 ms a frame on the main thread at the paddock (PC, 2.9 steps a
+    // frame); sent off on each, the next step began with a job that had no time (build 5's
+    // stutter). While last step's job still runs, nothing new joins it (see
+    // `join_heavy_bodies`).
+    let kick = !job.job.is_pending();
     let live = LiveFrames {
         transforms: &transforms,
         poses: &poses,
@@ -1439,11 +1436,34 @@ pub fn kick_heavy_bodies(
     mut bodies: Query<(Entity, &mut SoftBodySim)>,
     range: Option<Res<SimulationRange>>,
     mut job: ResMut<FrameJob>,
-    ticks: SystemChangeTick,
+    (ticks, fixed): (SystemChangeTick, Res<FixedTime>),
 ) {
     // The last job still runs (see `join_heavy_bodies`): its bodies wait for it, and no
     // others were sent (`snapshot_frames`).
     if !config.enabled || job.job.is_pending() {
+        return;
+    }
+    // Another step follows in this frame: the heavy bodies owe this one and are solved with
+    // the frame's last (see `snapshot_frames`).
+    if !fixed.is_last_step() {
+        for (e, mut b) in &mut bodies {
+            if !b.kicked {
+                continue;
+            }
+            let b = &mut *b;
+            // What it sent the world went out this step.
+            b.out = StepOutput::default();
+            if b.lod_every > 1 {
+                // A far body counts it as one of the steps it skips.
+                if b.lod_wait + 1 < b.lod_every {
+                    let owner = b.time_owner.unwrap_or(e);
+                    b.lod_debt += time.delta_for(scales.get(owner).ok());
+                    b.lod_wait += 1;
+                }
+            } else {
+                b.owed = (b.owed + 1).min(MAX_OWED_STEPS);
+            }
+        }
         return;
     }
     let ctx = StepContext {
@@ -1463,9 +1483,13 @@ pub fn kick_heavy_bodies(
             continue;
         }
         let b = &mut *b;
-        let Some(prep) = prepare(e, b, &ctx) else {
+        let owed = std::mem::take(&mut b.owed);
+        let Some(mut prep) = prepare(e, b, &ctx) else {
             continue;
         };
+        if !prep.swap {
+            prep.steps += owed;
+        }
         let sim = b.sim.clone();
         // Its loads are the copy's to apply.
         b.sim.loads.clear();
@@ -1720,6 +1744,9 @@ pub fn step_bodies(
         .chain(beside.slowest)
         .chain(frame_job.slowest)
         .max_by(|a, b| a.1.total_cmp(&b.1));
+    // On the main thread this step: the bodies beside the physics step (wall) and the heavy
+    // bodies' preparation for the job beside the frame (last step's).
+    diagnostics.set("softbody.beside_physics_ms", beside.wall);
     diagnostics.set("softbody.beside_frame_ms", frame_job.busy);
     diagnostics.set("softbody.beside_frame_wait_ms", frame_job.wait);
     diagnostics.set("softbody.beside_frame_bodies", frame_job.solved as f64);
@@ -1876,6 +1903,9 @@ struct Prepared {
     /// Time it took to get here, ms.
     prep_ms: f32,
     dt: f32,
+    /// Fixed steps of `dt` it takes (more than one for a heavy body beside the frame in a
+    /// frame of several steps, see [`kick_heavy_bodies`]).
+    steps: u32,
     origin: DVec3,
     /// Colliders near it, in its coordinates.
     local: Vec<LocalCollider>,
@@ -2205,6 +2235,7 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
     Some(Prepared {
         prep_ms: started.elapsed().as_secs_f32() * 1000.0,
         dt,
+        steps: 1,
         origin,
         local,
         swap,
@@ -2224,9 +2255,12 @@ fn solve(sim: &mut Sim, prep: &Prepared, settled_us: Option<&AtomicU32>) -> Solv
     let local = &prep.local;
     // What it pushed on colliders and pulled frames with in the frame's step (the settling
     // step's, when it stands in).
-    sim.step(if prep.swap { 1.0 / 60.0 } else { prep.dt }, local);
-    let impulses = sim.collider_impulses.clone();
-    let pulls = sim.frame_impulses.clone();
+    let (impulses, pulls) = if prep.steps > 1 {
+        steps_of(sim, prep.dt, prep.steps, local)
+    } else {
+        sim.step(if prep.swap { 1.0 / 60.0 } else { prep.dt }, local);
+        (sim.collider_impulses.clone(), sim.frame_impulses.clone())
+    };
     let mut runs = u32::from(prep.swap);
     let settling = Instant::now();
     while runs < prep.most {
@@ -2258,6 +2292,47 @@ fn solve(sim: &mut Sim, prep: &Prepared, settled_us: Option<&AtomicU32>) -> Solv
     }
 }
 
+/// `steps` steps of `dt` one after another, the frames' motion this step spread over them
+/// (each step moves a frame its share of the way). What it pushed on colliders and pulled
+/// frames with, summed.
+fn steps_of(
+    sim: &mut Sim,
+    dt: f32,
+    steps: u32,
+    local: &[LocalCollider],
+) -> (Vec<ColliderImpulse>, Vec<ColliderImpulse>) {
+    let from: Vec<_> = sim
+        .frames
+        .iter()
+        .map(|f| (f.from_pos, f.from_rot))
+        .collect();
+    let to: Vec<_> = sim.frames.iter().map(|f| (f.to_pos, f.to_rot)).collect();
+    let mut impulses: Vec<ColliderImpulse> = Vec::new();
+    let mut pulls: Vec<ColliderImpulse> = Vec::new();
+    let add = |sum: &mut Vec<ColliderImpulse>, these: &[ColliderImpulse]| {
+        sum.resize(sum.len().max(these.len()), ColliderImpulse::default());
+        for (s, i) in sum.iter_mut().zip(these) {
+            s.linear += i.linear;
+            s.angular += i.angular;
+        }
+    };
+    for k in 0..steps {
+        let (t0, t1) = (k as f32 / steps as f32, (k + 1) as f32 / steps as f32);
+        for (f, (&(p0, r0), &(p1, r1))) in sim.frames.iter_mut().zip(from.iter().zip(&to)) {
+            (f.from_pos, f.from_rot) = (p0.lerp(p1, t0), r0.slerp(r1, t0));
+            (f.to_pos, f.to_rot) = (p0.lerp(p1, t1), r0.slerp(r1, t1));
+        }
+        sim.step(dt, local);
+        add(&mut impulses, &sim.collider_impulses);
+        add(&mut pulls, &sim.frame_impulses);
+    }
+    (impulses, pulls)
+}
+
+/// Fixed steps a heavy body owes at most when the frame's last step sends it beside the frame
+/// (as many as a frame runs).
+const MAX_OWED_STEPS: u32 = 8;
+
 /// Everything of a body's step after its solve: sleep, tearing and fire, bridge planks and
 /// what it sends the world. `colliders` are the ones it was prepared with.
 fn finish(
@@ -2270,6 +2345,7 @@ fn finish(
     let finishing = Instant::now();
     let Prepared {
         dt,
+        steps,
         origin,
         local,
         loaded,
@@ -2278,6 +2354,8 @@ fn finish(
         up,
         ..
     } = prep;
+    // Wetting, burning and the like follow the time of all its steps.
+    let dt = dt * steps as f32;
     let Solved {
         impulses,
         pulls,

@@ -8,6 +8,8 @@
 //! WORST=1 cargo run ...  # also prints the worst frame (hitches: restores, catch-up steps)
 //! TRACE="Unveiling sheet" cargo run ...  # that body's step, prewarm and pairs each frame
 //! SLOW_GROUND=1 cargo run ...  # ground that costs about what a planet's terrain does
+//! RANGE_M=220 cargo run ...  # Ultra's simulation range (High's 150 m by default)
+//! REALTIME=45 cargo run ...  # a real clock paced at 45 fps, as in play: main-thread ms a frame
 //! ARRIVE=600 cargo run ...  # wait far off for 600 frames, then arrive (WORST shows the spike)
 //! ```
 
@@ -30,6 +32,12 @@ fn main() {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((engine_world::WorldPlugin, engine_softbody::SoftBodyPlugin));
+    // RANGE_M=220: the simulation range of Ultra (the default is High's 150 m).
+    if let Some(m) = std::env::var("RANGE_M").ok().and_then(|m| m.parse().ok()) {
+        app.world
+            .resource_mut::<engine_world::SimulationRange>()
+            .active_m = m;
+    }
     if std::env::var("SLOW_GROUND").is_ok() {
         app.insert_resource(engine_world::Ground(std::sync::Arc::new(SlowGround)));
     }
@@ -55,9 +63,32 @@ fn main() {
             focus.points.push(yard + DVec3::new(d, 1.7, 0.0));
         },
     );
+    // REALTIME=<fps>: after the warm-up the clock turns real and frames are paced at fps, as
+    // in play (bodies beside the frame, several fixed steps in a slow frame); reports the
+    // soft bodies' main-thread time beside the physics step, summed over each frame's steps.
+    let realtime: Option<f64> = std::env::var("REALTIME").ok().and_then(|f| f.parse().ok());
+    if realtime.is_some() {
+        app.world
+            .resource_mut::<engine_softbody::SoftBodyConfig>()
+            .beside_frame = Some(true);
+    }
+    app.init_resource::<MainThread>();
+    app.add_systems(
+        engine_core::schedule::FixedPostUpdate,
+        |d: Res<Diagnostics>, mut m: ResMut<MainThread>| {
+            m.0 += d.get("softbody.beside_physics_ms").unwrap_or(0.0);
+        },
+    );
     // Build the bodies (and their first steps) before timing.
     let warm = Instant::now();
     app.update_n(30);
+    if realtime.is_some() {
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Realtime);
+    }
+    app.world.resource_mut::<MainThread>().0 = 0.0;
+    let mut main_ms = Vec::with_capacity(frames);
     println!("warm-up: {:.0} ms", warm.elapsed().as_secs_f64() * 1000.0);
     let start = Instant::now();
     let mut worst = (0.0, 0);
@@ -74,6 +105,15 @@ fn main() {
         let t = Instant::now();
         app.update();
         let ms = t.elapsed().as_secs_f64() * 1000.0;
+        if let Some(fps) = realtime
+            && let Some(rest) =
+                std::time::Duration::from_secs_f64(1.0 / fps).checked_sub(t.elapsed())
+        {
+            std::thread::sleep(rest);
+        }
+        main_ms.push(std::mem::take(
+            &mut app.world.resource_mut::<MainThread>().0,
+        ));
         updating += ms;
         stepping += app
             .world
@@ -145,6 +185,16 @@ fn main() {
         if ms > worst.0 {
             worst = (ms, f);
         }
+    }
+    if realtime.is_some() {
+        let mut sorted = main_ms.clone();
+        sorted.sort_by(f64::total_cmp);
+        println!(
+            "beside the physics step on the main thread: {:.2} ms a frame on average, {:.2} at the 95th percentile, {:.2} worst",
+            main_ms.iter().sum::<f64>() / main_ms.len().max(1) as f64,
+            sorted.get(sorted.len() * 95 / 100).copied().unwrap_or(0.0),
+            sorted.last().copied().unwrap_or(0.0),
+        );
     }
     if std::env::var("WORST").is_ok() {
         println!("worst frame {:.1} ms (frame {})", worst.0, worst.1);
@@ -375,3 +425,7 @@ impl engine_world::GroundQuery for SlowGround {
         })
     }
 }
+
+/// Soft bodies' main-thread time beside the physics step this frame, ms (`REALTIME`).
+#[derive(Resource, Default)]
+struct MainThread(f64);

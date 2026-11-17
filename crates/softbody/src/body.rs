@@ -157,6 +157,9 @@ pub struct SoftBodySim {
     /// Of those, solved beside the frame, from the end of this fixed step to the start of the
     /// next (`systems::kick_heavy_bodies`): readers see the last step's sim meanwhile.
     pub(crate) kicked: bool,
+    /// Fixed steps of this frame it was not stepped in, owed to the step that sends it beside
+    /// the frame (`systems::kick_heavy_bodies`).
+    pub(crate) owed: u32,
     pub(crate) snapshot: Vec<Option<(DVec3, Quat)>>,
     /// Time its last step spent asking the world (ground, water, wind, colliders near it), ms.
     pub env_ms: f32,
@@ -263,6 +266,7 @@ impl SoftBodySim {
             far: None,
             overlaps: false,
             kicked: false,
+            owed: 0,
             snapshot: Vec::new(),
             env_ms: 0.0,
             sleep_wind: Vec3::ZERO,
@@ -320,6 +324,9 @@ impl SoftBodySim {
             "frozen": self.frozen,
             "swaying": self.swaying(),
             "step_ms": self.step_ms,
+            // Steps beside the physics step (or beside the frame when kicked), not after it.
+            "beside_physics": self.overlaps,
+            "kicked": self.kicked,
             // Its last step covers lod_every fixed steps; per fixed step it costs this.
             "ms_per_step": self.step_ms / self.lod_every.max(1) as f32,
             "substeps": self.sim.params.substeps,
