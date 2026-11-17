@@ -200,10 +200,14 @@ pub fn leave_grass_wakes(
     mut trails: Local<HashMap<Entity, (DVec3, Vec<Entity>)>>,
 ) {
     let dt = time.delta_secs();
+    // Despawned below this frame but still in the query until the commands apply, so a
+    // trail's oldest wake isn't despawned a second time when it runs out the same frame.
+    let mut gone = Vec::new();
     for (e, mut wake, mut bender) in &mut wakes {
         wake.secs_left -= dt;
         if wake.secs_left <= 0.0 {
             commands.entity(e).despawn();
+            gone.push(e);
             continue;
         }
         // Eases back: most of the way up in the first half.
@@ -217,7 +221,7 @@ pub fn leave_grass_wakes(
         }
         let here = gt.translation();
         let (last, list) = trails.entry(e).or_insert((here, Vec::new()));
-        list.retain(|w| wakes.contains(*w));
+        list.retain(|w| wakes.contains(*w) && !gone.contains(w));
         // Moved along (a jump or a teleport moves it up or far: no wake in the air).
         let moved = here - *last;
         if moved.length() < WAKE_STEP_M {
