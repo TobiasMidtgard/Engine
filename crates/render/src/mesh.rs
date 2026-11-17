@@ -16,7 +16,9 @@ pub struct Vertex {
     pub uv: [f32; 2],
     /// Linear RGBA vertex color (multiplied with the material's base color). On materials with
     /// `StandardMaterial::wind_sway` the alpha is the vertex's wind weight (0 = still, 1 = full
-    /// sway) instead of opacity.
+    /// sway) instead of opacity. On blended materials it is how much of the pixel the surface
+    /// covers: a smooth one (glass, water) fades out with it, its reflections included, where
+    /// the material's alpha only makes it clearer.
     pub color: [f32; 4],
 }
 

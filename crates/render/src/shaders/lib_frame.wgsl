@@ -157,6 +157,17 @@ fn in_prepass_known(rel: vec3<f32>) {
     in_prepass_answer = 1;
 }
 
+// A fragment the prepass never draws (a blended one) says so here first: `in_prepass` then
+// answers no without reading. Otherwise one drawn just over an opaque surface (within the
+// read's tolerance, a hundredth of the distance) would take that surface's screen-space light
+// as its own: its shadows, contact shadows, sky, probes and fog, and from far away its glint
+// and its shadows' noise.
+fn in_prepass_never(rel: vec3<f32>) {
+    in_prepass_rel = rel;
+    in_prepass_pixel = vec2<i32>(floor(pixel_of(rel)));
+    in_prepass_answer = 0;
+}
+
 fn in_prepass_read(rel: vec3<f32>, pixel: vec2<i32>) -> bool {
     let size = vec2<i32>(textureDimensions(prepass_depth));
     if (any(pixel < vec2<i32>(0)) || any(pixel >= size)) { return false; }

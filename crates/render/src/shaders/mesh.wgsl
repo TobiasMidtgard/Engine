@@ -1113,8 +1113,12 @@ fn scene_fragment(in: VertexOut, front: bool) -> vec4<f32> {
         }
         return vec4<f32>(0.2, 0.2, 0.2, 1.0);
     }
-    // Blended materials have no prepass: they ask for their virtual texture tiles here.
+    // Blended materials have no prepass: they ask for their virtual texture tiles here, and
+    // the screen-space maps hold the surfaces behind them.
     vt_feedback_on = (flags & 15u) == 2u && vt_feedback_pixel(in.clip.xy);
+    if ((flags & 15u) == 2u) {
+        in_prepass_never(in.rel);
+    }
     let m = evaluate_material(surface_in(in, front), true);
     if (!kept || (SCENE_ALPHA_TEST && (flags & 15u) == 1u && m.base.a < mat.params.w)) {
         discard;
@@ -1178,16 +1182,23 @@ fn scene_fragment(in: VertexOut, front: bool) -> vec4<f32> {
         // the sun), and the share it reflects (Fresnel: most of it at grazing angles) hides what
         // lies behind it as its alpha does. A rough one (smoke, dust, ghosts) covers only part
         // of each pixel, so all of its light fades with its alpha.
+        //
+        // The vertex color's alpha is how much of the pixel the surface covers, whatever it is
+        // made of: a smooth one fades out with it, its reflections and their cover too (the
+        // edge of a sheet of water), while the material's and its textures' alpha say how
+        // clear the surface is.
+        let coverage = saturate(in.color.a);
         if (unlit) {
             color *= alpha;
         } else {
+            let clear = select(0.0, saturate(alpha / coverage), coverage > 1e-4);
             let pane = 1.0 - smoothstep(0.25, 0.5, s.roughness);
             let specular = min(shade_specular, color) * pane;
             let f0 = mix(vec3(0.16 * s.reflectance * s.reflectance), s.albedo, s.metallic);
             let n_dot_v = max(dot(s.normal, normalize(-in.rel)), 1e-4);
             let reflected = env_brdf_approx(f0, s.roughness, n_dot_v);
-            color = (color - specular) * alpha + specular;
-            alpha = mix(alpha, 1.0, saturate(max(reflected.x, max(reflected.y, reflected.z))) * pane);
+            color = ((color - specular) * clear + specular) * coverage;
+            alpha = mix(clear, 1.0, saturate(max(reflected.x, max(reflected.y, reflected.z))) * pane) * coverage;
         }
         let fog = surface_fog(in.rel);
         color = color * fog.transmittance + fog.inscatter * alpha;
