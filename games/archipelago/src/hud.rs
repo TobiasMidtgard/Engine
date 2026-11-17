@@ -28,6 +28,7 @@ use crate::tools::{Hand, Tool};
 mod ledger;
 mod map;
 mod routes;
+mod shelf;
 
 /// The bars' own state between frames.
 #[derive(Resource, Default)]
@@ -168,7 +169,7 @@ fn good_cell(g: Good, compact: bool) -> El {
 }
 
 /// Room held for the town cartouche in the middle of the top bar.
-const CARTOUCHE_ROOM: f32 = 380.0;
+const CARTOUCHE_ROOM: f32 = 340.0;
 
 /// Wells a row holds on either side of the town cartouche.
 const WELLS_PER_ROW: usize = 6;
@@ -446,6 +447,16 @@ fn bar_items(category: usize, tool: Tool, isle: usize) -> Vec<El> {
     v
 }
 
+/// The tiles row's width: one row up to ten tiles, then two even rows (so the bar stays
+/// clear of the map table).
+fn items_width(n: usize) -> f32 {
+    if n > 10 {
+        n.div_ceil(2) as f32 * 94.0
+    } else {
+        2000.0
+    }
+}
+
 fn build_bar(category: usize, tool: Tool, isle: usize) -> El {
     let tabs = El::new().class("row").with_style(|s| s.gap(14.0)).children(
         Category::ALL.iter().enumerate().map(|(i, c)| {
@@ -480,7 +491,13 @@ fn build_bar(category: usize, tool: Tool, isle: usize) -> El {
             El::new()
                 .class("row")
                 .id("isle.items")
-                .with_style(|s| s.gap(10.0).margin([4.0, 0.0, 0.0, 0.0]))
+                .with_style(move |s| {
+                    s.gap(10.0)
+                        .margin([4.0, 0.0, 0.0, 0.0])
+                        .wrap(true)
+                        .justify(Justify::Center)
+                        .max_width(items_width(kinds_in(Category::ALL[category]).len()))
+                })
                 .children(bar_items(category, tool, isle)),
         );
     let hint = El::text("{isle.hint}")
@@ -581,7 +598,7 @@ fn info_card(kind: Kind) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(12.0).align_items(Align::Center))
-                .child(brass::badge(kind_icon(kind), 62.0))
+                .child(brass::badge(kind_icon(kind), 62.0).tooltip(d.name, d.blurb))
                 .child(
                     El::new()
                         .class("col")
@@ -607,6 +624,7 @@ fn info_card(kind: Kind) -> El {
         .child_opt(chain)
         .child_opt(d.output.map(|_| progress_bar()))
         .children((0..6).map(card_row))
+        .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
         .child(
             El::new()
                 .class("row")
@@ -696,6 +714,11 @@ pub fn setup(world: &mut World) {
     }
     ledger::install(world);
     routes::install(world);
+    shelf::install(world);
+    // `--hud-shelf`: open the item shelf (tour shots).
+    if std::env::args().any(|a| a == "--hud-shelf") {
+        shelf::toggle(world);
+    }
     // `--hud-routes`: open the trade routes with the second route picked out (tour shots).
     if std::env::args().any(|a| a == "--hud-routes") {
         routes::toggle(world);
@@ -738,6 +761,7 @@ pub fn show_card(world: &mut World) {
     if screens::spawn_screen(world, hud_screen(INFO, 1), &info_card(kind)).is_ok() {
         world.resource_mut::<Hud>().info_open = true;
         update_data_now(world);
+        shelf::card_opened(world);
     }
 }
 
@@ -804,6 +828,10 @@ pub fn read_actions(world: &mut World) {
             } else {
                 routes::refresh(world);
             }
+        } else if shelf::action(world, &a) {
+        } else if a.starts_with("isle.item.") {
+            crate::tools::action(world, &a);
+            shelf::after_item_action(world, &a);
         } else {
             crate::tools::action(world, &a);
         }
@@ -844,12 +872,16 @@ fn read_keys(world: &mut World) {
     let Some(keys) = world.get_resource::<ButtonInput<KeyCode>>() else {
         return;
     };
-    let (l, h, t, esc) = (
+    let (l, h, t, i, esc) = (
         keys.just_pressed(KeyCode::L),
         keys.just_pressed(KeyCode::H),
         keys.just_pressed(KeyCode::T),
+        keys.just_pressed(KeyCode::I),
         keys.just_pressed(KeyCode::Escape),
     );
+    if i || (esc && world.resource::<shelf::Shelf>().open) {
+        shelf::toggle(world);
+    }
     if l || (esc && world.resource::<ledger::Ledger>().open) {
         toggle_ledger(world);
     }
@@ -876,6 +908,14 @@ fn refresh_items(world: &mut World) {
     let isle = world.resource::<Hud>().island;
     if let Some(e) = engine_ui::input::find_id(world, "isle.items") {
         let _ = engine_ui::el::replace_children(world, e, &bar_items(cat, tool, isle));
+        let w = Some(engine_ui::style::Val::Px(items_width(
+            kinds_in(Category::ALL[cat]).len(),
+        )));
+        if let Some(mut n) = world.get_mut::<Node>(e)
+            && n.style.max_width != w
+        {
+            n.style.max_width = w;
+        }
     }
     for i in 0..Category::ALL.len() {
         set_selected(world, &format!("isle.cat:{i}"), i == cat);
@@ -1056,7 +1096,10 @@ fn update_data_now(world: &mut World) {
             rows[4] = ("Made".into(), format!("{} so far", p.made));
             rows[5] = ("Upkeep".into(), format!("{:.0} coins a minute", d.upkeep));
         } else {
-            rows[0] = ("About".into(), d.blurb.to_string());
+            // (The three item holders show their sockets instead: the card stays short.)
+            if crate::items::Host::of(b.kind).is_none() {
+                rows[0] = ("About".into(), d.blurb.to_string());
+            }
             if b.kind == Kind::Harbour {
                 let books = &econ.islands[b.island];
                 rows[1] = (
@@ -1209,6 +1252,7 @@ pub fn update_data(world: &mut World) {
         update_data_now(world);
         ledger::update(world);
         map::update(world, 0.2);
+        shelf::update(world);
     }
     demo_step(world, dt);
 }
@@ -1248,6 +1292,12 @@ fn demo_step(world: &mut World, dt: f32) {
         if let Some(e) = weaver {
             world.resource_mut::<Hand>().selected = Some(e);
             show_card(world);
+            // `--hud-slot=k`: pick out an item socket on an institution's card.
+            if let Some(k) =
+                std::env::args().find_map(|a| a.strip_prefix("--hud-slot=")?.parse::<usize>().ok())
+            {
+                shelf::pick_slot(world, k);
+            }
         }
     }
     if t > 2.5

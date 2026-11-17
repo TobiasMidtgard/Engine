@@ -89,7 +89,7 @@ pub(super) fn bounds(k: usize) -> Bounds {
 pub(super) const PW: usize = 504;
 pub(super) const PH: usize = 472;
 /// The chart node's size, logical px (same aspect as the picture).
-pub const CHART_W: f32 = 340.0;
+pub const CHART_W: f32 = 360.0;
 pub const CHART_H: f32 = CHART_W * PH as f32 / PW as f32;
 
 pub const PAINTER: &str = "isle_map";
@@ -558,18 +558,22 @@ pub fn panel() -> El {
         .child(
             El::new()
                 .class("row")
-                .with_style(|s| s.gap(8.0))
+                .with_style(|s| s.gap(6.0))
                 .child(
-                    brass::medallion("isle_ledger", 38.0, "isle.ledger")
+                    brass::medallion("isle_items", 34.0, "isle.shelf")
+                        .tooltip("Items", "The shelf of spare items, and the pedlar's wares while he is at the quay.\n[b]Key[/b]  I"),
+                )
+                .child(
+                    brass::medallion("isle_ledger", 34.0, "isle.ledger")
                         .id("isle.ledger")
                         .tooltip("Ledger", "Goods made and used, the treasury and the people, island by island.\n[b]Key[/b]  L"),
                 )
                 .child(
-                    brass::medallion("isle_routes", 38.0, "isle.routes")
+                    brass::medallion("isle_routes", 34.0, "isle.routes")
                         .tooltip("Trade routes", "Every route, its stops and cargo, and its ships on the chart.\n[b]Key[/b]  T"),
                 )
                 .child(
-                    brass::medallion("isle_home", 38.0, "isle.home")
+                    brass::medallion("isle_home", 34.0, "isle.home")
                         .tooltip("Home", "Back to the town on Haverholm.\n[b]Key[/b]  H"),
                 ),
         );
