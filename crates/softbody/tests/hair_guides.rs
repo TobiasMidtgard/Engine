@@ -422,3 +422,79 @@ fn far_hair_rests_and_rides_the_head_until_it_is_near_again() {
         assert!(g[0].distance(roots.guides[i].points[0]) < 1e-3);
     }
 }
+
+/// `n` locks of `len` points, grown straight out sideways from the skull (a styled shape
+/// on a stand pose, far from where it hangs).
+fn long_out(n: usize, len: usize) -> HairGuides {
+    let center = HEAD + SKULL;
+    let guides = (0..n)
+        .map(|k| {
+            let a = k as f32 / n as f32 * TAU;
+            let out = Vec3::new(a.cos(), 0.0, a.sin());
+            let d = (out + Vec3::Y * 0.3).normalize();
+            let root = center + d * 0.1;
+            HairGuide {
+                bones: [1, 1],
+                blend: 0.0,
+                points: (0..len).map(|i| root + out * (0.035 * i as f32)).collect(),
+                normal: d,
+                thickness: 0.004,
+            }
+        })
+        .collect();
+    HairGuides {
+        version: 1,
+        guides,
+        grown_on: pose().bones,
+        stiffness: 0.05,
+    }
+}
+
+#[test]
+fn a_long_groom_built_near_too_big_to_settle_ahead_sags_into_place_without_flailing() {
+    let mut app = app();
+    // 400 locks of 20 points: past what a frame may spend settling a body ahead of time,
+    // so it settles in its own steps, in view.
+    let grown = long_out(400, 20);
+    let person = app
+        .world
+        .spawn((Transform::default(), pose(), grown.clone()))
+        .id();
+    let mut last: Option<Vec<Vec3>> = None;
+    let mut fastest_seen = 0.0f32;
+    for step in 0..80 {
+        app.update();
+        let Some(posed) = app.world.get::<HairGuidesPosed>(person) else {
+            continue;
+        };
+        for (i, g) in grown.guides.iter().enumerate() {
+            let tip = posed.guide(&grown, i).unwrap()[19];
+            assert!(
+                tip.y < g.points[19].y + 0.05,
+                "step {step}: lock {i}'s tip rose to {tip}"
+            );
+        }
+        if let Some(last) = &last {
+            let fastest = posed
+                .points
+                .iter()
+                .zip(last)
+                .map(|(a, b)| a.distance(*b) * 60.0)
+                .fold(0.0, f32::max);
+            fastest_seen = fastest_seen.max(fastest);
+            assert!(fastest < 2.0, "step {step}: hair swung at {fastest:.1} m/s");
+        }
+        last = Some(posed.points.clone());
+    }
+    assert!(last.is_some(), "never posed");
+    // It did fall (it is not just frozen in the grown shape), and it is settled by now.
+    let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
+    let tip = posed.guide(&grown, 0).unwrap()[19];
+    assert!(
+        tip.y < grown.guides[0].points[19].y - 0.2,
+        "the tip didn't sag: {tip} (fastest {fastest_seen:.2} m/s)"
+    );
+    let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
+    let (_, b) = q.single(&app.world).unwrap();
+    assert_eq!(b.pending_prewarm, 0, "still settling");
+}

@@ -1927,6 +1927,9 @@ struct Prepared {
     /// Settling steps it must take, and may.
     least: u32,
     most: u32,
+    /// Near and too big for any settling step a frame: its own steps settle it instead,
+    /// damped hard ([`SETTLE_DAMPING`]) and counted off its settling.
+    settle_in_step: bool,
     loaded: bool,
     rain: f32,
     wind_here: Vec3,
@@ -2245,6 +2248,7 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
     // It settles in as many frames; that far off, the time it skips doesn't show.
     let swap = least > 0 && b.pending_prewarm > 0;
     let most = fits.max(least).min(b.pending_prewarm);
+    let settle_in_step = most == 0 && b.pending_prewarm > 0;
     Some(Prepared {
         prep_ms: started.elapsed().as_secs_f32() * 1000.0,
         dt,
@@ -2254,12 +2258,21 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
         swap,
         least,
         most,
+        settle_in_step,
         loaded,
         rain,
         wind_here,
         up,
     })
 }
+
+/// Velocity damping (1/s) of the steps that settle a near body too big to settle ahead
+/// ([`Prepared::settle_in_step`]). Undamped, a long groom built on a stand pose swung its
+/// tips 0.3-0.56 m up and back over the head in its first quarter second (the character
+/// creator's shots, 17 Nov 2026), in view, on everyone with long hair who streamed in near.
+/// At 6/s, about critical for a 60 cm lock, it sags into place at under 1.5 m/s (3.5
+/// undamped) and is nearly at rest when its settling is done and the damping goes back.
+const SETTLE_DAMPING: f32 = 6.0;
 
 /// A body's solve: its step and settling steps. Touches only its `Sim`, so it can run beside
 /// the frame ([`kick_heavy_bodies`]).
@@ -2268,13 +2281,27 @@ fn solve(sim: &mut Sim, prep: &Prepared, settled_us: Option<&AtomicU32>) -> Solv
     let local = &prep.local;
     // What it pushed on colliders and pulled frames with in the frame's step (the settling
     // step's, when it stands in).
+    let damping = sim.params.damping;
+    if prep.settle_in_step {
+        sim.params.damping = damping.max(SETTLE_DAMPING);
+    }
     let (impulses, pulls) = if prep.steps > 1 {
         steps_of(sim, prep.dt, prep.steps, local)
     } else {
         sim.step(if prep.swap { 1.0 / 60.0 } else { prep.dt }, local);
         (sim.collider_impulses.clone(), sim.frame_impulses.clone())
     };
+    sim.params.damping = damping;
     let mut runs = u32::from(prep.swap);
+    if prep.settle_in_step {
+        // Its own steps were its settling (at most what it still owes).
+        return Solved {
+            impulses,
+            pulls,
+            runs: prep.steps,
+            solve_ms: solving.elapsed().as_secs_f32() * 1000.0,
+        };
+    }
     let settling = Instant::now();
     while runs < prep.most {
         // In play, past the steps it must take, stop when this body or this step's bodies
@@ -2375,7 +2402,7 @@ fn finish(
         runs,
         solve_ms,
     } = solved;
-    b.pending_prewarm -= runs;
+    b.pending_prewarm = b.pending_prewarm.saturating_sub(runs);
     b.parts.solve_ms = solve_ms;
     b.parts.prewarm_steps = runs;
     b.steps += 1;
