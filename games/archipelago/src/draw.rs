@@ -9,6 +9,7 @@ use engine::prelude::*;
 use engine::render::{InstanceRow, Mesh, MeshInstances};
 
 use crate::art::{Mat, Mats, Parts, make_mats};
+use crate::globe::{self, Frame, Local};
 use crate::grid;
 use crate::looks::{MODELS, ModelKey, Piece, build_model, mill_sails};
 use crate::sim::Building;
@@ -86,10 +87,95 @@ pub fn make_art(world: &mut World) -> Art {
 #[derive(Component, Clone, Debug)]
 pub struct Look(pub Arc<Vec<Piece>>);
 
-/// The instanced row sets, one entity per (model, material).
+/// One copy of a model, in map space.
+#[derive(Clone, Copy, Debug)]
+pub struct MapRow {
+    pub at: DVec3,
+    /// Turn about up, as on the map.
+    pub yaw: f32,
+    pub scale: f32,
+    pub tint: [f32; 3],
+}
+
+/// Instanced copies kept per ground tile: one entity per (key, tile), each standing flat on
+/// the planet at its tile's middle with its rows placed exactly where the round ground is.
+pub struct Tiled<K> {
+    pub anchors: HashMap<(K, IVec2), Entity>,
+}
+
+impl<K> Default for Tiled<K> {
+    fn default() -> Self {
+        Self {
+            anchors: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Copy + Eq + std::hash::Hash> Tiled<K> {
+    /// Replace every set's rows by `groups`; sets that got none are emptied. `renderer` makes
+    /// the mesh and material of a key the first time a tile needs it. Returns the row count.
+    pub fn set(
+        &mut self,
+        world: &mut World,
+        groups: HashMap<K, Vec<MapRow>>,
+        mut renderer: impl FnMut(K) -> Option<MeshRenderer>,
+    ) -> usize {
+        let frame = *world.resource::<Frame>();
+        let mut locals: HashMap<IVec2, Local> = HashMap::new();
+        let mut sets: HashMap<(K, IVec2), Vec<InstanceRow>> = HashMap::new();
+        let mut count = 0;
+        for (key, rows) in groups {
+            for r in rows {
+                let tile = globe::tile_of(r.at.x, r.at.z);
+                let l = locals.entry(tile).or_insert_with(|| Local::tile(tile));
+                sets.entry((key, tile)).or_default().push(InstanceRow {
+                    position: l.put(r.at),
+                    yaw: r.yaw,
+                    scale: r.scale,
+                    tint: r.tint,
+                });
+                count += 1;
+            }
+        }
+        for (key, e) in &self.anchors {
+            if !sets.contains_key(key)
+                && let Some(mut inst) = world.get_mut::<MeshInstances>(*e)
+                && !inst.rows.is_empty()
+            {
+                inst.rows = Arc::from(Vec::new());
+            }
+        }
+        for (key, list) in sets {
+            if let Some(&e) = self.anchors.get(&key) {
+                if let Some(mut inst) = world.get_mut::<MeshInstances>(e) {
+                    *inst = MeshInstances::new(list);
+                }
+                continue;
+            }
+            let Some(r) = renderer(key.0) else {
+                continue;
+            };
+            let e = world
+                .spawn((frame.local(&locals[&key.1]), r, MeshInstances::new(list)))
+                .id();
+            self.anchors.insert(key, e);
+        }
+        count
+    }
+}
+
+/// The renderer of one material of a model.
+pub fn model_renderer(art: &Art, key: (ModelKey, Mat), shadows: bool) -> Option<MeshRenderer> {
+    let (mesh, mat) = art.models.get(key.0)?.iter().find(|(_, m)| *m == key.1)?;
+    let mut r = MeshRenderer::new(*mesh, art.mats.get(*mat));
+    r.cast_shadows = shadows && mat.casts_shadows();
+    Some(r)
+}
+
+/// The buildings' instanced sets, one per (model, material) and ground tile.
 #[derive(Resource, Default)]
 pub struct Drawn {
-    pub anchors: HashMap<(ModelKey, Mat), Entity>,
+    pub sets: Tiled<(ModelKey, Mat)>,
     pub dirty: bool,
     /// Rows drawn last rebuild, for the perf panel.
     pub rows: usize,
@@ -103,19 +189,19 @@ pub fn redraw_buildings(world: &mut World) {
     let Some(art) = world.get_resource::<Art>().cloned() else {
         return;
     };
-    let mut groups: HashMap<(ModelKey, Mat), Vec<InstanceRow>> = HashMap::new();
+    let mut groups: HashMap<(ModelKey, Mat), Vec<MapRow>> = HashMap::new();
     let mut q = world.query::<(&Building, &Look)>();
     for (b, look) in q.iter(world) {
         let c = grid::footprint_center(b.kind, b.origin, b.rot);
-        let base = Vec3::new(c.x as f32, b.base_y as f32, c.y as f32);
+        let base = DVec3::new(c.x, b.base_y, c.y);
         let yaw = grid::yaw(b.rot);
         let rot = Quat::from_rotation_y(yaw);
         for piece in look.0.iter() {
             let Some(model) = art.models.get(piece.model) else {
                 continue;
             };
-            let row = InstanceRow {
-                position: base + rot * piece.pos,
+            let row = MapRow {
+                at: base + (rot * piece.pos).as_dvec3(),
                 yaw: yaw + piece.yaw,
                 scale: piece.scale,
                 tint: piece.tint,
@@ -126,40 +212,9 @@ pub fn redraw_buildings(world: &mut World) {
         }
     }
     let mut drawn = std::mem::take(&mut *world.resource_mut::<Drawn>());
-    let mut rows = 0;
-    // Empty out sets that lost every row.
-    for (key, e) in &drawn.anchors {
-        if !groups.contains_key(key)
-            && let Some(mut inst) = world.get_mut::<MeshInstances>(*e)
-        {
-            inst.rows = Arc::from(Vec::new());
-        }
-    }
-    for (key, list) in groups {
-        rows += list.len();
-        if let Some(&e) = drawn.anchors.get(&key) {
-            if let Some(mut inst) = world.get_mut::<MeshInstances>(e) {
-                *inst = MeshInstances::new(list);
-            }
-            continue;
-        }
-        let model = &art.models[key.0];
-        let Some((mesh, mat)) = model.iter().find(|(_, m)| *m == key.1) else {
-            continue;
-        };
-        let mut r = MeshRenderer::new(*mesh, art.mats.get(*mat));
-        r.cast_shadows = mat.casts_shadows();
-        let e = world
-            .spawn((
-                Name::new(format!("{} {:?}", key.0, key.1)),
-                Transform::default(),
-                r,
-                MeshInstances::new(list),
-            ))
-            .id();
-        drawn.anchors.insert(key, e);
-    }
-    drawn.rows = rows;
+    drawn.rows = drawn
+        .sets
+        .set(world, groups, |key| model_renderer(&art, key, true));
     drawn.dirty = false;
     *world.resource_mut::<Drawn>() = drawn;
 }
@@ -205,8 +260,10 @@ pub fn follow_bodies(
 /// A part that turns about its own axis (windmill sails, propellers).
 #[derive(Component, Clone, Debug)]
 pub struct Spin {
-    /// The transform it turns from.
+    /// The transform it turns from: in its body's space, or in the map's at `at`.
     pub base: Transform,
+    /// The map point `base` is measured from, for a part of no body (a windmill's sails).
+    pub at: DVec3,
     /// Local axis and speed, rad/s.
     pub axis: Vec3,
     pub rate: f32,
@@ -221,6 +278,7 @@ pub struct Spin {
 pub fn spin_parts(
     time: Res<Time>,
     econ: Res<crate::sim::Economy>,
+    frame: Res<Frame>,
     mut q: Query<(&mut Spin, &mut Transform), Without<Body>>,
     bodies: Query<&Transform, With<Body>>,
     producers: Query<&crate::sim::Producer>,
@@ -240,14 +298,19 @@ pub fn spin_parts(
             rotation: s.base.rotation * Quat::from_axis_angle(s.axis, s.angle),
             ..s.base
         };
-        *t = match s.on.and_then(|e| bodies.get(e).ok()) {
-            Some(parent) => Transform {
-                translation: parent.translation
-                    + (parent.rotation * local.translation.as_vec3()).as_dvec3(),
-                rotation: parent.rotation * local.rotation,
-                scale: local.scale,
-            },
-            None => local,
+        let stand;
+        let parent = match s.on.and_then(|e| bodies.get(e).ok()) {
+            Some(parent) => parent,
+            None => {
+                stand = frame.stand(s.at, 0.0);
+                &stand
+            }
+        };
+        *t = Transform {
+            translation: parent.translation
+                + (parent.rotation * local.translation.as_vec3()).as_dvec3(),
+            rotation: parent.rotation * local.rotation,
+            scale: local.scale,
         };
     }
 }

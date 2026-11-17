@@ -7,6 +7,7 @@ use engine::prelude::*;
 
 use crate::defs::Good;
 use crate::draw::{Art, Body, spawn_model};
+use crate::globe::Frame;
 use crate::island;
 use crate::sim::{Building, Economy, RoadLink, Shipments};
 
@@ -21,6 +22,8 @@ pub struct Cart {
     /// Cumulative lengths along the path.
     pub lengths: Arc<Vec<f64>>,
     pub s: f64,
+    /// Which way it faces on the map.
+    pub yaw: f32,
     /// Driving from the warehouse to the workshop.
     pub reverse: bool,
     pub good: Good,
@@ -87,21 +90,17 @@ pub fn dispatch_carts(world: &mut World) {
             path: path.clone(),
             lengths: lengths.clone(),
             s: 0.0,
+            yaw: 0.0,
             reverse: !out,
             good: g,
             island: isle,
             deliver: out,
         };
-        let parts = spawn_model(
-            world,
-            &art,
-            &art.cart.clone(),
-            Transform::from_translation(path[0]),
-            true,
-        );
+        let start = world.resource::<Frame>().stand(path[0], 0.0);
+        let parts = spawn_model(world, &art, &art.cart.clone(), start, true);
         world.spawn((
             Name::new(format!("Cart: {}", g.name())),
-            Transform::from_translation(path[0]),
+            start,
             cart,
             Body { parts },
         ));
@@ -113,6 +112,7 @@ pub fn drive_carts(world: &mut World) {
     let dt =
         world.resource::<Time>().delta_secs() as f64 * world.resource::<Economy>().speed as f64;
     let mut done = Vec::new();
+    let frame = *world.resource::<Frame>();
     let mut q = world.query::<(Entity, &mut Cart, &mut Transform)>();
     for (e, mut c, mut t) in q.iter_mut(world) {
         c.s += CART_SPEED * dt;
@@ -127,11 +127,10 @@ pub fn drive_carts(world: &mut World) {
             d = -d;
         }
         let ground = island::height(p.x, p.z).max(p.y - 0.5);
-        t.translation = DVec3::new(p.x, ground + 0.02, p.z);
-        let yaw = (-d.z).atan2(d.x) as f32;
         if d.length_squared() > 0.0 {
-            t.rotation = Quat::from_rotation_y(yaw);
+            c.yaw = (-d.z).atan2(d.x) as f32;
         }
+        *t = frame.stand(DVec3::new(p.x, ground + 0.02, p.z), c.yaw);
     }
     for (e, isle, g, deliver) in done {
         if deliver {

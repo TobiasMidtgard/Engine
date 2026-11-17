@@ -12,6 +12,7 @@ use engine_vfx::{
 
 use crate::build::MovingParts;
 use crate::defs::{Kind, Tier};
+use crate::globe::Frame;
 use crate::grid;
 use crate::sim::{Building, House, Producer};
 use crate::vessels::Craft;
@@ -73,12 +74,12 @@ pub fn effects() -> Vec<EffectDesc> {
             12.0,
             vec![smoke_layer(
                 "smoke",
-                0.72,
-                0.62,
-                3.5,
-                [8.0, 12.0],
-                [1.5, 2.1],
-                5.0,
+                0.85,
+                0.3,
+                3.0,
+                [6.0, 9.0],
+                [0.8, 1.1],
+                4.2,
             )],
         ),
         fx(
@@ -236,8 +237,11 @@ pub fn tend_plumes(world: &mut World, mut timer: Local<f32>) {
         let c = grid::footprint_center(b.kind, b.origin, b.rot);
         let rot = Quat::from_rotation_y(grid::yaw(b.rot));
         let at = DVec3::new(c.x, b.base_y, c.y) + (rot * local).as_dvec3();
-        if let Some(mut t) = world.get_mut::<Transform>(e) {
-            t.translation = at;
+        let stand = world.resource::<Frame>().stand(at, 0.0);
+        if let Some(mut t) = world.get_mut::<Transform>(e)
+            && (t.translation - stand.translation).length_squared() > 1e-4
+        {
+            *t = stand;
         }
         if let Some(mut fx) = world.get_mut::<ParticleEffect>(e) {
             if fx.effect != name {

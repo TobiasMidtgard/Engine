@@ -20,6 +20,8 @@ mod draw;
 mod effects;
 mod fields;
 mod fleet;
+mod fog;
+mod globe;
 mod grid;
 mod hud;
 mod icons;
@@ -27,6 +29,7 @@ mod island;
 mod logistics;
 mod looks;
 mod orders;
+mod sea;
 mod sim;
 mod streets;
 mod tools;
@@ -83,13 +86,19 @@ pub fn add_game(app: &mut App) {
         .init_resource::<fleet::SeaChart>()
         .init_resource::<fleet::Routes>()
         .init_resource::<tools::Tool>()
+        .init_resource::<world::Woods>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, sim::economy_system)
         .add_systems(
             Update,
             (
-                camera::control,
-                camera::simulation_reach,
+                (
+                    camera::control,
+                    camera::simulation_reach,
+                    world::follow_air,
+                    world::tend_woods,
+                )
+                    .chain(),
                 hud::read_actions,
                 tools::input,
                 town::upgrade_looks,
@@ -110,11 +119,13 @@ pub fn add_game(app: &mut App) {
                 draw::spin_parts,
                 draw::follow_bodies,
                 effects::follow_riders,
+                fog::update,
                 tools::ghost,
                 hud::update_data,
             )
                 .chain(),
         );
+    globe::add(app);
     api::register(app);
 }
 
@@ -140,8 +151,9 @@ fn setup(world: &mut World) {
     }));
     world.insert_resource(art);
     world::spawn_world(world);
-    world::plant_woods(world);
+    sea::spawn(world);
     town::build_start(world);
+    fog::start(world);
     build::refresh(world);
     town::prewarm(world, 600.0);
     tools::setup(world);
@@ -152,7 +164,7 @@ fn setup(world: &mut World) {
         .map_or(DVec3::new(isle.center.x, 0.0, isle.center.y), |t| t.0);
     let mut cam = camera::StrategyCam::new(focus, 0.6, 260.0);
     cam.snap();
-    let t = cam.transform();
+    let t = cam.transform(world.resource::<globe::Frame>());
     world.spawn((
         Name::new("Strategy camera"),
         Camera::perspective(50.0),

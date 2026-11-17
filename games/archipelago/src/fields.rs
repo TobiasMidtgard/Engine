@@ -185,13 +185,16 @@ pub fn redraw(world: &mut World, farm: Entity) {
 /// Pieces for a farm's fields, in the farm's own space.
 pub fn field_pieces(b: &Building, cells: &[IVec2]) -> Vec<Piece> {
     let mid = grid::footprint_center(b.kind, b.origin, b.rot);
-    let base = Vec3::new(mid.x as f32, b.base_y as f32, mid.y as f32);
     let yaw = grid::yaw(b.rot);
     let to_local = Quat::from_rotation_y(-yaw);
     let local = |c: IVec2, off: Vec2| {
         let p = grid::cell_center(c);
-        let y = grid::cell_height(c) as f32;
-        to_local * (Vec3::new(p.x as f32 + off.x, y, p.y as f32 + off.y) - base)
+        let d = DVec3::new(
+            p.x + off.x as f64 - mid.x,
+            grid::cell_height(c) - b.base_y,
+            p.y + off.y as f64 - mid.y,
+        );
+        to_local * d.as_vec3()
     };
     let yard: HashSet<IVec2> = grid::footprint(b.kind, b.origin, b.rot)
         .into_iter()

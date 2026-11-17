@@ -8,11 +8,11 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
 use engine::prelude::*;
-use engine::world::Water;
 use serde::Serialize;
 
 use crate::defs::{CELL_M, Good, Kind};
 use crate::draw::{Art, Body, Spin, spawn_model};
+use crate::globe::{self, Frame};
 use crate::grid;
 use crate::island;
 use crate::logistics::along;
@@ -21,42 +21,41 @@ use crate::vessels::Craft;
 
 // ------------------------------------------------------------------------------ sea lanes
 
-const NAV_CELL: f64 = 25.0;
-const NAV_HALF: i32 = 220; // ±5.5 km
+const NAV_CELL: f64 = 32.0;
 
-/// Where ships may sail: a grid of sea cells deep enough for a laden freighter.
+/// Where ships may sail: for every region a grid of sea cells deep enough for a laden
+/// freighter, and the ocean crossings between the regions.
 #[derive(Resource)]
 pub struct SeaChart {
-    open: Vec<bool>,
-    /// Extra cost of a cell (near shore), so lanes keep off the coasts.
-    cost: Vec<f32>,
+    charts: Vec<Chart>,
     cache: HashMap<(IVec2, IVec2), Arc<Vec<DVec3>>>,
 }
 
-fn nav_index(c: IVec2) -> Option<usize> {
-    let (x, z) = (c.x + NAV_HALF, c.y + NAV_HALF);
-    let n = NAV_HALF * 2;
-    (x >= 0 && z >= 0 && x < n && z < n).then(|| (z * n + x) as usize)
+/// One region's waters, out to its reach.
+struct Chart {
+    /// Map point of the grid's middle (the region's sheet origin) and cells from it to an edge.
+    origin: DVec2,
+    half: i32,
+    open: Vec<bool>,
+    /// Extra cost of a cell (near shore), so lanes keep off the coasts.
+    cost: Vec<f32>,
 }
 
-fn nav_cell(p: DVec2) -> IVec2 {
-    IVec2::new(
-        (p.x / NAV_CELL).floor() as i32,
-        (p.y / NAV_CELL).floor() as i32,
-    )
-}
-
-fn nav_center(c: IVec2) -> DVec2 {
-    DVec2::new((c.x as f64 + 0.5) * NAV_CELL, (c.y as f64 + 0.5) * NAV_CELL)
-}
-
-impl SeaChart {
-    pub fn new() -> Self {
-        let n = (NAV_HALF * 2) as usize;
+impl Chart {
+    fn new(region: usize) -> Self {
+        let origin = globe::sheet_origin(region);
+        let half = (globe::regions()[region].reach_m / NAV_CELL).ceil() as i32;
+        let n = (half * 2) as usize;
+        let mut chart = Self {
+            origin,
+            half,
+            open: Vec::new(),
+            cost: Vec::new(),
+        };
         let depth: Vec<f64> = engine_ui::demo::art::par_map(n, |z| {
             (0..n)
                 .map(|x| {
-                    let c = nav_center(IVec2::new(x as i32 - NAV_HALF, z as i32 - NAV_HALF));
+                    let c = chart.center(IVec2::new(x as i32 - half, z as i32 - half));
                     island::height(c.x, c.y)
                 })
                 .collect::<Vec<_>>()
@@ -84,11 +83,27 @@ impl SeaChart {
                 cost[z * n + x] = near.max(0.0) * 1.5;
             }
         }
-        Self {
-            open,
-            cost,
-            cache: HashMap::new(),
-        }
+        chart.open = open;
+        chart.cost = cost;
+        chart
+    }
+
+    fn index(&self, c: IVec2) -> Option<usize> {
+        let (x, z) = (c.x + self.half, c.y + self.half);
+        let n = self.half * 2;
+        (x >= 0 && z >= 0 && x < n && z < n).then(|| (z * n + x) as usize)
+    }
+
+    fn cell(&self, p: DVec2) -> IVec2 {
+        let l = p - self.origin;
+        IVec2::new(
+            (l.x / NAV_CELL).floor() as i32,
+            (l.y / NAV_CELL).floor() as i32,
+        )
+    }
+
+    fn center(&self, c: IVec2) -> DVec2 {
+        self.origin + DVec2::new((c.x as f64 + 0.5) * NAV_CELL, (c.y as f64 + 0.5) * NAV_CELL)
     }
 
     fn clear_line(&self, a: DVec2, b: DVec2) -> bool {
@@ -96,18 +111,16 @@ impl SeaChart {
         let steps = (d.length() / 8.0).ceil().max(1.0) as i32;
         (0..=steps).all(|i| {
             let p = a + d * (i as f64 / steps as f64);
-            nav_index(nav_cell(p)).is_some_and(|i| self.open[i] && self.cost[i] < 3.0)
+            self.index(self.cell(p))
+                .is_some_and(|i| self.open[i] && self.cost[i] < 3.0)
         })
     }
 
-    /// A sea lane from `a` to `b` (both at sea), smoothed; `None` if the sea doesn't join them.
-    pub fn lane(&mut self, a: DVec2, b: DVec2) -> Option<Arc<Vec<DVec3>>> {
-        let (ca, cb) = (nav_cell(a), nav_cell(b));
-        if let Some(p) = self.cache.get(&(ca, cb)) {
-            return Some(p.clone());
-        }
-        let n = NAV_HALF * 2;
-        let (ia, ib) = (nav_index(ca)?, nav_index(cb)?);
+    /// A lane from `a` to `b` through this region's waters, smoothed.
+    fn lane(&self, a: DVec2, b: DVec2) -> Option<Vec<DVec2>> {
+        let (ca, cb) = (self.cell(a), self.cell(b));
+        let n = self.half * 2;
+        let (ia, ib) = (self.index(ca)?, self.index(cb)?);
         #[derive(PartialEq)]
         struct Node(f32, usize);
         impl Eq for Node {}
@@ -121,11 +134,9 @@ impl SeaChart {
                 o.0.total_cmp(&self.0)
             }
         }
+        let half = self.half;
         let h = |i: usize| {
-            let (x, z) = (
-                (i as i32 % n) - cb.x - NAV_HALF,
-                (i as i32 / n) - cb.y - NAV_HALF,
-            );
+            let (x, z) = ((i as i32 % n) - cb.x - half, (i as i32 / n) - cb.y - half);
             ((x * x + z * z) as f32).sqrt()
         };
         let mut g = vec![f32::INFINITY; (n * n) as usize];
@@ -179,7 +190,7 @@ impl SeaChart {
         cells.reverse();
         let pts: Vec<DVec2> = cells
             .iter()
-            .map(|&i| nav_center(IVec2::new(i as i32 % n - NAV_HALF, i as i32 / n - NAV_HALF)))
+            .map(|&i| self.center(IVec2::new(i as i32 % n - half, i as i32 / n - half)))
             .collect();
         // String-pull.
         let mut out = vec![a];
@@ -193,10 +204,97 @@ impl SeaChart {
             k = j;
         }
         out.push(b);
+        Some(out)
+    }
+}
+
+/// How far apart the points of an ocean crossing are laid, meters (a straight course over
+/// the planet is a curve on a chart).
+const ARC_STEP_M: f64 = 150.0;
+
+/// The straight course over the planet from map point `a` to map point `b` (which may be on
+/// different sheets), as one leg per sheet: the first charted on `a`'s sheet as far as half
+/// way, the second on `b`'s. Heights run evenly from `a.y` to `b.y`. On one sheet it is a
+/// single leg.
+pub fn course(a: DVec3, b: DVec3) -> Vec<Vec<DVec3>> {
+    let (ka, kb) = (globe::region_of(a.x, a.z), globe::region_of(b.x, b.z));
+    if ka == kb {
+        return vec![vec![a, b]];
+    }
+    let (da, db) = (globe::dir(a.x, a.z), globe::dir(b.x, b.z));
+    let angle = da.dot(db).clamp(-1.0, 1.0).acos();
+    let n = ((angle * globe::RADIUS_M / ARC_STEP_M).ceil() as usize).max(2);
+    let at = |i: usize, k: usize| {
+        let t = i as f64 / n as f64;
+        let d = (da * ((1.0 - t) * angle).sin() + db * (t * angle).sin()).normalize();
+        let mut m = globe::map_on(k, d);
+        m.y = a.y + (b.y - a.y) * t;
+        m
+    };
+    let mid = n / 2;
+    vec![
+        (0..=mid).map(|i| at(i, ka)).collect(),
+        (mid..=n).map(|i| at(i, kb)).collect(),
+    ]
+}
+
+impl SeaChart {
+    pub fn new() -> Self {
+        Self {
+            charts: (0..globe::regions().len()).map(Chart::new).collect(),
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Where ships leave region `k`'s waters for region `to`: on its rim, on the straight
+    /// course between the two.
+    fn gate(k: usize, to: usize) -> DVec2 {
+        let o = globe::sheet_origin(k);
+        let there = globe::map_on(k, globe::regions()[to].anchor());
+        let bearing = (DVec2::new(there.x, there.z) - o).normalize();
+        o + bearing * (globe::regions()[k].reach_m * 0.95)
+    }
+
+    /// A sea lane from `a` to `b` (both at sea, on one sheet), smoothed; `None` if the sea
+    /// doesn't join them.
+    pub fn lane(&mut self, a: DVec2, b: DVec2) -> Option<Arc<Vec<DVec3>>> {
+        let k = globe::region_of(a.x, a.y);
+        if k != globe::region_of(b.x, b.y) {
+            return None;
+        }
+        let chart = &self.charts[k];
+        let key = (
+            chart.cell(a),
+            chart.cell(b) + IVec2::splat(100_000 * (k as i32 + 1)),
+        );
+        if let Some(p) = self.cache.get(&key) {
+            return Some(p.clone());
+        }
+        let out = chart.lane(a, b)?;
         let path: Arc<Vec<DVec3>> =
             Arc::new(out.into_iter().map(|p| DVec3::new(p.x, 0.0, p.y)).collect());
-        self.cache.insert((ca, cb), path.clone());
+        self.cache.insert(key, path.clone());
         Some(path)
+    }
+
+    /// The whole way by sea from `a` to `b`, which may lie in different regions: one leg per
+    /// sheet of the map (out through the home waters and half way over the ocean, then the
+    /// other half and in through the far waters).
+    pub fn voyage(&mut self, a: DVec2, b: DVec2) -> Option<Vec<Arc<Vec<DVec3>>>> {
+        let (ka, kb) = (globe::region_of(a.x, a.y), globe::region_of(b.x, b.y));
+        if ka == kb {
+            return self.lane(a, b).map(|l| vec![l]);
+        }
+        let (ga, gb) = (Self::gate(ka, kb), Self::gate(kb, ka));
+        let out = self.lane(a, ga)?;
+        let inward = self.lane(gb, b)?;
+        let sea = |p: DVec2| DVec3::new(p.x, 0.0, p.y);
+        let mut legs = course(sea(ga), sea(gb));
+        let mut first: Vec<DVec3> = out.as_ref().clone();
+        first.extend(legs[0].drain(1..));
+        let mut second = std::mem::take(&mut legs[1]);
+        second.extend(inward.iter().skip(1).copied());
+        Some(vec![Arc::new(first), Arc::new(second)])
     }
 }
 
@@ -247,10 +345,14 @@ pub struct Vessel {
     /// Route index (trade) and which stop it is bound for.
     pub route: Option<usize>,
     pub next_stop: usize,
+    /// Where it is: a map point (`y` above the sea), on the sheet its lane is charted on.
+    pub at: DVec3,
     /// The lane it follows now.
     pub path: Arc<Vec<DVec3>>,
     pub lengths: Arc<Vec<f64>>,
     pub s: f64,
+    /// The legs of its voyage still to come (an ocean crossing changes sheets half way).
+    pub onward: Vec<Arc<Vec<DVec3>>>,
     pub doing: Doing,
     pub cargo: Vec<(Good, u32)>,
     /// Smoothed heading (radians, yaw of +X) and speed.
@@ -328,7 +430,7 @@ pub fn spawn_vessel(
     roam: Roam,
     seed: u64,
 ) -> Entity {
-    let t = Transform::from_translation(at).with_rotation(Quat::from_rotation_y(heading));
+    let t = world.resource::<Frame>().stand(at, heading);
     let mut parts = Vec::new();
     if let Some(art) = world.get_resource::<Art>().cloned() {
         parts = spawn_model(world, &art, &art.crafts[&craft].clone(), t, true);
@@ -344,9 +446,11 @@ pub fn spawn_vessel(
         name: name.into(),
         route,
         next_stop: 0,
+        at,
         path: Arc::new(vec![at, at]),
         lengths: Arc::new(vec![0.0, 0.0]),
         s: 0.0,
+        onward: Vec::new(),
         doing: Doing::Moored(2.0 + (seed % 7) as f32),
         cargo: Vec::new(),
         heading,
@@ -404,11 +508,18 @@ pub fn plan_legs(world: &mut World) {
         let Some(mut v) = world.get::<Vessel>(e).cloned() else {
             continue;
         };
-        let here = world
-            .get::<Transform>(e)
-            .map(|t| t.translation)
-            .unwrap_or_default();
+        let here = v.at;
         match v.doing.clone() {
+            Doing::Sailing if !v.onward.is_empty() => {
+                // The next sheet of the map: the same spot and course on the planet.
+                let path = v.onward.remove(0);
+                let start = path[0];
+                v.heading = globe::carry_yaw(here, v.heading, start);
+                v.at = DVec3::new(start.x, here.y, start.z);
+                v.lengths = lengths(&path);
+                v.path = path;
+                v.s = 0.0;
+            }
             Doing::Sailing => arrive(world, &mut v),
             _ => depart(world, &mut v, here),
         }
@@ -512,11 +623,9 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
             })
         }
         (Roam::Crossing { a, b }, None) => {
-            let to = if (from - *a).length() < (from - *b).length() {
-                *b
-            } else {
-                *a
-            };
+            // (The two ends may be on different sheets: compare over the planet.)
+            let far = |p: &DVec2| globe::distance(here, DVec3::new(p.x, 0.0, p.y));
+            let to = if far(a) < far(b) { *b } else { *a };
             Some(DVec3::new(to.x, 0.0, to.y))
         }
         (Roam::Loop { points }, None) => {
@@ -537,48 +646,60 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
         v.doing = Doing::Lingering(10.0);
         return;
     };
-    let path = if v.craft.flies() {
+    let mut legs: Vec<Arc<Vec<DVec3>>> = if v.craft.flies() {
         let cruise = v.altitude as f64;
-        let start = DVec3::new(here.x, here.y, here.z);
-        let d = DVec2::new(to.x, to.z) - from;
-        let len = d.length().max(1.0);
-        let dir = d / len;
-        // Climb out, cruise, let down to the mast.
+        // Climb out, cruise (straight over the planet), let down to the mast.
+        let mut way = course(
+            DVec3::new(here.x, cruise, here.z),
+            DVec3::new(to.x, cruise, to.z),
+        );
+        let len: f64 = way
+            .iter()
+            .map(|l| lengths(l).last().copied().unwrap_or(0.0))
+            .sum();
         let climb = (len * 0.2).min(500.0);
-        let mut pts = vec![start];
-        pts.push(DVec3::new(
-            from.x + dir.x * climb,
-            cruise,
-            from.y + dir.y * climb,
-        ));
-        pts.push(DVec3::new(
-            to.x - dir.x * climb,
-            cruise,
-            to.z - dir.y * climb,
-        ));
+        let first = &mut way[0];
+        let out = (first[1] - first[0]).normalize_or_zero();
+        first[0] += out * climb;
+        first.insert(0, here);
+        let last = way.last_mut().unwrap();
+        let n = last.len();
+        let back = (last[n - 2] - last[n - 1]).normalize_or_zero();
+        let over = last[n - 1];
+        last[n - 1] = over + back * climb;
         if v.route.is_some() || matches!(v.roam, Roam::Idle { .. }) {
             // Nose to the mast: its middle ends 48 m short, just above the cup.
-            pts.push(DVec3::new(
-                to.x - dir.x * 48.0,
+            last.push(DVec3::new(
+                to.x + back.x * 48.0,
                 to.y + 4.0,
-                to.z - dir.y * 48.0,
+                to.z + back.z * 48.0,
             ));
         } else {
-            pts.push(DVec3::new(to.x, cruise, to.z));
+            last.push(over);
         }
-        Arc::new(pts)
+        way.into_iter().map(Arc::new).collect()
     } else {
         let chart = world.get_resource_mut::<SeaChart>();
-        let lane = chart.and_then(|mut c| c.lane(from, DVec2::new(to.x, to.z)));
-        match lane {
+        let way = chart.and_then(|mut c| c.voyage(from, DVec2::new(to.x, to.z)));
+        match way {
             Some(l) => l,
-            None => Arc::new(vec![here, to]),
+            None => course(here, to).into_iter().map(Arc::new).collect(),
         }
     };
+    let path = legs.remove(0);
+    v.onward = legs;
     v.lengths = lengths(&path);
     v.path = path;
     v.s = 0.0;
     v.doing = Doing::Sailing;
+}
+
+/// Height of the sea's swell at a map point, meters: what hulls ride on. (The planet's sea
+/// is the terrain's; its waves are drawn, not simulated.)
+fn swell(x: f64, z: f64, t: f64) -> f64 {
+    0.22 * (x * 0.045 + z * 0.012 + t * 0.55).sin()
+        + 0.13 * (z * 0.081 - x * 0.027 - t * 0.83).sin()
+        + 0.06 * ((x + z) * 0.19 + t * 1.3).sin()
 }
 
 /// Move every vessel along its lane: steer toward a point ahead, ride the waves, bank.
@@ -586,8 +707,8 @@ pub fn sail(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
     let speed_k = world.resource::<Economy>().speed;
     let gdt = dt * speed_k;
-    let water = world.get_resource::<Water>().cloned();
     let t_now = world.resource::<Time>().elapsed_secs();
+    let frame = *world.resource::<Frame>();
     let mut q = world.query::<(&mut Vessel, &mut Transform)>();
     for (mut v, mut t) in q.iter_mut(world) {
         let total = *v.lengths.last().unwrap_or(&0.0);
@@ -630,7 +751,8 @@ pub fn sail(world: &mut World) {
         }
         let turn_rate = if gdt > 0.0 { step / gdt } else { 0.0 };
         let fwd = Vec3::new(v.heading.cos(), 0.0, -v.heading.sin());
-        let yaw = Quat::from_rotation_y(v.heading);
+        // Level on the planet where it is, bows along its heading.
+        let yaw = frame.facing(p.x, p.z, v.heading);
         if v.craft.flies() {
             let bank_want = (-turn_rate * v.speed / 9.81).atan().clamp(-0.6, 0.6);
             v.bank += (bank_want - v.bank) * (gdt * 1.5).min(1.0);
@@ -640,7 +762,8 @@ pub fn sail(world: &mut World) {
             } else {
                 0.0
             };
-            t.translation = pos + DVec3::Y * bob;
+            v.at = pos + DVec3::Y * bob;
+            t.translation = frame.at(v.at);
             let pitch = if total > 0.0 {
                 (dir.y as f32).asin()
             } else {
@@ -657,13 +780,8 @@ pub fn sail(world: &mut World) {
             // Float on the waves.
             let side = Vec3::new(fwd.z, 0.0, -fwd.x);
             let hl = v.craft.half_length() * 0.7;
-            let sample = |o: Vec3| -> f64 {
-                let q = DVec3::new(p.x, 0.0, p.z) + o.as_dvec3();
-                water
-                    .as_ref()
-                    .and_then(|w| w.sample(q))
-                    .map_or(0.0, |s| s.surface_height)
-            };
+            let sample =
+                |o: Vec3| -> f64 { swell(p.x + o.x as f64, p.z + o.z as f64, t_now as f64) };
             let (hb, hs) = (sample(fwd * hl), sample(-fwd * hl));
             let (hp, hst) = (sample(side * 2.5), sample(-side * 2.5));
             let mid = (hb + hs + hp + hst) * 0.25;
@@ -674,7 +792,8 @@ pub fn sail(world: &mut World) {
             } else {
                 0.0
             };
-            t.translation = DVec3::new(p.x, mid, p.z);
+            v.at = DVec3::new(p.x, mid, p.z);
+            t.translation = frame.at(v.at);
             t.rotation = yaw
                 * Quat::from_rotation_z(pitch)
                 * Quat::from_rotation_x(roll + heel - turn_rate * 2.0);
@@ -757,7 +876,11 @@ pub fn spawn_traffic(world: &mut World) {
             v.speed = v.craft.speed();
         }
     }
-    let isles = island::islands();
+    // The mail planes and seaplanes fly the home isles.
+    let isles: Vec<&island::Island> = island::islands()
+        .iter()
+        .filter(|i| i.region() == 0)
+        .collect();
     for i in 0..3 {
         let pts: Vec<DVec3> = (0..isles.len())
             .map(|k| {
@@ -827,6 +950,7 @@ pub fn spin_props(world: &mut World) {
             for p in spawn_model(world, &art, &art.paddles.clone(), base, true) {
                 world.entity_mut(p).insert(Spin {
                     base,
+                    at: DVec3::ZERO,
                     axis: Vec3::Z,
                     rate: -1.7,
                     angle: 0.0,
@@ -842,6 +966,7 @@ pub fn spin_props(world: &mut World) {
             for p in spawn_model(world, &art, &art.props.clone(), base, false) {
                 world.entity_mut(p).insert(Spin {
                     base,
+                    at: DVec3::ZERO,
                     axis: Vec3::X,
                     rate: 9.0,
                     angle: 0.0,

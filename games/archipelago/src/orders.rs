@@ -177,10 +177,7 @@ pub fn assign(world: &mut World, e: Entity, r: usize) -> Result<(), String> {
             format!("{} flies; this route is for ships", v.name)
         });
     }
-    let here = world
-        .get::<Transform>(e)
-        .map(|t| t.translation)
-        .unwrap_or_default();
+    let here = v.at;
     // Start from the nearest stop.
     let mut best = (0usize, f64::MAX);
     for (i, s) in route.stops.iter().enumerate() {
@@ -298,10 +295,7 @@ fn stand_down(world: &mut World, e: Entity) {
     let Some(v) = world.get::<Vessel>(e).cloned() else {
         return;
     };
-    let here = world
-        .get::<Transform>(e)
-        .map(|t| t.translation)
-        .unwrap_or_default();
+    let here = v.at;
     let air = v.craft.flies();
     let want = stop_kind(air);
     let mut q = world.query::<&Building>();

@@ -15,6 +15,8 @@ enum Aim {
     /// The home town's middle.
     Town,
     Island(usize),
+    /// Where an island's settlement meets the sea.
+    Settle(usize),
     /// The first building of this kind on an island.
     Kind(crate::defs::Kind, usize),
     /// The first vessel of this craft.
@@ -33,6 +35,8 @@ struct View {
     pitch_deg: Option<f32>,
     /// Hide the HUD for this one.
     clean: bool,
+    /// Draw the fog of war (off for views of lands not yet explored).
+    fog: bool,
 }
 
 const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
@@ -44,6 +48,7 @@ const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
         dist,
         pitch_deg: None,
         clean: false,
+        fog: true,
     }
 }
 
@@ -54,11 +59,83 @@ fn views() -> Vec<View> {
             pitch_deg: Some(52.0),
             ..v("archipelago", Aim::At(-150.0, 250.0), 0.35, 5200.0)
         },
+        // The planet: from over the home isles out to the whole globe, and the other lands.
+        View {
+            clean: true,
+            fog: false,
+            ..v("planet_isles", Aim::At(0.0, 0.0), 0.35, 9_000.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            ..v("planet_high", Aim::At(0.0, 0.0), 0.35, 34_000.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            ..v("planet_globe", Aim::At(0.0, 0.0), 0.2, 120_000.0)
+        },
+        // The fog of war over what has not been explored.
+        View {
+            clean: true,
+            pitch_deg: Some(50.0),
+            ..v("fog_isles", Aim::At(0.0, 0.0), 0.35, 7_000.0)
+        },
+        View {
+            clean: true,
+            ..v("fog_globe", Aim::At(0.0, 0.0), 0.2, 120_000.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(14.0),
+            ..v("fog_bank", Aim::Island(0), 4.4, 900.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(38.0),
+            ..v("sarrowmere", Aim::Island(5), 0.8, 5_200.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(22.0),
+            ..v("sarrowmere_coast", Aim::Settle(5), 2.4, 420.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(38.0),
+            ..v("amberland", Aim::Island(9), 5.2, 5_600.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(17.0),
+            ..v("amberland_coast", Aim::Island(9), 0.9, 1_500.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(38.0),
+            ..v("frostholm", Aim::Island(12), 2.2, 4_800.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(14.0),
+            ..v("frostholm_coast", Aim::Island(12), 2.2, 1_800.0)
+        },
         v("town", Aim::Town, 0.6, 330.0),
         View {
             clean: true,
             pitch_deg: Some(24.0),
             ..v("town_street", Aim::Town, 2.1, 110.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(20.0),
+            ..v("gardens", Aim::Kind(K::House, 0), 0.75, 40.0)
         },
         v("harbour", Aim::Kind(K::Harbour, 0), 3.4, 190.0),
         v("market", Aim::Kind(K::Market, 0), 1.2, 90.0),
@@ -107,6 +184,10 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
             let c = islands().get(*i)?.center;
             DVec3::new(c.x, 0.0, c.y)
         }
+        Aim::Settle(i) => {
+            let c = crate::island::settle_spot(islands().get(*i)?)?;
+            DVec3::new(c.x, 0.0, c.y)
+        }
         Aim::Kind(k, isle) => {
             let mut q = world.query::<&Building>();
             let b = q
@@ -118,10 +199,8 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
             DVec3::new(c.x, b.base_y, c.y)
         }
         Aim::Craft(c) => {
-            let mut q = world.query::<(&Vessel, &Transform)>();
-            q.iter(world)
-                .find(|(v, _)| v.craft == *c)
-                .map(|(_, t)| t.translation)?
+            let mut q = world.query::<&Vessel>();
+            q.iter(world).find(|v| v.craft == *c).map(|v| v.at)?
         }
         Aim::At(x, z) => DVec3::new(*x, 0.0, *z),
     })
@@ -229,6 +308,9 @@ pub fn run(mut app: App, only: Option<&str>) {
             }
         }
         set_hud(&mut app.world, !view.clean);
+        if let Some(mut fog) = app.world.get_resource_mut::<crate::fog::FogOfWar>() {
+            fog.shown = view.fog;
+        }
         let t0 = std::time::Instant::now();
         settle(&mut app, 240.0);
         // Exposure and the environment, following a moving craft.

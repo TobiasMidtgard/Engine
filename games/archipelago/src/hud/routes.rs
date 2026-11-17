@@ -654,12 +654,12 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         }
     }
     // Ships where they are, in their route's ink.
-    let mut q = world.query::<(&Vessel, &Transform)>();
+    let mut q = world.query::<&Vessel>();
     let ships: Vec<(Vec2, f32, bool, Option<usize>)> = q
         .iter(world)
-        .map(|(v, t)| {
+        .map(|v| {
             (
-                at(DVec2::new(t.translation.x, t.translation.z)),
+                at(DVec2::new(v.at.x, v.at.z)),
                 std::f32::consts::FRAC_PI_2 - v.heading,
                 v.craft == crate::vessels::Craft::Airship,
                 v.route,

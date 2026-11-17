@@ -296,6 +296,25 @@ fn harbour_toward(world: &mut World, isle: usize, toward: DVec2) -> Option<Entit
     place_near(world, Kind::Harbour, p, 40, false)
 }
 
+/// The route that crosses the ocean at the start.
+const OCEAN_ROUTE: &str = "Sarrowmere packet";
+
+/// A harbour where a land's settlement meets the sea (see [`island::settle_spot`]).
+fn harbour_at_settlement(world: &mut World, isle: usize) -> Option<Entity> {
+    let land = &islands()[isle];
+    let spot = island::settle_spot(land)?;
+    let dir = (spot - land.center).normalize();
+    // Walk out from behind the spot to the coast.
+    let mut p = spot - dir * 600.0;
+    for _ in 0..400 {
+        if island::height(p.x, p.y) < 0.5 {
+            break;
+        }
+        p += dir * 5.0;
+    }
+    place_near(world, Kind::Harbour, p, 40, false)
+}
+
 /// The street from a harbour's back to `to`.
 fn street_inland(world: &mut World, harbour: Entity, len_cells: i32) -> DVec2 {
     let b = world.get::<Building>(harbour).cloned().unwrap();
@@ -558,14 +577,52 @@ pub fn build_start(world: &mut World) {
             true,
         );
     }
+    // --- Sarrowmere, across the ocean: a trading post on the jungle coast.
+    let far_harbour = harbour_at_settlement(world, 5);
+    if let Some(fh) = far_harbour {
+        let village = street_inland(world, fh, 12);
+        street_grid(world, village, 60.0, 7, false);
+        place_near(world, Kind::Market, village, 15, true);
+        place_near(
+            world,
+            Kind::Chapel,
+            village + DVec2::new(30.0, -30.0),
+            20,
+            true,
+        );
+        fill_houses(world, village, 80.0, 14, Tier::Fisherfolk);
+        if let Some(b) = world.get::<Building>(fh).cloned() {
+            let c = grid::footprint_center(b.kind, b.origin, b.rot);
+            let fd = grid::front_dir(b.rot).as_dvec2();
+            let along = DVec2::new(fd.y, -fd.x);
+            for k in [-1.0, 1.0] {
+                place_near(world, Kind::Fishery, c + along * (70.0 * k), 30, false)
+                    .map(|e| join_to_roads(world, e));
+            }
+        }
+        woodcutters_near(world, 5, village, 3);
+        place_near(
+            world,
+            Kind::Sawmill,
+            village + DVec2::new(-80.0, 60.0),
+            30,
+            true,
+        );
+    }
     refresh_looks(world);
     // Every settled island starts with some stock.
     let ids = |world: &mut World, e: Option<Entity>| {
         e.and_then(|e| world.get::<Building>(e).map(|b| (b.id, b.island)))
     };
-    for e in [Some(h_harbour), b_harbour, n_harbour, s_harbour]
-        .into_iter()
-        .flatten()
+    for e in [
+        Some(h_harbour),
+        b_harbour,
+        n_harbour,
+        s_harbour,
+        far_harbour,
+    ]
+    .into_iter()
+    .flatten()
     {
         if let Some((_, isle)) = ids(world, Some(e)) {
             let mut econ = world.resource_mut::<Economy>();
@@ -644,6 +701,25 @@ pub fn build_start(world: &mut World) {
             air: false,
         });
     }
+    let f_id = ids(world, far_harbour).map(|x| x.0);
+    if let (Some(h), Some(f)) = (h_id, f_id) {
+        routes.push(Route {
+            name: OCEAN_ROUTE.into(),
+            stops: vec![
+                Stop {
+                    at: f,
+                    load: vec![Good::Planks, Good::Fish, Good::Logs],
+                    unload: vec![Good::Bread, Good::Ale, Good::Clothes, Good::Bricks],
+                },
+                Stop {
+                    at: h,
+                    load: vec![Good::Bread, Good::Ale, Good::Clothes, Good::Bricks],
+                    unload: vec![Good::Planks, Good::Fish, Good::Logs],
+                },
+            ],
+            air: false,
+        });
+    }
     let mast_id = |world: &mut World, e: Option<Entity>| {
         e.and_then(|e| world.get::<Building>(e).map(|b| b.id))
     };
@@ -684,7 +760,13 @@ pub fn build_start(world: &mut World) {
         &[(Craft::Airship, "Albatross"), (Craft::Airship, "Petrel")],
     ];
     for (r, route) in routes.iter().enumerate() {
-        let list = if route.air {
+        let ocean: &[(Craft, &str)] = &[
+            (Craft::Clipper, "Morning Star"),
+            (Craft::Steamer, "SS Sarrow Trader"),
+        ];
+        let list = if route.name == OCEAN_ROUTE {
+            ocean
+        } else if route.air {
             crafts[3]
         } else {
             crafts[r.min(2)]
@@ -777,6 +859,7 @@ pub mod tests {
         w.init_resource::<crate::sim::Shipments>();
         w.init_resource::<Changed>();
         w.init_resource::<build::Forest>();
+        w.init_resource::<crate::globe::Frame>();
         w.init_resource::<crate::draw::Drawn>();
         w.init_resource::<crate::fleet::SeaChart>();
         w.init_resource::<Routes>();
@@ -803,7 +886,7 @@ pub mod tests {
             .collect();
         kinds.sort();
         assert!(total >= 30, "only {total} workshops: {kinds:?}");
-        let mut tiers = [[0; 2]; 5];
+        let mut tiers = vec![[0; 2]; islands().len()];
         for (b, h) in w.query::<(&Building, &House)>().iter(&w) {
             tiers[b.island][h.tier.index()] += 1;
         }
@@ -842,7 +925,43 @@ pub mod tests {
             .filter(|b| b.kind == Kind::AirshipMast)
             .count();
         assert_eq!(masts, 2, "airship masts");
-        assert_eq!(w.resource::<Routes>().0.len(), 4, "routes");
+        let routes = w.resource::<Routes>().0.clone();
+        assert_eq!(routes.len(), 5, "routes");
+        // One of them crosses the ocean to the post on Sarrowmere, and the sea joins its ends.
+        let ocean = routes
+            .iter()
+            .find(|r| r.name == OCEAN_ROUTE)
+            .expect("ocean route");
+        let ends: Vec<DVec2> = ocean
+            .stops
+            .iter()
+            .map(|s| {
+                let b = w
+                    .query::<&Building>()
+                    .iter(&w)
+                    .find(|b| b.id == s.at)
+                    .cloned()
+                    .unwrap();
+                crate::fleet::mooring(&b).0
+            })
+            .collect();
+        assert_ne!(
+            crate::globe::region_of(ends[0].x, ends[0].y),
+            crate::globe::region_of(ends[1].x, ends[1].y)
+        );
+        let legs = w
+            .resource_mut::<crate::fleet::SeaChart>()
+            .voyage(ends[1], ends[0])
+            .expect("a way over the ocean");
+        assert_eq!(legs.len(), 2);
+        let miles: f64 = legs
+            .iter()
+            .map(|l| l.windows(2).map(|w| (w[1] - w[0]).length()).sum::<f64>())
+            .sum();
+        assert!((25_000.0..60_000.0).contains(&miles), "{miles:.0} m");
+        // The legs meet at the same spot on the planet, half way.
+        let (a, b) = (*legs[0].last().unwrap(), legs[1][0]);
+        assert!(crate::globe::distance(a, b) < 1.0);
         assert!(
             linked * 10 >= total * 9,
             "{linked} of {total} linked; not: {unlinked:?}"

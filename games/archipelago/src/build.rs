@@ -11,15 +11,18 @@ use engine::world::terrain::{EditOp, EditShape, TerrainEdit};
 
 use crate::defs::{CELL_M, Good, Kind, Site, Tier};
 use crate::draw::{Art, Drawn, Look, Spin, spawn_model};
+use crate::globe::{Biome, Frame};
 use crate::grid::{self, Grid, Occ};
 use crate::island;
-use crate::looks::look;
+use crate::looks::{h01, look};
 use crate::sim::{Building, Economy, House, Producer, RoadLink};
 
 /// Trees by cell, so building can clear them and woodcutters can count them.
 #[derive(Resource, Default)]
 pub struct Forest {
     pub by_cell: HashMap<IVec2, Vec<Entity>>,
+    /// Cells cleared for building: nothing is planted there again.
+    pub cleared: HashSet<IVec2>,
 }
 
 /// Something was built or removed: links, services and draws need a refresh.
@@ -100,14 +103,15 @@ pub(crate) fn paint_cells(world: &mut World, cells: &[IVec2], surface: &'static 
         return;
     }
     let id = world.resource::<SurfaceMaterials>().id_or_default(surface);
+    let frame = world.get_resource::<Frame>().copied().unwrap_or_default();
     for &c in cells {
         let p = grid::cell_center(c);
         let y = grid::cell_height(c);
         world.write_message(TerrainEdit {
-            center: DVec3::new(p.x, y, p.y),
+            center: frame.at(DVec3::new(p.x, y, p.y)),
             shape: EditShape::Box {
                 half_extents: Vec3::new(CELL_M as f32 * 0.55, 3.0, CELL_M as f32 * 0.55),
-                rotation: Quat::IDENTITY,
+                rotation: frame.facing(p.x, p.y, 0.0),
             },
             op: EditOp::Paint,
             surface: Some(id),
@@ -121,6 +125,7 @@ pub(crate) fn clear_trees(world: &mut World, cells: &[IVec2]) {
     {
         let mut forest = world.resource_mut::<Forest>();
         for c in cells {
+            forest.cleared.insert(*c);
             if let Some(v) = forest.by_cell.remove(c) {
                 gone.extend(v);
             }
@@ -254,8 +259,9 @@ pub fn place(
         && kind != Kind::GrainFarm
         && kind != Kind::HopFarm
         && kind != Kind::SheepFarm
+        && kind != Kind::House
     {
-        // A trodden yard round the building.
+        // A trodden yard round the building (houses keep their grass: they have gardens).
         paint_cells(world, &cells, "dirt");
     }
     // Moving parts.
@@ -264,13 +270,19 @@ pub fn place(
     {
         let c = grid::footprint_center(kind, origin, rot);
         let yaw = grid::yaw(rot);
-        let hub = Vec3::new(c.x as f32, base_y as f32 + 11.6, c.y as f32)
-            + Quat::from_rotation_y(yaw) * Vec3::new(0.0, 0.0, 2.6);
-        let base = Transform::from_translation(hub.as_dvec3())
-            .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-0.12));
-        for part in spawn_model(world, &art, &art.sails.clone(), base, true) {
+        let hub = DVec3::new(c.x, base_y + 11.6, c.y)
+            + (Quat::from_rotation_y(yaw) * Vec3::new(0.0, 0.0, 2.6)).as_dvec3();
+        let base =
+            Transform::from_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-0.12));
+        let stand = world.resource::<Frame>().stand(hub, 0.0);
+        let first = Transform {
+            rotation: stand.rotation * base.rotation,
+            ..stand
+        };
+        for part in spawn_model(world, &art, &art.sails.clone(), first, true) {
             world.entity_mut(part).insert(Spin {
                 base,
+                at: hub,
                 axis: Vec3::Z,
                 rate: 0.9,
                 angle: 0.0,
@@ -289,6 +301,7 @@ pub fn place(
     if kind == Kind::Market {
         spawn_stalls(world, entity, origin, rot, base_y);
     }
+    plant_garden(world, entity);
     crate::fields::claim(world, entity);
     crate::effects::add_plumes(world, entity);
     if matches!(kind, Kind::Market | Kind::Harbour | Kind::Chapel) {
@@ -296,6 +309,143 @@ pub fn place(
     }
     world.resource_mut::<Drawn>().dirty = true;
     Ok(entity)
+}
+
+/// The trees that grow on a building's lot, by the land's climate: where in the building's
+/// space, which species, how grown (0..1).
+pub fn garden_trees(kind: Kind, seed: u64, biome: Biome) -> Vec<(Vec3, &'static str, f32)> {
+    let r = |k: u64| h01(seed, 900 + k);
+    let (small, big): (&[&'static str], &[&'static str]) = match biome {
+        Biome::Temperate => (
+            &["rowan", "hazel", "birch", "goat willow", "alder"],
+            &["oak", "beech", "aspen", "birch"],
+        ),
+        Biome::Tropical => (&["coconut palm"], &["coconut palm", "tropical canopy"]),
+        Biome::Arid => (&["juniper", "umbrella thorn"], &["umbrella thorn"]),
+        Biome::Arctic => (
+            &["mountain birch", "juniper"],
+            &["black spruce", "mountain birch"],
+        ),
+    };
+    let pick =
+        |list: &[&'static str], k: u64| list[(r(k) * list.len() as f32) as usize % list.len()];
+    let mut out = Vec::new();
+    match kind {
+        Kind::House => {
+            // Beside the house on the side without the shed, and in a back corner (clear of
+            // both the cottage and the terrace house that may replace it).
+            let free = if crate::looks::variant(seed) == 2 {
+                -1.0
+            } else {
+                1.0
+            };
+            if r(0) < 0.5 {
+                out.push((
+                    Vec3::new(5.1 * free, 0.0, -1.6 + 1.2 * r(1)),
+                    pick(small, 2),
+                    0.42 + 0.2 * r(3),
+                ));
+            }
+            if r(4) < 0.35 {
+                out.push((
+                    Vec3::new(-4.9 * free, 0.0, -4.7),
+                    pick(small, 5),
+                    0.36 + 0.2 * r(6),
+                ));
+            }
+        }
+        Kind::Chapel => {
+            // The churchyard.
+            for (k, (x, z)) in [(-6.1, 4.8), (6.1, -3.4), (6.2, 6.4), (-6.2, -6.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let k = k as u64 * 4;
+                if r(10 + k) < 0.65 {
+                    out.push((
+                        Vec3::new(x, 0.0, z),
+                        pick(big, 11 + k),
+                        0.4 + 0.2 * r(12 + k),
+                    ));
+                }
+            }
+        }
+        Kind::SheepFarm | Kind::GrainFarm | Kind::HopFarm => {
+            // One old tree in the farmyard.
+            let (w, d) = kind.def().size;
+            let yard = Vec3::new(
+                -(w as f32) * CELL_M as f32 * 0.5 + 6.0,
+                0.0,
+                d as f32 * CELL_M as f32 * 0.5 - 6.0,
+            );
+            out.push((
+                yard + Vec3::new(5.4, 0.0, -2.2),
+                pick(big, 30),
+                0.7 + 0.25 * r(31),
+            ));
+        }
+        Kind::Weaver | Kind::Bakery | Kind::Brewery if r(40) < 0.6 => {
+            let (w, d) = kind.def().size;
+            out.push((
+                Vec3::new(
+                    (w as f32 * CELL_M as f32 * 0.5 - 1.0) * if r(41) < 0.5 { -1.0 } else { 1.0 },
+                    0.0,
+                    -(d as f32) * CELL_M as f32 * 0.5 + 1.2,
+                ),
+                pick(small, 42),
+                0.45 + 0.2 * r(43),
+            ));
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Plant a building's garden trees (they go when the building goes).
+fn plant_garden(world: &mut World, owner: Entity) {
+    let Some(library) = world
+        .get_resource::<engine_foliage::PlantLibrary>()
+        .cloned()
+    else {
+        return;
+    };
+    let Some(b) = world.get::<Building>(owner).cloned() else {
+        return;
+    };
+    let biome = island::islands()[b.island].biome();
+    let c = grid::footprint_center(b.kind, b.origin, b.rot);
+    let yaw = grid::yaw(b.rot);
+    let frame = *world.resource::<Frame>();
+    let mut parts = Vec::new();
+    for (k, (at, species, size)) in garden_trees(b.kind, b.seed, biome).into_iter().enumerate() {
+        let p = Quat::from_rotation_y(yaw) * at;
+        let (x, z) = (c.x + p.x as f64, c.y + p.z as f64);
+        let ground = island::height(x, z);
+        if ground < 0.4 {
+            continue;
+        }
+        let Some(mut tree) =
+            engine_foliage::SceneryTree::new(&library, species, b.seed ^ (k as u64 + 1) << 48)
+        else {
+            continue;
+        };
+        tree.size = size;
+        let turn = h01(b.seed, 950 + k as u64) * std::f32::consts::TAU;
+        parts.push(
+            world
+                .spawn((frame.stand(DVec3::new(x, ground - 0.1, z), turn), tree))
+                .id(),
+        );
+    }
+    if !parts.is_empty() {
+        world
+            .entity_mut(owner)
+            .entry::<MovingParts>()
+            .or_default()
+            .get_mut()
+            .0
+            .extend(parts);
+    }
 }
 
 /// Extra entities a building owns (sails, stalls, lights).
@@ -368,12 +518,10 @@ fn spawn_stalls(world: &mut World, owner: Entity, origin: IVec2, rot: u8, base_y
     .enumerate()
     {
         let local = Quat::from_rotation_y(yaw) * Vec3::new(x, 0.0, z);
-        let at = Transform::from_translation(DVec3::new(
-            c.x + local.x as f64,
-            base_y + 0.08,
-            c.y + local.z as f64,
-        ))
-        .with_rotation(Quat::from_rotation_y(yaw + a + std::f32::consts::PI));
+        let at = world.resource::<Frame>().stand(
+            DVec3::new(c.x + local.x as f64, base_y + 0.08, c.y + local.z as f64),
+            yaw + a + std::f32::consts::PI,
+        );
         parts.extend(place_stall(
             world,
             &mats,

@@ -6,9 +6,10 @@ use engine::input::Mouse;
 use engine::prelude::*;
 use engine::render::Projection;
 
+use crate::globe::{self, Frame};
 use crate::island;
 
-/// The player's view: a point on the ground it looks at, a bearing and a distance.
+/// The player's view: a map point on the ground it looks at, a bearing and a distance.
 #[derive(Component, Clone, Debug)]
 pub struct StrategyCam {
     pub focus: DVec3,
@@ -25,7 +26,12 @@ pub struct StrategyCam {
 }
 
 pub const MIN_DIST: f32 = 22.0;
-pub const MAX_DIST: f32 = 2600.0;
+/// Far enough to see the whole planet.
+pub const MAX_DIST: f32 = 150_000.0;
+/// The view that takes in a group of islands: the pitch curve's knee.
+const ISLES_DIST: f32 = 2600.0;
+/// From here up the view looks almost straight down at the globe.
+const GLOBE_DIST: f32 = 60_000.0;
 
 impl StrategyCam {
     pub fn new(focus: DVec3, yaw: f32, dist: f32) -> Self {
@@ -41,10 +47,12 @@ impl StrategyCam {
         }
     }
 
-    /// Look down this far for a distance: 28° at street level, 58° over the whole map.
+    /// Look down this far for a distance: 28° at street level, 58° over a group of islands,
+    /// and on up to straight down at the globe.
     pub fn pitch_for(dist: f32) -> f32 {
-        let t = ((dist / MIN_DIST).ln() / (MAX_DIST / MIN_DIST).ln()).clamp(0.0, 1.0);
-        (28.0 + 30.0 * t.powf(0.8)).to_radians()
+        let t = ((dist / MIN_DIST).ln() / (ISLES_DIST / MIN_DIST).ln()).clamp(0.0, 1.0);
+        let u = ((dist / ISLES_DIST).ln() / (GLOBE_DIST / ISLES_DIST).ln()).clamp(0.0, 1.0);
+        (28.0 + 30.0 * t.powf(0.8) + 30.0 * u * u * (3.0 - 2.0 * u)).to_radians()
     }
 
     pub fn pitch(&self) -> f32 {
@@ -52,14 +60,18 @@ impl StrategyCam {
             .unwrap_or_else(|| Self::pitch_for(self.dist))
     }
 
-    /// The camera transform for the current state.
-    pub fn transform(&self) -> Transform {
-        let rot = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(-self.pitch());
-        let fwd = rot * -Vec3::Z;
-        let mut eye = self.focus - (fwd * self.dist).as_dvec3();
-        let floor = island::height(eye.x, eye.z).max(0.0) + 4.0;
-        if eye.y < floor {
-            eye.y = floor;
+    /// The camera transform for the current state, in the world as `frame` has it.
+    pub fn transform(&self, frame: &Frame) -> Transform {
+        let stand = frame.stand(self.focus, self.yaw);
+        let rot = (stand.rotation * Quat::from_rotation_x(-self.pitch())).normalize();
+        let fwd = (rot * -Vec3::Z).as_dvec3();
+        let mut eye = stand.translation - fwd * self.dist as f64;
+        // Never under the ground or the sea.
+        let p = frame.planet(eye);
+        let len = p.length();
+        let floor = island::ground(p / len).max(0.0) + 4.0;
+        if len - globe::RADIUS_M < floor {
+            eye = frame.world(p / len * (globe::RADIUS_M + floor));
         }
         Transform::from_translation(eye).with_rotation(rot)
     }
@@ -69,6 +81,27 @@ impl StrategyCam {
         self.focus = self.goal_focus;
         self.yaw = self.goal_yaw;
         self.dist = self.goal_dist;
+    }
+
+    /// Keep the view on the chart of the region it is nearest: crossing an ocean, the focus
+    /// and the bearing move to the next region's sheet (the same spot and direction on the
+    /// planet). A view sent to another region's sheet glides there over the planet.
+    fn rechart(&mut self) {
+        let goal = self.goal_focus;
+        let k = globe::nearest_region(globe::dir(goal.x, goal.z));
+        if k != globe::region_of(goal.x, goal.z) {
+            let mut m = globe::map_on(k, globe::dir(goal.x, goal.z));
+            m.y = goal.y;
+            self.goal_yaw = globe::carry_yaw(goal, self.goal_yaw, m);
+            self.goal_focus = m;
+        }
+        let at = self.focus;
+        if globe::region_of(at.x, at.z) != k {
+            let mut m = globe::map_on(k, globe::dir(at.x, at.z));
+            m.y = at.y;
+            self.yaw = globe::carry_yaw(at, self.yaw, m);
+            self.focus = m;
+        }
     }
 }
 
@@ -85,6 +118,7 @@ pub fn simulation_reach(mut range: ResMut<engine::world::SimulationRange>, q: Qu
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -92,6 +126,7 @@ pub fn control(
     buttons: Res<ButtonInput<MouseButton>>,
     capture: Option<Res<engine_ui::UiInputCapture>>,
     config: Res<EngineConfig>,
+    frame: Res<Frame>,
     mut q: Query<(&mut StrategyCam, &mut Transform)>,
 ) {
     let dt = time.real_delta_secs().min(0.1);
@@ -151,11 +186,8 @@ pub fn control(
                 cam.goal_focus.z += d.y;
             }
         }
-        let r = cam.goal_focus.length();
-        if r > 5200.0 {
-            cam.goal_focus *= 5200.0 / r;
-        }
-        let ground = island::height(cam.goal_focus.x, cam.goal_focus.z).max(0.0);
+        cam.rechart();
+        let ground = island::true_height(cam.goal_focus.x, cam.goal_focus.z).max(0.0);
         if !cam.free_height {
             cam.goal_focus.y = ground;
         }
@@ -166,7 +198,7 @@ pub fn control(
         let (yaw, dist) = (cam.yaw, cam.dist);
         cam.yaw = yaw + (cam.goal_yaw - yaw) * k;
         cam.dist = dist + (cam.goal_dist - dist) * k;
-        *t = cam.transform();
+        *t = cam.transform(&frame);
     }
 }
 
@@ -189,40 +221,62 @@ pub fn cursor_ray(
     (t.translation, t.rotation * d)
 }
 
-/// Where a ray meets the ground or the sea.
-pub fn ground_hit(origin: DVec3, dir: Vec3) -> Option<DVec3> {
-    let d = dir.as_dvec3();
-    let below = |p: DVec3| p.y <= island::height(p.x, p.z).max(0.0);
+/// Where a world ray meets the ground or the sea, as a map point.
+pub fn ground_hit(frame: &Frame, origin: DVec3, dir: Vec3) -> Option<DVec3> {
+    // March in the planet's own space.
+    let o = frame.planet(origin);
+    let d = (frame.rot.inverse() * dir.as_dvec3()).normalize();
+    let r = globe::RADIUS_M;
+    let height = |p: DVec3| p.length() - r;
+    let below = |p: DVec3| height(p) <= island::ground(p.normalize()).max(0.0);
+    // Skip the empty air down to just above the highest ground.
+    let top = r + island::HEIGHT_RANGE_M.1 + 50.0;
     let mut t = 0.0f64;
-    let mut prev = 0.0;
-    while t < 12_000.0 {
-        let p = origin + d * t;
+    if o.length() > top {
+        let b = o.dot(d);
+        let disc = b * b - (o.length_squared() - top * top);
+        if disc <= 0.0 || -b - disc.sqrt() < 0.0 {
+            return None;
+        }
+        t = -b - disc.sqrt();
+    }
+    let mut prev = t;
+    let end = t + 4.0 * r;
+    while t < end {
+        let p = o + d * t;
+        if p.length() > top + 1.0 && p.dot(d) > 0.0 {
+            // Past the planet and climbing away.
+            return None;
+        }
         if below(p) {
             let (mut a, mut b) = (prev, t);
             for _ in 0..24 {
                 let m = (a + b) * 0.5;
-                if below(origin + d * m) {
+                if below(o + d * m) {
                     b = m;
                 } else {
                     a = m;
                 }
             }
-            return Some(origin + d * b);
+            return Some(globe::map_of(o + d * b));
         }
         prev = t;
-        t += (t * 0.01).max(1.0);
+        // Steps grow with the height above the ground (a slope steeper than 2:1 is rare).
+        let clear = height(p) - island::ground(p.normalize()).max(0.0);
+        t += (clear * 0.4).max(t * 0.01).max(1.0);
     }
     None
 }
 
-/// The ground point under the mouse, if any.
+/// The ground point under the mouse, if any (a map point).
 pub fn pick(world: &mut World) -> Option<DVec3> {
     let px = world.resource::<Mouse>().position?;
     let window = world.resource::<engine::core::window::Window>().clone();
+    let frame = *world.resource::<Frame>();
     let mut q = world.query::<(&Transform, &Camera, &StrategyCam)>();
     let (t, cam, _) = q.iter(world).next()?;
     let (o, d) = cursor_ray(t, cam, &window, px);
-    ground_hit(o, d)
+    ground_hit(&frame, o, d)
 }
 
 #[cfg(test)]
@@ -237,8 +291,9 @@ mod tests {
             0.7,
             300.0,
         );
-        let t = cam.transform();
-        let hit = ground_hit(t.translation, t.rotation * -Vec3::Z).unwrap();
+        let frame = Frame::default();
+        let t = cam.transform(&frame);
+        let hit = ground_hit(&frame, t.translation, t.rotation * -Vec3::Z).unwrap();
         assert!(
             (hit - cam.focus).length() < 30.0,
             "{hit:?} vs {:?}",

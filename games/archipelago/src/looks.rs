@@ -51,7 +51,8 @@ impl Piece {
     }
 }
 
-fn h01(seed: u64, k: u64) -> f32 {
+/// A number 0..1 from a seed and a draw number.
+pub(crate) fn h01(seed: u64, k: u64) -> f32 {
     let mut x = seed ^ k.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 33;
     x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -97,6 +98,12 @@ pub const MODELS: &[ModelKey] = &[
     "wheat_cell",
     "hedge_4",
     "fence_4",
+    "bush",
+    "flower_bed",
+    "wash_line",
+    "bench",
+    "hand_cart",
+    "tub_shrub",
     "walker_0_0",
     "walker_0_1",
     "walker_0_2",
@@ -135,8 +142,97 @@ pub fn look(kind: Kind, tier: Tier, seed: u64) -> Vec<Piece> {
             };
             let t = 0.9 + 0.2 * h01(seed, 2);
             out.push(Piece::at(key, Vec3::ZERO).tint([t, t * (0.97 + 0.06 * h01(seed, 3)), t]));
+            let r = |k: u64| h01(seed, 40 + k);
+            let leaf = |k: u64| {
+                let g = 0.85 + 0.3 * r(k);
+                [g * (0.9 + 0.2 * r(k + 1)), g, g * 0.9]
+            };
+            // A bed's flowers take one of five colours.
+            let bloom = |k: u64| match (r(k) * 5.0) as u32 {
+                0 => [1.0, 0.55, 0.5],
+                1 => [1.0, 0.95, 0.55],
+                2 => [0.95, 0.75, 1.0],
+                3 => [1.0, 0.8, 0.6],
+                _ => [1.0; 3],
+            };
             if tier == Tier::Fisherfolk {
                 out.push(Piece::at("plot", v3(0.0, 0.0, -3.6)).yaw(0.0));
+                // The shed stands on one side (see `cottage`), the other side is garden.
+                let free = if v == 2 { -1.0 } else { 1.0 };
+                // Front garden: beds either side of the path to the door (at x = -0.9).
+                if r(0) > 0.2 {
+                    out.push(Piece::at("flower_bed", v3(2.4, 0.0, 4.8)).tint(bloom(1)));
+                }
+                if r(2) > 0.45 {
+                    out.push(
+                        Piece::at("flower_bed", v3(-3.9, 0.0, 4.8))
+                            .scale(0.8)
+                            .tint(bloom(3)),
+                    );
+                }
+                for k in 0..3u64 {
+                    if r(4 + k) > 0.45 {
+                        continue;
+                    }
+                    let x = [5.1 * free, -5.2 * free, 4.6 * free][k as usize];
+                    let z = [3.6, 5.0, -0.6][k as usize] + r(8 + k) * 0.6;
+                    out.push(
+                        Piece::at("bush", v3(x, 0.0, z))
+                            .yaw(r(11 + k) * TAU)
+                            .scale(0.75 + 0.5 * r(14 + k))
+                            .tint(leaf(17 + k * 2)),
+                    );
+                }
+                if r(23) > 0.5 {
+                    out.push(
+                        Piece::at("wash_line", v3(5.0 * free, 0.0, 1.2))
+                            .yaw(PI * 0.5)
+                            .tint([1.0, 0.94 + 0.06 * r(24), 0.9 + 0.1 * r(25)]),
+                    );
+                } else if r(23) > 0.25 {
+                    out.push(
+                        Piece::at("hand_cart", v3(4.9 * free, 0.0, 1.6)).yaw(0.3 + r(26) * 2.0),
+                    );
+                }
+                if r(27) > 0.55 {
+                    out.push(Piece::at("bench", v3(1.6, 0.0, 4.15)));
+                }
+                if r(28) > 0.6 {
+                    out.push(Piece::at("barrel", v3(-3.1 * free, 0.0, 4.2)));
+                }
+            } else {
+                // Shrubs in tubs by the door (at x = -2.6), a low hedge before the windows.
+                out.push(Piece::at("tub_shrub", v3(-3.65, 0.0, 5.0)).tint(leaf(0)));
+                out.push(Piece::at("tub_shrub", v3(-1.55, 0.0, 5.0)).tint(leaf(2)));
+                if r(4) > 0.3 {
+                    out.push(
+                        Piece::at("hedge_4", v3(2.2, 0.0, 5.5))
+                            .scale(0.62)
+                            .tint(leaf(5)),
+                    );
+                    out.push(
+                        Piece::at("flower_bed", v3(2.2, 0.0, 4.75))
+                            .scale(0.8)
+                            .tint(bloom(7)),
+                    );
+                }
+                // The back yard behind its wall.
+                if r(8) > 0.35 {
+                    out.push(Piece::at("wash_line", v3(1.4, 0.0, -4.1)).tint([
+                        1.0,
+                        0.94 + 0.06 * r(9),
+                        0.9 + 0.1 * r(10),
+                    ]));
+                }
+                if r(11) > 0.5 {
+                    out.push(Piece::at("barrel", v3(-4.9, 0.0, -3.4)));
+                    out.push(Piece::at("crate", v3(-4.8, 0.0, -4.5)).yaw(r(12)));
+                }
+                if r(13) > 0.6 {
+                    out.push(
+                        Piece::at("hand_cart", v3(5.1, 0.0, -1.0)).yaw(PI * 0.5 + r(14) * 0.4),
+                    );
+                }
             }
         }
         Kind::Harbour => {
@@ -393,6 +489,36 @@ fn cottage(v: usize) -> Parts {
     );
     p.windows(c + v3(1.6, 1.7, w * 0.5), Vec3::Z, 1, 0.9, 1.0, 0.0, WHITE);
     p.windows(c + v3(-2.6, 1.7, w * 0.5), Vec3::Z, 1, 0.8, 1.0, 0.0, WHITE);
+    let (paint, bloom) = match v {
+        0 => (hexc(0x3d6b4a), hexc(0xe0524a)),
+        1 => (hexc(0x2f4a5a), hexc(0xf0c040)),
+        _ => (hexc(0x7a2e2a), hexc(0xf2f0e8)),
+    };
+    shutters(&mut p, c + v3(1.6, 1.7, w * 0.5), 0.9, 1.0, paint);
+    shutters(&mut p, c + v3(-2.6, 1.7, w * 0.5), 0.8, 1.0, paint);
+    flower_box(&mut p, c + v3(1.6, 1.08, w * 0.5 + 0.1), 1.0, bloom);
+    // A little porch over the door.
+    for x in [-1.55, -0.25] {
+        p.beam(
+            Mat::Timber,
+            c + v3(x, 0.0, w * 0.5 + 0.85),
+            c + v3(x, 2.45, w * 0.5 + 0.85),
+            0.12,
+            tc,
+        );
+    }
+    p.gable_roof(
+        roof,
+        Mat::Plaster,
+        c + v3(-0.9, 2.45, w * 0.5 + 0.45),
+        1.5,
+        0.9,
+        0.6,
+        0.14,
+        true,
+        Vec4::ONE,
+        pc,
+    );
     p.windows(
         c + v3(0.0, 1.7, -w * 0.5),
         -Vec3::Z,
@@ -556,6 +682,40 @@ fn townhouse(v: usize) -> Parts {
         hexc(0x6b1e1e),
     );
     p.windows(c + v3(0.8, 1.9, w * 0.5), Vec3::Z, 2, 1.0, 1.5, 1.2, WHITE);
+    // Two steps up to the door, a stone hood over it, flowers under the parlour windows.
+    for (k, top) in [(0.0, 0.5), (1.0, 0.25)] {
+        p.cuboid(
+            Mat::Stone,
+            c + v3(-3.4, 0.0, w * 0.5 + 0.4 * k),
+            c + v3(-1.8, top, w * 0.5 + 0.4 * (k + 1.0)),
+            WHITE,
+            false,
+        );
+    }
+    p.cuboid(
+        Mat::Stone,
+        c + v3(-3.4, 3.0, w * 0.5),
+        c + v3(-1.8, 3.15, w * 0.5 + 0.55),
+        WHITE,
+        true,
+    );
+    for x in [-3.3, -1.9] {
+        p.beam(
+            Mat::Stone,
+            c + v3(x, 2.6, w * 0.5 + 0.05),
+            c + v3(x, 3.0, w * 0.5 + 0.45),
+            0.12,
+            WHITE,
+        );
+    }
+    let bloom = match v {
+        0 => hexc(0xe0524a),
+        1 => hexc(0xf2f0e8),
+        _ => hexc(0xf0c040),
+    };
+    for x in [-0.3, 1.9] {
+        flower_box(&mut p, c + v3(x, 1.02, w * 0.5 + 0.1), 1.1, bloom);
+    }
     p.windows(c + v3(0.0, 4.6, w * 0.5), Vec3::Z, 3, 1.0, 1.4, 1.2, WHITE);
     p.windows(
         c + v3(0.0, 1.9, -w * 0.5),
@@ -2181,6 +2341,314 @@ fn fence_4() -> Parts {
     p.finish()
 }
 
+/// A pair of painted shutters either side of a window `w` × `h` centred on `at`, on a wall
+/// that faces +Z.
+fn shutters(p: &mut Parts, at: Vec3, w: f32, h: f32, col: Vec4) {
+    for s in [-1.0, 1.0] {
+        let x = at.x + s * (w * 0.5 + 0.24);
+        p.cuboid(
+            Mat::Paint,
+            v3(x - 0.19, at.y - h * 0.5, at.z + 0.02),
+            v3(x + 0.19, at.y + h * 0.5, at.z + 0.07),
+            col,
+            false,
+        );
+    }
+}
+
+/// A window box of flowers `w` wide: `at` is the middle of its back, on a wall facing +Z.
+fn flower_box(p: &mut Parts, at: Vec3, w: f32, bloom: Vec4) {
+    p.cuboid(
+        Mat::Planks,
+        at + v3(-w * 0.5, -0.1, 0.0),
+        at + v3(w * 0.5, 0.1, 0.22),
+        shade(Vec4::ONE, 0.7),
+        true,
+    );
+    let n = ((w / 0.17) as usize).max(2);
+    for i in 0..n {
+        let x = -w * 0.5 + 0.1 + i as f32 * (w - 0.2) / (n - 1) as f32;
+        let c = at + v3(x, 0.08, 0.11);
+        lump(p, Mat::Leaf, c, 0.1, 0.2, hexc(0x3f6e2c));
+        if i % 2 == 0 {
+            p.cylinder(
+                Mat::Paint,
+                c + v3(0.0, 0.17, 0.04),
+                0.03,
+                0.08,
+                0.07,
+                6,
+                bloom,
+                true,
+            );
+        }
+    }
+}
+
+/// A rounded leafy lump standing on `base`: `r` across at its widest, `h` high.
+fn lump(p: &mut Parts, m: Mat, base: Vec3, r: f32, h: f32, col: Vec4) {
+    let rings = [(0.0, 0.5), (0.3, 1.0), (0.66, 0.84), (1.0, 0.2)];
+    for k in 0..3 {
+        let (y0, r0) = rings[k];
+        let (y1, r1) = rings[k + 1];
+        p.cylinder(
+            m,
+            base + Vec3::Y * (y0 * h),
+            r * r0,
+            r * r1,
+            (y1 - y0) * h,
+            7,
+            shade(col, 0.78 + 0.13 * k as f32),
+            k == 2,
+        );
+    }
+}
+
+/// A garden shrub: three leafy lumps grown together.
+fn bush() -> Parts {
+    let mut p = Parts::default();
+    let green = hexc(0x41662c);
+    lump(&mut p, Mat::Leaf, v3(0.0, -0.1, 0.0), 0.8, 1.35, green);
+    lump(
+        &mut p,
+        Mat::Leaf,
+        v3(0.62, -0.1, 0.25),
+        0.55,
+        0.95,
+        shade(green, 1.12),
+    );
+    lump(
+        &mut p,
+        Mat::Leaf,
+        v3(-0.45, -0.1, -0.4),
+        0.6,
+        1.05,
+        shade(green, 0.9),
+    );
+    p.ground_occlusion(0.3, 0.8);
+    p.finish()
+}
+
+/// A clipped shrub in a wooden tub, for a townhouse door.
+fn tub_shrub() -> Parts {
+    let mut p = Parts::default();
+    p.cylinder(
+        Mat::Planks,
+        Vec3::ZERO,
+        0.3,
+        0.36,
+        0.5,
+        10,
+        shade(Vec4::ONE, 0.8),
+        true,
+    );
+    p.cylinder(
+        Mat::Iron,
+        v3(0.0, 0.34, 0.0),
+        0.355,
+        0.36,
+        0.06,
+        10,
+        Vec4::ONE,
+        false,
+    );
+    p.cylinder(
+        Mat::Timber,
+        v3(0.0, 0.5, 0.0),
+        0.04,
+        0.04,
+        0.4,
+        5,
+        hexc(0x4a3626),
+        false,
+    );
+    lump(
+        &mut p,
+        Mat::Leaf,
+        v3(0.0, 0.75, 0.0),
+        0.42,
+        0.85,
+        hexc(0x38602a),
+    );
+    p.finish()
+}
+
+/// A 3 m flower bed: dark soil, low leaves and three dozen flower heads. White petals, so a
+/// piece's tint chooses the colour.
+fn flower_bed() -> Parts {
+    let mut p = Parts::default();
+    p.cuboid(
+        Mat::Clay,
+        v3(-1.5, -0.3, -0.42),
+        v3(1.5, 0.08, 0.42),
+        shade(Vec4::ONE, 0.5),
+        false,
+    );
+    let leaf = hexc(0x3f6e2c);
+    for i in 0..36u64 {
+        let x = -1.38 + (i % 12) as f32 * 0.25 + (h01(i, 91) - 0.5) * 0.12;
+        let z = -0.26 + (i / 12) as f32 * 0.26 + (h01(i, 92) - 0.5) * 0.1;
+        let h = 0.3 + 0.25 * h01(i, 93);
+        let c = v3(x, 0.08, z);
+        // Leaves: two crossed cards. A head: a small cone, point down.
+        for a in [0.6f32, 2.2] {
+            let d = v3(a.cos(), 0.0, a.sin()) * 0.14;
+            p.quad(
+                Mat::Leaf,
+                c - d,
+                c + d,
+                c + d + Vec3::Y * h,
+                c - d + Vec3::Y * h,
+                leaf,
+            );
+        }
+        let petal = if i % 5 == 0 {
+            hexc(0xf4e9a0)
+        } else {
+            Vec4::ONE
+        };
+        p.cylinder(
+            Mat::Paint,
+            c + Vec3::Y * (h - 0.02),
+            0.03,
+            0.1,
+            0.09,
+            6,
+            petal,
+            true,
+        );
+    }
+    p.finish()
+}
+
+/// A washing line between two posts 3.6 m apart, with the week's linen on it.
+fn wash_line() -> Parts {
+    let mut p = Parts::default();
+    let wood = hexc(0x8a7a66);
+    for x in [-1.8, 1.8] {
+        p.beam(Mat::Timber, v3(x, -0.3, 0.0), v3(x, 2.1, 0.0), 0.1, wood);
+        p.beam(Mat::Timber, v3(x, 2.0, -0.3), v3(x, 2.0, 0.3), 0.07, wood);
+    }
+    p.rod(
+        Mat::Iron,
+        v3(-1.8, 2.02, 0.0),
+        v3(1.8, 2.02, 0.0),
+        0.012,
+        4,
+        Vec4::ONE,
+    );
+    // (left edge, width, drop, colour)
+    let linen = [
+        (-1.55, 0.9, 1.15, hexc(0xf2efe6)),
+        (-0.55, 0.45, 0.7, hexc(0x9db4c8)),
+        (0.0, 0.5, 0.85, hexc(0xe9e2d0)),
+        (0.62, 0.95, 1.25, hexc(0xf5f2ea)),
+    ];
+    for (x, w, drop, col) in linen {
+        // Hung over the line and blown a little to one side.
+        let (a, b) = (v3(x, 2.02, 0.0), v3(x + w, 2.02, 0.0));
+        let (c, d) = (v3(x + w, 2.02 - drop, 0.16), v3(x, 2.02 - drop, 0.12));
+        p.quad(Mat::Canvas, d, c, b, a, col);
+    }
+    p.finish()
+}
+
+/// A garden bench of planks on two trestles.
+fn bench() -> Parts {
+    let mut p = Parts::default();
+    let wood = hexc(0x6e5a44);
+    for x in [-0.6, 0.6] {
+        p.cuboid(
+            Mat::Timber,
+            v3(x - 0.05, 0.0, -0.2),
+            v3(x + 0.05, 0.42, 0.2),
+            wood,
+            false,
+        );
+    }
+    p.cuboid(
+        Mat::Planks,
+        v3(-0.8, 0.42, -0.22),
+        v3(0.8, 0.48, 0.22),
+        Vec4::ONE,
+        true,
+    );
+    p.cuboid(
+        Mat::Planks,
+        v3(-0.8, 0.7, -0.24),
+        v3(0.8, 0.95, -0.19),
+        Vec4::ONE,
+        true,
+    );
+    for x in [-0.6, 0.6] {
+        p.beam(
+            Mat::Timber,
+            v3(x, 0.42, -0.2),
+            v3(x, 0.95, -0.24),
+            0.06,
+            wood,
+        );
+    }
+    p.finish()
+}
+
+/// A two-wheeled hand cart, shafts resting on the ground.
+fn hand_cart() -> Parts {
+    let mut p = Parts::default();
+    let wood = hexc(0x7a654c);
+    // The box, tipped forward onto its shafts.
+    let mut body = Parts::default();
+    body.cuboid(
+        Mat::Planks,
+        v3(-0.5, 0.0, -0.8),
+        v3(0.5, 0.08, 0.8),
+        Vec4::ONE,
+        true,
+    );
+    for x in [-0.5, 0.45] {
+        body.cuboid(
+            Mat::Planks,
+            v3(x, 0.08, -0.8),
+            v3(x + 0.05, 0.45, 0.8),
+            Vec4::ONE,
+            false,
+        );
+    }
+    body.cuboid(
+        Mat::Planks,
+        v3(-0.5, 0.08, -0.8),
+        v3(0.5, 0.45, -0.75),
+        Vec4::ONE,
+        false,
+    );
+    for x in [-0.42, 0.42] {
+        body.beam(Mat::Timber, v3(x, 0.0, 0.8), v3(x, 0.0, 2.0), 0.07, wood);
+    }
+    body.cuboid(
+        Mat::Canvas,
+        v3(-0.4, 0.1, -0.6),
+        v3(0.4, 0.38, 0.3),
+        hexc(0xb7a98a),
+        false,
+    );
+    p.add_parts(
+        &body,
+        Mat4::from_rotation_translation(Quat::from_rotation_x(0.25), v3(0.0, 0.55, 0.0)),
+    );
+    for x in [-0.62, 0.56] {
+        let mut wheel = Parts::default();
+        wheel.lathe_x(
+            Mat::Timber,
+            &[(0.0, 0.03), (0.0, 0.5), (0.06, 0.5), (0.06, 0.03)],
+            12,
+            |_, _| wood,
+        );
+        p.add_parts(&wheel, Mat4::from_translation(v3(x, 0.5, 0.0)));
+    }
+    p.ground_occlusion(0.2, 0.6);
+    p.finish()
+}
+
 /// Build one model by key.
 pub fn build_model(key: ModelKey) -> Parts {
     match key {
@@ -2220,6 +2688,12 @@ pub fn build_model(key: ModelKey) -> Parts {
         "wheat_cell" => wheat_cell(),
         "hedge_4" => hedge_4(),
         "fence_4" => fence_4(),
+        "bush" => bush(),
+        "flower_bed" => flower_bed(),
+        "wash_line" => wash_line(),
+        "bench" => bench(),
+        "hand_cart" => hand_cart(),
+        "tub_shrub" => tub_shrub(),
         _ => crate::walkers::build(key).unwrap_or_default(),
     }
 }

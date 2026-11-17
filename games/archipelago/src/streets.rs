@@ -10,6 +10,7 @@ use engine::render::{Mesh, Vertex};
 use crate::art::{Mat, hexc};
 use crate::defs::{CELL_M, Kind};
 use crate::draw::Art;
+use crate::globe::{Frame, Local};
 use crate::grid::{self, Grid};
 use crate::island;
 use crate::sim::Building;
@@ -90,7 +91,9 @@ pub fn redraw_streets(world: &mut World) {
     let towns = town_spots(world);
     let built: Vec<Vec<(Mat, Mesh)>> =
         engine_ui::demo::art::par_map(chunks.len(), |i| chunk_meshes(chunks[i], &roads, &towns));
+    let frame = *world.resource::<Frame>();
     for (chunk, meshes) in chunks.into_iter().zip(built) {
+        let stand = frame.local(&chunk_space(chunk).1);
         let old = world
             .resource_mut::<Streets>()
             .parts
@@ -109,11 +112,7 @@ pub fn redraw_streets(world: &mut World) {
             r.cast_shadows = false;
             ents.push(
                 world
-                    .spawn((
-                        Name::new(format!("streets {chunk}")),
-                        Transform::default(),
-                        r,
-                    ))
+                    .spawn((Name::new(format!("streets {chunk}")), stand, r))
                     .id(),
             );
         }
@@ -123,13 +122,38 @@ pub fn redraw_streets(world: &mut World) {
     }
 }
 
+/// A chunk's corner on the map and the flat space its meshes are built in (the chunk's
+/// entity stands there on the planet).
+fn chunk_space(chunk: IVec2) -> (DVec2, Local) {
+    let o = (chunk * CHUNK).as_dvec2() * CELL_M;
+    (o, Local::at(o.x, o.y))
+}
+
 /// A patch of surface over the ground: a grid of vertices about every meter, each at the
-/// ground's height plus `lift`, UVs in world meters.
+/// ground's height plus `lift`, UVs in meters. Coordinates are map meters from the chunk's
+/// corner `o`.
 struct Builder {
     meshes: HashMap<Mat, Mesh>,
+    o: DVec2,
+    space: Local,
 }
 
 impl Builder {
+    fn ground(&self, x: f32, z: f32) -> f32 {
+        island::height(self.o.x + x as f64, self.o.y + z as f64) as f32
+    }
+
+    /// Where the map point `(x, y above sea, z)` lies in the chunk's space.
+    fn put(&self, x: f32, y: f32, z: f32) -> [f32; 3] {
+        self.space
+            .put(DVec3::new(
+                self.o.x + x as f64,
+                y as f64,
+                self.o.y + z as f64,
+            ))
+            .to_array()
+    }
+
     fn mesh(&mut self, m: Mat) -> &mut Mesh {
         self.meshes
             .entry(m)
@@ -146,13 +170,12 @@ impl Builder {
             for i in 0..=nx {
                 let x = x0 + (x1 - x0) * i as f32 / nx as f32;
                 let z = z0 + (z1 - z0) * j as f32 / nz as f32;
-                hs[j * (nx + 1) + i] = island::height(x as f64, z as f64) as f32 + lift;
+                hs[j * (nx + 1) + i] = self.ground(x, z) + lift;
             }
         }
         let (dx, dz) = ((x1 - x0) / nx as f32, (z1 - z0) / nz as f32);
         let h = |i: usize, j: usize| hs[j.min(nz) * (nx + 1) + i.min(nx)];
-        let mesh = self.mesh(m);
-        let base = mesh.vertices.len() as u32;
+        let mut verts = Vec::with_capacity((nx + 1) * (nz + 1));
         for j in 0..=nz {
             for i in 0..=nx {
                 let x = x0 + dx * i as f32;
@@ -162,14 +185,17 @@ impl Builder {
                 let gx = (h(ir, j) - h(il, j)) / (dx * (ir.min(nx) - il) as f32);
                 let gz = (h(i, jr) - h(i, jl)) / (dz * (jr.min(nz) - jl) as f32);
                 let n = Vec3::new(-gx, 1.0, -gz).normalize();
-                mesh.vertices.push(Vertex {
-                    position: [x, h(i, j), z],
+                verts.push(Vertex {
+                    position: self.put(x, h(i, j), z),
                     normal: n.to_array(),
                     uv: [x, z],
                     color: col.to_array(),
                 });
             }
         }
+        let mesh = self.mesh(m);
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend(verts);
         let w = (nx + 1) as u32;
         for j in 0..nz as u32 {
             for i in 0..nx as u32 {
@@ -196,7 +222,6 @@ impl Builder {
             } else {
                 Vec2::new(side, 0.0)
             };
-            let mesh = self.mesh(Mat::Stone);
             for k in 0..n {
                 let t0 = k as f32 / n as f32;
                 let t1 = (k + 1) as f32 / n as f32;
@@ -213,8 +238,8 @@ impl Builder {
                         Vec2::new(x, z0 + (z1 - z0) * t1),
                     )
                 };
-                let g0 = island::height(p0.x as f64, p0.y as f64) as f32;
-                let g1 = island::height(p1.x as f64, p1.y as f64) as f32;
+                let g0 = self.ground(p0.x, p0.y);
+                let g1 = self.ground(p1.x, p1.y);
                 let quad = [
                     Vec3::new(p0.x, g0 - 0.15, p0.y),
                     Vec3::new(p1.x, g1 - 0.15, p1.y),
@@ -222,11 +247,13 @@ impl Builder {
                     Vec3::new(p0.x, g0 + KERB_H, p0.y),
                 ];
                 let nrm = Vec3::new(face.x, 0.0, face.y);
+                let placed = quad.map(|p| self.put(p.x, p.y, p.z));
+                let mesh = self.mesh(Mat::Stone);
                 let base = mesh.vertices.len() as u32;
-                for p in &quad {
+                for (p, at) in quad.iter().zip(placed) {
                     let along = if along_x { p.x } else { p.z };
                     mesh.vertices.push(Vertex {
-                        position: p.to_array(),
+                        position: at,
                         normal: nrm.to_array(),
                         uv: [along, p.y],
                         color: (col * 0.85).with_w(1.0).to_array(),
@@ -269,8 +296,11 @@ fn hash01(c: IVec2, k: u32) -> f32 {
 
 /// The street surfaces of one chunk, by material.
 fn chunk_meshes(chunk: IVec2, roads: &HashSet<IVec2>, towns: &[(DVec2, f64)]) -> Vec<(Mat, Mesh)> {
+    let (o, space) = chunk_space(chunk);
     let mut b = Builder {
         meshes: HashMap::new(),
+        o,
+        space,
     };
     let cobble = hexc(0xb8b0a4);
     let kerb = hexc(0xc8c4bc);
@@ -284,7 +314,7 @@ fn chunk_meshes(chunk: IVec2, roads: &HashSet<IVec2>, towns: &[(DVec2, f64)]) ->
                 continue;
             }
             let m = grid::cell_center(c);
-            let (cx, cz) = (m.x as f32, m.y as f32);
+            let (cx, cz) = ((m.x - o.x) as f32, (m.y - o.y) as f32);
             let link =
                 [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y].map(|d| roads.contains(&(c + d)));
             let in_town = towns.iter().any(|(p, r)| (*p - m).length() < *r);

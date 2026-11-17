@@ -7,6 +7,7 @@ use crate::build;
 use crate::camera::StrategyCam;
 use crate::defs::{DEFS, Good, Kind};
 use crate::fleet::{Roam, Route, Routes, Stop, Vessel, mast_point, mooring, spawn_vessel};
+use crate::globe;
 use crate::grid::{self, Grid};
 use crate::island::islands;
 use crate::orders;
@@ -176,15 +177,63 @@ pub fn register(app: &mut App) {
             Ok(Value::Array(v))
         },
     )
+    .register_api(
+        "isle.fog",
+        "The fog of war: show or hide it, clear it round a map point, or ask whether a map point has been seen (at_seen). Returns the share of the planet seen.",
+        r#"{"on": true, "reveal": [0, 0, 1500], "at": [0, 0]}"#,
+        |world, args| {
+            let mut fog = world.resource_mut::<crate::fog::FogOfWar>();
+            if let Some(on) = args.get("on").and_then(Value::as_bool) {
+                fog.shown = on;
+            }
+            if let Some(r) = args.get("reveal").and_then(Value::as_array) {
+                let n = |i: usize| r.get(i).and_then(Value::as_f64);
+                let (Some(x), Some(z)) = (n(0), n(1)) else {
+                    return Err("reveal takes [x, z, radius]".into());
+                };
+                fog.reveal_map(x, z, n(2).unwrap_or(1_000.0));
+            }
+            // "at": [x, z] asks whether that map point has been seen.
+            let at = args.get("at").and_then(Value::as_array).and_then(|a| {
+                Some(fog.is_seen(a.first()?.as_f64()?, a.get(1)?.as_f64()?))
+            });
+            Ok(json!({"on": fog.shown, "seen": fog.share_seen(), "at_seen": at}))
+        },
+    )
+    .register_api(
+        "isle.regions",
+        "The planet's regions: name, climate, where on the globe, the map point of each chart's middle, and its islands.",
+        "{}",
+        |_, _| {
+            let out: Vec<Value> = globe::regions()
+                .iter()
+                .enumerate()
+                .map(|(k, r)| {
+                    let o = globe::sheet_origin(k);
+                    json!({
+                        "name": r.name, "about": r.blurb, "climate": format!("{:?}", r.biome),
+                        "lat": r.lat_deg, "lon": r.lon_deg, "reach_m": r.reach_m,
+                        "map": [o.x, o.y],
+                        "islands": islands().iter().enumerate()
+                            .filter(|(_, i)| i.region() == k)
+                            .map(|(n, i)| json!({"index": n, "name": i.name, "at": [i.center.x, i.center.y], "radius": i.radius}))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Ok(Value::Array(out))
+        },
+    )
     .register_api("isle.fleet", "Routes and every ship and aircraft: where, doing what, carrying what.", "{}", |world, _| {
         let routes = serde_json::to_value(&world.resource::<Routes>().0).map_err(|e| e.to_string())?;
-        let mut q = world.query::<(Entity, &Vessel, &Transform)>();
+        let mut q = world.query::<(Entity, &Vessel)>();
         let vessels: Vec<Value> = q
             .iter(world)
-            .map(|(e, v, t)| {
+            .map(|(e, v)| {
                 json!({
                     "id": e.to_bits(), "name": v.name, "craft": v.craft.name(), "route": v.route, "doing": v.doing,
-                    "at": [t.translation.x.round(), t.translation.y.round(), t.translation.z.round()],
+                    "at": [v.at.x.round(), v.at.y.round(), v.at.z.round()],
+                    "region": globe::region_at(v.at.x, v.at.z).name,
                     "cargo": v.cargo.iter().map(|(g, n)| json!([g.name(), n])).collect::<Vec<_>>(),
                 })
             })

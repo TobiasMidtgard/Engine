@@ -326,6 +326,7 @@ pub fn home(world: &mut World) {
 /// sea plane, a few kilometres at most.
 fn view_corners(world: &mut World) -> Option<[DVec2; 4]> {
     let window = world.resource::<engine::core::window::Window>().clone();
+    let frame = *world.resource::<crate::globe::Frame>();
     let mut q = world.query::<(&Transform, &Camera, &StrategyCam)>();
     let (t, cam, sc) = q.iter(world).next()?;
     let (w, h) = (window.width as f32, window.height as f32);
@@ -341,15 +342,9 @@ fn view_corners(world: &mut World) -> Option<[DVec2; 4]> {
     .enumerate()
     {
         let (o, d) = camera::cursor_ray(t, cam, &window, s);
-        let d = d.as_dvec3();
         let reach = 4000.0;
-        let p = if d.y < -1e-3 {
-            let t = (-o.y / d.y).min(reach);
-            o + d * t
-        } else {
-            o + DVec3::new(d.x, 0.0, d.z).normalize_or_zero() * reach
-        };
-        let p = DVec2::new(p.x, p.z);
+        // Where the corner's ray meets the round ground, as a map point.
+        let p = camera::ground_hit(&frame, o, d).map_or(focus, |p| DVec2::new(p.x, p.z));
         // Keep far corners from running off when the view looks at the horizon.
         let off = p - focus;
         out[k] = focus + off.clamp_length_max(reach);
@@ -431,12 +426,12 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         ctx.text_spec(&spec, p, Vec2::new(0.5, 0.0));
     }
     // Ships and airships.
-    let mut q = world.query::<(&Vessel, &Transform)>();
+    let mut q = world.query::<&Vessel>();
     let vessels: Vec<(Vec2, f32, bool)> = q
         .iter(world)
-        .map(|(v, t)| {
+        .map(|v| {
             (
-                at(t.translation.x, t.translation.z),
+                at(v.at.x, v.at.z),
                 std::f32::consts::FRAC_PI_2 - v.heading,
                 v.craft == Craft::Airship,
             )
@@ -495,7 +490,8 @@ mod tests {
 
     #[test]
     fn chart_covers_every_island_and_round_trips() {
-        for isle in island::islands() {
+        // (The chart is the home region's.)
+        for isle in island::islands().iter().filter(|i| i.region() == 0) {
             for d in [DVec2::X, DVec2::NEG_X, DVec2::Y, DVec2::NEG_Y] {
                 let p = isle.center + d * isle.radius * 1.3;
                 let uv = to_uv(p.x, p.y);

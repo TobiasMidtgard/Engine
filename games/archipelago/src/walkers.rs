@@ -3,11 +3,10 @@
 //! (three outfits, three stride poses), so hundreds cost a handful of draws.
 
 use engine::prelude::*;
-use engine::render::{InstanceRow, MeshInstances};
 use std::collections::HashMap;
 
 use crate::art::{Mat, Parts, hexc, v3};
-use crate::draw::Art;
+use crate::draw::{Art, MapRow, Tiled};
 use crate::grid::{self, Grid};
 use crate::island;
 use crate::looks::ModelKey;
@@ -45,7 +44,7 @@ struct Walker {
 #[derive(Resource, Default)]
 pub struct Walkers {
     people: Vec<Walker>,
-    anchors: HashMap<(ModelKey, Mat), Entity>,
+    sets: Tiled<(ModelKey, Mat)>,
     spawn_clock: f32,
     seed: u64,
 }
@@ -137,7 +136,7 @@ pub fn walk(world: &mut World) {
         w.spawn_clock = 0.05;
     }
     // Walk.
-    let mut rows: HashMap<ModelKey, Vec<InstanceRow>> = HashMap::new();
+    let mut rows: HashMap<(ModelKey, Mat), Vec<MapRow>> = HashMap::new();
     w.people.retain_mut(|p| {
         if !roads.contains(&p.to) {
             return false;
@@ -163,46 +162,23 @@ pub fn walk(world: &mut World) {
         let y = island::height(at.x, at.y) + 0.08;
         let pose = (p.phase as usize) % 4;
         let model = WALKER_MODELS[p.outfit][[0, 1, 2, 1][pose]];
-        rows.entry(model).or_default().push(InstanceRow {
-            position: Vec3::new(at.x as f32, y as f32, at.y as f32),
+        let row = MapRow {
+            at: DVec3::new(at.x, y, at.y),
             yaw: (-d.y).atan2(d.x) as f32,
             scale: 1.0,
             tint: p.tint,
-        });
-        true
-    });
-    // Rewrite the instanced rows (every model, so ones nobody uses empty out).
-    for outfit in WALKER_MODELS {
-        for key in outfit {
-            let list = rows.remove(key).unwrap_or_default();
-            let Some(model) = art.models.get(key) else {
-                continue;
-            };
-            for (mesh, mat) in model.iter() {
-                let anchor = w.anchors.get(&(key, *mat)).copied();
-                match anchor {
-                    Some(e) => {
-                        if let Some(mut inst) = world.get_mut::<MeshInstances>(e) {
-                            *inst = MeshInstances::new(list.clone());
-                        }
-                    }
-                    None => {
-                        let mut r = MeshRenderer::new(*mesh, art.mats.get(*mat));
-                        r.cast_shadows = true;
-                        let e = world
-                            .spawn((
-                                Name::new(format!("walkers {key}")),
-                                Transform::default(),
-                                r,
-                                MeshInstances::new(list.clone()),
-                            ))
-                            .id();
-                        w.anchors.insert((key, *mat), e);
-                    }
-                }
+        };
+        if let Some(m) = art.models.get(model) {
+            for (_, mat) in m.iter() {
+                rows.entry((model, *mat)).or_default().push(row);
             }
         }
-    }
+        true
+    });
+    // Rewrite the instanced rows (sets nobody is in empty out).
+    w.sets.set(world, rows, |key| {
+        crate::draw::model_renderer(&art, key, true)
+    });
     *world.resource_mut::<Walkers>() = w;
 }
 

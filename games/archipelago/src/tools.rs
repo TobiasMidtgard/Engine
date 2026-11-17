@@ -2,18 +2,17 @@
 //! what is about to be built, keys, and what the bars' `isle.*` buttons do.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use engine::input::Mouse;
 use engine::prelude::*;
-use engine::render::{InstanceRow, MeshInstances, Vertex};
+use engine::render::Vertex;
 use engine_ui::input::UiInputCapture;
 
 use crate::art::Mat;
 use crate::build;
 use crate::camera;
 use crate::defs::{CELL_M, Kind, Tier};
-use crate::draw::Art;
+use crate::draw::{Art, MapRow, Tiled};
 use crate::grid::{self, Grid, Occ};
 use crate::looks::{ModelKey, look};
 use crate::sim::{Building, Economy, Producer};
@@ -46,8 +45,10 @@ pub struct Hand {
 /// The ghost's draw sets and the footprint tiles.
 #[derive(Resource, Default)]
 struct Ghost {
-    sets: HashMap<(ModelKey, Mat), Entity>,
-    tiles: Option<(Entity, Entity)>,
+    sets: Tiled<(ModelKey, Mat)>,
+    /// The footprint tiles: allowed ones and blocked ones.
+    marks: Tiled<bool>,
+    tile: Option<MeshRenderer>,
 }
 
 /// Ready the hand.
@@ -419,33 +420,17 @@ pub fn ghost(world: &mut World) {
     let Some(art) = world.get_resource::<Art>().cloned() else {
         return;
     };
-    if world.resource::<Ghost>().tiles.is_none() {
+    if world.resource::<Ghost>().tile.is_none() {
         let mesh = world.resource_mut::<Assets<Mesh>>().add(tile_mesh());
         let mat = ghost_material(world);
         let mut r = MeshRenderer::new(mesh, mat);
         r.cast_shadows = false;
-        let ok = world
-            .spawn((
-                Name::new("Ghost tiles"),
-                Transform::default(),
-                r.clone(),
-                MeshInstances::new(Vec::new()),
-            ))
-            .id();
-        let bad = world
-            .spawn((
-                Name::new("Ghost tiles (blocked)"),
-                Transform::default(),
-                r,
-                MeshInstances::new(Vec::new()),
-            ))
-            .id();
-        world.resource_mut::<Ghost>().tiles = Some((ok, bad));
+        world.resource_mut::<Ghost>().tile = Some(r);
     }
     let tool = *world.resource::<Tool>();
     let p = preview(world, tool);
-    let mut tiles: Vec<InstanceRow> = Vec::new();
-    let mut groups: HashMap<(ModelKey, Mat), Vec<InstanceRow>> = HashMap::new();
+    let mut tiles: Vec<MapRow> = Vec::new();
+    let mut groups: HashMap<(ModelKey, Mat), Vec<MapRow>> = HashMap::new();
     let mut hint = String::new();
     let mut ok_all = true;
     if let Some((cells, ok, building, msg)) = p {
@@ -461,8 +446,8 @@ pub fn ghost(world: &mut World) {
         for c in &cells {
             let p = grid::cell_center(*c);
             let y = grid::cell_range(*c).1.max(0.0) + 0.12;
-            tiles.push(InstanceRow {
-                position: Vec3::new(p.x as f32, y as f32, p.y as f32),
+            tiles.push(MapRow {
+                at: DVec3::new(p.x, y, p.y),
                 yaw: 0.0,
                 scale: CELL_M as f32 * 0.94,
                 tint,
@@ -470,11 +455,7 @@ pub fn ghost(world: &mut World) {
         }
         if let Some((kind, origin, rot)) = building {
             let c = grid::footprint_center(kind, origin, rot);
-            let base = Vec3::new(
-                c.x as f32,
-                grid::base_height(kind, origin, rot) as f32,
-                c.y as f32,
-            );
+            let base = DVec3::new(c.x, grid::base_height(kind, origin, rot), c.y);
             let yaw = grid::yaw(rot);
             let q = Quat::from_rotation_y(yaw);
             for piece in look(kind, Tier::Fisherfolk, 7) {
@@ -482,61 +463,28 @@ pub fn ghost(world: &mut World) {
                     continue;
                 };
                 for (_, mat) in model.iter() {
-                    groups
-                        .entry((piece.model, *mat))
-                        .or_default()
-                        .push(InstanceRow {
-                            position: base + q * piece.pos,
-                            yaw: yaw + piece.yaw,
-                            scale: piece.scale,
-                            tint: piece.tint,
-                        });
+                    groups.entry((piece.model, *mat)).or_default().push(MapRow {
+                        at: base + (q * piece.pos).as_dvec3(),
+                        yaw: yaw + piece.yaw,
+                        scale: piece.scale,
+                        tint: piece.tint,
+                    });
                 }
             }
         }
     }
-    let (ok_e, bad_e) = world.resource::<Ghost>().tiles.unwrap();
-    let (a, b) = if ok_all && tool != Tool::Demolish {
-        (tiles, Vec::new())
-    } else {
-        (Vec::new(), tiles)
-    };
-    if let Some(mut i) = world.get_mut::<MeshInstances>(ok_e) {
-        *i = MeshInstances::new(a);
-    }
-    if let Some(mut i) = world.get_mut::<MeshInstances>(bad_e) {
-        *i = MeshInstances::new(b);
-    }
     let mut ghost = std::mem::take(&mut *world.resource_mut::<Ghost>());
-    for (key, e) in &ghost.sets {
-        if !groups.contains_key(key)
-            && let Some(mut inst) = world.get_mut::<MeshInstances>(*e)
-        {
-            inst.rows = Arc::from(Vec::new());
-        }
+    // Allowed tiles and blocked ones are two sets (key: allowed).
+    let good = ok_all && tool != Tool::Demolish;
+    let mut marks: HashMap<bool, Vec<MapRow>> = HashMap::new();
+    if !tiles.is_empty() {
+        marks.insert(good, tiles);
     }
-    for (key, rows) in groups {
-        if let Some(&e) = ghost.sets.get(&key) {
-            if let Some(mut inst) = world.get_mut::<MeshInstances>(e) {
-                *inst = MeshInstances::new(rows);
-            }
-            continue;
-        }
-        let Some((mesh, mat)) = art.models[key.0].iter().find(|(_, m)| *m == key.1) else {
-            continue;
-        };
-        let mut r = MeshRenderer::new(*mesh, art.mats.get(*mat));
-        r.cast_shadows = false;
-        let e = world
-            .spawn((
-                Name::new("Ghost"),
-                Transform::default(),
-                r,
-                MeshInstances::new(rows),
-            ))
-            .id();
-        ghost.sets.insert(key, e);
-    }
+    let tile = ghost.tile.clone();
+    ghost.marks.set(world, marks, |_| tile.clone());
+    ghost.sets.set(world, groups, |key| {
+        crate::draw::model_renderer(&art, key, false)
+    });
     *world.resource_mut::<Ghost>() = ghost;
     world.resource_mut::<Hand>().hint = hint;
 }
