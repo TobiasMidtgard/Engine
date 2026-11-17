@@ -27,10 +27,15 @@ use crate::skin::SkinnedMesh;
 use crate::xform::Xf;
 
 mod parkour;
+mod prone;
 pub use parkour::{
     AIR, DOUBLE_JUMP, JUMP, LAND, LAND_HARD, SLIDE, TRIGGER_DOUBLE_JUMP, TRIGGER_JUMP,
     TRIGGER_LAND, TRIGGER_LAND_HARD, TRIGGER_WALL_KICK, WALL_CURVES, WALL_DISTANCE, WALL_INSET,
     WALL_KICK, WALL_RUN, WALL_RUN_SECS, WALL_TILT,
+};
+pub use prone::{
+    PRONE_BACK, PRONE_BACK_SPEED, PRONE_CRAWL, PRONE_CRAWL_SPEED, PRONE_IDLE, PRONE_KNEEL,
+    PRONE_SECS, PRONED,
 };
 
 pub const SKELETON: &str = "humanoid";
@@ -4324,6 +4329,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
     .into_iter()
     .chain(super::weapons::clips(s))
     .chain(parkour::clips(s))
+    .chain(prone::clips(s))
     .collect()
 }
 
@@ -4620,6 +4626,9 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             weight: Weight::param(carry),
             additive: false,
         });
+    // Lying prone (`proned`) over all of that: down through hands and knees, then still or
+    // crawling.
+    let leaning = prone::graph(leaning);
     // A weapon stance standing still, or stepping and circling in guard: the stance's upper
     // body (its `_moving` clip, over square hips) from the spine up over the legs'
     // locomotion, by speed.

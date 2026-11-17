@@ -120,6 +120,9 @@ pub struct BodyMotion {
     /// How far crouched, 0..1 (eased toward the contract's `crouch`, a crouching
     /// [`MoveIntent`] or a crouched [`LocomotionMode`]).
     pub crouch: f32,
+    /// How far lying down, 0..1 (ramped toward the contract-style `prone` over
+    /// [`humanoid::PRONE_SECS`]; 0.5 is on hands and knees).
+    pub prone: f32,
     owners: [Owner; PARAMS.len()],
 }
 
@@ -135,7 +138,7 @@ enum Owner {
     Others,
 }
 
-const PARAMS: [&str; 8] = [
+const PARAMS: [&str; 9] = [
     "speed",
     "turn",
     "move_effort",
@@ -144,6 +147,7 @@ const PARAMS: [&str; 8] = [
     "accel",
     "grade",
     humanoid::CROUCHED,
+    humanoid::PRONED,
 ];
 
 /// How quickly a person drops into a crouch or rises from one, s (time constant).
@@ -431,6 +435,11 @@ pub(crate) fn drive_bodies(
         if (motion.crouch - target).abs() < 1e-3 {
             motion.crouch = target;
         }
+        // Callers say prone or not (0 or 1); the body goes down through hands and knees at a
+        // steady pace, and comes up the same way.
+        let target = if params.get("prone") > 0.5 { 1.0 } else { 0.0 };
+        let step = dt / humanoid::PRONE_SECS;
+        motion.prone += (target - motion.prone).clamp(-step, step);
         let values = [
             Some(motion.speed),
             Some((motion.yaw_rate / 1.2).clamp(-1.0, 1.0)),
@@ -441,6 +450,7 @@ pub(crate) fn drive_bodies(
             Some(accel_param(motion.accel)),
             Some(grade_param(motion.grade)),
             Some(motion.crouch),
+            Some(motion.prone),
         ];
         for (i, (name, value)) in PARAMS.iter().zip(values).enumerate() {
             let Some(value) = value else {

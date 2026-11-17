@@ -46,7 +46,7 @@ impl Key {
     /// The pose of `self` with the limbs that have a target (in [`LIMBS`] order, character
     /// frame, meters) reached by IK, each bending toward its `pole`, and each end turned to
     /// its `ends` rotation (model space) or kept as the joint angles put it.
-    fn reach(
+    pub(super) fn reach(
         &self,
         s: &Skeleton,
         targets: [Option<Vec3>; 4],
