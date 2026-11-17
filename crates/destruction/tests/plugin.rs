@@ -2016,14 +2016,18 @@ fn prop_models_and_voxel_volumes_are_built_off_the_frame_thread() {
     };
     let (a, b) = (spawn(&mut app, 1), spawn(&mut app, 1));
     let hill = app.world.spawn(VoxelVolume::default()).id();
-    let mut frames = 0;
+    // Bounded by wall time, not frames: the builds run on worker threads, and a frame with
+    // nothing else to do takes microseconds, so a frame count only measures the runner's load.
+    let started = std::time::Instant::now();
     while app.world.get::<dress::PropBuilt>(a).is_none()
         || app.world.get::<VoxelState>(hill).is_none()
         || engine_destruction::is_loading(&app.world)
     {
-        assert!(frames < 600, "the look never came in");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the look never came in"
+        );
         app.update();
-        frames += 1;
     }
     assert!(
         app.world.get::<dress::PropBuilt>(b).is_some(),
@@ -2071,11 +2075,14 @@ fn a_blasted_crate_shatters_on_the_bake_threads() {
             .iter(&app.world)
             .count()
     };
-    let mut frames = 0;
+    // Wall time, not frames: the pieces may be cut on a worker (see above).
+    let started = std::time::Instant::now();
     while debris(&mut app) == 0 {
-        assert!(frames < 120, "the crate's pieces never came");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the crate's pieces never came"
+        );
         app.update();
-        frames += 1;
     }
     assert!(app.world.get_entity(crate_e).is_err(), "the crate is gone");
 }

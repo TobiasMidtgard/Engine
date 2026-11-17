@@ -141,6 +141,9 @@ fn a_finely_drawn_floor_collides_as_a_few_triangles_fitted_off_the_frame() {
         root
     };
     let roots = [model(&mut app, 0.0), model(&mut app, 20.0)];
+    // Bounded by wall time, not frames: the fit runs on a worker, and an idle frame takes
+    // microseconds, so a frame count only measures the runner's load.
+    let started = std::time::Instant::now();
     let mut frames = 0;
     while roots
         .iter()
@@ -148,7 +151,10 @@ fn a_finely_drawn_floor_collides_as_a_few_triangles_fitted_off_the_frame() {
     {
         app.update();
         frames += 1;
-        assert!(frames < 600, "not fitted after {frames} frames");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "not fitted after {frames} frames"
+        );
     }
     for r in roots {
         let shape = &app.world.get::<Collider>(r).unwrap().shape;
