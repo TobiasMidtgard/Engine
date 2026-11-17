@@ -2,9 +2,16 @@
 //!
 //! ```text
 //! perf: 24.1 fps (41.5 ms, worst 63.0); render CPU 9.8 ms (acquiring the window image 22.3 ms),
-//! everything else 9.4 ms; GPU 30.6 ms; GPU memory 5.81 GB in use, 6.40 GB reserved;
+//! everything else 9.4 ms; main thread 14.2 ms (fixed steps 5.1 ms, 1.2 a frame), 26.8 ms
+//! waiting for the render thread; GPU 30.6 ms; GPU memory 5.81 GB in use, 6.40 GB reserved;
 //! 1934 draws, 7.2 M triangles
 //! ```
+//!
+//! "Main thread" is the game's own work through the frame's schedules, `render_system`'s
+//! share on the main thread included, apart from its wait for the render thread
+//! (`engine_core::frame_cost`). With the renderer pipelined the frame is the longer of the
+//! main thread and the render thread, so a frame near "main thread" is held up by the game's
+//! systems, and a frame near "render CPU" with a long wait for the window image by the GPU.
 //!
 //! So one run on a player's machine tells a frame held up by the CPU (render CPU or everything
 //! else, the game's systems, near the frame time) from one held up by the GPU (GPU time near
@@ -713,6 +720,11 @@ impl PerfLog {
             self.side.pop_front();
         }
         self.side.push_back(side);
+        if self.last_frame.is_none() {
+            // The main thread's frames before the first one counted here (loading) are not
+            // in this window.
+            let _ = engine_core::frame_cost::take();
+        }
         self.frame_ms = self
             .last_frame
             .map_or(0.0, |t| (now - t).as_secs_f32() * 1000.0);
@@ -770,10 +782,18 @@ impl PerfLog {
                 ),
                 _ => String::new(),
             };
+            // The main thread's own share, from engine_core (none in a run without frames).
+            let main = engine_core::frame_cost::take().map_or(String::new(), |m| {
+                format!(
+                    "; main thread {:.1} ms (fixed steps {:.1} ms, {:.1} a frame), {:.1} ms \
+                     waiting for the render thread",
+                    m.busy_ms, m.fixed_ms, m.steps, m.wait_ms
+                )
+            });
             tracing::info!(
                 "perf: {:.1} fps ({:.1} ms, worst {:.1}); render CPU {:.1} ms (acquiring the \
-                 window image {:.1} ms), everything else {:.1} ms; {gpu}{memory}; {} draws, \
-                 {:.1} M triangles",
+                 window image {:.1} ms), everything else {:.1} ms{main}; {gpu}{memory}; {} \
+                 draws, {:.1} M triangles",
                 1000.0 / frame.max(1e-3),
                 frame,
                 w.worst_ms,

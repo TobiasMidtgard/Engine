@@ -21,6 +21,7 @@ pub mod app;
 pub mod beside;
 pub mod config;
 pub mod diagnostics;
+pub mod frame_cost;
 pub mod log;
 pub mod math;
 pub mod off_frame;

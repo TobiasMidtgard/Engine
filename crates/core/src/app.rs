@@ -509,6 +509,8 @@ impl App {
 
 /// One frame: see [`crate::schedule`] for the order.
 pub fn run_frame(world: &mut World) {
+    let frame_started = std::time::Instant::now();
+    let waited_before = crate::frame_cost::waited();
     world.run_schedule(First);
     world.run_schedule(PreUpdate);
 
@@ -520,6 +522,7 @@ pub fn run_frame(world: &mut World) {
     };
     let dropped = world.resource::<FixedTime>().dropped_secs();
     let started = std::time::Instant::now();
+    let mut ran = 0u32;
     for i in 0..steps {
         // A step the budget will end on is told so as it begins (`FixedTime::is_last_step`),
         // and the loop keeps to that.
@@ -530,6 +533,7 @@ pub fn run_frame(world: &mut World) {
         world.run_schedule(FixedPreUpdate);
         world.run_schedule(FixedUpdate);
         world.run_schedule(FixedPostUpdate);
+        ran += 1;
         // Every step's cost, the last ones too: a step that is always last (one costly
         // step after a load stall) would otherwise never update the estimate, and every
         // later frame would plan one step.
@@ -542,6 +546,7 @@ pub fn run_frame(world: &mut World) {
             break;
         }
     }
+    let fixed_secs = started.elapsed().as_secs_f64();
     time::exit_fixed_steps(world);
     // Steps the budget cut are world time the simulation didn't get: the frame's clock loses
     // them too, so per-frame motion keeps pace with the steps (time::Time::drop_world).
@@ -558,6 +563,19 @@ pub fn run_frame(world: &mut World) {
     let fixed = world
         .get_resource::<FixedTime>()
         .map(|f| (f.tick(), f.dropped_secs()));
+    let wait = crate::frame_cost::waited() - waited_before;
+    let main = crate::frame_cost::Frame {
+        busy_ms: frame_started.elapsed().saturating_sub(wait).as_secs_f64() * 1000.0,
+        fixed_ms: fixed_secs * 1000.0,
+        wait_ms: wait.as_secs_f64() * 1000.0,
+        steps: f64::from(ran),
+    };
+    crate::frame_cost::note_frame(main);
+    if let Some(mut d) = world.get_resource_mut::<crate::diagnostics::Diagnostics>() {
+        d.set("frame.main_ms", main.busy_ms);
+        d.set("frame.main_fixed_ms", main.fixed_ms);
+        d.set("frame.main_wait_ms", main.wait_ms);
+    }
     crate::profile::frame_done(fixed);
 }
 

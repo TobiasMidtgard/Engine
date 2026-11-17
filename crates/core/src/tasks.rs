@@ -311,7 +311,10 @@ impl<T: Send + 'static> Pipelined<T> {
         self.out = false;
         let back = {
             let _span = tracing::info_span!(target: "engine_core", "pipeline wait").entered();
-            self.done.recv()
+            let waiting = std::time::Instant::now();
+            let back = self.done.recv();
+            crate::frame_cost::note_wait(waiting.elapsed());
+            back
         };
         match back {
             Ok(Ok(value)) => self.home = Some(value),
