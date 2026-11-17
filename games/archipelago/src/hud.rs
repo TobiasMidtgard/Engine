@@ -25,6 +25,7 @@ use crate::island;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::tools::{Hand, Tool};
 
+mod house;
 mod ledger;
 mod map;
 mod routes;
@@ -59,7 +60,7 @@ const SPEEDS: [(f32, &str, &str); 4] = [
     (4.0, "isle_speed_4", "Four times as fast (3)"),
 ];
 
-fn kind_icon(k: Kind) -> &'static str {
+pub(super) fn kind_icon(k: Kind) -> &'static str {
     match k {
         Kind::Road => "isle_road",
         Kind::PavedRoad => "isle_paved",
@@ -623,6 +624,7 @@ fn info_card(kind: Kind) -> El {
         .child(brass::divider(316.0))
         .child_opt(chain)
         .child_opt(d.output.map(|_| progress_bar()))
+        .child_opt((kind == Kind::House).then(house::card_placeholder))
         .children((0..6).map(card_row))
         .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
         .child(
@@ -714,6 +716,7 @@ pub fn setup(world: &mut World) {
     }
     ledger::install(world);
     routes::install(world);
+    house::install(world);
     shelf::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
@@ -762,6 +765,7 @@ pub fn show_card(world: &mut World) {
         world.resource_mut::<Hud>().info_open = true;
         update_data_now(world);
         shelf::card_opened(world);
+        house::card_opened(world);
     }
 }
 
@@ -992,62 +996,12 @@ fn update_data_now(world: &mut World) {
             d.category.name()
         );
         if let Some(h) = world.get::<House>(e) {
-            let (needs, basic) = h.tier.needs();
-            // What each need is worth to this tier, in coins a minute.
-            let worth = |n: crate::defs::Need| {
-                h.tier
-                    .wants()
-                    .iter()
-                    .find(|w| w.need == n)
-                    .map_or(0.0, |w| w.coins)
-            };
             sub = format!(
                 "{} house · {}",
                 h.tier.name(),
                 island::islands()[b.island].name
             );
-            rows[0] = (
-                "Residents".into(),
-                format!("{:.1} of {:.0}", h.residents, h.tier.capacity()),
-            );
-            let books = &econ.islands[b.island];
-            let _ = basic;
-            let need_list: Vec<String> = needs
-                .iter()
-                .map(|g| {
-                    let met = books.supply[g.index()].min(1.0);
-                    let s = format!(
-                        "{} +{:.1}",
-                        g.name(),
-                        worth(crate::defs::Need::Good(*g)) * met
-                    );
-                    if met >= 0.99 { good(&s) } else { bad(&s) }
-                })
-                .collect();
-            rows[1] = ("Needs".into(), need_list.join(", "));
-            let svc: Vec<String> = h
-                .tier
-                .services()
-                .iter()
-                .enumerate()
-                .map(|(i, k)| {
-                    let coins = worth(crate::defs::Need::Service(*k));
-                    if h.services[i] {
-                        good(&format!("{} +{coins:.1}", k.def().name))
-                    } else {
-                        bad(&format!("{} ✗", k.def().name))
-                    }
-                })
-                .collect();
-            rows[2] = ("Services".into(), svc.join(", "));
-            rows[3] = (
-                "Income".into(),
-                format!(
-                    "{:.1} of {:.1} coins a minute",
-                    h.income,
-                    h.tier.full_income()
-                ),
-            );
+            // Residents, needs, services and income: the badges and meters (hud/house.rs).
             rows[4] = (
                 "Next tier".into(),
                 match h.tier.next() {
@@ -1057,20 +1011,19 @@ fn update_data_now(world: &mut World) {
                             .map(|(g, n)| format!("{n} {}", g.name().to_lowercase()))
                             .collect();
                         let road = if next.wants_paving() && !h.paved {
-                            ", needs a paved road at the door"
+                            ", a paved road"
                         } else {
                             ""
                         };
-                        format!(
-                            "{} when full and content ({}){road}",
-                            next.name(),
-                            c.join(", ")
-                        )
+                        format!("{}: {}{road}", next.name(), c.join(", "))
                     }
                     None => "Top tier for now".into(),
                 },
             );
-            rows[5] = ("Content".into(), format!("for {:.0} s", h.content_s));
+            // Contentment only counts toward the next tier, once the house is full.
+            if h.tier.next().is_some() && h.residents >= h.tier.capacity() - 0.5 {
+                rows[5] = ("Content".into(), format!("for {:.0} s", h.content_s));
+            }
         } else if let Some(p) = world.get::<Producer>(e) {
             paused = p.paused;
             progress = Some(p.progress);
@@ -1253,6 +1206,7 @@ pub fn update_data(world: &mut World) {
         ledger::update(world);
         map::update(world, 0.2);
         shelf::update(world);
+        house::refresh(world);
     }
     demo_step(world, dt);
 }
@@ -1281,13 +1235,30 @@ fn demo_step(world: &mut World, dt: f32) {
         let want = std::env::args()
             .find_map(|a| a.strip_prefix("--hud-card=").map(String::from))
             .unwrap_or_else(|| "Weaver".into());
+        // `--hud-card=House:Burghers`: a house of that tier.
+        let (want, tier) = match want.split_once(':') {
+            Some((k, t)) => (k.to_string(), Some(t.to_string())),
+            None => (want, None),
+        };
         let weaver = {
-            let mut q = world.query::<(Entity, &Building)>();
+            let mut q = world.query::<(Entity, &Building, Option<&House>)>();
             q.iter(world)
-                .find(|(_, b)| format!("{:?}", b.kind) == want)
-                .or_else(|| q.iter(world).find(|(_, b)| b.kind == Kind::Weaver))
-                .or_else(|| q.iter(world).find(|(_, b)| b.kind.def().output.is_some()))
-                .map(|(e, _)| e)
+                .find(|(_, b, h)| {
+                    format!("{:?}", b.kind) == want
+                        && tier
+                            .as_ref()
+                            .is_none_or(|t| h.is_some_and(|h| format!("{:?}", h.tier) == *t))
+                })
+                .or_else(|| {
+                    q.iter(world)
+                        .find(|(_, b, _)| format!("{:?}", b.kind) == want)
+                })
+                .or_else(|| q.iter(world).find(|(_, b, _)| b.kind == Kind::Weaver))
+                .or_else(|| {
+                    q.iter(world)
+                        .find(|(_, b, _)| b.kind.def().output.is_some())
+                })
+                .map(|(e, ..)| e)
         };
         if let Some(e) = weaver {
             world.resource_mut::<Hand>().selected = Some(e);
