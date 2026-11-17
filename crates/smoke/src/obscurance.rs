@@ -23,12 +23,12 @@ struct Frozen {
     cell: f32,
     dims: UVec3,
     /// Density per voxel, kg/m³ (x fastest, then y, then z).
-    density: Vec<f32>,
+    density: Arc<Vec<f32>>,
 }
 
 /// The voxels' densities, a few layers per task: a big volume holds a few hundred thousand
 /// voxels, and copying it on one thread held up the frame (0.22 ms alone on the PC plaza).
-fn densities(voxels: &[Voxel], dims: UVec3) -> Vec<f32> {
+pub(crate) fn densities(voxels: &[Voxel], dims: UVec3) -> Vec<f32> {
     let mut out = vec![0.0; voxels.len()];
     let slab = ((dims.x * dims.y) as usize * 8).max(1);
     engine_core::tasks::par_chunks_mut(&mut out, slab, |i, chunk| {
@@ -41,12 +41,22 @@ fn densities(voxels: &[Voxel], dims: UVec3) -> Vec<f32> {
 }
 
 impl Frozen {
-    fn of(d: &Domain) -> Self {
+    /// `d`'s air, with the densities its step's task copied out (`stepped`, and the version
+    /// they are of) when they are of the air as it is now; else copied here.
+    fn of(d: &Domain, stepped: Option<&(u64, Arc<Vec<f32>>)>) -> Self {
+        let density = match stepped {
+            Some((version, density))
+                if *version == d.version && density.len() == d.voxels.len() =>
+            {
+                density.clone()
+            }
+            _ => Arc::new(densities(&d.voxels, d.dims)),
+        };
         Self {
             origin: d.origin,
             cell: d.cell,
             dims: d.dims,
-            density: densities(&d.voxels, d.dims),
+            density,
         }
     }
 
@@ -138,7 +148,7 @@ impl SmokeSnapshot {
                 .iter()
                 .find(|(id, v, _)| *id == d.id && *v == version)
                 .map(|(.., f)| f.clone())
-                .unwrap_or_else(|| Arc::new(Frozen::of(&d.domain)));
+                .unwrap_or_else(|| Arc::new(Frozen::of(&d.domain, d.stepped_density.as_ref())));
             kept.push((d.id, version, frozen));
         }
         Self {
@@ -289,5 +299,27 @@ mod tests {
                 .sum();
             assert!(live > 0.0 && (snap.extinction(p) - live).abs() < 1e-3 * live.max(1.0));
         }
+    }
+
+    /// A step in the background copies the densities out on its task; the snapshot takes
+    /// that copy as long as it is of the air as it is.
+    #[test]
+    fn the_snapshot_takes_the_copy_the_step_made() {
+        engine_core::tasks::init_task_pools();
+        let mut domains = puffs();
+        domains.step_in_background_for_test(false);
+        let d = &domains.list[0];
+        let (version, stepped) = d.stepped_density.clone().expect("the step's copy");
+        assert_eq!(version, d.domain.version);
+        let snap = SmokeSnapshot::of(&domains, 20.0);
+        assert!(Arc::ptr_eq(&snap.volumes[0].density, &stepped));
+        let (a, b) = (DVec3::new(-6.0, 1.0, -6.0), DVec3::new(7.0, 4.0, 6.0));
+        let live = domains.transmittance(a, b, 20.0);
+        assert!(live < 0.95 && (snap.transmittance(a, b) - live).abs() < 1e-4);
+        // Cleared while its step ran, the step's copy is of smoke that is gone.
+        let mut domains = puffs();
+        domains.step_in_background_for_test(true);
+        assert!(domains.list[0].stepped_density.is_none());
+        assert_eq!(domains.list[0].domain.mass_kg, 0.0);
     }
 }

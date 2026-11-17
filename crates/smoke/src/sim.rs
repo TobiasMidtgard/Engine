@@ -8,7 +8,7 @@ use engine_world::{
     WorldImpulse,
 };
 
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 use engine_core::tasks::AsyncComputeTaskPool;
 
@@ -172,24 +172,57 @@ pub struct SmokeDomain {
     pub shown_dt: f32,
     /// Its step running on a background task, if one is.
     pub background: Background,
+    /// The air's densities as its last background step left them, and the version of the
+    /// air they are of: the step's task copies them out for [`crate::obscurance`], so the
+    /// frame doesn't.
+    pub(crate) stepped_density: Option<(u64, Arc<Vec<f32>>)>,
 }
 
 /// A volume's step running on a background task: it steps a copy of the air, and the copy
 /// replaces the air when it is done, with what was done to the air meanwhile done to it again.
 #[derive(Default)]
 pub struct Background {
-    job: Option<Mutex<mpsc::Receiver<Domain>>>,
+    job: Option<Mutex<mpsc::Receiver<Stepped>>>,
     /// Changes made to the air since the job started.
     pending: Vec<Change>,
     /// The air before the last step landed: memory for the next job's copy.
     spare: Option<Domain>,
+    /// The air as the last step left it, copied by that step's task for the next step to
+    /// work on: copying a big volume's air on the frame was most of what a step cost it
+    /// (0.5 ms for the field's volume). A stepping volume so holds its air three times.
+    ahead: Option<Domain>,
+    /// What was done to the air since `ahead` was copied; the next step's task does it to
+    /// the copy first.
+    since: Vec<Change>,
     /// The running step's length, seconds.
     dt: f32,
+}
+
+/// Most changes kept for the copy [`Background::ahead`]: a volume that is changed this often
+/// without stepping (bodies moving through clear air) gives the copy up.
+const MAX_SINCE: usize = 4096;
+
+/// What a background step sends back.
+struct Stepped {
+    air: Domain,
+    /// A copy of `air` for the next step to work on.
+    ahead: Domain,
+    /// `air`'s densities, for [`crate::obscurance`].
+    density: Vec<f32>,
 }
 
 impl Background {
     pub fn running(&self) -> bool {
         self.job.is_some()
+    }
+
+    /// Give up the copy made for the next step: the air changed in a way the copy can't be
+    /// told about, or stopped stepping. Its memory is kept for the next copy if none is.
+    fn forget_ahead(&mut self) {
+        self.since.clear();
+        if let Some(a) = self.ahead.take() {
+            self.spare.get_or_insert(a);
+        }
     }
 }
 
@@ -256,8 +289,18 @@ impl SmokeDomain {
     /// Do `c` to the air, and again to the step running in the background when it lands.
     pub fn change(&mut self, c: Change) {
         self.domain.apply(&c);
-        if self.background.running() {
-            self.background.pending.push(c);
+        let b = &mut self.background;
+        if b.running() {
+            b.pending.push(c);
+        } else if b.ahead.is_some() {
+            if c == Change::Clear {
+                b.since.clear();
+            }
+            if b.since.len() < MAX_SINCE {
+                b.since.push(c);
+            } else {
+                b.forget_ahead();
+            }
         }
     }
 
@@ -269,6 +312,7 @@ impl SmokeDomain {
     pub fn drop_running(&mut self) {
         self.background.job = None;
         self.background.pending.clear();
+        self.background.forget_ahead();
     }
 
     /// Put the background step in place if it is done (or `wait` for it); true when none
@@ -290,13 +334,24 @@ impl SmokeDomain {
         self.background.job = None;
         let pending = std::mem::take(&mut self.background.pending);
         // A step that died leaves the air as it is.
-        if let Some(mut stepped) = stepped {
+        if let Some(Stepped {
+            air: mut stepped,
+            ahead,
+            density,
+        }) = stepped
+        {
             for c in &pending {
                 stepped.apply(c);
             }
             stepped.version = stepped.version.max(self.domain.version) + 1;
             stepped.resampled = self.domain.resampled;
+            // The densities were copied before what was done meanwhile: the next step's copy
+            // has that. Cleared air has no next step, so its copy is made from the air.
+            self.stepped_density =
+                (!pending.contains(&Change::Clear)).then(|| (stepped.version, Arc::new(density)));
             self.background.spare = Some(std::mem::replace(&mut self.domain, stepped));
+            self.background.ahead = Some(ahead);
+            self.background.since = pending;
             let dt = self.background.dt;
             self.shown(dt);
         }
@@ -312,22 +367,51 @@ impl SmokeDomain {
         params: StepParams,
         wind: impl Fn(DVec3) -> Vec3 + Send + Sync + 'static,
     ) {
-        let mut work = match self.background.spare.take() {
-            Some(mut w) => {
-                w.copy_from(&self.domain);
-                w
+        let b = &mut self.background;
+        // The copy the last step's task made, with what was done since still to do to it;
+        // without one (the first step, or the air changed some other way) a copy made here.
+        let since = std::mem::take(&mut b.since);
+        let (mut work, since) = match (b.ahead.take(), b.spare.take()) {
+            (Some(a), spare) => {
+                b.spare = spare;
+                (a, since)
             }
-            None => self.domain.clone(),
+            (None, Some(mut w)) => {
+                let _span = tracing::info_span!("smoke step: copy air").entered();
+                w.copy_from(&self.domain);
+                (w, Vec::new())
+            }
+            (None, None) => {
+                let _span = tracing::info_span!("smoke step: copy air").entered();
+                (self.domain.clone(), Vec::new())
+            }
         };
-        self.background.dt = params.dt;
+        // Memory for the copy this step's task makes for the next one.
+        let spare = b.spare.take();
+        b.dt = params.dt;
         let (tx, rx) = mpsc::channel();
         pool.spawn(async move {
+            for c in &since {
+                work.apply(c);
+            }
             work.sample_wind(&wind);
             work.step_sampled(&params);
-            let _ = tx.send(work);
+            let density = crate::obscurance::densities(&work.voxels, work.dims);
+            let ahead = match spare {
+                Some(mut a) => {
+                    a.copy_from(&work);
+                    a
+                }
+                None => work.clone(),
+            };
+            let _ = tx.send(Stepped {
+                air: work,
+                ahead,
+                density,
+            });
         })
         .detach();
-        self.background.job = Some(Mutex::new(rx));
+        b.job = Some(Mutex::new(rx));
     }
 }
 
@@ -368,8 +452,22 @@ impl SmokeDomains {
             shown_secs: 0.0,
             shown_dt: 0.0,
             background: Background::default(),
+            stepped_density: None,
         });
         self.list.len() - 1
+    }
+
+    /// Step the first volume once on a background task and land it, clearing it meanwhile
+    /// if `clear_meanwhile`.
+    #[cfg(test)]
+    pub(crate) fn step_in_background_for_test(&mut self, clear_meanwhile: bool) {
+        let d = &mut self.list[0];
+        let params = SmokeSettings::default().step_params(0.05, 15.0);
+        d.start(AsyncComputeTaskPool::get(), params, |_| Vec3::X);
+        if clear_meanwhile {
+            d.change(Change::Clear);
+        }
+        d.land(true);
     }
 
     /// Smoke density at a point, kg/m³.
@@ -998,6 +1096,10 @@ pub fn step(
         if d.domain.is_idle() {
             d.empty_secs += dt;
             d.stride = 1;
+            // An empty volume keeps no copy of its air for a next step.
+            if ready {
+                d.background.forget_ahead();
+            }
             continue;
         }
         d.empty_secs = 0.0;
@@ -1026,6 +1128,7 @@ pub fn step(
                 });
             }
             _ => {
+                d.background.forget_ahead();
                 d.domain.step(&params, &wind_fn);
                 d.shown(params.dt);
             }
@@ -1183,5 +1286,141 @@ mod tests {
             .map(|(a, b)| (a.density - b.density).abs())
             .fold(0.0, f32::max);
         assert!(worst < 1e-5, "{worst}");
+    }
+
+    /// What a step of a big volume (the field's, 80×32×48 voxels) costs the frame: starting
+    /// it, landing it and the obscurance snapshot, beside the two copies the frame made
+    /// before the step's task took them over.
+    /// `cargo test --release -p engine_smoke --lib frame_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn frame_cost_of_a_background_step() {
+        engine_core::tasks::init_task_pools();
+        let pool = AsyncComputeTaskPool::get();
+        let mut domain = Domain::new(DVec3::new(-50.0, 0.0, -30.0), 1.25, UVec3::new(80, 32, 48));
+        domain.set_floor(|_, _| Some(0.0));
+        let mut domains = SmokeDomains::default();
+        domains.add(None, domain);
+        let puff = |x: f64| Change::Splat {
+            at: DVec3::new(x, 3.0, 0.0),
+            radius: 4.0,
+            mass_kg: 2.0,
+            heat_c: 300.0,
+            vel: Vec3::Y,
+            albedo: Vec3::splat(0.5),
+        };
+        let params = SmokeSettings::default().step_params(0.05, 15.0);
+        let wind = |_: DVec3| Vec3::new(2.0, 0.0, 0.5);
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        let (mut start, mut land, mut snap, mut copy_air, mut copy_density) =
+            (0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut scratch = domains.list[0].domain.clone();
+        let rounds = 60;
+        for round in 0..rounds {
+            let d = &mut domains.list[0];
+            for x in [-30.0, -10.0, 10.0, 30.0] {
+                d.change(puff(x + round as f64 * 0.1));
+            }
+            let t = std::time::Instant::now();
+            d.start(pool, params, wind);
+            // The first step has no copy to work on yet and makes its own.
+            if round > 0 {
+                start += ms(t);
+            }
+            d.change(puff(0.0));
+            // The task runs off the clock: the frame doesn't wait for it.
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let t = std::time::Instant::now();
+            d.land(true);
+            land += ms(t);
+            let t = std::time::Instant::now();
+            let s = crate::obscurance::SmokeSnapshot::of(&domains, 100.0);
+            snap += ms(t);
+            drop(s);
+            let d = &domains.list[0];
+            let t = std::time::Instant::now();
+            scratch.copy_from(&d.domain);
+            copy_air += ms(t);
+            let t = std::time::Instant::now();
+            let v = crate::obscurance::densities(&d.domain.voxels, d.domain.dims);
+            copy_density += ms(t);
+            drop(v);
+        }
+        let n = rounds as f64;
+        println!(
+            "per step, ms: start {:.3}, land {:.3}, snapshot {:.3}; before, on the frame: \
+             air copy {:.3}, density copy {:.3}",
+            start / n,
+            land / n,
+            snap / n,
+            copy_air / n,
+            copy_density / n
+        );
+    }
+
+    /// From the second step on, a step works on the copy the step before it made, with what
+    /// was done to the air between and during steps done to it too.
+    #[test]
+    fn steps_work_on_the_copy_the_last_one_made() {
+        engine_core::tasks::init_task_pools();
+        let pool = AsyncComputeTaskPool::get();
+        let mut domain = Domain::new(DVec3::new(-8.0, 0.0, -8.0), 0.5, UVec3::new(32, 32, 32));
+        domain.set_floor(|_, _| Some(0.0));
+        let mut domains = SmokeDomains::default();
+        let i = domains.add(None, domain);
+        let d = &mut domains.list[i];
+        let puff = |x: f64, z: f64| Change::Splat {
+            at: DVec3::new(x, 2.0, z),
+            radius: 1.0,
+            mass_kg: 0.2,
+            heat_c: 300.0,
+            vel: Vec3::Y,
+            albedo: Vec3::splat(0.5),
+        };
+        let shot = |z: f64| Change::Carve {
+            from: DVec3::new(-7.0, 2.0, z),
+            to: DVec3::new(7.0, 3.0, z),
+            radius: 0.4,
+            clear: 0.8,
+            speed: 6.0,
+        };
+        d.change(puff(-2.0, 0.0));
+        let mut on_the_spot = d.domain.clone();
+        let params = SmokeSettings::default().step_params(0.05, 15.0);
+        let wind = |_: DVec3| Vec3::new(2.0, 0.0, 0.0);
+        for round in 0..5 {
+            let z = round as f64 - 2.0;
+            // Between steps, then while the step runs.
+            let (between, during) = ([puff(1.0, z), shot(z)], [puff(-3.0, z), shot(z + 0.5)]);
+            for c in between {
+                d.change(c);
+                on_the_spot.apply(&c);
+            }
+            assert_eq!(d.background.ahead.is_some(), round > 0);
+            assert_eq!(d.background.since.len(), if round > 0 { 4 } else { 0 });
+            d.start(pool, params, wind);
+            assert!(d.background.ahead.is_none() && d.background.since.is_empty());
+            for c in during {
+                d.change(c);
+            }
+            d.land(true);
+            on_the_spot.step(&params, &wind);
+            for c in during {
+                on_the_spot.apply(&c);
+            }
+        }
+        assert!(d.domain.mass_kg > 0.05, "{}", d.domain.mass_kg);
+        assert!((d.domain.mass_kg - on_the_spot.mass_kg).abs() < 1e-4);
+        let worst = d
+            .domain
+            .voxels
+            .iter()
+            .zip(&on_the_spot.voxels)
+            .map(|(a, b)| (a.density - b.density).abs().max((a.vel - b.vel).length()))
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-4, "{worst}");
+        // Air changed some other way gives the copy up and keeps its memory.
+        d.drop_running();
+        assert!(d.background.ahead.is_none() && d.background.spare.is_some());
     }
 }
