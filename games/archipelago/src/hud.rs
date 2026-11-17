@@ -20,7 +20,7 @@ use engine_ui::screens;
 use engine_ui::style::{Align, Direction, Ease, Enter, Justify, Pick, Position, pct};
 
 use crate::camera;
-use crate::defs::{Category, DEFS, Good, Kind};
+use crate::defs::{Category, DEFS, Good, Kind, Tier};
 use crate::island;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::tools::{Hand, Tool};
@@ -108,11 +108,15 @@ fn cost_text(k: Kind) -> String {
     }
     match (d.input, d.output) {
         (Some(i), Some(o)) => {
-            s += &format!(
-                "\n[b]Makes[/b]  {} from {}",
-                o.name().to_lowercase(),
-                i.name().to_lowercase()
-            )
+            let from = match d.input2 {
+                Some(j) => format!(
+                    "{} and {}",
+                    i.name().to_lowercase(),
+                    j.name().to_lowercase()
+                ),
+                None => i.name().to_lowercase(),
+            };
+            s += &format!("\n[b]Makes[/b]  {} from {from}", o.name().to_lowercase())
         }
         (None, Some(o)) => s += &format!("\n[b]Makes[/b]  {}", o.name().to_lowercase()),
         _ => {}
@@ -150,23 +154,41 @@ fn stat(icon: &str, bind: &str, label_bind: &str, tip: &str, tip_text: &str) -> 
 }
 
 /// A good in the warehouse: badge and count in a recessed well.
-fn good_cell(g: Good) -> El {
-    brass::well(g.icon(), &format!("{{isle.stock.{}}}", g.index())).tooltip(
+fn good_cell(g: Good, compact: bool) -> El {
+    let well = brass::well(g.icon(), &format!("{{isle.stock.{}}}", g.index()));
+    let well = if compact {
+        well.with_style(|s| s.padding([2.0, 7.0, 2.0, 2.0]).gap(3.0))
+    } else {
+        well
+    };
+    well.tooltip(
         g.name(),
         "In the warehouse of the island in view. Carts bring what workshops make; houses take what they need.",
     )
 }
 
-/// The goods wells in two rows at most (twelve to a row), for the island's own goods.
-fn goods_rows(goods: &[Good]) -> Vec<El> {
-    let per_row = goods.len().div_ceil(2).clamp(6, 12);
-    goods
-        .chunks(per_row)
+/// Room held for the town cartouche in the middle of the top bar.
+const CARTOUCHE_ROOM: f32 = 380.0;
+
+/// Wells a row holds on either side of the town cartouche.
+const WELLS_PER_ROW: usize = 6;
+
+/// The goods wells in two rows at most, six to a row; `side` 0 is the block left of the town
+/// cartouche, 1 the block right of it (goods past twelve). The wells are smaller when the
+/// right block is in use.
+fn goods_rows(goods: &[Good], side: usize) -> Vec<El> {
+    let compact = goods.len() > 2 * WELLS_PER_ROW;
+    let part = if side == 0 {
+        &goods[..goods.len().min(2 * WELLS_PER_ROW)]
+    } else {
+        &goods[goods.len().min(2 * WELLS_PER_ROW)..]
+    };
+    part.chunks(WELLS_PER_ROW)
         .map(|row| {
             El::new()
                 .class("row")
-                .with_style(|s| s.gap(6.0))
-                .children(row.iter().map(|g| good_cell(*g)))
+                .with_style(move |s| s.gap(if compact { 4.0 } else { 6.0 }))
+                .children(row.iter().map(|g| good_cell(*g, compact)))
         })
         .collect()
 }
@@ -174,11 +196,37 @@ fn goods_rows(goods: &[Good]) -> Vec<El> {
 /// The top bar, with the wells for `goods` (the goods kept, made or used on the island in
 /// view; they change as the view moves to another island).
 fn top_bar(goods: &[Good]) -> El {
-    let goods = El::new()
-        .class("col")
-        .id("isle.goods")
-        .with_style(|s| s.gap(4.0))
-        .children(goods_rows(goods));
+    let block = |side: usize| {
+        El::new()
+            .class("col")
+            .id(if side == 0 {
+                "isle.goods"
+            } else {
+                "isle.goods2"
+            })
+            .with_style(|s| s.gap(4.0))
+            .children(goods_rows(goods, side))
+    };
+    let left = block(0);
+    // Goods past twelve: a second block just right of the town cartouche (an overlay row with
+    // the cartouche's room held free in the middle).
+    let right = El::new()
+        .with_style(|s| {
+            s.position(Position::Absolute)
+                .left(0.0)
+                .right(0.0)
+                .top(0.0)
+                .bottom(0.0)
+                .align_items(Align::Center)
+                .pick(Pick::Ignore)
+        })
+        .child(El::new().with_style(|s| s.grow(1.0).basis(0.0).pick(Pick::Ignore)))
+        .child(El::new().with_style(|s| s.width(CARTOUCHE_ROOM).pick(Pick::Ignore)))
+        .child(
+            El::new()
+                .with_style(|s| s.grow(1.0).basis(0.0).pick(Pick::Ignore))
+                .child(block(1)),
+        );
     let speed = El::new()
         .class("row")
         .with_style(|s| s.gap(8.0))
@@ -211,9 +259,10 @@ fn top_bar(goods: &[Good]) -> El {
             "{isle.people}",
             "people",
             "People",
-            "Fisherfolk and labourers on every island.",
+            "Every tier, on every island.",
         ))
-        .child(goods)
+        .child(left)
+        .child(right)
         .child(El::new().with_style(|s| s.grow(1.0)))
         .child(
             El::new()
@@ -485,8 +534,27 @@ fn info_card(kind: Kind) -> El {
         (Some(i), Some(o)) => Some(
             El::new()
                 .class("row")
-                .with_style(|s| s.gap(10.0).justify(Justify::Center))
+                .with_style(|s| {
+                    s.gap(10.0)
+                        .justify(Justify::Center)
+                        .align_items(Align::Center)
+                })
                 .child(brass::badge(i.icon(), 42.0).tooltip(i.name(), "Taken from the warehouse."))
+                .children(d.input2.map(|j| {
+                    El::new()
+                        .class("row")
+                        .with_style(|s| s.gap(10.0).align_items(Align::Center))
+                        .child(
+                            El::text("+")
+                                .class("ink_title")
+                                .text_style(|t| t.size(20.0))
+                                .pick_ignore(),
+                        )
+                        .child(
+                            brass::badge(j.icon(), 42.0)
+                                .tooltip(j.name(), "Taken from the warehouse, with the first."),
+                        )
+                }))
                 .child(El::icon("isle_arrow").with_style(|s| s.size(34.0, 20.0).pick(Pick::Ignore)))
                 .child(brass::badge(o.icon(), 50.0).tooltip(o.name(), "Carted to the warehouse.")),
         ),
@@ -589,6 +657,13 @@ pub fn setup(world: &mut World) {
     if std::env::args().any(|a| a == "--hud-demo") {
         world.resource_mut::<Hud>().demo = Some(0.0);
     }
+    // `--hud-cat=k`: open the build bar on category k (tour shots).
+    if let Some(k) = std::env::args()
+        .find_map(|a| a.strip_prefix("--hud-cat=")?.parse::<usize>().ok())
+        .filter(|k| *k < Category::ALL.len())
+    {
+        world.resource_mut::<Hud>().category = k;
+    }
     update_data_now(world);
     if let Err(e) = screens::spawn_screen(
         world,
@@ -601,7 +676,11 @@ pub fn setup(world: &mut World) {
     if let Err(e) = screens::spawn_screen(
         world,
         hud_screen(BAR, 0),
-        &build_bar(2, tool, world.resource::<Hud>().island),
+        &build_bar(
+            world.resource::<Hud>().category,
+            tool,
+            world.resource::<Hud>().island,
+        ),
     ) {
         engine::core::log::warn!("archipelago build bar: {e}");
     }
@@ -1016,13 +1095,21 @@ fn update_data_now(world: &mut World) {
         );
         data.set("isle.people", fmt_int(total as f64));
         data.set("isle.island", island::islands()[isle].name);
-        data.set(
-            "isle.island_people",
-            format!(
-                "{:.0} fisherfolk · {:.0} labourers",
-                books.population[0], books.population[1]
-            ),
-        );
+        data.set("isle.island_people", {
+            // Every tier that lives here, lowest first (fisherfolk alone on a new isle).
+            let tiers: Vec<String> = Tier::ALL
+                .into_iter()
+                .filter(|t| books.population[*t as usize] >= 0.5 || *t == Tier::Fisherfolk)
+                .map(|t| {
+                    format!(
+                        "{:.0} {}",
+                        books.population[t as usize],
+                        t.name().to_lowercase()
+                    )
+                })
+                .collect();
+            tiers.join(" · ")
+        });
         for g in Good::ALL {
             data.set(
                 &format!("isle.stock.{}", g.index()),
@@ -1096,8 +1183,10 @@ fn update_data_now(world: &mut World) {
         .get_resource::<Hud>()
         .is_some_and(|h| h.goods != goods)
     {
-        if let Some(e) = engine_ui::input::find_id(world, "isle.goods") {
-            let _ = engine_ui::el::replace_children(world, e, &goods_rows(&goods));
+        for (side, id) in ["isle.goods", "isle.goods2"].into_iter().enumerate() {
+            if let Some(e) = engine_ui::input::find_id(world, id) {
+                let _ = engine_ui::el::replace_children(world, e, &goods_rows(&goods, side));
+            }
         }
         world.resource_mut::<Hud>().goods = goods;
     }
@@ -1124,7 +1213,15 @@ pub fn update_data(world: &mut World) {
     demo_step(world, dt);
 }
 
-/// `--hud-demo`: open the first weaver's card at 2 s and keep the pointer on a build tile.
+/// The build tile `--hud-demo` hovers: `--hud-tile=PavedRoad`, or the sawmill.
+fn demo_tile() -> String {
+    let k = std::env::args()
+        .find_map(|a| a.strip_prefix("--hud-tile=").map(String::from))
+        .unwrap_or_else(|| "Sawmill".into());
+    format!("isle.build:{k}")
+}
+
+/// `--hud-demo`: open the first weaver's (or `--hud-card=Kind`'s) card at 2 s and keep the pointer on a build tile.
 fn demo_step(world: &mut World, dt: f32) {
     let Some(t) = world.resource::<Hud>().demo else {
         return;
@@ -1136,10 +1233,15 @@ fn demo_step(world: &mut World, dt: f32) {
         && !world.resource::<ledger::Ledger>().open
         && !world.resource::<routes::RouteBook>().open
     {
+        // `--hud-card=Saltery` shows that kind's card instead (by its name in the code).
+        let want = std::env::args()
+            .find_map(|a| a.strip_prefix("--hud-card=").map(String::from))
+            .unwrap_or_else(|| "Weaver".into());
         let weaver = {
             let mut q = world.query::<(Entity, &Building)>();
             q.iter(world)
-                .find(|(_, b)| b.kind == Kind::Weaver)
+                .find(|(_, b)| format!("{:?}", b.kind) == want)
+                .or_else(|| q.iter(world).find(|(_, b)| b.kind == Kind::Weaver))
                 .or_else(|| q.iter(world).find(|(_, b)| b.kind.def().output.is_some()))
                 .map(|(e, _)| e)
         };
@@ -1149,7 +1251,7 @@ fn demo_step(world: &mut World, dt: f32) {
         }
     }
     if t > 2.5
-        && let Some(e) = engine_ui::input::find_id(world, "isle.build:Sawmill")
+        && let Some(e) = engine_ui::input::find_id(world, &demo_tile())
         && let Some(c) = world.get::<engine_ui::node::ComputedNode>(e)
     {
         let p = c.rect.center() + Vec2::new(8.0, 10.0);

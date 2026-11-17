@@ -201,7 +201,12 @@ fn legend(color: Color, text: &str) -> El {
                 .background(Fill::Solid(color))
                 .pick(Pick::Ignore)
         }))
-        .child(El::text(text).class("ink_label").pick_ignore())
+        .child(
+            El::text(text)
+                .class("ink_label")
+                .text_style(|t| t.nowrap())
+                .pick_ignore(),
+        )
 }
 
 fn workforce(t: Tier) -> El {
@@ -358,18 +363,14 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
                 .with_style(|s| s.justify(Justify::Center))
                 .child(brass::divider(320.0)),
         )
+        .child(page_title("{isle.led.people_title}", "{isle.led.people}"))
         .child(
             El::new()
                 .class("row")
-                .with_style(|s| s.justify(Justify::SpaceBetween).align_items(Align::End))
-                .child(page_title("{isle.led.people_title}", "{isle.led.people}"))
-                .child(
-                    El::new()
-                        .class("row")
-                        .with_style(|s| s.gap(14.0))
-                        .child(legend(FISHERFOLK, "fisherfolk"))
-                        .child(legend(LABOURERS, "labourers")),
-                ),
+                .with_style(|s| s.gap(16.0).justify(Justify::End))
+                .child(legend(FISHERFOLK, "fisherfolk"))
+                .child(legend(LABOURERS, "labourers"))
+                .child(legend(BURGHERS, "burghers")),
         )
         .child(chart(PEOPLE_PAINTER, 120.0))
         .child(
@@ -419,6 +420,12 @@ const LABOURERS: Color = Color {
     r: 0.62,
     g: 0.24,
     b: 0.13,
+    a: 1.0,
+};
+const BURGHERS: Color = Color {
+    r: 0.25,
+    g: 0.48,
+    b: 0.17,
     a: 1.0,
 };
 
@@ -478,8 +485,8 @@ pub fn update(world: &mut World) {
         d.set(
             "isle.led.people",
             format!(
-                "{:.0} fisherfolk · {:.0} labourers",
-                books.population[0], books.population[1]
+                "{:.0} fisherfolk · {:.0} labourers · {:.0} burghers",
+                books.population[0], books.population[1], books.population[2]
             ),
         );
         d.set("isle.led.since", format!("since {}", clock(since)));
@@ -793,7 +800,11 @@ fn paint_people(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
             .map(|s| (s.clock_s, s.people.get(i).map_or(0.0, |p| p[k])))
             .collect()
     };
-    let series = [(tier(0), FISHERFOLK), (tier(1), LABOURERS)];
+    let series = [
+        (tier(0), FISHERFOLK),
+        (tier(1), LABOURERS),
+        (tier(2), BURGHERS),
+    ];
     line_chart(world, ctx, &series, short);
 }
 
