@@ -556,6 +556,12 @@ pub fn setup(world: &mut World) {
     if let Err(e) = screens::spawn_screen(world, hud_screen(MAP, 0), &map::panel()) {
         engine::core::log::warn!("archipelago map table: {e}");
     }
+    // `--hud-map=k`: turn the map table to region k (tour shots of the far charts).
+    if let Some(k) =
+        std::env::args().find_map(|a| a.strip_prefix("--hud-map=")?.parse::<i32>().ok())
+    {
+        map::turn(world, k);
+    }
     ledger::install(world);
     routes::install(world);
     // `--hud-routes`: open the trade routes with the second route picked out (tour shots).
@@ -653,6 +659,9 @@ pub fn read_actions(world: &mut World) {
             routes::select(world, i);
         } else if a == "isle.map" {
             map::clicked(world, entity);
+        } else if a == "isle.map.next" || a == "isle.map.prev" {
+            map::turn(world, if a.ends_with("next") { 1 } else { -1 });
+            update_data_now(world);
         } else if a == "isle.home" {
             map::home(world);
         } else if a.starts_with("isle.route.") {
@@ -907,6 +916,7 @@ fn update_data_now(world: &mut World) {
             }
         })
     };
+    let region = map::region_label(world);
     let total: f32 = econ.islands.iter().map(population).sum();
     let books = &econ.islands[isle];
     let category = world.get_resource::<Hud>().map_or(2, |h| h.category);
@@ -946,6 +956,8 @@ fn update_data_now(world: &mut World) {
                 if airships == 1 { "airship" } else { "airships" }
             ),
         );
+        data.set("isle.map_region", region.0);
+        data.set("isle.map_blurb", region.1);
         data.set("isle.clock", clock(econ.clock_s));
         data.set("isle.season", season(econ.clock_s));
         data.set(
@@ -1009,6 +1021,7 @@ pub fn update_data(world: &mut World) {
         world.resource_mut::<Hud>().refresh = 0.2;
         update_data_now(world);
         ledger::update(world);
+        map::update(world, 0.2);
     }
     demo_step(world, dt);
 }

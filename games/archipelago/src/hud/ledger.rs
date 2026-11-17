@@ -235,17 +235,26 @@ fn workforce(t: Tier) -> El {
 }
 
 /// The book.
-pub fn el(shown: usize) -> El {
+pub fn el(shown: usize, settled: &[bool]) -> El {
+    // Tabs for the shown island's region: its settled islands (and the shown one).
+    let region = island::islands()[shown].region();
     let tabs = El::new().class("row").with_style(|s| s.gap(8.0)).children(
-        island::islands().iter().enumerate().map(|(i, isle)| {
-            El::button(isle.name, format!("isle.led:{i}"))
-                .class(if i == shown {
-                    "brass_button"
-                } else {
-                    "brass_button_dark"
-                })
-                .id(format!("isle.led:{i}"))
-        }),
+        island::islands()
+            .iter()
+            .enumerate()
+            .filter(|(i, isle)| {
+                isle.region() == region
+                    && (*i == shown || settled.get(*i).copied().unwrap_or(false))
+            })
+            .map(|(i, isle)| {
+                El::button(isle.name, format!("isle.led:{i}"))
+                    .class(if i == shown {
+                        "brass_button"
+                    } else {
+                        "brass_button_dark"
+                    })
+                    .id(format!("isle.led:{i}"))
+            }),
     );
     let header = El::new()
         .class("row")
@@ -557,7 +566,13 @@ pub fn show(world: &mut World, island: Option<usize>) {
         closable: false,
         ..Default::default()
     };
-    if engine_ui::screens::spawn_screen(world, screen, &el(i)).is_ok() {
+    let settled: Vec<bool> = world
+        .resource::<Economy>()
+        .islands
+        .iter()
+        .map(|b| b.harbours > 0 || b.population.iter().sum::<f32>() > 0.0)
+        .collect();
+    if engine_ui::screens::spawn_screen(world, screen, &el(i, &settled)).is_ok() {
         world.resource_mut::<Ledger>().open = true;
     }
 }

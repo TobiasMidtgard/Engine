@@ -19,6 +19,8 @@ pub struct IconLibrary {
     sources: HashMap<String, Arc<str>>,
     parsed: HashMap<String, Option<Arc<usvg::Tree>>>,
     pictures: HashMap<String, Arc<image::RgbaImage>>,
+    /// Bumped each time a picture is replaced, so drawn copies are refreshed in place.
+    revisions: HashMap<String, u32>,
 }
 
 impl Default for IconLibrary {
@@ -31,6 +33,7 @@ impl Default for IconLibrary {
             sources,
             parsed: HashMap::new(),
             pictures: HashMap::new(),
+            revisions: HashMap::new(),
         }
     }
 }
@@ -107,6 +110,14 @@ impl IconLibrary {
         self.sources.remove(name);
         self.parsed.remove(name);
         self.pictures.insert(name.to_string(), Arc::new(image));
+        *self.revisions.entry(name.to_string()).or_default() += 1;
+    }
+
+    /// How many times picture `name` was added or replaced (0 for none or an SVG icon). Pictures
+    /// painted in code can be replaced every second or so (a fog of war over a chart): copies
+    /// already in the atlas are rewritten in place when the size is unchanged.
+    pub fn revision(&self, name: &str) -> u32 {
+        self.revisions.get(name).copied().unwrap_or(0)
     }
 
     /// [`IconLibrary::add_picture`] from straight-alpha sRGB RGBA8 pixels, `w`×`h` (for callers

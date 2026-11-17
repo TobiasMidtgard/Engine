@@ -38,8 +38,30 @@ fn ink(i: usize) -> Color {
 pub struct RouteBook {
     pub open: bool,
     pub selected: Option<usize>,
-    /// Per route: the polyline it sails (world X, Z) and its stops.
+    /// Per route: the polyline it sails (map X, Z) and its stops.
     lines: Vec<(Vec<DVec2>, Vec<DVec2>, bool)>,
+    /// The region whose chart the page shows: the picked route's, or the map table's.
+    chart: usize,
+}
+
+/// Turn the page's chart to the picked route's region (or the map table's).
+fn pick_chart(world: &mut World) {
+    let (sel, first) = {
+        let b = world.resource::<RouteBook>();
+        let first = b
+            .selected
+            .and_then(|s| b.lines.get(s))
+            .and_then(|l| l.1.first().copied());
+        (b.selected, first)
+    };
+    let k = match (sel, first) {
+        (Some(_), Some(p)) => crate::globe::region_of(p.x, p.y),
+        _ => world
+            .get_resource::<map::MapTable>()
+            .map_or(0, |m| m.region),
+    };
+    map::ensure_painted(world, k);
+    world.resource_mut::<RouteBook>().chart = k;
 }
 
 pub fn install(world: &mut World) {
@@ -477,6 +499,7 @@ pub fn refresh(world: &mut World) {
         }
         b.selected
     };
+    pick_chart(world);
     let els = tiles(world, n, sel, false);
     if let Some(e) = engine_ui::input::find_id(world, LIST) {
         let _ = engine_ui::el::replace_children(world, e, &els);
@@ -572,6 +595,7 @@ pub fn toggle(world: &mut World) {
     }
     let lines = trace(world);
     world.resource_mut::<RouteBook>().lines = lines;
+    pick_chart(world);
     let screen = engine_ui::node::Screen {
         key: SCREEN.into(),
         modal: false,
@@ -597,16 +621,20 @@ pub fn select(world: &mut World, i: usize) {
 fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
     let r = ctx.rect;
     let px = ctx.px;
+    let chart = world.resource::<RouteBook>().chart;
     let at = |p: DVec2| {
-        let uv = map::to_uv(p.x, p.y);
+        let uv = map::to_uv(chart, p.x, p.y);
         Vec2::new(r.x + uv.x * r.w, r.y + uv.y * r.h)
     };
-    ctx.icon(map::PICTURE, r, Color::WHITE);
+    let here = |p: DVec2| crate::globe::region_of(p.x, p.y) == chart;
+    ctx.icon(&map::picture(chart), r, Color::WHITE);
     let book = world.resource::<RouteBook>();
     let sel = book.selected;
     let lines = book.lines.clone();
-    // Others first, the picked route on top.
-    let mut order: Vec<usize> = (0..lines.len()).collect();
+    // Routes on this chart; others first, the picked route on top.
+    let mut order: Vec<usize> = (0..lines.len())
+        .filter(|k| lines[*k].1.first().is_some_and(|p| here(*p)))
+        .collect();
     if let Some(s) = sel {
         order.retain(|k| *k != s);
         order.push(s);
@@ -657,6 +685,7 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
     let mut q = world.query::<&Vessel>();
     let ships: Vec<(Vec2, f32, bool, Option<usize>)> = q
         .iter(world)
+        .filter(|v| here(DVec2::new(v.at.x, v.at.z)))
         .map(|v| {
             (
                 at(DVec2::new(v.at.x, v.at.z)),

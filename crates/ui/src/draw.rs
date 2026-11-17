@@ -222,13 +222,18 @@ pub struct AtlasSlot {
     pub h: f32,
 }
 
+/// An icon drawn at a size: name, width, height, mirrored.
+type IconKey = (Arc<str>, u32, u32, bool);
+
 /// The glyph (mask) and color atlases with their caches.
 #[derive(Resource)]
 pub struct UiAtlases {
     pub mask: Atlas,
     pub color: Atlas,
     glyphs: HashMap<CacheKey, Option<AtlasSlot>>,
-    icons: HashMap<(Arc<str>, u32, u32, bool), Option<AtlasSlot>>,
+    icons: HashMap<IconKey, Option<AtlasSlot>>,
+    /// For pictures: the revision drawn into each cached slot, and where it sits in the atlas.
+    icon_revs: HashMap<IconKey, (u32, u32, u32)>,
     /// Something didn't fit this frame: rebuild after growing/clearing.
     pub overflowed: bool,
     /// Rows (with padding) the largest failed request needed: mask, color.
@@ -242,6 +247,7 @@ impl Default for UiAtlases {
             color: Atlas::new(2048, 2048, 4, 4096),
             glyphs: HashMap::new(),
             icons: HashMap::new(),
+            icon_revs: HashMap::new(),
             overflowed: false,
             need: [0; 2],
         }
@@ -310,9 +316,25 @@ impl UiAtlases {
     ) -> Option<AtlasSlot> {
         let (w, h) = (w.clamp(1, 2048), h.clamp(1, 2048));
         let key = (Arc::<str>::from(name), w, h, flip);
+        let rev = icons.revision(name);
         if let Some(s) = self.icons.get(&key) {
-            return *s;
+            match (s, self.icon_revs.get(&key)) {
+                // A replaced picture: rewrite it where it sits when the size is unchanged.
+                (Some(slot), Some(&(old, x, y))) if old != rev => {
+                    let slot = *slot;
+                    if let Some((pw, ph, pixels)) = icons.rasterize(name, w, h, flip)
+                        && pw as f32 == slot.w
+                        && ph as f32 == slot.h
+                    {
+                        self.color.write(x, y, pw, ph, &pixels);
+                        self.icon_revs.insert(key, (rev, x, y));
+                        return Some(slot);
+                    }
+                }
+                _ => return *s,
+            }
         }
+        let mut at = None;
         let slot = icons
             .rasterize(name, w, h, flip)
             .and_then(|(pw, ph, pixels)| {
@@ -322,6 +344,7 @@ impl UiAtlases {
                     return None;
                 };
                 self.color.write(x, y, pw, ph, &pixels);
+                at = Some((x, y));
                 Some(AtlasSlot {
                     page: 1,
                     uv: self.color.uv(x, y, pw, ph),
@@ -332,6 +355,9 @@ impl UiAtlases {
                 })
             });
         if !self.overflowed {
+            if let (Some((x, y)), true) = (at, rev > 0) {
+                self.icon_revs.insert(key.clone(), (rev, x, y));
+            }
             self.icons.insert(key, slot);
         }
         slot
@@ -350,6 +376,7 @@ impl UiAtlases {
         }
         self.glyphs.clear();
         self.icons.clear();
+        self.icon_revs.clear();
     }
 }
 
@@ -1234,4 +1261,32 @@ fn content_box(c: &ComputedNode, px: f32) -> Rect {
         (c.rect.w - l - r).max(0.0),
         (c.rect.h - t - bt).max(0.0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A picture replaced at the same size is rewritten where it sits in the atlas.
+    #[test]
+    fn replaced_picture_is_rewritten_in_place() {
+        let mut lib = IconLibrary::default();
+        let mut atlases = UiAtlases::default();
+        lib.add_picture_rgba("chart", 4, 4, [200, 10, 10, 255].repeat(16));
+        let a = atlases.icon(&mut lib, "chart", 4, 4, false).unwrap();
+        let w = atlases.color.width;
+        let at = |s: &AtlasSlot, data: &[u8]| {
+            let (x, y) = ((s.uv[0] * w as f32) as usize, (s.uv[1] * w as f32) as usize);
+            data[(y * w as usize + x) * 4]
+        };
+        assert!(at(&a, &atlases.color.data) > 150);
+        assert_eq!(
+            atlases.icon(&mut lib, "chart", 4, 4, false).unwrap().uv,
+            a.uv
+        );
+        lib.add_picture_rgba("chart", 4, 4, [10, 10, 200, 255].repeat(16));
+        let b = atlases.icon(&mut lib, "chart", 4, 4, false).unwrap();
+        assert_eq!(a.uv, b.uv, "same slot");
+        assert!(at(&b, &atlases.color.data) < 50, "new pixels written");
+    }
 }
