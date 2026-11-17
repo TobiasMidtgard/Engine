@@ -82,7 +82,28 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
         } else {
             s.albedo *= grass_raceme_tone(1.0) * own;
         }
+    } else if (in.pinnae > 0.0 && in.pinnae < BERRY_CUT - 0.5) {
+        let a = abs(in.across);
+        let fr = grass_frond(in.along, in.across, in.pinnae);
+        let edge = saturate(fr.x);
+        let vein = fr.y;
+        let rachis = 1.0 - smoothstep(0.06, 0.12, a);
+        // Darker toward each pinnule's margin, where the blade is thinnest and curls under;
+        // the midveins paler and glossier (the upper surface of a fern's frond is smooth and
+        // a little shiny, the veins sunk into it).
+        let tone = mix(1.0, 0.74, smoothstep(0.35, 1.0, edge)) + 0.1 * vein;
+        // No two pinnae quite alike: some a little paler or yellower, some darker and bluer.
+        let own = mix(vec3<f32>(0.9, 0.93, 1.02), vec3<f32>(1.1, 1.06, 0.88), fr.z);
+        // By summer a few pinnules have browned, papery tips (drought, slugs, fungi).
+        let scorch = step(0.86, fr.w) * smoothstep(0.55, 1.0, edge) * smoothstep(0.35, 0.7, a);
+        s.albedo *= tone * own;
+        s.albedo = mix(s.albedo, vec3<f32>(0.17, 0.1, 0.035), scorch * 0.8);
+        // The rachis a little paler and browner than the blade (a male fern's is scaly).
+        s.albedo = mix(s.albedo, s.albedo * vec3<f32>(1.12, 1.05, 0.8), rachis);
+        s.roughness = mix(s.roughness, 0.42, vein);
     } else if (in.pinnae > 0.0) {
+        // A shrub's twig or a berry: the same light banding the fronds had before they were
+        // cut into pinnules.
         let a = abs(in.across);
         let t = fract(in.along * in.pinnae - a * 0.55 + 0.25);
         let edge = abs(t - 0.5) * 2.0 / max(0.7 * (1.0 - 0.75 * a * a), 0.05);
@@ -222,9 +243,20 @@ fn grass_flower_cut(cut: f32, flower: f32) -> f32 {
 }
 
 // ... and a raceme near the camera cut into its flowers, pods and buds (`grass_raceme_code`).
+// A fern's frond near the camera also carries how far its pinnae are cut into pinnules
+// (`grass_frond`): the code's fraction, 0.49 at full detail, fading out between
+// `FERN_PINNULES_NEAR_M` and `FERN_PINNULES_FAR_M`, where a pinnule (about 1.5 cm) shrinks under
+// a few pixels at 1440p and the cut would only shimmer.
+const FERN_PINNULES_NEAR_M: f32 = 4.0;
+const FERN_PINNULES_FAR_M: f32 = 11.0;
+
 fn grass_blade_cut(f: GrassField, s: BladeShape) -> f32 {
     let raceme = grass_raceme_code(f, s);
-    return select(grass_flower_cut(f.kind.z, s.flower), raceme, raceme > 0.0);
+    let cut = grass_flower_cut(f.kind.z, s.flower);
+    let fern = cut > 0.5 && cut < BERRY_CUT - 0.5;
+    let detail = 1.0 - smoothstep(FERN_PINNULES_NEAR_M, FERN_PINNULES_FAR_M, length(s.root));
+    let fern_cut = cut + 0.49 * detail;
+    return select(select(cut, fern_cut, fern), raceme, raceme > 0.0);
 }
 
 // Where (`along`, `across`) lies on a raceme (`code` from `grass_raceme_code`): x 1 inside it
@@ -321,17 +353,56 @@ fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
     if (pinnae == 0.0) {
         return false;
     }
+    return grass_frond(along, across, pinnae).x > 1.0;
+}
+
+// Where (`along`, `across`) lies on a fern's frond (`pinnae` from `grass_blade_cut`: whole
+// pairs, its fraction how deep the pinnules are cut): x how far out from a pinnule's (or a
+// pinna's) midline to its margin (above 1: cut away; the rachis is always 0), y how near its
+// midvein (1 on it), z the pinna's own random number, w the pinnule's (0..1).
+//
+// Woodland ferns are cut twice (male fern, lady fern; bracken three times): the frond into
+// 20 to 35 pairs of pinnae, each pinna into 10 to 20 oblong pinnules with rounded, toothed
+// tips, cut almost to the pinna's midrib (the costa), the lowest pinnules the longest and the
+// last few toward the pinna's tip only lobes (Stace, New Flora of the British Isles, 2019;
+// Merryweather, Britain's Ferns, 2020). Without the second cut a frond reads as a palm's leaf
+// or a sword fern's, which is how the fronds looked until 17 Nov 2026.
+fn grass_frond(along: f32, across: f32, pinnae: f32) -> vec4<f32> {
+    let n = floor(pinnae);
+    let detail = saturate(fract(pinnae) * 2.05);
     let a = abs(across);
     if (a < 0.1) {
-        return false;
+        return vec4<f32>(0.0, 1.0, 0.5, 0.5);
     }
-    // Each pinna is a lobe one 1/pinnae of the frond long at the rachis, slanted forward.
-    let t = fract(along * pinnae - a * 0.55 + 0.25);
-    // ...narrowing toward its tip at the frond's edge, with a gap to the next, its margin
-    // finely toothed.
-    let teeth = 0.06 * abs(sin(a * 48.0));
-    let fill = 0.7 * (1.0 - 0.75 * a * a) - teeth;
-    return abs(t - 0.5) * 2.0 > fill;
+    // Each pinna is a lobe one 1/pinnae of the frond long at the rachis, slanted forward,
+    // narrowing toward its tip at the frond's edge, with a gap to the next.
+    let slot = along * n - a * 0.55 + 0.25;
+    let t = fract(slot);
+    let pinna = floor(slot) * 2.0 + select(0.0, 1.0, across > 0.0);
+    let w = abs(t - 0.5) * 2.0;
+    let fill = mix(0.7, 0.84, detail) * (1.0 - 0.75 * a * a);
+    // Its pinnules: one every 1/8 of the way out from the rachis, each slanted toward the
+    // pinna's tip and rounded at its end; the cuts between them reach most of the way in to
+    // the costa, less toward the pinna's tip, where the pinnules merge into lobes. Up close the
+    // pinnae are a little broader, so the pinnules overlap the next pinna's as a lacy whole.
+    let q = (a - 0.1) * 8.0 - w * 0.5;
+    let u = fract(q);
+    let lobe = sqrt(saturate(1.0 - (2.0 * u - 1.0) * (2.0 * u - 1.0)));
+    let depth = detail * 0.84 * (1.0 - smoothstep(0.8, 1.0, a));
+    let teeth = 0.06 * abs(sin(a * 48.0)) * (1.0 - detail) + 0.035 * detail * abs(sin(u * 9.42)) * smoothstep(0.4, 1.0, w / max(fill, 0.05));
+    let limit = max(fill * (1.0 - depth * (1.0 - lobe)) - teeth, 0.01);
+    let edge = w / limit;
+    // The pinnule's midvein runs out from the costa through the middle of the pinnule (where
+    // the cut is not), the costa itself along the pinna's middle.
+    let costa = 1.0 - smoothstep(0.0, 0.07, w);
+    let midvein = (1.0 - smoothstep(0.0, 0.08, abs(u - 0.5))) * detail * smoothstep(0.05, 0.2, w);
+    let pinnule = floor(q);
+    return vec4<f32>(
+        edge,
+        max(costa, midvein * 0.7),
+        hash12(vec2<f32>(pinna, 7.3)),
+        hash12(vec2<f32>(pinna, pinnule)),
+    );
 }
 
 // A dwarf shrub's twig (bilberry, lingonberry) or a bramble's cane (`palmate`, each leaf three

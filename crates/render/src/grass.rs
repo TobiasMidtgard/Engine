@@ -598,7 +598,8 @@ impl GrassStyle {
             height_variation: 0.3,
             width: 0.26,
             bend: 0.7,
-            lush_color: [0.065, 0.16, 0.035],
+            // Deep, slightly bluish green, not lime: a male fern's frond in summer.
+            lush_color: [0.05, 0.13, 0.035],
             dry_color: [0.27, 0.13, 0.045],
             dryness: 0.1,
             wind_response: 0.25,
@@ -612,7 +613,7 @@ impl GrassStyle {
             clump_color: 0.12,
             droop: 0.35,
             gloss: 0.3,
-            tip_tint: [1.12, 1.1, 0.85],
+            tip_tint: [1.06, 1.06, 0.9],
             leaf: 1.0,
             leaf_rise: 0.8,
             stalk: 0.22,
