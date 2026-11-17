@@ -75,11 +75,17 @@ struct SystemTaskMetadata {
     is_send: bool,
     /// Is `true` if the system is exclusive.
     is_exclusive: bool,
+    /// Engine patch (PATCHES.md 1): a decaying maximum of the system's run time in
+    /// nanoseconds, `u32::MAX` until it has run. Below [`inline_ns`] the system runs on the
+    /// thread that ticks the executor instead of as a task.
+    cost_ns: u32,
 }
 
 /// The result of running a system that is sent across a channel.
 struct SystemResult {
     system_index: usize,
+    /// How long the system ran, in nanoseconds (engine patch, PATCHES.md 1).
+    ns: u32,
 }
 
 /// Runs the schedule using a thread pool. Non-conflicting systems can run in parallel.
@@ -127,6 +133,8 @@ pub struct ExecutorState {
     completed_systems: FixedBitSet,
     /// Systems that have run but have not had their buffers applied.
     unapplied_systems: FixedBitSet,
+    /// Engine patch (PATCHES.md 1): the systems a pass runs inline, kept for its allocation.
+    inline_systems: Vec<usize>,
 }
 
 /// References to data required by the executor.
@@ -171,6 +179,7 @@ impl SystemExecutor for MultiThreadedExecutor {
                 dependents: schedule.system_dependents[index].clone(),
                 is_send: schedule.systems[index].system.is_send(),
                 is_exclusive: schedule.systems[index].access.is_exclusive(),
+                cost_ns: u32::MAX,
             });
             // A system with no dependencies is a starting system.
             if schedule.system_dependencies[index] == 0 {
@@ -321,12 +330,17 @@ impl SystemExecutor for MultiThreadedExecutor {
 }
 
 impl<'scope, 'env: 'scope, 'sys> Context<'scope, 'env, 'sys> {
-    fn system_completed(&self, system_index: usize, res: Result<(), Box<dyn Any + Send>>) {
+    fn system_completed(
+        &self,
+        system_index: usize,
+        ns: u32,
+        res: Result<(), Box<dyn Any + Send>>,
+    ) {
         // tell the executor that the system finished
         self.environment
             .executor
             .system_completion
-            .push(SystemResult { system_index })
+            .push(SystemResult { system_index, ns })
             .unwrap_or_else(|error| unreachable!("{}", error));
         if let Err(payload) = res {
             // set the payload to propagate the error
@@ -401,6 +415,7 @@ impl ExecutorState {
             skipped_systems: FixedBitSet::new(),
             completed_systems: FixedBitSet::new(),
             unapplied_systems: FixedBitSet::new(),
+            inline_systems: Vec::new(),
         }
     }
 
@@ -449,6 +464,7 @@ impl ExecutorState {
 
         // can't borrow since loop mutably borrows `self`
         let mut ready_systems = core::mem::take(&mut self.ready_systems_copy);
+        let mut inline = core::mem::take(&mut self.inline_systems);
 
         // Skipping systems may cause their dependents to become ready immediately.
         // If that happens, we need to run again immediately or we may fail to spawn those dependents.
@@ -513,6 +529,15 @@ impl ExecutorState {
                     break;
                 }
 
+                // Engine patch (PATCHES.md 1): a system that has been taking under
+                // `inline_ns` runs here, after this pass has started the others: handing
+                // it to a pool thread and back costs more than the system.
+                let meta = &self.system_task_metadata[system_index];
+                if meta.is_send && meta.cost_ns < inline_ns() {
+                    inline.push(system_index);
+                    continue;
+                }
+
                 // SAFETY:
                 // - Caller ensured no other reference to this system exists.
                 // - `system_task_metadata[system_index].is_exclusive` is `false`,
@@ -522,10 +547,44 @@ impl ExecutorState {
                     self.spawn_system_task(context, system_index);
                 }
             }
+
+            // The pass's inline systems: `can_run` saw each of them as running when it
+            // checked the next, so none conflicts with another or with a spawned task.
+            for system_index in inline.drain(..) {
+                // SAFETY: as for `spawn_system_task`: this system is not running elsewhere,
+                // is not exclusive, and nothing running conflicts with its access.
+                let system = &mut unsafe { &mut *context.environment.systems[system_index].get() }
+                    .system;
+                let started = std::time::Instant::now();
+                let res = handle_errors(
+                    |system| {
+                        // SAFETY: see above.
+                        unsafe {
+                            __rust_begin_short_backtrace::run_unsafe(
+                                system,
+                                context.environment.world_cell,
+                            )
+                        }
+                    },
+                    system,
+                    context.error_handler,
+                    "System panicked",
+                );
+                if let Err(payload) = res {
+                    *context.environment.executor.panic_payload.lock().unwrap() = Some(payload);
+                }
+                self.finish_system_and_handle_dependents(SystemResult {
+                    system_index,
+                    ns: elapsed_ns(started),
+                });
+                // Its dependents may be ready now.
+                check_for_new_ready_systems = true;
+            }
         }
 
         // give back
         self.ready_systems_copy = ready_systems;
+        self.inline_systems = inline;
     }
 
     fn can_run(&mut self, system_index: usize, conditions: &mut Conditions) -> bool {
@@ -643,6 +702,7 @@ impl ExecutorState {
         let system_meta = &self.system_task_metadata[system_index];
 
         let task = async move {
+            let started = std::time::Instant::now();
             let res = handle_errors(
                 |system| {
                     // SAFETY:
@@ -661,7 +721,7 @@ impl ExecutorState {
                 context.error_handler,
                 "System panicked",
             );
-            context.system_completed(system_index, res);
+            context.system_completed(system_index, elapsed_ns(started), res);
         };
 
         if system_meta.is_send {
@@ -694,7 +754,7 @@ impl ExecutorState {
                     world,
                     context.error_handler,
                 );
-                context.system_completed(system_index, res);
+                context.system_completed(system_index, u32::MAX, res);
             };
 
             context.scope.spawn_on_scope(task);
@@ -710,7 +770,7 @@ impl ExecutorState {
                     context.error_handler,
                     "Exclusive system panicked",
                 );
-                context.system_completed(system_index, res);
+                context.system_completed(system_index, u32::MAX, res);
             };
 
             context.scope.spawn_on_scope(task);
@@ -721,7 +781,9 @@ impl ExecutorState {
     }
 
     fn finish_system_and_handle_dependents(&mut self, result: SystemResult) {
-        let SystemResult { system_index, .. } = result;
+        let SystemResult { system_index, ns } = result;
+        let cost = &mut self.system_task_metadata[system_index].cost_ns;
+        *cost = decayed_max(*cost, ns);
 
         if self.system_task_metadata[system_index].is_exclusive {
             self.exclusive_running = false;
@@ -758,6 +820,33 @@ impl ExecutorState {
                 self.ready_systems.insert(dep_idx);
             }
         }
+    }
+}
+
+/// Engine patch (PATCHES.md 1): systems whose recent runs took less than this many
+/// nanoseconds run inline on the thread ticking the executor. `ENGINE_INLINE_SYSTEMS_US`
+/// sets it in microseconds (`0` turns inlining off); 20 µs by default.
+fn inline_ns() -> u32 {
+    static NS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *NS.get_or_init(|| {
+        std::env::var("ENGINE_INLINE_SYSTEMS_US")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map_or(20_000, |us| (us.max(0.0) * 1000.0).min(u32::MAX as f64) as u32)
+    })
+}
+
+fn elapsed_ns(started: std::time::Instant) -> u32 {
+    started.elapsed().as_nanos().min(u32::MAX as u128) as u32
+}
+
+/// The new cost estimate: a run longer than the estimate sets it; shorter runs bring it down
+/// by an eighth of the gap each, so one slow run keeps a system on the pool for a while.
+fn decayed_max(old: u32, ns: u32) -> u32 {
+    if ns >= old || old == u32::MAX {
+        ns
+    } else {
+        old - (old - ns) / 8
     }
 }
 

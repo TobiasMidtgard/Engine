@@ -91,8 +91,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 16
 
-# Rapier 0.36.1 as published on crates.io, with the small fixes listed in
-# third_party/rapier3d/PATCHES.md. Delete this entry (and the folder) to go back to stock.
+# Rapier 0.36.1 and bevy_ecs 0.20.0 as published on crates.io, with the small changes listed
+# in third_party/<crate>/PATCHES.md. Delete an entry (and its folder) to go back to stock.
 [patch.crates-io]
 rapier3d = { path = "third_party/rapier3d" }
 bevy_ecs = { path = "third_party/bevy_ecs" }
