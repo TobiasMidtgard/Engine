@@ -756,8 +756,29 @@ struct Pipelines {
     material_layout: wgpu::BindGroupLayout,
 }
 
-/// One of the static buffers: meshes appended at the end (`used` bytes so far), grown to the
-/// next power of two with what it holds copied on the GPU.
+/// Room for `bytes` and some to grow into: the next power of two while small, a quarter more
+/// past 16 MiB (a power of two left the big buffers up to half empty: 512 MiB of skin buffers
+/// on the PC with every zone in), never past what the device can bind.
+fn grown(device: &wgpu::Device, usage: wgpu::BufferUsages, bytes: u64) -> u64 {
+    const MIB: u64 = 1 << 20;
+    let wanted = if bytes <= 16 * MIB {
+        bytes.next_power_of_two()
+    } else {
+        (bytes + bytes / 4).next_multiple_of(MIB)
+    };
+    let limits = device.limits();
+    let most = if usage.contains(wgpu::BufferUsages::STORAGE) {
+        limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size)
+    } else {
+        limits.max_buffer_size
+    };
+    wanted.min(most & !3).max(bytes.next_multiple_of(4))
+}
+
+/// One of the static buffers: meshes appended at the end (`used` bytes so far), grown with
+/// room to spare (see [`grown`]) and what it holds copied on the GPU.
 struct Packed {
     buffer: wgpu::Buffer,
     capacity: u64,
@@ -775,7 +796,7 @@ impl Packed {
     ) -> Self {
         let usage = usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         // (Storage bindings can't be empty.)
-        let capacity = bytes.max(256).next_power_of_two();
+        let capacity = grown(device, usage, bytes.max(256));
         Self {
             buffer: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -859,12 +880,13 @@ struct OutputBuffer {
 
 impl OutputBuffer {
     fn new(device: &wgpu::Device, bytes: u64) -> Self {
-        let capacity = bytes.max(4096).next_power_of_two();
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX;
+        let capacity = grown(device, usage, bytes.max(4096));
         Self {
             buffer: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("skinned vertices"),
                 size: capacity,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
+                usage,
                 mapped_at_creation: false,
             }),
             capacity,
