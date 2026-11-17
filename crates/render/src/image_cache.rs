@@ -51,8 +51,10 @@
 //! first run after new art pays for it. An image whose pixels change after its first upload (a
 //! map redrawn now and then) stays out of the cache: each version would leave a file.
 //!
-//! Images whose levels don't halve to multiples of 4 texels stay RGBA8, as do
-//! [`TextureUse::Exact`] slots and 16-bit float images. Under a software GPU (lavapipe) nothing
+//! Images whose width or height isn't a multiple of 4 texels stay RGBA8, as do
+//! [`TextureUse::Exact`] slots and 16-bit float images. Smaller levels need not be whole
+//! blocks (1536 halves down to 6 and 3): such a level is compressed from a copy with its edge
+//! texels repeated out to whole blocks. Under a software GPU (lavapipe) nothing
 //! is compressed unless `RenderSettings::texture_compression_on_cpu` says so: building the
 //! encoders takes seconds there and every sample of a compressed texture is decoded in software.
 //!
@@ -239,7 +241,7 @@ impl Encoding {
         mode: TextureCompression,
         usage: TextureUse,
         image: &Image,
-        (width, height, levels): (u32, u32, u32),
+        (width, height, _levels): (u32, u32, u32),
     ) -> Option<Encoding> {
         if mode == TextureCompression::Off
             || usage == TextureUse::Exact
@@ -248,13 +250,10 @@ impl Encoding {
         {
             return None;
         }
-        // Every level at least a block across must be whole blocks (smaller tail levels are
-        // padded by the encoder's clamped reads).
-        let whole = (0..levels).all(|l| {
-            let (w, h) = ((width >> l).max(1), (height >> l).max(1));
-            w < 4 || h < 4 || (w % 4 == 0 && h % 4 == 0)
-        });
-        if !whole {
+        // A block-compressed texture's first level must be whole blocks. Its smaller levels
+        // need not be (1536 halves down to 6 and 3): a block that hangs over a level's edge is
+        // compressed from the level's edge texels repeated (`padded_level`).
+        if !width.is_multiple_of(4) || !height.is_multiple_of(4) {
             return None;
         }
         Some(match usage {
@@ -940,7 +939,7 @@ impl ImageCache {
                 inner.encoding = None;
                 continue;
             }
-            let (texels, spent) = job.queue(compressor, budget);
+            let (texels, spent) = job.queue(gpu, compressor, budget);
             queued += texels;
             cost += spent;
             budget = budget.saturating_sub(spent);
@@ -1637,6 +1636,83 @@ struct Encode {
     /// The next slice: level, and first row (a multiple of 4).
     level: u32,
     row: u32,
+    /// The level being compressed grown to whole blocks, when it isn't ([`padded_level`]).
+    padded: Option<(u32, wgpu::Texture)>,
+}
+
+/// A copy of level `level` of `source` (`width`×`height` texels there) grown to whole 4×4
+/// blocks, the texels past its right and lower edges repeating the edge: what the blocks that
+/// hang over the edge are compressed from. Read straight from the level, the texels past the
+/// edge are black on drivers that guard texture reads (clamped on others), and a block's colors
+/// are then fitted to black texels nobody sees at the cost of the ones at the edge.
+fn padded_level(
+    gpu: &GpuShared,
+    source: &wgpu::Texture,
+    level: u32,
+    (width, height): (u32, u32),
+) -> wgpu::Texture {
+    let (w, h) = (width.next_multiple_of(4), height.next_multiple_of(4));
+    let padded = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("compression source, padded"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: source.format().remove_srgb_suffix(),
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("compression source, padded"),
+        });
+    let mut copy = |from: (u32, u32), to: (u32, u32), size: (u32, u32)| {
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: source,
+                mip_level: level,
+                origin: wgpu::Origin3d {
+                    x: from.0,
+                    y: from.1,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &padded,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: to.0,
+                    y: to.1,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+    };
+    copy((0, 0), (0, 0), (width, height));
+    for x in width..w {
+        copy((width - 1, 0), (x, 0), (1, height));
+    }
+    for y in height..h {
+        copy((0, height - 1), (0, y), (width, 1));
+        for x in width..w {
+            copy((width - 1, height - 1), (x, y), (1, 1));
+        }
+    }
+    // With the frame's submit, ahead of the compression pass queued after it.
+    gpu.submit_with_frame(encoder.finish(), None);
+    padded
 }
 
 impl Encode {
@@ -1684,30 +1760,51 @@ impl Encode {
             },
             level: 0,
             row: 0,
+            padded: None,
         }
     }
 
     /// Queue the next slices (read as plain RGBA8), about `budget` texels of BC7 cost (at least
     /// one block row). Returns the texels queued and their cost.
-    fn queue(&mut self, compressor: &mut GpuBlockCompressor, budget: u64) -> (u64, u64) {
+    fn queue(
+        &mut self,
+        gpu: &GpuShared,
+        compressor: &mut GpuBlockCompressor,
+        budget: u64,
+    ) -> (u64, u64) {
         let source = &self.source;
         let weight = self.encoding.cost();
         let (mut queued, mut cost) = (0, 0);
         while self.level < source.mip_levels && cost < budget {
             let l = self.level;
-            // Levels under a block across are padded by the encoder's clamped reads.
-            let w = (source.width >> l).max(1).next_multiple_of(4);
-            let h = (source.height >> l).max(1).next_multiple_of(4);
+            let level = ((source.width >> l).max(1), (source.height >> l).max(1));
+            let (w, h) = (level.0.next_multiple_of(4), level.1.next_multiple_of(4));
             let row_cost = (w as f32 * weight).max(1.0);
             let fit = (((budget - cost) as f32 / row_cost) as u64).min(h as u64) as u32 / 4 * 4;
             let rows = fit.clamp(4, h - self.row);
-            let view = source.texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("compression source"),
-                format: Some(source.texture.format().remove_srgb_suffix()),
-                base_mip_level: l,
-                mip_level_count: Some(1),
-                ..Default::default()
-            });
+            // A level that isn't whole blocks is read from a copy that is (a texture that
+            // can't be copied from, as generated ones may be, is read as it is: its levels
+            // under a block across then end in whatever the driver reads past an edge).
+            let whole = level == (w, h)
+                || !source
+                    .texture
+                    .usage()
+                    .contains(wgpu::TextureUsages::COPY_SRC);
+            let view = if whole {
+                source.texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("compression source"),
+                    format: Some(source.texture.format().remove_srgb_suffix()),
+                    base_mip_level: l,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            } else {
+                if self.padded.as_ref().is_none_or(|(of, _)| *of != l) {
+                    self.padded = Some((l, padded_level(gpu, &source.texture, l, level)));
+                }
+                let (_, padded) = self.padded.as_ref().expect("made above");
+                padded.create_view(&wgpu::TextureViewDescriptor::default())
+            };
             let offset = self.out.offsets[l as usize]
                 + (self.row / 4) as u64 * (w / 4) as u64 * self.out.block_bytes as u64;
             compressor.add_compression_task(
@@ -1725,6 +1822,7 @@ impl Encode {
             if self.row >= h {
                 self.level += 1;
                 self.row = 0;
+                self.padded = None;
             }
         }
         (queued, cost)
@@ -1891,11 +1989,13 @@ fn upload_labelled(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
+        // Copied from to compress levels that aren't whole blocks (`padded_level`) and to
+        // check a chain drawn on the GPU (tests/gpu_mips.rs).
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
             | if gpu_mips {
-                // Drawn into; copied from to check the chain (tests/gpu_mips.rs).
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+                wgpu::TextureUsages::RENDER_ATTACHMENT
             } else {
                 wgpu::TextureUsages::empty()
             },

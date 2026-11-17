@@ -386,11 +386,94 @@ fn generated_material_maps_compress_and_look_the_same() {
     assert!(max < 64, "a pixel changed a lot: {max}");
 }
 
+/// A quad drawn small, so its texture's smaller levels show, with an image of 200×120 texels:
+/// its levels halve to 50×30, 25×15, 12×7, 6×3, which are not whole 4×4 blocks. The right and
+/// lower edges are bright against a dark middle, where a block fitted to black texels past the
+/// edge would show.
+fn odd_levels_scene(compression: TextureCompression, name: &str) -> Option<(App, RgbaImage)> {
+    let mut app = still_app(compression);
+    let mut image = Image::from_fn(200, 120, true, |x, y| {
+        let edge = x >= 192 || y >= 112;
+        let detail = ((x * 5 + y * 11) % 13) as u8 * 3;
+        if edge {
+            [250, 240 - detail, 200, 255]
+        } else {
+            [40 + detail, 70 + (x / 2) as u8, 30 + y as u8, 255]
+        }
+    });
+    image.generate_mips();
+    let image = add(&mut app, image);
+    // Five quads, each half the size of the one before: about 120 pixels wide down to 8.
+    let places = [
+        (-0.4, 0.45),
+        (-0.8, -0.5),
+        (-0.1, -0.5),
+        (0.3, -0.5),
+        (0.55, -0.5),
+    ];
+    for (i, (x, y)) in places.into_iter().enumerate() {
+        let size = 1.6 / (1 << i) as f32;
+        app.world.spawn((
+            Transform::from_xyz(x, y, 0.0),
+            MeshRenderer::new(
+                Shape::Quad {
+                    size: [size, size * 0.6],
+                },
+                StandardMaterial::color(1.0, 1.0, 1.0)
+                    .with_roughness(0.9)
+                    .with_base_color_texture(image),
+            ),
+        ));
+    }
+    if !run(&mut app, 4, name) || !bc_supported(&app) {
+        return None;
+    }
+    app.update_n(COMPRESS_AFTER_FRAMES as usize + 2);
+    let mut frames = COMPRESS_AFTER_FRAMES + 2;
+    while compression != TextureCompression::Off && cache(&app).compressed < 1 && frames < 2000 {
+        app.update();
+        frames += 1;
+    }
+    let shot = shot(&mut app, name);
+    Some((app, shot))
+}
+
+#[test]
+fn an_image_whose_smaller_levels_are_not_whole_blocks_compresses_and_looks_the_same() {
+    let Some((_, plain)) = odd_levels_scene(TextureCompression::Off, "odd_plain") else {
+        return;
+    };
+    let Some((app, compressed)) = odd_levels_scene(TextureCompression::Quality, "odd_bc7") else {
+        return;
+    };
+    let stats = cache(&app);
+    assert_eq!(stats.compressed, 1, "the image is compressed: {stats:?}");
+    let renderer = app.world.resource::<Renderer>();
+    let images = app.world.resource::<Assets<Image>>();
+    let formats: Vec<_> = images
+        .iter()
+        .filter_map(|(h, _)| {
+            renderer
+                .shared
+                .image_texture_for(images, h, TextureUse::Color)
+        })
+        .map(|t| (t.format(), t.mip_levels))
+        .collect();
+    assert!(
+        formats.contains(&(wgpu::TextureFormat::Bc7RgbaUnormSrgb, 8)),
+        "BC7 with every level: {formats:?}"
+    );
+    let (mean, max) = difference(&plain, &compressed);
+    eprintln!("odd levels, BC7 vs RGBA8: mean {mean:.3}, max {max}");
+    assert!(mean < 1.5, "the picture changed: mean {mean}");
+    assert!(max < 24, "a pixel changed a lot: {max}");
+}
+
 #[test]
 fn images_that_dont_split_into_blocks_and_exact_slots_stay_rgba8() {
     let mut app = still_app(TextureCompression::Quality);
-    // 100 → 50 → 25: the third level isn't whole 4×4 blocks.
-    let mut odd = Image::from_fn(100, 100, true, |x, _| [x as u8, 90, 40, 255]);
+    // 102 texels are not whole 4×4 blocks.
+    let mut odd = Image::from_fn(102, 102, true, |x, _| [x as u8, 90, 40, 255]);
     odd.generate_mips();
     let odd = add(&mut app, odd);
     let lut = add(&mut app, photo(64));
