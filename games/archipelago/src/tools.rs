@@ -458,7 +458,11 @@ pub fn ghost(world: &mut World) {
             let base = DVec3::new(c.x, grid::base_height(kind, origin, rot), c.y);
             let yaw = grid::yaw(rot);
             let q = Quat::from_rotation_y(yaw);
-            for piece in look(kind, Tier::Fisherfolk, 7) {
+            let biome = crate::island::island_at(c.x, c.y)
+                .map_or(crate::globe::Biome::Temperate, |i| {
+                    crate::island::islands()[i].biome()
+                });
+            for piece in look(kind, Tier::Fisherfolk, 7, biome) {
                 let Some(model) = art.models.get(piece.model) else {
                     continue;
                 };

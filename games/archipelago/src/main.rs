@@ -29,6 +29,7 @@ mod island;
 mod logistics;
 mod looks;
 mod orders;
+mod regional;
 mod sea;
 mod sim;
 mod streets;

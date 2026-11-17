@@ -153,7 +153,7 @@ fn good_cell(g: Good) -> El {
 }
 
 fn top_bar() -> El {
-    // Two rows of six goods.
+    // Rows of six goods.
     let row = |goods: &[Good]| {
         El::new()
             .class("row")
@@ -163,8 +163,7 @@ fn top_bar() -> El {
     let goods = El::new()
         .class("col")
         .with_style(|s| s.gap(4.0))
-        .child(row(&Good::ALL[..6]))
-        .child(row(&Good::ALL[6..]));
+        .children(Good::ALL.chunks(6).map(row));
     let speed = El::new()
         .class("row")
         .with_style(|s| s.gap(8.0))

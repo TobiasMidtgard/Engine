@@ -229,7 +229,12 @@ pub fn place(
             seed,
             id,
         },
-        Look(Arc::new(look(kind, tier, seed))),
+        Look(Arc::new(look(
+            kind,
+            tier,
+            seed,
+            island::islands()[isle].biome(),
+        ))),
     ));
     if kind == Kind::House {
         e.insert(House::new(tier));
@@ -247,7 +252,10 @@ pub fn place(
     }
     clear_trees(world, &cells);
     match kind {
-        Kind::GrainFarm | Kind::HopFarm => paint_cells(world, &cells, "dirt"),
+        Kind::GrainFarm | Kind::HopFarm | Kind::CanePlantation | Kind::DateGrove => {
+            paint_cells(world, &cells, "dirt")
+        }
+        Kind::SaltWorks => paint_cells(world, &cells, "sand"),
         Kind::ClayPit => paint_cells(world, &cells, "mud"),
         Kind::Market => paint_cells(world, &cells, "gravel"),
         Kind::Harbour => {
@@ -255,12 +263,7 @@ pub fn place(
         }
         _ => {}
     }
-    if def.site == Site::Land
-        && kind != Kind::GrainFarm
-        && kind != Kind::HopFarm
-        && kind != Kind::SheepFarm
-        && kind != Kind::House
-    {
+    if def.site == Site::Land && !crate::fields::is_farm(kind) && kind != Kind::House {
         // A trodden yard round the building (houses keep their grass: they have gardens).
         paint_cells(world, &cells, "dirt");
     }
@@ -657,12 +660,31 @@ pub fn refresh(world: &mut World) {
     let grid_cells: HashSet<IVec2> = world.resource::<Grid>().cells.keys().copied().collect();
     let mut q = world.query::<(&Building, &mut Producer, Option<&crate::fields::Fields>)>();
     for (b, mut p, fields) in q.iter_mut(world) {
-        if b.kind != Kind::Woodcutter {
+        if !matches!(b.kind, Kind::Woodcutter | Kind::TrapperLodge) {
             p.site = crate::fields::share(b.kind, fields);
             continue;
         }
         let r = b.kind.def().reach;
         let (w, d) = b.kind.footprint(b.rot);
+        if b.kind == Kind::TrapperLodge {
+            // Trappers want wild country: land in reach with nothing built on it.
+            let (mut wild, mut all) = (0.0f32, 0.0f32);
+            for z in -r..d + r {
+                for x in -r..w + r {
+                    let c = b.origin + IVec2::new(x, z);
+                    let m = grid::cell_center(c);
+                    all += 1.0;
+                    if !grid_cells.contains(&c)
+                        && island::island_at(m.x, m.y) == Some(b.island)
+                        && grid::cell_height(c) > 0.9
+                    {
+                        wild += 1.0;
+                    }
+                }
+            }
+            p.site = (wild / all.max(1.0) / 0.7).min(1.0);
+            continue;
+        }
         let mut n = 0.0;
         for z in -r..d + r {
             for x in -r..w + r {

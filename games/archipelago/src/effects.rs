@@ -12,7 +12,7 @@ use engine_vfx::{
 
 use crate::build::MovingParts;
 use crate::defs::{Kind, Tier};
-use crate::globe::Frame;
+use crate::globe::{Biome, Frame};
 use crate::grid;
 use crate::sim::{Building, House, Producer};
 use crate::vessels::Craft;
@@ -160,9 +160,21 @@ pub struct Riding {
 }
 
 /// Chimney tops of a building, in its own space, and which effect each one plays.
-pub fn chimneys(kind: Kind, tier: Tier, seed: u64) -> Vec<(Vec3, &'static str)> {
+pub fn chimneys(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<(Vec3, &'static str)> {
     let v = crate::looks::variant(seed);
     match kind {
+        // Far houses: no hearth smoke in the heat; a stone chimney in the north.
+        Kind::House if matches!(biome, Biome::Tropical | Biome::Arid) => vec![],
+        Kind::House if biome == Biome::Arctic => match tier {
+            Tier::Fisherfolk => {
+                let x = if v == 2 { -1.98 } else { 1.98 };
+                vec![(Vec3::new(x, 6.2, -0.2), "isle.chimney")]
+            }
+            Tier::Labourers => vec![(Vec3::new(2.4, 9.9, -0.4), "isle.chimney")],
+        },
+        Kind::Distillery => vec![(Vec3::new(6.6, 13.7, -7.0), "isle.stack")],
+        Kind::OilWorks => vec![(Vec3::new(6.9, 12.2, -6.9), "isle.stack")],
+        Kind::TrapperLodge => vec![(Vec3::new(-4.82, 5.9, -1.0), "isle.chimney")],
         Kind::House => match tier {
             Tier::Fisherfolk => {
                 let x = if v == 2 { -2.24 } else { 2.24 };
@@ -182,13 +194,14 @@ pub fn add_plumes(world: &mut World, e: Entity) {
     let Some(b) = world.get::<Building>(e).cloned() else {
         return;
     };
-    let n = chimneys(b.kind, Tier::Fisherfolk, b.seed).len();
+    let biome = crate::island::islands()[b.island].biome();
+    let n = chimneys(b.kind, Tier::Fisherfolk, b.seed, biome).len();
     for slot in 0..n {
         let p = world
             .spawn((
                 Name::new("chimney smoke"),
                 Transform::default(),
-                ParticleEffect::new(chimneys(b.kind, Tier::Fisherfolk, b.seed)[slot].1),
+                ParticleEffect::new(chimneys(b.kind, Tier::Fisherfolk, b.seed, biome)[slot].1),
                 Plume {
                     building: e,
                     slot: slot as u8,
@@ -230,7 +243,8 @@ pub fn tend_plumes(world: &mut World, mut timer: Local<f32>) {
                 if eff > 0.05 { 0.4 + 0.6 * eff } else { 0.0 },
             )
         };
-        let spots = chimneys(b.kind, tier, b.seed);
+        let biome = crate::island::islands()[b.island].biome();
+        let spots = chimneys(b.kind, tier, b.seed, biome);
         let Some(&(local, name)) = spots.get(plume.slot as usize) else {
             continue;
         };

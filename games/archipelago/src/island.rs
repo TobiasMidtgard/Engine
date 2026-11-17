@@ -195,6 +195,7 @@ fn far_lands() -> Vec<Island> {
             Fertility {
                 clay: true,
                 grain: true,
+                cane: true,
                 ..none
             },
             Some((6, 520.0)),
@@ -208,7 +209,11 @@ fn far_lands() -> Vec<Island> {
             (0.4, 0.15),
             103,
             0.6,
-            Fertility { hops: true, ..none },
+            Fertility {
+                hops: true,
+                cane: true,
+                ..none
+            },
             Some((5, 260.0)),
         ),
         land(
@@ -232,7 +237,11 @@ fn far_lands() -> Vec<Island> {
             (2.2, 0.4),
             109,
             0.8,
-            Fertility { clay: true, ..none },
+            Fertility {
+                clay: true,
+                cane: true,
+                ..none
+            },
             None,
         ),
         // --- The Amber Reach: dry hills and thorn savanna (islands 9..=11).
@@ -248,6 +257,7 @@ fn far_lands() -> Vec<Island> {
             Fertility {
                 wool: true,
                 clay: true,
+                dates: true,
                 ..none
             },
             Some((10, 560.0)),
@@ -261,7 +271,12 @@ fn far_lands() -> Vec<Island> {
             (4.4, 0.3),
             223,
             0.08,
-            Fertility { wool: true, ..none },
+            Fertility {
+                wool: true,
+                salt: true,
+                dates: true,
+                ..none
+            },
             Some((9, 280.0)),
         ),
         land(
@@ -273,7 +288,7 @@ fn far_lands() -> Vec<Island> {
             (0.0, 0.8),
             227,
             0.1,
-            none,
+            Fertility { salt: true, ..none },
             None,
         ),
         // --- Frostholm: ice and dark spruce (islands 12..=15).
@@ -286,7 +301,12 @@ fn far_lands() -> Vec<Island> {
             (5.6, 0.5),
             307,
             0.32,
-            Fertility { wool: true, ..none },
+            Fertility {
+                wool: true,
+                furs: true,
+                oil: true,
+                ..none
+            },
             Some((13, 480.0)),
         ),
         land(
@@ -298,7 +318,7 @@ fn far_lands() -> Vec<Island> {
             (2.8, 0.5),
             311,
             0.2,
-            none,
+            Fertility { oil: true, ..none },
             Some((12, 230.0)),
         ),
         land(
@@ -310,7 +330,11 @@ fn far_lands() -> Vec<Island> {
             (1.0, 0.6),
             313,
             0.25,
-            none,
+            Fertility {
+                furs: true,
+                oil: true,
+                ..none
+            },
             None,
         ),
         land(
@@ -322,7 +346,7 @@ fn far_lands() -> Vec<Island> {
             (3.3, 0.7),
             317,
             0.1,
-            none,
+            Fertility { oil: true, ..none },
             None,
         ),
     ]
@@ -346,6 +370,21 @@ pub fn settle_spot(isle: &Island) -> Option<DVec2> {
     let t = isle.settle_toward?;
     let dir = (islands()[t].center - isle.center).normalize();
     Some(isle.center + dir * isle.radius * 0.92)
+}
+
+/// Where the shore lies on the way out from the land's middle through its settlement spot:
+/// the harbour of its first town goes here.
+pub fn settle_coast(isle: &Island) -> Option<DVec2> {
+    let spot = settle_spot(isle)?;
+    let dir = (spot - isle.center).normalize();
+    let mut p = spot - dir * 600.0;
+    for _ in 0..400 {
+        if height(p.x, p.y) < 0.5 {
+            break;
+        }
+        p += dir * 5.0;
+    }
+    Some(p)
 }
 
 /// 1 on the calm ground around `isle`'s settlement, 0 beyond `reach` times its calm radius.

@@ -99,6 +99,13 @@ const PAINTED: &[(&str, &str)] = &[
         "isle_market",
         include_str!("../assets/icons/isle_market.svg"),
     ),
+    // Goods of the far regions.
+    ("isle_cane", include_str!("../assets/icons/isle_cane.svg")),
+    ("isle_rum", include_str!("../assets/icons/isle_rum.svg")),
+    ("isle_dates", include_str!("../assets/icons/isle_dates.svg")),
+    ("isle_salt", include_str!("../assets/icons/isle_salt.svg")),
+    ("isle_furs", include_str!("../assets/icons/isle_furs.svg")),
+    ("isle_oil", include_str!("../assets/icons/isle_oil.svg")),
 ];
 
 /// Every icon as (name, svg).

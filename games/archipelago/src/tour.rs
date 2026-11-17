@@ -17,6 +17,9 @@ enum Aim {
     Island(usize),
     /// Where an island's settlement meets the sea.
     Settle(usize),
+    /// The middle of a far land's first town ([`crate::town::far_site`]); the view's yaw is
+    /// relative to the way inland from its quay.
+    FarTown(usize),
     /// The first building of this kind on an island.
     Kind(crate::defs::Kind, usize),
     /// The first vessel of this craft.
@@ -126,6 +129,103 @@ fn views() -> Vec<View> {
             pitch_deg: Some(14.0),
             ..v("frostholm_coast", Aim::Island(12), 2.2, 1_800.0)
         },
+        // The first towns of the three far regions (the camera looks inland over the quay).
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(27.0),
+            shift: (-88.0, 19.0),
+            ..v("sarrowmere_town", Aim::Settle(5), 2.4, 380.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(27.0),
+            ..v("amber_town", Aim::FarTown(9), 0.45, 300.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(27.0),
+            ..v("frost_town", Aim::FarTown(12), 0.45, 380.0)
+        },
+        // Their streets, fields and works.
+        View {
+            clean: true,
+            pitch_deg: Some(21.0),
+            ..v("stilt_street", Aim::Kind(K::Market, 5), 4.1, 95.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(26.0),
+            ..v("cane_fields", Aim::Kind(K::CanePlantation, 5), 2.9, 150.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(24.0),
+            ..v("distillery", Aim::Kind(K::Distillery, 5), -0.3, 55.0)
+        },
+        View {
+            pitch_deg: Some(30.0),
+            ..v("sarrowmere_hud", Aim::Kind(K::Market, 5), 2.0, 260.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(27.0),
+            shift: (60.0, -13.0),
+            ..v("palm_key", Aim::Settle(6), 4.31, 300.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(21.0),
+            ..v("adobe_street", Aim::Kind(K::Market, 9), 4.47, 95.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(35.0),
+            ..v("amber_quay", Aim::Kind(K::Harbour, 9), 4.7, 200.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(26.0),
+            ..v("date_grove", Aim::Kind(K::DateGrove, 9), 3.9, 120.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(28.0),
+            ..v("salt_pans", Aim::Kind(K::SaltWorks, 10), 1.33, 80.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(27.0),
+            shift: (-60.0, 23.0),
+            ..v("saltholm", Aim::Settle(10), 1.33, 320.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(21.0),
+            ..v("cabin_street", Aim::Kind(K::Market, 12), 1.34, 95.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(20.0),
+            ..v("trapper", Aim::Kind(K::TrapperLodge, 12), 0.6, 42.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("oil_works", Aim::Kind(K::OilWorks, 12), 0.9, 70.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(27.0),
+            shift: (60.0, -24.0),
+            ..v("whalers_rock", Aim::Settle(13), 4.48, 300.0)
+        },
         v("town", Aim::Town, 0.6, 330.0),
         View {
             clean: true,
@@ -185,7 +285,11 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
             DVec3::new(c.x, 0.0, c.y)
         }
         Aim::Settle(i) => {
-            let c = crate::island::settle_spot(islands().get(*i)?)?;
+            let c = crate::island::settle_coast(islands().get(*i)?)?;
+            DVec3::new(c.x, 0.0, c.y)
+        }
+        Aim::FarTown(i) => {
+            let (_, c) = crate::town::far_site(*i)?;
             DVec3::new(c.x, 0.0, c.y)
         }
         Aim::Kind(k, isle) => {
@@ -208,6 +312,13 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
 
 /// The heading of the craft a view follows (0 for other views).
 fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
+    if let Aim::FarTown(i) = aim {
+        // The yaw that looks from the quay to the town's middle.
+        return crate::town::far_site(*i).map_or(0.0, |(quay, mid)| {
+            let d = (mid - quay).normalize_or_zero();
+            (-d.x).atan2(-d.y) as f32
+        });
+    }
     let Aim::Craft(c) = aim else {
         return 0.0;
     };
@@ -312,7 +423,12 @@ pub fn run(mut app: App, only: Option<&str>) {
             fog.shown = view.fog;
         }
         let t0 = std::time::Instant::now();
-        settle(&mut app, 240.0);
+        // (A software renderer at 1440p needs longer: ARCH_TOUR_SETTLE_S.)
+        let cap = std::env::var("ARCH_TOUR_SETTLE_S")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(240.0);
+        settle(&mut app, cap);
         // Exposure and the environment, following a moving craft.
         for _ in 0..8 {
             if matches!(view.aim, Aim::Craft(_))

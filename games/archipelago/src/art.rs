@@ -45,6 +45,10 @@ pub enum Mat {
     Clay,
     Lamp,
     Copper,
+    /// Lying snow, and salt.
+    Snow,
+    /// Still brine in a salt pan.
+    Brine,
 }
 
 impl Mat {
@@ -924,6 +928,30 @@ pub fn make_mats(world: &mut World) -> Mats {
     map.insert(
         Mat::Copper,
         add_mat(world, plain(0.25, 0.48, 0.4, 0.5, 0.4)),
+    );
+    map.insert(
+        Mat::Snow,
+        add_mat(
+            world,
+            StandardMaterial {
+                base_color: [0.9, 0.92, 0.96, 1.0],
+                perceptual_roughness: 0.9,
+                subsurface: 0.3,
+                ..Default::default()
+            },
+        ),
+    );
+    map.insert(
+        Mat::Brine,
+        add_mat(
+            world,
+            StandardMaterial {
+                base_color: [0.78, 0.84, 0.82, 1.0],
+                perceptual_roughness: 0.22,
+                reflectance: 0.5,
+                ..Default::default()
+            },
+        ),
     );
     map.insert(
         Mat::Lamp,

@@ -180,6 +180,55 @@ I['isle_market'] = svg(
     '<path d="M4 34 C8 38 12 38 16 34 C20 38 24 38 28 34 C32 38 36 38 40 34 C44 38 48 38 52 34 C56 38 60 38 60 34" fill="#f6efe0" stroke="#2a1708" stroke-width="2"/>'
     f'<g {O} stroke-width="1.8"><circle cx="22" cy="47" r="5" fill="#e0a43a"/><circle cx="33" cy="48" r="5" fill="#8fbf4a"/><circle cx="43" cy="47" r="5" fill="#d0532e"/></g>'
     '<g fill="#fff" opacity=".7"><circle cx="20.5" cy="45.5" r="1.3"/><circle cx="31.5" cy="46.5" r="1.3"/><circle cx="41.5" cy="45.5" r="1.3"/></g>')
+# --- Goods of the far regions.
+I['isle_cane'] = svg(
+    lg('cn', (0, '#e6dc7a'), (.5, '#b9b84a'), (1, '#7c8a2a'), x2=1, y2=0) + lg('cl', (0, '#8fd05a'), (1, '#3f7a26')),
+    shadow(32, 58, 22, 4) +
+    ''.join(f'<g {O}><path d="M{x} 58 L{x+dx} 16 L{x+dx+7} 16 L{x+7} 58 Z" fill="url(#cn)"/></g>'
+            + ''.join(f'<path d="M{x + dx*(58-y)/42:.1f} {y} L{x + dx*(58-y)/42 + 7:.1f} {y}" stroke="#5a5a16" stroke-width="1.6"/>' for y in (26, 36, 46))
+            for x, dx in ((14, 4), (27, 0), (40, -4))) +
+    f'<g {O} stroke-width="2" fill="url(#cl)"><path d="M21 17 C14 10 8 10 3 14 C10 14 15 17 19 22 Z"/><path d="M22 16 C24 8 30 4 37 4 C31 8 28 13 26 18 Z"/><path d="M40 16 C46 9 53 8 60 12 C53 13 47 17 43 22 Z"/><path d="M38 16 C36 9 31 6 26 7 C31 10 33 14 34 19 Z"/></g>'
+    '<path d="M17 54 L20.4 20 M30 54 L30 20 M43 54 L39.6 20" stroke="#fff6b0" stroke-width="1.6" opacity=".7"/>')
+I['isle_rum'] = svg(
+    lg('rb', (0, '#7a4a22'), (.45, '#b9722e'), (1, '#4a2810'), x2=1, y2=0) + lg('rl', (0, '#fbf3d8'), (1, '#d8c79a')),
+    shadow(32, 59, 18, 4) +
+    f'<g {O}><path d="M26 6 L38 6 L38 12 L26 12 Z" fill="#c8a06a"/><path d="M27 12 L37 12 L37 22 C37 27 47 29 47 37 L47 54 C47 57 45 58 42 58 L22 58 C19 58 17 57 17 54 L17 37 C17 29 27 27 27 22 Z" fill="url(#rb)"/><path d="M19 38 L45 38 L45 51 L19 51 Z" fill="url(#rl)"/></g>'
+    '<path d="M25 44.5 L39 44.5" stroke="#7a2a1a" stroke-width="2.6" stroke-linecap="round"/><path d="M27 48 L37 48" stroke="#8a7a52" stroke-width="1.2"/>'
+    '<path d="M22 33 C22 29 29 27 30 22 L30 14" fill="none" stroke="#f0b870" stroke-width="2" opacity=".75"/>')
+I['isle_dates'] = svg(
+    rg('dt', (0, '#e9a05a'), (.6, '#a8521e'), (1, '#5e2a0c'), cx=.38, cy=.32, r=.75) + lg('dl', (0, '#9fd05a'), (1, '#4a7a26')),
+    shadow(32, 58, 22, 4) +
+    '<path d="M32 6 L32 22 M32 16 L20 26 M32 16 L44 26 M32 22 L26 36 M32 22 L38 36" fill="none" stroke="#2a1708" stroke-width="4" stroke-linecap="round"/>'
+    '<path d="M32 6 L32 22 M32 16 L20 26 M32 16 L44 26 M32 22 L26 36 M32 22 L38 36" fill="none" stroke="#b08a3a" stroke-width="1.8" stroke-linecap="round"/>' +
+    ''.join(f'<g {O} stroke-width="2"><ellipse cx="{x}" cy="{y}" rx="5.2" ry="7.6" transform="rotate({a} {x} {y})" fill="url(#dt)"/></g>'
+            f'<ellipse cx="{x-1.6}" cy="{y-2.6}" rx="1.3" ry="2.4" transform="rotate({a} {x} {y})" fill="#ffd9a0" opacity=".75"/>'
+            for x, y, a in ((18, 32, 18), (46, 32, -18), (32, 30, 0), (24, 44, 10), (40, 44, -10), (32, 50, 0))) +
+    f'<g {O} stroke-width="2" fill="url(#dl)"><path d="M33 7 C40 2 50 2 58 8 C50 8 43 10 37 13 Z"/></g>')
+I['isle_salt'] = svg(
+    lg('sa', (0, '#ffffff'), (.6, '#e6eef2'), (1, '#a9bcc6')) + lg('sw', (0, '#c8965e'), (1, '#6e4a26')),
+    shadow(32, 57, 26, 5) +
+    f'<g {O}><path d="M6 54 C14 34 24 18 32 12 C40 18 50 34 58 54 Z" fill="url(#sa)"/></g>'
+    '<path d="M32 14 C26 22 20 34 16 46" fill="none" stroke="#ffffff" stroke-width="3" opacity=".95" stroke-linecap="round"/>'
+    '<path d="M36 22 C42 30 47 40 51 50" fill="none" stroke="#9fb4c0" stroke-width="2" opacity=".7" stroke-linecap="round"/>'
+    f'<g {O} stroke-width="1.8" fill="#f6fafc"><path d="M22 40 L28 38 L30 44 L24 46 Z"/><path d="M36 44 L43 43 L44 50 L37 51 Z"/><path d="M29 28 L34 27 L35 32 L30 33 Z"/></g>'
+    f'<g {O} stroke-width="2.2"><path d="M40 60 L58 46 L62 50 L46 62 Z" fill="url(#sw)"/></g>'
+    '<g fill="#fff"><path d="M12 14 L13.4 18.6 L18 20 L13.4 21.4 L12 26 L10.6 21.4 L6 20 L10.6 18.6 Z"/><path d="M52 8 L53 11 L56 12 L53 13 L52 16 L51 13 L48 12 L51 11 Z"/></g>')
+I['isle_furs'] = svg(
+    lg('fu', (0, '#c89058'), (.5, '#8a5428'), (1, '#4e2c10')) + rg('fb', (0, '#f4e2c0'), (1, '#c79a62'), cx=.5, cy=.4, r=.6),
+    shadow(32, 59, 24, 4) +
+    f'<g {O}><path d="M26 4 L38 4 L40 12 L56 10 L60 20 L48 26 L50 40 L60 50 L52 58 L40 52 L32 60 L24 52 L12 58 L4 50 L14 40 L16 26 L4 20 L8 10 L24 12 Z" fill="url(#fu)"/></g>'
+    '<path d="M27 12 L37 12 L40 26 L41 42 L32 52 L23 42 L24 26 Z" fill="url(#fb)" opacity=".9"/>'
+    '<g stroke="#5e3614" stroke-width="1.4" stroke-linecap="round" opacity=".8"><path d="M12 16 L15 20 M50 16 L47 20 M10 49 L14 46 M54 49 L50 46 M20 30 L22 34 M44 30 L42 34 M28 20 L29 24 M35 20 L34 24 M30 34 L30 38 M34 40 L34 44"/></g>'
+    '<path d="M27 6 L25 13 L10 12" fill="none" stroke="#f0c088" stroke-width="1.6" opacity=".8"/>')
+I['isle_oil'] = svg(
+    lg('ob', (0, '#f2d27a'), (.5, '#c8962e'), (1, '#7a5210'), x2=1, y2=0) + rg('og', (0, '#fff8d0'), (.5, '#ffd24a'), (1, '#e0761a'), cx=.5, cy=.6, r=.6) + lg('ogl', (0, '#eef6fa'), (1, '#b8ccd6'), x2=1, y2=0),
+    shadow(32, 59, 20, 4) +
+    f'<g {O}><path d="M24 30 C18 22 22 8 32 4 C42 8 46 22 40 30 Z" fill="url(#ogl)" fill-opacity=".85"/></g>'
+    f'<g {O} stroke-width="1.6"><path d="M32 12 C37 18 37 24 32 28 C27 24 27 18 32 12 Z" fill="url(#og)"/></g>'
+    f'<g {O}><path d="M22 30 L42 30 L42 36 L22 36 Z" fill="url(#ob)"/><path d="M20 36 L44 36 C52 42 52 52 46 56 L18 56 C12 52 12 42 20 36 Z" fill="url(#ob)"/><path d="M14 56 L50 56 L50 60 L14 60 Z" fill="url(#ob)"/></g>'
+    f'<g {O} stroke-width="2"><circle cx="50" cy="33" r="3.2" fill="#c8962e"/></g>'
+    '<path d="M22 40 C18 44 18 50 21 53" fill="none" stroke="#fff0b8" stroke-width="2.2" opacity=".8" stroke-linecap="round"/>'
+    '<path d="M27 10 C24 15 24 22 26 27" fill="none" stroke="#ffffff" stroke-width="1.6" opacity=".8" stroke-linecap="round"/>')
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
 import re

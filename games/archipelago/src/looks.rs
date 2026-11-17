@@ -10,6 +10,7 @@ use engine::prelude::*;
 
 use crate::art::{Mat, Parts, hexc, shade, v3};
 use crate::defs::{CELL_M, Kind, Tier};
+use crate::globe::Biome;
 
 /// A model's name in the art registry.
 pub type ModelKey = &'static str;
@@ -113,6 +114,45 @@ pub const MODELS: &[ModelKey] = &[
     "walker_2_0",
     "walker_2_1",
     "walker_2_2",
+    // The far regions (regional.rs).
+    "stilt_0",
+    "stilt_1",
+    "stilt_2",
+    "gallery_0",
+    "gallery_1",
+    "gallery_2",
+    "adobe_0",
+    "adobe_1",
+    "adobe_2",
+    "riad_0",
+    "riad_1",
+    "riad_2",
+    "cabin_0",
+    "cabin_1",
+    "cabin_2",
+    "lodge_0",
+    "lodge_1",
+    "lodge_2",
+    "cane_cell",
+    "cane_shed",
+    "distillery",
+    "date_palm",
+    "date_house",
+    "mud_wall_4",
+    "salt_pan",
+    "salt_heap",
+    "salt_house",
+    "windpump",
+    "trapper",
+    "pelt_frame",
+    "sled",
+    "husky",
+    "oil_works",
+    "snow_drift",
+    "fish_rack",
+    "jar",
+    "canoe",
+    "banana",
 ];
 
 /// Which of a model's three variants a building with this seed gets.
@@ -120,8 +160,9 @@ pub fn variant(seed: u64) -> usize {
     (h01(seed, 1) * 3.0) as usize % 3
 }
 
-/// The pieces a building is drawn with (without its moving parts).
-pub fn look(kind: Kind, tier: Tier, seed: u64) -> Vec<Piece> {
+/// The pieces a building is drawn with (without its moving parts), in the style of the
+/// climate it stands in.
+pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
     let v = variant(seed);
     let (w, d) = kind.def().size;
     let (hw, hd) = (
@@ -131,6 +172,15 @@ pub fn look(kind: Kind, tier: Tier, seed: u64) -> Vec<Piece> {
     let mut out = Vec::new();
     match kind {
         Kind::Road => {}
+        Kind::House if biome != Biome::Temperate => {
+            crate::regional::house_look(biome, tier, seed, &mut out);
+        }
+        Kind::CanePlantation
+        | Kind::Distillery
+        | Kind::DateGrove
+        | Kind::SaltWorks
+        | Kind::TrapperLodge
+        | Kind::OilWorks => crate::regional::works_look(kind, seed, hw, hd, &mut out),
         Kind::House => {
             let key: ModelKey = match (tier, v) {
                 (Tier::Fisherfolk, 0) => "cottage_0",
@@ -362,12 +412,32 @@ pub fn look(kind: Kind, tier: Tier, seed: u64) -> Vec<Piece> {
             }
         }
     }
+    // What the climate adds to any building: snow drifted into the corners of a northern lot.
+    if biome == Biome::Arctic && !matches!(kind, Kind::Road | Kind::House | Kind::Harbour) {
+        for k in 0..3u64 {
+            if h01(seed, 880 + k) < 0.55 {
+                let sx = if h01(seed, 884 + k) < 0.5 { -1.0 } else { 1.0 };
+                out.push(
+                    Piece::at(
+                        "snow_drift",
+                        v3(
+                            sx * (hw - 1.4),
+                            0.0,
+                            -hd + 1.4 + h01(seed, 888 + k) * (hd * 1.2),
+                        ),
+                    )
+                    .yaw(h01(seed, 892 + k) * TAU)
+                    .scale(0.8 + 0.8 * h01(seed, 896 + k)),
+                );
+            }
+        }
+    }
     out
 }
 
 // ------------------------------------------------------------------------------ models
 
-const WHITE: Vec4 = Vec4::new(0.92, 0.9, 0.85, 1.0);
+pub(crate) const WHITE: Vec4 = Vec4::new(0.92, 0.9, 0.85, 1.0);
 
 fn plaster_col(v: usize) -> Vec4 {
     match v {
@@ -2343,7 +2413,7 @@ fn fence_4() -> Parts {
 
 /// A pair of painted shutters either side of a window `w` × `h` centred on `at`, on a wall
 /// that faces +Z.
-fn shutters(p: &mut Parts, at: Vec3, w: f32, h: f32, col: Vec4) {
+pub(crate) fn shutters(p: &mut Parts, at: Vec3, w: f32, h: f32, col: Vec4) {
     for s in [-1.0, 1.0] {
         let x = at.x + s * (w * 0.5 + 0.24);
         p.cuboid(
@@ -2386,7 +2456,7 @@ fn flower_box(p: &mut Parts, at: Vec3, w: f32, bloom: Vec4) {
 }
 
 /// A rounded leafy lump standing on `base`: `r` across at its widest, `h` high.
-fn lump(p: &mut Parts, m: Mat, base: Vec3, r: f32, h: f32, col: Vec4) {
+pub(crate) fn lump(p: &mut Parts, m: Mat, base: Vec3, r: f32, h: f32, col: Vec4) {
     let rings = [(0.0, 0.5), (0.3, 1.0), (0.66, 0.84), (1.0, 0.2)];
     for k in 0..3 {
         let (y0, r0) = rings[k];
@@ -2694,7 +2764,9 @@ pub fn build_model(key: ModelKey) -> Parts {
         "bench" => bench(),
         "hand_cart" => hand_cart(),
         "tub_shrub" => tub_shrub(),
-        _ => crate::walkers::build(key).unwrap_or_default(),
+        _ => crate::regional::build(key)
+            .or_else(|| crate::walkers::build(key))
+            .unwrap_or_default(),
     }
 }
 
@@ -2722,11 +2794,25 @@ mod tests {
             if d.kind == Kind::Road {
                 continue;
             }
-            let l = look(d.kind, Tier::Fisherfolk, 7);
-            assert!(!l.is_empty(), "{:?}", d.kind);
-            for piece in &l {
-                assert!(MODELS.contains(&piece.model), "{}", piece.model);
+            for biome in [
+                Biome::Temperate,
+                Biome::Tropical,
+                Biome::Arid,
+                Biome::Arctic,
+            ] {
+                for tier in Tier::ALL {
+                    for seed in [7, 8, 9, 1234] {
+                        let l = look(d.kind, tier, seed, biome);
+                        assert!(!l.is_empty(), "{:?}", d.kind);
+                        for piece in &l {
+                            assert!(MODELS.contains(&piece.model), "{}", piece.model);
+                        }
+                    }
+                }
             }
+        }
+        for key in crate::regional::MODELS {
+            assert!(MODELS.contains(key), "{key} is not listed");
         }
     }
 }

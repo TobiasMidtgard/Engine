@@ -63,6 +63,12 @@ pub fn place_near(
 /// Lay roads from a building's edge to the nearest road (or to `fallback` cells) over
 /// buildable ground. False if no road is within reach.
 pub fn join_to_roads(world: &mut World, e: Entity) -> bool {
+    // (About 270 m over open ground: further than that is not "near".)
+    join_within(world, e, 14_000)
+}
+
+/// [`join_to_roads`], giving up once `cap` cells have been looked at.
+fn join_within(world: &mut World, e: Entity, cap: usize) -> bool {
     let Some(b) = world.get::<Building>(e).cloned() else {
         return false;
     };
@@ -86,7 +92,7 @@ pub fn join_to_roads(world: &mut World, e: Entity) -> bool {
     }
     let mut goal = None;
     while let Some(c) = q.pop_front() {
-        if seen.len() > 40_000 {
+        if seen.len() > cap {
             break;
         }
         for n in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
@@ -253,18 +259,23 @@ pub fn upgrade_looks(world: &mut World, mut timer: Local<f32>) {
     }
     *timer = 0.5;
     let mut q = world.query::<(Entity, &Building, &House, Option<&ShownTier>)>();
-    let stale: Vec<(Entity, Kind, Tier, u64)> = q
+    let stale: Vec<(Entity, Kind, Tier, u64, usize)> = q
         .iter(world)
         .filter(|(_, _, h, s)| s.is_none_or(|s| s.0 != h.tier))
-        .map(|(e, b, h, _)| (e, b.kind, h.tier, b.seed))
+        .map(|(e, b, h, _)| (e, b.kind, h.tier, b.seed, b.island))
         .collect();
     if stale.is_empty() {
         return;
     }
-    for (e, kind, tier, seed) in stale {
+    for (e, kind, tier, seed, isle) in stale {
         world.entity_mut(e).insert((
             ShownTier(tier),
-            crate::draw::Look(std::sync::Arc::new(crate::looks::look(kind, tier, seed))),
+            crate::draw::Look(std::sync::Arc::new(crate::looks::look(
+                kind,
+                tier,
+                seed,
+                islands()[isle].biome(),
+            ))),
         ));
     }
     world.resource_mut::<crate::draw::Drawn>().dirty = true;
@@ -274,7 +285,10 @@ pub fn refresh_looks(world: &mut World) {
     let mut q = world.query::<(&Building, &House, &mut crate::draw::Look)>();
     for (b, h, mut look) in q.iter_mut(world) {
         *look = crate::draw::Look(std::sync::Arc::new(crate::looks::look(
-            b.kind, h.tier, b.seed,
+            b.kind,
+            h.tier,
+            b.seed,
+            islands()[b.island].biome(),
         )));
     }
     world.resource_mut::<crate::draw::Drawn>().dirty = true;
@@ -299,22 +313,6 @@ fn harbour_toward(world: &mut World, isle: usize, toward: DVec2) -> Option<Entit
 /// The route that crosses the ocean at the start.
 const OCEAN_ROUTE: &str = "Sarrowmere packet";
 
-/// A harbour where a land's settlement meets the sea (see [`island::settle_spot`]).
-fn harbour_at_settlement(world: &mut World, isle: usize) -> Option<Entity> {
-    let land = &islands()[isle];
-    let spot = island::settle_spot(land)?;
-    let dir = (spot - land.center).normalize();
-    // Walk out from behind the spot to the coast.
-    let mut p = spot - dir * 600.0;
-    for _ in 0..400 {
-        if island::height(p.x, p.y) < 0.5 {
-            break;
-        }
-        p += dir * 5.0;
-    }
-    place_near(world, Kind::Harbour, p, 40, false)
-}
-
 /// The street from a harbour's back to `to`.
 fn street_inland(world: &mut World, harbour: Entity, len_cells: i32) -> DVec2 {
     let b = world.get::<Building>(harbour).cloned().unwrap();
@@ -337,7 +335,13 @@ fn street_inland(world: &mut World, harbour: Entity, len_cells: i32) -> DVec2 {
 }
 
 /// Woodcutters at the edges of the woods nearest `town` on `isle`, at least 90 m apart.
-fn woodcutters_near(world: &mut World, isle: usize, town: DVec2, n: usize) {
+fn woodcutters_near(world: &mut World, isle: usize, town: DVec2, n: usize) -> usize {
+    by_the_woods(world, Kind::Woodcutter, isle, town, n)
+}
+
+/// `n` of `kind` at the edges of the woods nearest `town` on `isle`, at least 90 m apart.
+/// Returns how many were placed.
+fn by_the_woods(world: &mut World, kind: Kind, isle: usize, town: DVec2, n: usize) -> usize {
     let mut spots: Vec<DVec2> = Vec::new();
     for j in -40..=40 {
         for i in -40..=40 {
@@ -349,17 +353,295 @@ fn woodcutters_near(world: &mut World, isle: usize, town: DVec2, n: usize) {
     }
     spots.sort_by_key(|p| ((*p - town).length() * 10.0) as i64);
     let mut cut: Vec<DVec2> = Vec::new();
+    // (Woods no road can reach, across a cliff say, are given up after a few tries.)
+    let mut failed: Vec<DVec2> = Vec::new();
     for p in spots {
-        if cut.len() >= n {
+        if cut.len() >= n || failed.len() >= 6 {
             break;
         }
-        if cut.iter().any(|q| (*q - p).length() < 90.0) {
+        if cut.iter().any(|q| (*q - p).length() < 90.0)
+            || failed.iter().any(|q| (*q - p).length() < 120.0)
+        {
             continue;
         }
-        if place_near(world, Kind::Woodcutter, p, 4, true).is_some() {
-            cut.push(p);
+        // (A forest track may run half a kilometre to the first of them.)
+        match place_near(world, kind, p, 4, false) {
+            Some(e) if join_within(world, e, 90_000) => cut.push(p),
+            Some(e) => {
+                build::demolish(world, e);
+                failed.push(p);
+            }
+            None => failed.push(p),
         }
     }
+    cut.len()
+}
+
+/// The harbours and masts of the far regions' settlements.
+#[derive(Default)]
+struct FarLands {
+    sarrow: Option<Entity>,
+    palm: Option<Entity>,
+    amber: Option<Entity>,
+    salt: Option<Entity>,
+    frost: Option<Entity>,
+    rock: Option<Entity>,
+    sarrow_mast: Option<Entity>,
+    amber_mast: Option<Entity>,
+    frost_mast: Option<Entity>,
+}
+
+/// Where a far land's first town goes: the point on the shore for its harbour and the
+/// middle of the town behind it.
+///
+/// Usually that is where the land's settlement meets the sea ([`island::settle_coast`]) and
+/// a little inland of it. Where that shore is hemmed in by cliffs or hills, the flattest
+/// ground by the sea within a kilometre is taken instead.
+pub fn far_site(isle: usize) -> Option<(DVec2, DVec2)> {
+    static SITES: std::sync::OnceLock<Vec<Option<(DVec2, DVec2)>>> = std::sync::OnceLock::new();
+    SITES.get_or_init(|| {
+        engine_ui::demo::art::par_map(islands().len(), |i| {
+            (islands()[i].region() != 0)
+                .then(|| find_far_site(i))
+                .flatten()
+        })
+    })[isle]
+}
+
+fn find_far_site(isle: usize) -> Option<(DVec2, DVec2)> {
+    let land = &islands()[isle];
+    let coast = island::settle_coast(land)?;
+    let spot = island::settle_spot(land)?;
+    let dir = (spot - land.center).normalize();
+    // Ground sampled every third cell over a box round the usual shore.
+    const STEP: f64 = 12.0;
+    let half = (1000.0 / STEP) as i32;
+    let n = (half * 2 + 1) as usize;
+    let at = |i: i32, j: i32| coast + DVec2::new(i as f64, j as f64) * STEP;
+    let mut flat = vec![0u32; n * n];
+    for j in -half..=half {
+        for i in -half..=half {
+            let p = at(i, j);
+            let k = (j + half) as usize * n + (i + half) as usize;
+            let c = grid::cell_of(p.x, p.y);
+            flat[k] = (island::island_at(p.x, p.y) == Some(isle) && grid::cell_buildable(c)) as u32;
+        }
+    }
+    // Sums of `flat` over boxes, by a summed-area table.
+    let mut sum = vec![0u32; (n + 1) * (n + 1)];
+    for j in 0..n {
+        for i in 0..n {
+            sum[(j + 1) * (n + 1) + i + 1] =
+                flat[j * n + i] + sum[j * (n + 1) + i + 1] + sum[(j + 1) * (n + 1) + i]
+                    - sum[j * (n + 1) + i];
+        }
+    }
+    let reach = (130.0 / STEP) as i32;
+    let flat_round = |i: i32, j: i32| {
+        let (i0, i1) = (
+            (i - reach + half).clamp(0, n as i32) as usize,
+            (i + reach + 1 + half).clamp(0, n as i32) as usize,
+        );
+        let (j0, j1) = (
+            (j - reach + half).clamp(0, n as i32) as usize,
+            (j + reach + 1 + half).clamp(0, n as i32) as usize,
+        );
+        (sum[j1 * (n + 1) + i1] + sum[j0 * (n + 1) + i0]) as f64
+            - (sum[j0 * (n + 1) + i1] + sum[j1 * (n + 1) + i0]) as f64
+    };
+    // Where a harbour could stand: shore cells where a quay fits in some facing.
+    let empty = Grid::default();
+    let (hw, hd) = Kind::Harbour.def().size;
+    let mut quays: Vec<DVec2> = Vec::new();
+    for j in -half..=half {
+        for i in -half..=half {
+            let p = at(i, j);
+            if !(-3.0..=3.0).contains(&island::height(p.x, p.y))
+                || island::nearest_island(p.x, p.y) != isle
+            {
+                continue;
+            }
+            let origin = grid::cell_of(p.x, p.y) - IVec2::new(hw / 2, hd / 2);
+            if (0..4).any(|rot| grid::check(&empty, Kind::Harbour, origin, rot).is_ok()) {
+                quays.push(p);
+            }
+        }
+    }
+    // A site's worth: flat ground all round, less the walk to the nearest quay.
+    let worth = |p: DVec2| -> Option<(f64, DVec2)> {
+        let quay = quays
+            .iter()
+            .copied()
+            .min_by(|a, b| a.distance_squared(p).total_cmp(&b.distance_squared(p)))?;
+        let walk = quay.distance(p);
+        let (i, j) = (
+            ((p.x - coast.x) / STEP).round() as i32,
+            ((p.y - coast.y) / STEP).round() as i32,
+        );
+        (walk < 220.0).then(|| (flat_round(i, j) - walk * 0.4, quay))
+    };
+    // The usual site: a little inland of the shore.
+    let usual = coast - dir * 60.0;
+    let usual_worth = worth(usual).map_or(f64::MIN, |w| w.0);
+    // The best: as good as can be had without going far from the usual shore.
+    let mut best: Option<(f64, DVec2, DVec2)> = None;
+    for j in (-half + reach..=half - reach).step_by(3) {
+        for i in (-half + reach..=half - reach).step_by(3) {
+            if flat[(j + half) as usize * n + (i + half) as usize] == 0 {
+                continue;
+            }
+            let p = at(i, j);
+            let Some((w, quay)) = worth(p) else {
+                continue;
+            };
+            let score = w - (p - coast).length() * 0.12;
+            if best.is_none_or(|b| score > b.0) {
+                best = Some((score, quay, p));
+            }
+        }
+    }
+    match best {
+        Some((score, quay, p)) if usual_worth < score * 0.6 => {
+            engine::core::log::info!(
+                "archipelago: {}'s town goes {:.0} m along the coast, to flatter ground",
+                land.name,
+                (p - usual).length()
+            );
+            Some((quay, p))
+        }
+        _ => Some((coast, usual)),
+    }
+}
+
+/// The first town of a far land: a harbour on the shore ([`far_site`]), a grid of lanes, a
+/// market and fisher houses. Returns the harbour and the middle.
+fn far_town(
+    world: &mut World,
+    isle: usize,
+    street: i32,
+    radius: f64,
+    houses: usize,
+) -> Option<(Entity, DVec2)> {
+    let (coast, middle) = far_site(isle)?;
+    let Some(h) = place_near(world, Kind::Harbour, coast, 40, false) else {
+        engine::core::log::warn!("archipelago: no harbour site on {}", islands()[isle].name);
+        return None;
+    };
+    let usual = island::settle_coast(&islands()[isle]) == Some(coast);
+    let village = if usual {
+        // The street runs straight inland from the quay.
+        street_inland(world, h, street)
+    } else {
+        middle
+    };
+    street_grid(world, village, radius, 7, false);
+    if !usual && !join_within(world, h, 90_000) {
+        engine::core::log::warn!(
+            "archipelago: no way from the quay to the town on {}",
+            islands()[isle].name
+        );
+    }
+    place_near(world, Kind::Market, village, 15, true);
+    fill_houses(world, village, radius + 25.0, houses, Tier::Fisherfolk);
+    Some((h, village))
+}
+
+/// `kind` (a coast building) along the shore either side of a harbour, `step` meters apart.
+fn along_shore(world: &mut World, harbour: Entity, kind: Kind, n: usize, step: f64) {
+    let Some(b) = world.get::<Building>(harbour).cloned() else {
+        return;
+    };
+    let c = grid::footprint_center(b.kind, b.origin, b.rot);
+    let fd = grid::front_dir(b.rot).as_dvec2();
+    let along = DVec2::new(fd.y, -fd.x);
+    let mut placed = 0;
+    for k in [-1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -4.0, 4.0] {
+        if placed >= n {
+            break;
+        }
+        if let Some(e) = place_near(world, kind, c + along * (step * k), 14, false) {
+            join_to_roads(world, e);
+            placed += 1;
+        }
+    }
+}
+
+/// Settle the far regions: on each continent a town that makes what only its climate
+/// gives, on a nearby island an outpost that feeds it.
+fn far_lands(world: &mut World) -> FarLands {
+    let isles = islands();
+    let mut out = FarLands::default();
+    // Places round a town on its inland side: `a` radians off the way inland, `r` meters out.
+    let ring = |isle: usize, town: DVec2| {
+        let inland = (isles[isle].center - town).normalize();
+        move |a: f64, r: f64| town + DVec2::from_angle(a).rotate(inland) * r
+    };
+    // --- Sarrowmere: stilt houses on the jungle coast, cane and rum.
+    if let Some((h, town)) = far_town(world, 5, 14, 85.0, 44) {
+        out.sarrow = Some(h);
+        let at = ring(5, town);
+        place_near(world, Kind::Chapel, at(2.2, 70.0), 20, true);
+        along_shore(world, h, Kind::Fishery, 2, 75.0);
+        woodcutters_near(world, 5, town, 3);
+        place_near(world, Kind::Sawmill, at(1.9, 120.0), 30, true);
+        for (a, r) in [(-0.75, 250.0), (0.05, 330.0), (0.8, 260.0)] {
+            place_near(world, Kind::CanePlantation, at(a, r), 40, true);
+        }
+        for (a, r) in [(-1.35, 150.0), (1.25, 165.0)] {
+            place_near(world, Kind::Distillery, at(a, r), 30, true);
+        }
+        out.sarrow_mast = place_near(world, Kind::AirshipMast, at(-1.9, 150.0), 40, true);
+    }
+    if let Some((h, town)) = far_town(world, 6, 9, 50.0, 14) {
+        out.palm = Some(h);
+        let at = ring(6, town);
+        along_shore(world, h, Kind::Fishery, 1, 70.0);
+        place_near(world, Kind::CanePlantation, at(0.2, 190.0), 40, true);
+        woodcutters_near(world, 6, town, 1);
+    }
+    // --- The Amber Reach: mud-brick towns, dates under the palms, salt from the shore.
+    if let Some((h, town)) = far_town(world, 9, 14, 85.0, 40) {
+        out.amber = Some(h);
+        let at = ring(9, town);
+        along_shore(world, h, Kind::Fishery, 2, 75.0);
+        for (a, r) in [(-0.8, 230.0), (0.75, 240.0)] {
+            place_near(world, Kind::DateGrove, at(a, r), 40, true);
+        }
+        place_near(world, Kind::SheepFarm, at(0.0, 330.0), 40, true);
+        place_near(world, Kind::Weaver, at(-1.5, 140.0), 30, true);
+        out.amber_mast = place_near(world, Kind::AirshipMast, at(1.7, 160.0), 40, true);
+    }
+    if let Some((h, town)) = far_town(world, 10, 9, 50.0, 16) {
+        out.salt = Some(h);
+        let at = ring(10, town);
+        along_shore(world, h, Kind::Fishery, 1, 70.0);
+        for (a, r) in [(-1.25, 170.0), (1.25, 170.0)] {
+            place_near(world, Kind::SaltWorks, at(a, r), 40, true);
+        }
+        place_near(world, Kind::DateGrove, at(0.0, 210.0), 40, true);
+    }
+    // --- Frostholm: cabins under snow, furs from the spruce woods, oil from the ice edge.
+    if let Some((h, town)) = far_town(world, 12, 14, 85.0, 38) {
+        out.frost = Some(h);
+        let at = ring(12, town);
+        along_shore(world, h, Kind::Fishery, 2, 75.0);
+        along_shore(world, h, Kind::OilWorks, 1, 150.0);
+        // (Where the woods are up in the hills, out of a road's reach, planks come by sea.)
+        if woodcutters_near(world, 12, town, 2) > 0 {
+            place_near(world, Kind::Sawmill, at(1.8, 120.0), 30, true);
+        }
+        // Trappers out in the snow, clear of the town.
+        for a in [0.6, 2.6, 4.4] {
+            place_near(world, Kind::TrapperLodge, at(a, 190.0), 30, true);
+        }
+        out.frost_mast = place_near(world, Kind::AirshipMast, at(-1.8, 150.0), 40, true);
+    }
+    if let Some((h, _)) = far_town(world, 13, 9, 50.0, 14) {
+        out.rock = Some(h);
+        along_shore(world, h, Kind::Fishery, 1, 70.0);
+        along_shore(world, h, Kind::OilWorks, 2, 130.0);
+    }
+    out
 }
 
 /// Build the whole start. Called once, after the art exists.
@@ -577,200 +859,261 @@ pub fn build_start(world: &mut World) {
             true,
         );
     }
-    // --- Sarrowmere, across the ocean: a trading post on the jungle coast.
-    let far_harbour = harbour_at_settlement(world, 5);
-    if let Some(fh) = far_harbour {
-        let village = street_inland(world, fh, 12);
-        street_grid(world, village, 60.0, 7, false);
-        place_near(world, Kind::Market, village, 15, true);
-        place_near(
-            world,
-            Kind::Chapel,
-            village + DVec2::new(30.0, -30.0),
-            20,
-            true,
-        );
-        fill_houses(world, village, 80.0, 14, Tier::Fisherfolk);
-        if let Some(b) = world.get::<Building>(fh).cloned() {
-            let c = grid::footprint_center(b.kind, b.origin, b.rot);
-            let fd = grid::front_dir(b.rot).as_dvec2();
-            let along = DVec2::new(fd.y, -fd.x);
-            for k in [-1.0, 1.0] {
-                place_near(world, Kind::Fishery, c + along * (70.0 * k), 30, false)
-                    .map(|e| join_to_roads(world, e));
-            }
-        }
-        woodcutters_near(world, 5, village, 3);
-        place_near(
-            world,
-            Kind::Sawmill,
-            village + DVec2::new(-80.0, 60.0),
-            30,
-            true,
-        );
-    }
+    // --- The far regions: a first town and an outpost in each (see `far_town`).
+    // (ARCH_NO_FAR leaves their shores empty, for "before" pictures.)
+    let far = if std::env::var_os("ARCH_NO_FAR").is_some() {
+        FarLands::default()
+    } else {
+        far_lands(world)
+    };
     refresh_looks(world);
     // Every settled island starts with some stock.
     let ids = |world: &mut World, e: Option<Entity>| {
         e.and_then(|e| world.get::<Building>(e).map(|b| (b.id, b.island)))
     };
-    for e in [
-        Some(h_harbour),
-        b_harbour,
-        n_harbour,
-        s_harbour,
-        far_harbour,
-    ]
-    .into_iter()
-    .flatten()
+    let far_harbours = [
+        far.sarrow, far.palm, far.amber, far.salt, far.frost, far.rock,
+    ];
+    for (k, e) in [Some(h_harbour), b_harbour, n_harbour, s_harbour]
+        .into_iter()
+        .chain(far_harbours)
+        .enumerate()
     {
-        if let Some((_, isle)) = ids(world, Some(e)) {
-            let mut econ = world.resource_mut::<Economy>();
-            let books = &mut econ.islands[isle];
-            books.capacity = books.harbours as f64 * crate::sim::HARBOUR_CAPACITY;
-            for (g, n) in build::starting_stock() {
-                books.add(g, n);
-            }
-            for g in [Good::Bread, Good::Ale, Good::Logs, Good::Wool, Good::Grain] {
-                books.add(g, 25.0);
+        let Some((_, isle)) = ids(world, e) else {
+            continue;
+        };
+        let mut econ = world.resource_mut::<Economy>();
+        let books = &mut econ.islands[isle];
+        books.capacity = books.harbours as f64 * crate::sim::HARBOUR_CAPACITY;
+        for (g, n) in build::starting_stock() {
+            books.add(g, n);
+        }
+        for g in [Good::Bread, Good::Ale, Good::Logs, Good::Wool, Good::Grain] {
+            books.add(g, 25.0);
+        }
+        if k >= 4 {
+            // Far from the weavers of home.
+            books.add(Good::Clothes, 40.0);
+            books.add(Good::Fish, 20.0);
+        } else {
+            // The last packets left a little of everything from overseas.
+            for g in Good::ALL.into_iter().filter(|g| g.overseas()) {
+                books.add(g, 14.0);
             }
         }
     }
-    // --- Routes.
-    let mut routes = Vec::new();
-    let h_id = ids(world, Some(h_harbour)).map(|x| x.0);
-    let b_id = ids(world, b_harbour).map(|x| x.0);
-    let n_id = ids(world, n_harbour).map(|x| x.0);
-    let s_id = ids(world, s_harbour).map(|x| x.0);
+    // --- Routes, each with the ships that sail it.
+    type Line = (Route, &'static [(Craft, &'static str)]);
+    let mut lines: Vec<Line> = Vec::new();
+    let id = |world: &mut World, e: Option<Entity>| ids(world, e).map(|x| x.0);
+    let h_id = id(world, Some(h_harbour));
+    let b_id = id(world, b_harbour);
+    let n_id = id(world, n_harbour);
+    let s_id = id(world, s_harbour);
+    let treats = [Good::Rum, Good::Salt, Good::Dates, Good::Furs, Good::Oil];
+    let pair = |name: &str, a: (u32, &[Good]), b: (u32, &[Good]), air: bool| Route {
+        name: name.into(),
+        stops: vec![
+            Stop {
+                at: a.0,
+                load: a.1.to_vec(),
+                unload: b.1.to_vec(),
+            },
+            Stop {
+                at: b.0,
+                load: b.1.to_vec(),
+                unload: a.1.to_vec(),
+            },
+        ],
+        air,
+    };
     if let (Some(h), Some(b)) = (h_id, b_id) {
-        routes.push(Route {
-            name: "Bread and ale run".into(),
-            stops: vec![
-                Stop {
-                    at: b,
-                    load: vec![Good::Bread, Good::Ale],
-                    unload: vec![Good::Planks, Good::Clothes, Good::Fish],
-                },
-                Stop {
-                    at: h,
-                    load: vec![Good::Planks, Good::Clothes, Good::Fish],
-                    unload: vec![Good::Bread, Good::Ale],
-                },
+        lines.push((
+            pair(
+                "Bread and ale run",
+                (b, &[Good::Bread, Good::Ale]),
+                (h, &[Good::Planks, Good::Clothes, Good::Fish]),
+                false,
+            ),
+            &[
+                (Craft::Schooner, "Kittiwake"),
+                (Craft::Schooner, "Maud Ellen"),
+                (Craft::Schooner, "Good Intent"),
+                (Craft::PaddleSteamer, "PS Haverholm Belle"),
             ],
-            air: false,
-        });
+        ));
     }
     if let (Some(h), Some(n), Some(b)) = (h_id, n_id, b_id) {
-        routes.push(Route {
-            name: "Northern steam line".into(),
-            stops: vec![
-                Stop {
-                    at: n,
-                    load: vec![Good::Wool, Good::Planks, Good::Clothes],
-                    unload: vec![Good::Bread, Good::Bricks],
-                },
-                Stop {
-                    at: h,
-                    load: vec![Good::Bricks, Good::Bread],
-                    unload: vec![Good::Wool, Good::Planks, Good::Clothes],
-                },
-                Stop {
-                    at: b,
-                    load: vec![Good::Bread, Good::Ale, Good::Grain],
-                    unload: vec![Good::Bricks, Good::Planks],
-                },
+        // (The steamers also take what the packets land at Haverholm on to Brannsey.)
+        let mut from_home = vec![Good::Bricks, Good::Bread];
+        from_home.extend(treats);
+        let mut to_brannsey = vec![Good::Bricks, Good::Planks];
+        to_brannsey.extend(treats);
+        lines.push((
+            Route {
+                name: "Northern steam line".into(),
+                stops: vec![
+                    Stop {
+                        at: n,
+                        load: vec![Good::Wool, Good::Planks, Good::Clothes],
+                        unload: vec![Good::Bread, Good::Bricks],
+                    },
+                    Stop {
+                        at: h,
+                        load: from_home,
+                        unload: vec![Good::Wool, Good::Planks, Good::Clothes],
+                    },
+                    Stop {
+                        at: b,
+                        load: vec![Good::Bread, Good::Ale, Good::Grain],
+                        unload: to_brannsey,
+                    },
+                ],
+                air: false,
+            },
+            &[
+                (Craft::Steamer, "SS Brannock"),
+                (Craft::Steamer, "SS Northern Star"),
             ],
-            air: false,
-        });
+        ));
     }
     if let (Some(h), Some(s)) = (h_id, s_id) {
-        routes.push(Route {
-            name: "Skerry clay boat".into(),
-            stops: vec![
-                Stop {
-                    at: s,
-                    load: vec![Good::Bricks, Good::Hops],
-                    unload: vec![Good::Fish, Good::Clothes, Good::Planks],
-                },
-                Stop {
-                    at: h,
-                    load: vec![Good::Fish, Good::Clothes, Good::Planks],
-                    unload: vec![Good::Bricks, Good::Hops],
-                },
-            ],
-            air: false,
-        });
+        lines.push((
+            pair(
+                "Skerry clay boat",
+                (s, &[Good::Bricks, Good::Hops]),
+                (h, &[Good::Fish, Good::Clothes, Good::Planks]),
+                false,
+            ),
+            &[(Craft::Schooner, "Clay Pigeon")],
+        ));
     }
-    let f_id = ids(world, far_harbour).map(|x| x.0);
-    if let (Some(h), Some(f)) = (h_id, f_id) {
-        routes.push(Route {
-            name: OCEAN_ROUTE.into(),
-            stops: vec![
-                Stop {
-                    at: f,
-                    load: vec![Good::Planks, Good::Fish, Good::Logs],
-                    unload: vec![Good::Bread, Good::Ale, Good::Clothes, Good::Bricks],
-                },
-                Stop {
-                    at: h,
-                    load: vec![Good::Bread, Good::Ale, Good::Clothes, Good::Bricks],
-                    unload: vec![Good::Planks, Good::Fish, Good::Logs],
-                },
+    // The packets: out with cloth and brick, home with what only the far lands give.
+    let out: &[Good] = &[Good::Clothes, Good::Bricks];
+    if let (Some(h), Some(f)) = (h_id, id(world, far.sarrow)) {
+        lines.push((
+            pair(
+                OCEAN_ROUTE,
+                (f, &[Good::Rum, Good::Planks, Good::Logs]),
+                (h, out),
+                false,
+            ),
+            &[
+                (Craft::Clipper, "Morning Star"),
+                (Craft::Steamer, "SS Sarrow Trader"),
             ],
-            air: false,
-        });
+        ));
     }
-    let mast_id = |world: &mut World, e: Option<Entity>| {
-        e.and_then(|e| world.get::<Building>(e).map(|b| b.id))
-    };
-    let hm = mast_id(world, h_mast);
-    let nm = mast_id(world, n_mast);
-    if let (Some(h), Some(n)) = (hm, nm) {
-        routes.push(Route {
-            name: "Northmoor air freight".into(),
-            stops: vec![
-                Stop {
-                    at: n,
-                    load: vec![Good::Wool, Good::Clothes],
-                    unload: vec![Good::Bricks],
-                },
-                Stop {
-                    at: h,
-                    load: vec![Good::Bricks],
-                    unload: vec![Good::Wool, Good::Clothes],
-                },
+    if let (Some(f), Some(k)) = (id(world, far.sarrow), id(world, far.palm)) {
+        lines.push((
+            pair(
+                "Palm Key lugger",
+                (k, &[Good::Cane, Good::Fish]),
+                (f, &[Good::Clothes, Good::Planks]),
+                false,
+            ),
+            &[(Craft::Schooner, "Pelican")],
+        ));
+    }
+    if let (Some(h), Some(f)) = (h_id, id(world, far.amber)) {
+        lines.push((
+            pair(
+                "Amber Reach packet",
+                (f, &[Good::Dates, Good::Salt]),
+                (h, &[Good::Planks, Good::Bricks]),
+                false,
+            ),
+            &[
+                (Craft::Clipper, "Amber Queen"),
+                (Craft::Steamer, "SS Saltwind"),
             ],
-            air: true,
-        });
+        ));
     }
-    world.insert_resource(Routes(routes.clone()));
-    // --- Ships on the routes, spread round them.
-    let crafts: [&[(Craft, &str)]; 4] = [
-        &[
-            (Craft::Schooner, "Kittiwake"),
-            (Craft::Schooner, "Maud Ellen"),
-            (Craft::Schooner, "Good Intent"),
-            (Craft::PaddleSteamer, "PS Haverholm Belle"),
-        ],
-        &[
-            (Craft::Steamer, "SS Brannock"),
-            (Craft::Steamer, "SS Northern Star"),
-        ],
-        &[(Craft::Schooner, "Clay Pigeon")],
-        &[(Craft::Airship, "Albatross"), (Craft::Airship, "Petrel")],
+    if let (Some(f), Some(k)) = (id(world, far.amber), id(world, far.salt)) {
+        lines.push((
+            pair(
+                "Saltholm boat",
+                (k, &[Good::Salt, Good::Fish]),
+                (f, &[Good::Clothes, Good::Planks]),
+                false,
+            ),
+            &[(Craft::Schooner, "Brine Maid")],
+        ));
+    }
+    if let (Some(h), Some(f)) = (h_id, id(world, far.frost)) {
+        lines.push((
+            pair(
+                "Frostholm packet",
+                (f, &[Good::Furs, Good::Oil]),
+                (h, out),
+                false,
+            ),
+            &[
+                (Craft::Steamer, "SS Ice Pilot"),
+                (Craft::Clipper, "North Light"),
+            ],
+        ));
+    }
+    if let (Some(f), Some(k)) = (id(world, far.frost), id(world, far.rock)) {
+        lines.push((
+            pair(
+                "Whalers' Rock tender",
+                (k, &[Good::Oil, Good::Fish]),
+                (f, &[Good::Clothes, Good::Planks]),
+                false,
+            ),
+            &[(Craft::Schooner, "Guillemot")],
+        ));
+    }
+    // Airships: over the home isles, and the long way to each far town.
+    let hm = id(world, h_mast);
+    if let (Some(h), Some(n)) = (hm, id(world, n_mast)) {
+        lines.push((
+            pair(
+                "Northmoor air freight",
+                (n, &[Good::Wool, Good::Clothes]),
+                (h, &[Good::Bricks]),
+                true,
+            ),
+            &[(Craft::Airship, "Albatross"), (Craft::Airship, "Petrel")],
+        ));
+    }
+    /// A mast overseas, its route's name, what it sends home, and the airships on it.
+    type AirLine = (
+        Option<Entity>,
+        &'static str,
+        &'static [Good],
+        &'static [(Craft, &'static str)],
+    );
+    let air: [AirLine; 3] = [
+        (
+            far.sarrow_mast,
+            "Sarrowmere air freight",
+            &[Good::Rum],
+            &[(Craft::Airship, "Frigatebird")],
+        ),
+        (
+            far.amber_mast,
+            "Amber Reach air freight",
+            &[Good::Dates, Good::Salt],
+            &[(Craft::Airship, "Sandgrouse")],
+        ),
+        (
+            far.frost_mast,
+            "Frostholm air freight",
+            &[Good::Furs, Good::Oil],
+            &[(Craft::Airship, "Snow Goose")],
+        ),
     ];
-    for (r, route) in routes.iter().enumerate() {
-        let ocean: &[(Craft, &str)] = &[
-            (Craft::Clipper, "Morning Star"),
-            (Craft::Steamer, "SS Sarrow Trader"),
-        ];
-        let list = if route.name == OCEAN_ROUTE {
-            ocean
-        } else if route.air {
-            crafts[3]
-        } else {
-            crafts[r.min(2)]
-        };
+    for (mast, name, goods, ships) in air {
+        if let (Some(h), Some(m)) = (hm, id(world, mast)) {
+            lines.push((pair(name, (m, goods), (h, &[Good::Clothes]), true), ships));
+        }
+    }
+    let routes: Vec<Route> = lines.iter().map(|l| l.0.clone()).collect();
+    world.insert_resource(Routes(routes));
+    // --- Ships on the routes, spread round them.
+    for (r, (route, list)) in lines.iter().enumerate() {
         for (k, (craft, name)) in list.iter().enumerate() {
             let stop = &route.stops[k % route.stops.len()];
             let Some(e) = build::by_id(world, stop.at) else {
@@ -924,9 +1267,61 @@ pub mod tests {
             .iter(&w)
             .filter(|b| b.kind == Kind::AirshipMast)
             .count();
-        assert_eq!(masts, 2, "airship masts");
+        assert_eq!(masts, 5, "airship masts");
         let routes = w.resource::<Routes>().0.clone();
-        assert_eq!(routes.len(), 5, "routes");
+        let names: Vec<&str> = routes.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(routes.len(), 13, "routes: {names:?}");
+        // Every far land has its town and its outpost, in the style of its climate, and
+        // makes what only it can.
+        for (isle, kinds) in [
+            (5, &[Kind::CanePlantation, Kind::Distillery][..]),
+            (6, &[Kind::CanePlantation]),
+            (9, &[Kind::DateGrove, Kind::Weaver]),
+            (10, &[Kind::SaltWorks]),
+            (12, &[Kind::TrapperLodge, Kind::OilWorks]),
+            (13, &[Kind::OilWorks]),
+        ] {
+            let on: Vec<Kind> = w
+                .query::<&Building>()
+                .iter(&w)
+                .filter(|b| b.island == isle)
+                .map(|b| b.kind)
+                .collect();
+            let name = islands()[isle].name;
+            assert!(on.contains(&Kind::Harbour), "no harbour on {name}");
+            assert!(
+                on.iter().filter(|k| **k == Kind::House).count() >= 8,
+                "few houses on {name}"
+            );
+            for k in kinds {
+                assert!(on.contains(k), "no {k:?} on {name}: {on:?}");
+            }
+        }
+        // The sea joins the two ends of every shipping route.
+        for route in routes.iter().filter(|r| !r.air) {
+            let ends: Vec<DVec2> = route
+                .stops
+                .iter()
+                .map(|s| {
+                    let b = w
+                        .query::<&Building>()
+                        .iter(&w)
+                        .find(|b| b.id == s.at)
+                        .cloned()
+                        .unwrap();
+                    crate::fleet::mooring(&b).0
+                })
+                .collect();
+            for pair in ends.windows(2) {
+                assert!(
+                    w.resource_mut::<crate::fleet::SeaChart>()
+                        .voyage(pair[0], pair[1])
+                        .is_some(),
+                    "no way by sea along {}",
+                    route.name
+                );
+            }
+        }
         // One of them crosses the ocean to the post on Sarrowmere, and the sea joins its ends.
         let ocean = routes
             .iter()

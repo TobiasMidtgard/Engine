@@ -7,7 +7,7 @@
 use engine::prelude::*;
 use serde::Serialize;
 
-use crate::defs::{Good, Kind, NEED_PER_PERSON_MIN, Tier};
+use crate::defs::{Good, Kind, NEED_PER_PERSON_MIN, TREAT_TAX, Tier};
 use crate::island;
 
 /// A placed building.
@@ -37,6 +37,7 @@ pub enum Status {
     NoRoad,
     Full,
     NoTrees,
+    NoWilds,
     NoFields,
     Paused,
 }
@@ -50,6 +51,7 @@ impl Status {
             Status::NoRoad => "No road to a harbour",
             Status::Full => "Store full: carts are busy",
             Status::NoTrees => "No trees in reach",
+            Status::NoWilds => "No wild country in reach",
             Status::NoFields => "No room for fields",
             Status::Paused => "Paused",
         }
@@ -100,19 +102,19 @@ impl House {
 /// One island's books.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct IslandBooks {
-    pub stock: [f64; 12],
+    pub stock: [f64; Good::COUNT],
     /// Warehouse room for each good.
     pub capacity: f64,
-    pub population: [f32; 2],
+    pub population: [f32; Tier::COUNT],
     /// Workers asked for by its workshops, per tier.
-    pub jobs: [f32; 2],
+    pub jobs: [f32; Tier::COUNT],
     /// Share of those jobs filled, per tier.
-    pub workforce: [f32; 2],
+    pub workforce: [f32; Tier::COUNT],
     /// Share of each good's demand met lately, 0..1.
-    pub supply: [f32; 12],
+    pub supply: [f32; Good::COUNT],
     /// Goods made and used per minute lately (smoothed).
-    pub made_per_min: [f32; 12],
-    pub used_per_min: [f32; 12],
+    pub made_per_min: [f32; Good::COUNT],
+    pub used_per_min: [f32; Good::COUNT],
     pub harbours: u32,
 }
 
@@ -199,8 +201,8 @@ pub fn step(
     let n = econ.islands.len();
     let k = (dt / SMOOTH_S).min(1.0);
     for b in econ.islands.iter_mut() {
-        b.population = [0.0; 2];
-        b.jobs = [0.0; 2];
+        b.population = [0.0; Tier::COUNT];
+        b.jobs = [0.0; Tier::COUNT];
     }
     for (b, h) in houses.iter() {
         econ.islands[b.island].population[h.tier.index()] += h.residents;
@@ -215,7 +217,7 @@ pub fn step(
     }
     // Workers: higher tiers can't fill lower jobs in this round; each tier staffs its own.
     for b in econ.islands.iter_mut() {
-        for t in 0..2 {
+        for t in 0..Tier::COUNT {
             b.workforce[t] = if b.jobs[t] <= 0.0 {
                 1.0
             } else {
@@ -224,13 +226,14 @@ pub fn step(
         }
     }
     // Consumption, island by island.
-    let mut used = vec![[0.0f32; 12]; n];
+    let mut used = vec![[0.0f32; Good::COUNT]; n];
     for (i, b) in econ.islands.iter_mut().enumerate() {
-        let mut demand = [0.0f64; 12];
+        let mut demand = [0.0f64; Good::COUNT];
         for t in Tier::ALL {
             for g in t.needs().0 {
                 demand[g.index()] +=
-                    (b.population[t.index()] * NEED_PER_PERSON_MIN / 60.0 * dt) as f64;
+                    (b.population[t.index()] * NEED_PER_PERSON_MIN * g.need_share() / 60.0 * dt)
+                        as f64;
             }
         }
         for g in Good::ALL {
@@ -268,8 +271,10 @@ pub fn step(
         let target = cap * (0.2 + 0.8 * share);
         let rate = 0.4 * dt;
         h.residents += (target - h.residents).clamp(-rate, rate);
+        // Luxuries of the home isles make the house happy; overseas treats pay extra.
         let lux: Vec<f32> = needs[basic..]
             .iter()
+            .filter(|g| !g.overseas())
             .map(|g| books.supply[g.index()])
             .collect();
         let happy = if lux.is_empty() {
@@ -277,7 +282,13 @@ pub fn step(
         } else {
             lux.iter().sum::<f32>() / lux.len() as f32
         };
-        taxes += (h.residents * h.tier.tax() * (0.6 + 0.4 * happy) / 60.0 * dt) as f64;
+        let treats: f32 = needs[basic..]
+            .iter()
+            .filter(|g| g.overseas())
+            .map(|g| books.supply[g.index()].min(1.0))
+            .sum();
+        taxes += (h.residents * h.tier.tax() * (0.6 + 0.4 * happy + TREAT_TAX * treats) / 60.0 * dt)
+            as f64;
         let content = h.residents >= cap - 0.25 && share > 0.95 && happy > 0.8;
         h.content_s = if content { h.content_s + dt } else { 0.0 };
     }
@@ -306,7 +317,7 @@ pub fn step(
     }
     // Workshops.
     let mut upkeep = 0.0f64;
-    let mut made = vec![[0.0f32; 12]; n];
+    let mut made = vec![[0.0f32; Good::COUNT]; n];
     for (e, b, mut p, link) in producers.iter_mut() {
         let def = b.kind.def();
         upkeep += (def.upkeep / 60.0 * dt) as f64;
@@ -335,10 +346,10 @@ pub fn step(
             continue;
         }
         if p.site < 0.05 {
-            p.status = if b.kind == Kind::Woodcutter {
-                Status::NoTrees
-            } else {
-                Status::NoFields
+            p.status = match b.kind {
+                Kind::Woodcutter => Status::NoTrees,
+                Kind::TrapperLodge => Status::NoWilds,
+                _ => Status::NoFields,
             };
             p.efficiency = 0.0;
             continue;
@@ -379,7 +390,7 @@ pub fn step(
         b.capacity = b.harbours as f64 * HARBOUR_CAPACITY;
     }
     for (i, b) in econ.islands.iter_mut().enumerate() {
-        for g in 0..12 {
+        for g in 0..Good::COUNT {
             let per_min_made = made[i][g] / dt * 60.0;
             let per_min_used = used[i][g] / dt * 60.0;
             b.made_per_min[g] += (per_min_made - b.made_per_min[g]) * k;

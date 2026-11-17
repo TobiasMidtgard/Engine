@@ -930,6 +930,78 @@ pub fn spawn_traffic(world: &mut World) {
             v.speed = v.craft.speed();
         }
     }
+    far_traffic(world);
+}
+
+/// The far regions' own traffic: free traders working each coast, and a mail plane round
+/// its settlements and islands.
+fn far_traffic(world: &mut World) {
+    for k in 1..globe::regions().len() {
+        let region = &globe::regions()[k];
+        let o = globe::sheet_origin(k);
+        let r = region.reach_m * 0.8;
+        let crossings = [
+            (DVec2::new(-1.0, 0.12), DVec2::new(1.0, -0.14)),
+            (DVec2::new(0.12, -1.0), DVec2::new(-0.1, 1.0)),
+        ];
+        for (i, (a, b)) in crossings.into_iter().enumerate() {
+            let (a, b) = (o + a * r, o + b * r);
+            // Near one end, well out at sea.
+            let at = a + (b - a) * (0.03 + 0.03 * i as f64);
+            let d = b - a;
+            let (craft, name) = if i == 0 {
+                (Craft::Barque, format!("{} coaster", region.name))
+            } else {
+                (Craft::Steamer, format!("SS {} Mail", region.name))
+            };
+            let e = spawn_vessel(
+                world,
+                craft,
+                &name,
+                DVec3::new(at.x, 0.0, at.y),
+                (-d.y).atan2(d.x) as f32,
+                None,
+                Roam::Crossing { a, b },
+                1000 + (k * 10 + i) as u64,
+            );
+            if let Some(mut v) = world.get_mut::<Vessel>(e) {
+                v.doing = Doing::Lingering(0.1);
+                v.speed = v.craft.speed();
+            }
+        }
+        // Round the coasts (not over the continents' mountains).
+        let pts: Vec<DVec3> = island::islands()
+            .iter()
+            .filter(|i| i.region() == k)
+            .map(|i| island::settle_coast(i).unwrap_or(i.center))
+            .map(|p| DVec3::new(p.x, 0.0, p.y))
+            .collect();
+        if pts.len() < 2 {
+            continue;
+        }
+        let craft = if k == 1 {
+            Craft::Seaplane
+        } else {
+            Craft::Biplane
+        };
+        let start = pts[0] + DVec3::new(400.0, 260.0, 300.0);
+        let e = spawn_vessel(
+            world,
+            craft,
+            &format!("{} mail plane", region.name),
+            start,
+            k as f32,
+            None,
+            Roam::Loop {
+                points: Arc::new(pts),
+            },
+            1100 + k as u64,
+        );
+        if let Some(mut v) = world.get_mut::<Vessel>(e) {
+            v.doing = Doing::Lingering(0.1);
+            v.speed = v.craft.speed();
+        }
+    }
 }
 
 /// Give each new airship its four turning propellers and each paddle steamer its wheels.

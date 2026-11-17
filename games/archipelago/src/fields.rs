@@ -26,6 +26,9 @@ pub fn wanted(kind: Kind) -> usize {
         Kind::SheepFarm => 90,
         Kind::GrainFarm => 110,
         Kind::HopFarm => 64,
+        Kind::CanePlantation => 96,
+        Kind::DateGrove => 72,
+        Kind::SaltWorks => 48,
         _ => 0,
     }
 }
@@ -111,8 +114,10 @@ pub fn claim(world: &mut World, farm: Entity) {
         }
     }
     crate::build::clear_trees(world, &cells);
-    if b.kind != Kind::SheepFarm {
-        crate::build::paint_cells(world, &cells, "dirt");
+    match b.kind {
+        Kind::SheepFarm => {}
+        Kind::SaltWorks => crate::build::paint_cells(world, &cells, "sand"),
+        _ => crate::build::paint_cells(world, &cells, "dirt"),
     }
     world.entity_mut(farm).insert(Fields(cells));
     redraw(world, farm);
@@ -176,7 +181,8 @@ pub fn redraw(world: &mut World, farm: Entity) {
         .get::<Fields>(farm)
         .map(|f| f.0.clone())
         .unwrap_or_default();
-    let mut pieces = look(b.kind, tier, b.seed);
+    let biome = island::islands()[b.island].biome();
+    let mut pieces = look(b.kind, tier, b.seed, biome);
     pieces.extend(field_pieces(&b, &cells));
     world.entity_mut(farm).insert(Look(Arc::new(pieces)));
     world.resource_mut::<crate::draw::Drawn>().dirty = true;
@@ -219,6 +225,35 @@ pub fn field_pieces(b: &Building, cells: &[IVec2]) -> Vec<Piece> {
                     0.85 * green,
                 ]));
             }
+            Kind::CanePlantation => {
+                out.push(crate::regional::cane_piece(
+                    s,
+                    7000 + k,
+                    local(c, Vec2::ZERO),
+                    strip_t,
+                ));
+            }
+            Kind::DateGrove => {
+                out.push(crate::regional::palm_piece(
+                    s,
+                    7000 + k,
+                    local(c, Vec2::ZERO),
+                ));
+            }
+            Kind::SaltWorks => {
+                // Pans in pairs of strips: filling, rose, crusting, dry.
+                let pair = h01(s, 9100u64.wrapping_add(strip / 2));
+                let at = local(c, Vec2::ZERO);
+                out.extend(
+                    crate::regional::pan_pieces(s, 7000 + k, Vec3::ZERO, pair)
+                        .into_iter()
+                        .map(|mut p| {
+                            p.pos += at;
+                            p.yaw -= yaw;
+                            p
+                        }),
+                );
+            }
             Kind::HopFarm => {
                 for (i, (dx, dz)) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
                     .into_iter()
@@ -249,10 +284,12 @@ pub fn field_pieces(b: &Building, cells: &[IVec2]) -> Vec<Piece> {
     }
     // Hedges (fences round paddocks) on every outer edge of fields and yard, but not across
     // the yard's front where the road comes in.
-    let edge_model = if b.kind == Kind::SheepFarm {
-        "fence_4"
-    } else {
-        "hedge_4"
+    let edge_model = match b.kind {
+        Kind::SheepFarm => "fence_4",
+        Kind::DateGrove => "mud_wall_4",
+        // Cane grows to the edge of its field; a pan's bund is its own edge.
+        Kind::CanePlantation | Kind::SaltWorks => return out,
+        _ => "hedge_4",
     };
     let half = CELL_M as f32 * 0.5;
     let mut k = 0u64;

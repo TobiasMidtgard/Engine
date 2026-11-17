@@ -20,10 +20,20 @@ pub enum Good {
     Ale,
     Clay,
     Bricks,
+    // Goods of the far regions (added after the home goods, so those keep their numbers).
+    Cane,
+    Rum,
+    Dates,
+    Salt,
+    Furs,
+    Oil,
 }
 
 impl Good {
-    pub const ALL: [Good; 12] = [
+    /// How many goods there are.
+    pub const COUNT: usize = 18;
+
+    pub const ALL: [Good; Good::COUNT] = [
         Good::Fish,
         Good::Logs,
         Good::Planks,
@@ -36,6 +46,12 @@ impl Good {
         Good::Ale,
         Good::Clay,
         Good::Bricks,
+        Good::Cane,
+        Good::Rum,
+        Good::Dates,
+        Good::Salt,
+        Good::Furs,
+        Good::Oil,
     ];
 
     pub fn index(self) -> usize {
@@ -56,6 +72,12 @@ impl Good {
             Good::Ale => "Ale",
             Good::Clay => "Clay",
             Good::Bricks => "Bricks",
+            Good::Cane => "Sugar cane",
+            Good::Rum => "Rum",
+            Good::Dates => "Dates",
+            Good::Salt => "Salt",
+            Good::Furs => "Furs",
+            Good::Oil => "Lamp oil",
         }
     }
 
@@ -74,7 +96,26 @@ impl Good {
             Good::Ale => "isle_ale",
             Good::Clay => "isle_clay",
             Good::Bricks => "isle_bricks",
+            Good::Cane => "isle_cane",
+            Good::Rum => "isle_rum",
+            Good::Dates => "isle_dates",
+            Good::Salt => "isle_salt",
+            Good::Furs => "isle_furs",
+            Good::Oil => "isle_oil",
         }
+    }
+
+    /// Comes from one of the far regions: a treat at home, used a quarter as fast as bread.
+    pub fn overseas(self) -> bool {
+        matches!(
+            self,
+            Good::Rum | Good::Dates | Good::Salt | Good::Furs | Good::Oil
+        )
+    }
+
+    /// How much of it a person who wants it uses, against a staple.
+    pub fn need_share(self) -> f32 {
+        if self.overseas() { 0.25 } else { 1.0 }
     }
 
     pub fn from_name(s: &str) -> Option<Good> {
@@ -94,7 +135,10 @@ pub enum Tier {
 }
 
 impl Tier {
-    pub const ALL: [Tier; 2] = [Tier::Fisherfolk, Tier::Labourers];
+    /// How many tiers there are.
+    pub const COUNT: usize = 2;
+
+    pub const ALL: [Tier; Tier::COUNT] = [Tier::Fisherfolk, Tier::Labourers];
 
     pub fn index(self) -> usize {
         self as usize
@@ -124,11 +168,25 @@ impl Tier {
     }
 
     /// Goods the tier consumes. The first `basic` of them fill the house; the rest add
-    /// happiness and taxes.
+    /// happiness and taxes. Of those, the [`Good::overseas`] ones are treats: nobody is
+    /// unhappy without them, and each one in supply adds [`TREAT_TAX`] to the taxes.
     pub fn needs(self) -> (&'static [Good], usize) {
         match self {
             Tier::Fisherfolk => (&[Good::Fish, Good::Clothes], 2),
-            Tier::Labourers => (&[Good::Fish, Good::Clothes, Good::Bread, Good::Ale], 3),
+            Tier::Labourers => (
+                &[
+                    Good::Fish,
+                    Good::Clothes,
+                    Good::Bread,
+                    Good::Ale,
+                    Good::Rum,
+                    Good::Salt,
+                    Good::Dates,
+                    Good::Furs,
+                    Good::Oil,
+                ],
+                3,
+            ),
         }
     }
 
@@ -153,6 +211,9 @@ impl Tier {
 
 /// Goods each person eats or wears per minute of a need (1/120: one fish every two minutes).
 pub const NEED_PER_PERSON_MIN: f32 = 1.0 / 120.0;
+
+/// Share of a house's taxes each overseas treat in full supply adds.
+pub const TREAT_TAX: f32 = 0.12;
 
 /// Build bar groups.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -210,6 +271,13 @@ pub enum Kind {
     ClayPit,
     Brickworks,
     AirshipMast,
+    // Works of the far regions.
+    CanePlantation,
+    Distillery,
+    DateGrove,
+    SaltWorks,
+    TrapperLodge,
+    OilWorks,
 }
 
 /// Where a building may stand.
@@ -435,6 +503,89 @@ pub const DEFS: &[Def] = &[
         ..def(Kind::Brickworks, "Brickworks", Category::Production, (4, 4))
     },
     Def {
+        blurb: "Sugar cane in long green rows. Only in the tropics.",
+        coins: 150,
+        cost: &[(Good::Planks, 2)],
+        workers: Some((Tier::Fisherfolk, 20)),
+        output: Some(Good::Cane),
+        cycle_s: 60.0,
+        upkeep: 5.0,
+        needs_fertility: true,
+        ..def(
+            Kind::CanePlantation,
+            "Cane plantation",
+            Category::Farms,
+            (6, 6),
+        )
+    },
+    Def {
+        blurb: "Crushes cane and distils the juice to rum in copper stills.",
+        coins: 300,
+        cost: &[(Good::Planks, 4), (Good::Bricks, 4)],
+        workers: Some((Tier::Fisherfolk, 20)),
+        input: Some(Good::Cane),
+        output: Some(Good::Rum),
+        cycle_s: 60.0,
+        upkeep: 15.0,
+        ..def(
+            Kind::Distillery,
+            "Rum distillery",
+            Category::Production,
+            (4, 4),
+        )
+    },
+    Def {
+        blurb: "Date palms in watered rows. Only on the dry coasts of the Amber Reach.",
+        coins: 150,
+        cost: &[(Good::Planks, 2)],
+        workers: Some((Tier::Fisherfolk, 10)),
+        output: Some(Good::Dates),
+        cycle_s: 45.0,
+        upkeep: 5.0,
+        needs_fertility: true,
+        ..def(Kind::DateGrove, "Date grove", Category::Farms, (6, 6))
+    },
+    Def {
+        blurb: "Sea water dries to salt in clay pans. Only on flat, sun-baked shores.",
+        coins: 150,
+        cost: &[(Good::Planks, 2)],
+        workers: Some((Tier::Fisherfolk, 20)),
+        output: Some(Good::Salt),
+        cycle_s: 45.0,
+        upkeep: 5.0,
+        needs_fertility: true,
+        ..def(Kind::SaltWorks, "Salt works", Category::Production, (5, 5))
+    },
+    Def {
+        blurb: "Trappers work the wild snow country for furs: keep the land round them empty.",
+        coins: 100,
+        cost: &[(Good::Planks, 2)],
+        workers: Some((Tier::Fisherfolk, 10)),
+        output: Some(Good::Furs),
+        cycle_s: 60.0,
+        upkeep: 5.0,
+        needs_fertility: true,
+        reach: 8,
+        ..def(
+            Kind::TrapperLodge,
+            "Trapper's lodge",
+            Category::Production,
+            (3, 3),
+        )
+    },
+    Def {
+        blurb: "Boats work the ice edge; the try-pots on the quay render lamp oil.",
+        coins: 300,
+        cost: &[(Good::Planks, 4), (Good::Bricks, 4)],
+        workers: Some((Tier::Fisherfolk, 20)),
+        output: Some(Good::Oil),
+        cycle_s: 60.0,
+        upkeep: 15.0,
+        site: Site::Coast,
+        needs_fertility: true,
+        ..def(Kind::OilWorks, "Oil works", Category::Harbour, (4, 4))
+    },
+    Def {
         blurb: "Mooring mast for cargo airships that fly routes over land and sea.",
         coins: 800,
         cost: &[(Good::Planks, 10), (Good::Bricks, 10)],
@@ -474,6 +625,16 @@ pub struct Fertility {
     pub grain: bool,
     pub hops: bool,
     pub clay: bool,
+    #[serde(default)]
+    pub cane: bool,
+    #[serde(default)]
+    pub dates: bool,
+    #[serde(default)]
+    pub salt: bool,
+    #[serde(default)]
+    pub furs: bool,
+    #[serde(default)]
+    pub oil: bool,
 }
 
 impl Fertility {
@@ -483,6 +644,11 @@ impl Fertility {
             Kind::GrainFarm => self.grain,
             Kind::HopFarm => self.hops,
             Kind::ClayPit => self.clay,
+            Kind::CanePlantation => self.cane,
+            Kind::DateGrove => self.dates,
+            Kind::SaltWorks => self.salt,
+            Kind::TrapperLodge => self.furs,
+            Kind::OilWorks => self.oil,
             _ => true,
         }
     }
