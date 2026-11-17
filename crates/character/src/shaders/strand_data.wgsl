@@ -7,7 +7,8 @@
 struct StrandParams {
     info: vec4<u32>,   // points per hair, kind (0 scalp, 1 brows, 2 lashes, 3 beard), hairs, guides
     // Detail by distance: hair width scale (fewer hairs drawn, each wider), points stepped
-    // over per segment (1 every point).
+    // over per segment (1 every point), how far the set has faded in (0..1; hairs hand over to
+    // their locks), and 1 for a set of locks (locks.rs).
     lod: vec4<f32>,
     // The box the points are packed in: corner (w: the largest radius) and size.
     box_min: vec4<f32>,
@@ -25,6 +26,10 @@ struct StrandParams {
 @group(2) @binding(4) var<storage, read> strand_motion: array<vec4<f32>>;
 // Per hair that moves: the three guides it moves with and their weights (bytes, 0..255).
 @group(2) @binding(5) var<storage, read> strand_follow: array<vec4<u32>>;
+// Locks only, per point: the cross-section's major axis (octahedral, snorm16 x2), then its
+// minor half width over the major and the hairs' summed radii over the major half width (half
+// floats). The point's radius is the major half width.
+@group(2) @binding(6) var<storage, read> strand_shape: array<vec2<u32>>;
 
 struct StrandOut {
     @invariant @builtin(position) clip: vec4<f32>,
@@ -41,6 +46,9 @@ struct StrandOut {
     @location(8) axis_x: vec3<f32>,
     @location(9) axis_y: vec3<f32>,
     @location(10) axis_z: vec3<f32>,
+    // Locks: across the ribbon (-1..1) and the optical depth of its hairs through its middle
+    // (0 for hairs, whose share is `coverage`).
+    @location(11) lock: vec2<f32>,
 };
 
 struct RibbonPoint {
@@ -53,6 +61,11 @@ struct RibbonPoint {
     index: u32,
     rest: vec3<f32>,
     axes: mat3x3<f32>,
+    // Locks: the cross-section's major axis (camera-relative world), minor over major half
+    // width, and the hairs' summed radii over the major half width.
+    lock_axis: vec3<f32>,
+    lock_minor: f32,
+    lock_density: f32,
 };
 
 // Point i: model-space position (m) and radius (m).
@@ -123,12 +136,59 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     out.tangent = model_dir(along);
     out.radius = p.w * strand_params.lod.x;
     out.index = i;
+    out.lock_axis = vec3<f32>(0.0);
+    out.lock_minor = 1.0;
+    out.lock_density = 0.0;
+    if (is_locks()) {
+        let shape = strand_shape[i];
+        let axis = oct_decode(unpack2x16snorm(shape.x));
+        let ratios = unpack2x16float(shape.y);
+        out.lock_axis = model_dir((now * vec4<f32>(axis, 0.0)).xyz);
+        out.lock_minor = ratios.x;
+        out.lock_density = ratios.y;
+    }
     out.axes = mat3x3<f32>(
         normalize(model_dir((now * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz)),
         normalize(model_dir((now * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz)),
         normalize(model_dir((now * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz)),
     );
     return out;
+}
+
+fn is_locks() -> bool {
+    return strand_params.lod.w > 0.5;
+}
+
+// Half the ribbon's true width across `side` (unit, square to the hair), and for a lock the
+// optical depth of its hairs through its middle seen that way: a lock's elliptical
+// cross-section shows wide face-on and narrow edge-on, and as many hairs lie across either
+// (summed radii over half the width seen).
+fn ribbon_width(rp: RibbonPoint, side: vec3<f32>) -> vec2<f32> {
+    if (!is_locks()) {
+        return vec2<f32>(rp.radius, 0.0);
+    }
+    let t = normalize(rp.tangent);
+    let u = normalize(rp.lock_axis - t * dot(rp.lock_axis, t) + vec3<f32>(1e-6, 0.0, 0.0));
+    let v = cross(t, u);
+    let h = max(length(vec2<f32>(rp.radius * dot(u, side), rp.radius * rp.lock_minor * dot(v, side))), 1e-6);
+    return vec2<f32>(h, rp.lock_density * rp.radius / h);
+}
+
+// The ribbon's `lock` varying: across it, and the optical depth when drawn `half_width` wide
+// (wider than true, the same hairs spread thinner).
+fn lock_varying(width: vec2<f32>, half_width: f32, corner: u32) -> vec2<f32> {
+    return vec2<f32>(ribbon_side(corner), width.y * width.x / half_width);
+}
+
+// The share of a pixel a hair or lock covers: a hair's `coverage`; a lock's from its hairs'
+// optical depth, densest in its middle (hairs spread evenly over an ellipse cross a chord as
+// long as its height there: 4/π √(1-s²) of the mean), faded in by `lod.z`.
+fn lock_coverage(lock: vec2<f32>, coverage: f32) -> f32 {
+    if (lock.y <= 0.0) {
+        return coverage;
+    }
+    let profile = 1.2732395 * sqrt(max(1.0 - lock.x * lock.x, 0.0));
+    return (1.0 - exp(-lock.y * profile)) * strand_params.lod.z;
 }
 
 fn ribbon_side(corner: u32) -> f32 {

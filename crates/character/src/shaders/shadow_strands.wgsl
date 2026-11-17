@@ -20,6 +20,7 @@ struct ShadowOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) coverage: f32,
     @location(1) @interpolate(flat) hair: u32,
+    @location(2) lock: vec2<f32>,
 };
 
 @vertex
@@ -27,13 +28,15 @@ fn vs_strand_shadow(@builtin(vertex_index) vertex: u32, @builtin(instance_index)
     let rp = ribbon_point(hair, vertex);
     let light_dir = normalize((inverse_view_dir(shadow_view.view_proj)));
     let side = normalize(cross(rp.tangent, light_dir) + vec3<f32>(1e-6, 0.0, 0.0));
-    let half_width = max(rp.radius, MIN_HALF_WIDTH);
+    let width = ribbon_width(rp, side);
+    let half_width = max(width.x, MIN_HALF_WIDTH);
     let rel = rp.rel + side * (half_width * ribbon_side(vertex % 6u));
     var out: ShadowOut;
     var clip = shadow_view.view_proj * vec4<f32>(rel, 1.0);
     clip.z = max(clip.z, 0.0);
     out.clip = clip;
-    out.coverage = saturate(rp.radius / half_width);
+    out.coverage = saturate(width.x / half_width) * strand_params.lod.z;
+    out.lock = select(vec2<f32>(0.0), lock_varying(width, half_width, vertex % 6u), is_locks());
     out.hair = hair;
     return out;
 }
@@ -46,7 +49,7 @@ fn inverse_view_dir(m: mat4x4<f32>) -> vec3<f32> {
 @fragment
 fn fs_strand_shadow(in: ShadowOut) {
     let frame_seed = fract(shadow_view.time.x * 7.31) * 512.0;
-    if (hash13(vec3<f32>(in.clip.xy, f32(in.hair % 4096u) * 0.37 + frame_seed)) >= in.coverage) {
+    if (hash13(vec3<f32>(in.clip.xy, f32(in.hair % 4096u) * 0.37 + frame_seed)) >= lock_coverage(in.lock, in.coverage)) {
         discard;
     }
 }

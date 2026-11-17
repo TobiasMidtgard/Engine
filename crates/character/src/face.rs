@@ -251,7 +251,7 @@ pub fn f16_bits(x: f32) -> u16 {
     sign | h.min(0x7bff) as u16
 }
 
-fn f16_value(h: u16) -> f32 {
+pub(crate) fn f16_value(h: u16) -> f32 {
     let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = ((h >> 10) & 0x1f) as i32;
     let mant = (h & 0x3ff) as f32;

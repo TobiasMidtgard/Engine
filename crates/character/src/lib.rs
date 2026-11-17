@@ -15,6 +15,7 @@ pub mod hands;
 pub mod headgear;
 pub mod hood;
 pub mod limbs;
+pub mod locks;
 pub mod lod;
 pub mod mesh;
 pub mod morph;

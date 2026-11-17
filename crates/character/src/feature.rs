@@ -287,15 +287,28 @@ struct GpuStrands {
     /// The box its points are packed in (`PackedStrands`): corner and size.
     bounds: [[f32; 4]; 2],
     kind: StrandKind,
+    role: StrandRole,
+    /// Hairs (or locks) in the set.
     hairs: u32,
     points: u32,
     /// This frame's detail (`lod::strands`): hairs and vertices per hair drawn, and the
-    /// stride and width written to `params`.
+    /// stride and fade written to `params`.
     drawn: u32,
     vertices: u32,
-    lod: (u32, u32),
+    lod: (u32, u32, f32),
     /// Hair that moves: guide point displacements, this frame's then last frame's.
     motion: Option<GuideMotion>,
+}
+
+/// What a strand set is drawn as from afar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrandRole {
+    /// Hairs, thinned with distance (`lod::strands`).
+    Hairs,
+    /// Hairs that fade out as their locks fade in (`lod::lock_share`).
+    HandsOver,
+    /// A set's locks (`locks::HairLocks`).
+    Locks,
 }
 
 struct GuideMotion {
@@ -415,15 +428,40 @@ impl GpuMeshes {
     /// Pick this frame's detail for a person `distance` m from the camera.
     fn choose_detail(&mut self, gpu: &GpuShared, distance: f32) {
         self.coarse = self.coarse_count > 0 && distance > lod::COARSE_SKIN;
+        let locks = lod::lock_share(distance);
         for s in &mut self.strands {
-            let (drawn, stride, width) = lod::strands(s.kind, s.hairs, s.points, distance);
+            let (mut drawn, stride, mut width) = lod::strands(s.kind, s.hairs, s.points, distance);
+            let fade = match s.role {
+                StrandRole::Hairs => 1.0,
+                StrandRole::HandsOver => 1.0 - locks,
+                StrandRole::Locks => {
+                    // Every lock, as wide as its hairs (lod::strands thins hairs, not locks).
+                    if drawn > 0 {
+                        drawn = s.hairs;
+                    }
+                    width = 1.0;
+                    locks
+                }
+            };
+            if fade <= 0.0 {
+                drawn = 0;
+            }
             s.drawn = drawn;
             s.vertices = lod::strand_vertices(s.points, stride);
-            if s.lod != (drawn, stride) {
-                s.lod = (drawn, stride);
+            if s.lod != (drawn, stride, fade) {
+                s.lod = (drawn, stride, fade);
                 let params = GpuStrandParams {
                     info: s.info,
-                    lod: [width, stride as f32, 0.0, 0.0],
+                    lod: [
+                        width,
+                        stride as f32,
+                        fade,
+                        if s.role == StrandRole::Locks {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    ],
                     box_min: s.bounds[0],
                     box_size: s.bounds[1],
                 };
@@ -1068,6 +1106,96 @@ impl CharacterFeature {
             ],
         });
         let pack = |b: [u8; 4]| u32::from_le_bytes(b);
+        let root_of = |si: usize, h: usize, guide: u32| {
+            let v = m
+                .strand_roots
+                .get(si)
+                .and_then(|r| r.get(h))
+                .copied()
+                .unwrap_or(u32::MAX);
+            let at = v as usize;
+            [
+                v,
+                pack(m.skin.bones.get(at).copied().unwrap_or_default()),
+                pack(m.skin.weights.get(at).copied().unwrap_or([255, 0, 0, 0])),
+                guide,
+            ]
+        };
+        // Per hair that moves: its three guides and their weights (bytes, 0..255).
+        let follows = |follow: &[crate::strands::Follow]| -> Vec<[u32; 4]> {
+            follow
+                .iter()
+                .map(|f| {
+                    let w = f.weights.map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    let [a, b, c] = f.guides;
+                    [a, b, c, u32::from_le_bytes([w[0], w[1], w[2], 0])]
+                })
+                .collect()
+        };
+        // One strand set's (or its locks') buffers and bind group.
+        let upload = |info: [u32; 4],
+                      packed: &crate::strands::PackedStrands,
+                      roots: &[[u32; 4]],
+                      follow: &[[u32; 4]],
+                      shape: &[[u32; 2]],
+                      motion: &wgpu::Buffer,
+                      locks: bool| {
+            let bounds = [packed.box_min, packed.box_size];
+            let params = buffer(
+                "character strand params",
+                bytemuck::bytes_of(&GpuStrandParams {
+                    info,
+                    lod: [1.0, 1.0, 1.0, if locks { 1.0 } else { 0.0 }],
+                    box_min: bounds[0],
+                    box_size: bounds[1],
+                }),
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            );
+            let points = buffer(
+                "character strand points",
+                bytemuck::cast_slice(&packed.points),
+                wgpu::BufferUsages::STORAGE,
+            );
+            let attrs = buffer(
+                "character strand attributes",
+                bytemuck::cast_slice(&packed.attrs),
+                wgpu::BufferUsages::STORAGE,
+            );
+            let roots = buffer(
+                "character strand roots",
+                bytemuck::cast_slice(roots),
+                wgpu::BufferUsages::STORAGE,
+            );
+            let follow = buffer(
+                "character strand follow",
+                bytemuck::cast_slice(follow),
+                wgpu::BufferUsages::STORAGE,
+            );
+            let shape = buffer(
+                "character strand lock shape",
+                bytemuck::cast_slice(shape),
+                wgpu::BufferUsages::STORAGE,
+            );
+            let entries: Vec<wgpu::BindGroupEntry> =
+                [&params, &points, &attrs, &roots, motion, &follow, &shape]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, b)| wgpu::BindGroupEntry {
+                        binding: i as u32,
+                        resource: b.as_entire_binding(),
+                    })
+                    .collect();
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(if locks {
+                    "character hair locks"
+                } else {
+                    "character strands"
+                }),
+                layout: &p.strand_layout,
+                entries: &entries,
+            });
+            (group, params, bounds)
+        };
         let mut strands = Vec::new();
         for (si, set) in m.strands.iter().enumerate() {
             let hairs = set.strand_count() as u32;
@@ -1090,71 +1218,21 @@ impl CharacterFeature {
                     &unpacked
                 }
             };
-            let bounds = [packed.box_min, packed.box_size];
-            let params = buffer(
-                "character strand params",
-                bytemuck::bytes_of(&GpuStrandParams {
-                    info,
-                    lod: [1.0, 1.0, 0.0, 0.0],
-                    box_min: bounds[0],
-                    box_size: bounds[1],
-                }),
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            );
-            let points = buffer(
-                "character strand points",
-                bytemuck::cast_slice(&packed.points),
-                wgpu::BufferUsages::STORAGE,
-            );
-            let attrs = buffer(
-                "character strand attributes",
-                bytemuck::cast_slice(&packed.attrs),
-                wgpu::BufferUsages::STORAGE,
-            );
             let roots: Vec<[u32; 4]> = (0..hairs as usize)
                 .map(|h| {
-                    let v = m
-                        .strand_roots
-                        .get(si)
-                        .and_then(|r| r.get(h))
-                        .copied()
-                        .unwrap_or(u32::MAX);
-                    let at = v as usize;
-                    [
-                        v,
-                        pack(m.skin.bones.get(at).copied().unwrap_or_default()),
-                        pack(m.skin.weights.get(at).copied().unwrap_or([255, 0, 0, 0])),
-                        if moves {
-                            set.follow[h].guides[0]
-                        } else {
-                            u32::MAX
-                        },
-                    ]
+                    let guide = if moves {
+                        set.follow[h].guides[0]
+                    } else {
+                        u32::MAX
+                    };
+                    root_of(si, h, guide)
                 })
                 .collect();
-            let roots = buffer(
-                "character strand roots",
-                bytemuck::cast_slice(&roots),
-                wgpu::BufferUsages::STORAGE,
-            );
-            // Per hair that moves: its three guides and their weights (bytes, 0..255).
-            let follow: Vec<[u32; 4]> = if moves {
-                set.follow
-                    .iter()
-                    .map(|f| {
-                        let w = f.weights.map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8);
-                        let [a, b, c] = f.guides;
-                        [a, b, c, u32::from_le_bytes([w[0], w[1], w[2], 0])]
-                    })
-                    .collect()
+            let follow = if moves {
+                follows(&set.follow)
             } else {
                 Vec::new()
             };
-            let follow = buffer(
-                "character strand follow",
-                bytemuck::cast_slice(&follow),
-                wgpu::BufferUsages::STORAGE,
-            );
             // Every guide point's displacement, this frame's then last frame's (none yet).
             let guide_points = guides * set.points_per as usize;
             let motion = moves.then(|| GuideMotion {
@@ -1165,55 +1243,83 @@ impl CharacterFeature {
                 ),
                 last: vec![[0.0; 4]; guide_points],
             });
-            let still = motion
-                .is_none()
-                .then(|| buffer("character strand motion", &[], wgpu::BufferUsages::STORAGE));
-            let motion_binding = motion
-                .as_ref()
-                .map_or_else(|| still.as_ref().unwrap(), |m| &m.buffer)
-                .as_entire_binding();
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("character strands"),
-                layout: &p.strand_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: params.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: points.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: attrs.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: roots.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: motion_binding,
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: follow.as_entire_binding(),
-                    },
-                ],
-            });
+            let motion_buffer = motion.as_ref().map_or_else(
+                || buffer("character strand motion", &[], wgpu::BufferUsages::STORAGE),
+                |m| m.buffer.clone(),
+            );
+            let locks = m.hair_locks.get(si).and_then(Option::as_ref);
+            let (group, params, bounds) =
+                upload(info, packed, &roots, &follow, &[], &motion_buffer, false);
             strands.push(GpuStrands {
                 group,
                 params,
                 info,
                 bounds,
                 kind: set.kind,
+                role: if locks.is_some() {
+                    StrandRole::HandsOver
+                } else {
+                    StrandRole::Hairs
+                },
                 hairs,
                 points: set.points_per,
                 drawn: hairs,
                 vertices: lod::strand_vertices(set.points_per, 1),
-                lod: (hairs, 1),
+                lod: (hairs, 1, 1.0),
                 motion,
+            });
+            // Its locks, drawn from afar, move with the same guides.
+            let Some(locks) = locks else {
+                continue;
+            };
+            let count = locks.count() as u32;
+            let lock_moves = moves && locks.set.follow.len() == count as usize;
+            let info = [
+                set.points_per,
+                set.kind as u32,
+                count,
+                if lock_moves { guides as u32 } else { 0 },
+            ];
+            let roots: Vec<[u32; 4]> = locks
+                .members
+                .iter()
+                .enumerate()
+                .map(|(l, h)| {
+                    let guide = if lock_moves {
+                        locks.set.follow[l].guides[0]
+                    } else {
+                        u32::MAX
+                    };
+                    root_of(si, *h as usize, guide)
+                })
+                .collect();
+            let follow = if lock_moves {
+                follows(&locks.set.follow)
+            } else {
+                Vec::new()
+            };
+            let (group, params, bounds) = upload(
+                info,
+                &locks.packed,
+                &roots,
+                &follow,
+                &locks.shape,
+                &motion_buffer,
+                true,
+            );
+            strands.push(GpuStrands {
+                group,
+                params,
+                info,
+                bounds,
+                kind: set.kind,
+                role: StrandRole::Locks,
+                hairs: count,
+                points: set.points_per,
+                drawn: 0,
+                vertices: lod::strand_vertices(set.points_per, 1),
+                lod: (0, 1, 0.0),
+                motion: None,
             });
         }
         GpuMeshes {
@@ -1372,6 +1478,7 @@ impl RenderFeature for CharacterFeature {
                 storage_entry(3),
                 storage_entry(4),
                 storage_entry(5),
+                storage_entry(6),
             ],
         });
         let layouts = Layouts {

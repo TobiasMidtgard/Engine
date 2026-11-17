@@ -35,6 +35,11 @@ pub const FULL_FINE_HAIR: f32 = 3.0;
 pub const FINE_HAIR_END: f32 = 10.0;
 /// No strands at all beyond this distance.
 pub const HAIR_END: f32 = 60.0;
+/// Scalp hair and beards hand over to their locks (`crate::locks`) between these distances
+/// (m): nearer, single hairs show; farther, the thinned hairs would scatter into grain where
+/// the locks keep the hairdo's shape.
+pub const LOCKS_FROM: f32 = 2.0;
+pub const LOCKS_TO: f32 = 3.5;
 /// The fewest hairs a set keeps (as a share of all of them).
 const MIN_SHARE: f32 = 0.015;
 
@@ -68,6 +73,12 @@ pub fn strands(kind: StrandKind, hairs: u32, points: u32, distance: f32) -> (u32
     (drawn, stride, hairs as f32 / drawn as f32)
 }
 
+/// How far a set's locks have faded in at `distance` m (0 hairs only .. 1 locks only).
+pub fn lock_share(distance: f32) -> f32 {
+    let t = ((distance - LOCKS_FROM) / (LOCKS_TO - LOCKS_FROM)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Vertices to draw per hair of `points` points stepping `stride` points per segment.
 pub fn strand_vertices(points: u32, stride: u32) -> u32 {
     points.saturating_sub(1).div_ceil(stride.max(1)) * 6
@@ -92,5 +103,8 @@ mod tests {
         assert_eq!(strands(StrandKind::Beard, 30_000, 6, 70.0).0, 0);
         assert_eq!(strand_vertices(32, 1), 31 * 6);
         assert_eq!(strand_vertices(32, 4), 8 * 6);
+        assert_eq!(lock_share(1.0), 0.0);
+        assert_eq!(lock_share(5.0), 1.0);
+        assert!((lock_share(2.75) - 0.5).abs() < 1e-6);
     }
 }

@@ -47,6 +47,9 @@ pub struct CharacterMeshes {
     /// Per strand set, the set as the GPU reads it (`StrandSet::packed`), packed here off the
     /// frame thread.
     pub packed_strands: Vec<strands::PackedStrands>,
+    /// Per strand set, its locks for drawing from afar (`locks::locks`; `None` for brows,
+    /// lashes and small sets).
+    pub hair_locks: Vec<Option<crate::locks::HairLocks>>,
 }
 
 impl CharacterMeshes {
@@ -56,6 +59,9 @@ impl CharacterMeshes {
         if self.packed_strands.len() == self.strands.len() {
             for s in &mut self.strands {
                 s.release_points();
+            }
+            for l in self.hair_locks.iter_mut().flatten() {
+                l.set.release_points();
             }
         }
     }
@@ -229,6 +235,7 @@ pub fn build(
             EyeMesh::default()
         },
         packed_strands: strands.iter().map(StrandSet::packed).collect(),
+        hair_locks: strands.iter().map(crate::locks::locks).collect(),
         strands,
         strand_roots,
         guide_roots,

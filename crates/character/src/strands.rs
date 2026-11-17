@@ -93,7 +93,7 @@ impl Follow {
 }
 
 impl StrandSet {
-    fn new(kind: StrandKind, points_per: u32) -> Self {
+    pub(crate) fn new(kind: StrandKind, points_per: u32) -> Self {
         Self {
             kind,
             points_per,

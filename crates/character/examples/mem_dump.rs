@@ -59,6 +59,21 @@ fn main() {
             mb(face),
             mb(eyes)
         );
+        for (set, locks) in m.strands.iter().zip(&m.hair_locks) {
+            if let Some(l) = locks {
+                let widths: Vec<f32> = l.set.points.iter().map(|p| p[3] * 2000.0).collect();
+                let mean = widths.iter().sum::<f32>() / widths.len().max(1) as f32;
+                println!(
+                    "  {:?}: {} hairs of {} points in {} locks ({:.0} a lock), mean width {mean:.1} mm, {:.2} MB",
+                    set.kind,
+                    set.strand_count(),
+                    set.points_per,
+                    l.count(),
+                    set.strand_count() as f32 / l.count() as f32,
+                    mb(v(&l.packed.points) + v(&l.packed.attrs) + v(&l.shape))
+                );
+            }
+        }
         if let Some(g) = &m.hair_shadow {
             println!(
                 "  hair grid {:?} cells, {:.1} MB",

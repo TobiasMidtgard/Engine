@@ -23,15 +23,17 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) hair: 
     let dist = max(length(rp.rel), 1e-3);
     // One pixel at this distance, m.
     let pixel = dist * 2.0 / (frame.proj[1][1] * frame.viewport.y);
-    let half_width = max(rp.radius, pixel * 0.55);
     let to_cam = -rp.rel / dist;
     let side = normalize(cross(rp.tangent, to_cam) + vec3<f32>(1e-6, 0.0, 0.0));
+    let width = ribbon_width(rp, side);
+    let half_width = max(width.x, pixel * 0.55);
     let rel = rp.rel + side * (half_width * ribbon_side(vertex % 6u));
     var out: StrandOut;
     out.rel = rel;
     out.tangent = rp.tangent;
     out.attrs = unpack2x16unorm(strand_attrs[rp.index]);
-    out.coverage = saturate(rp.radius / half_width);
+    out.coverage = saturate(width.x / half_width) * strand_params.lod.z;
+    out.lock = select(vec2<f32>(0.0), lock_varying(width, half_width, vertex % 6u), is_locks());
     out.hair = hair;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.clip_now = motion_clip(rel);
@@ -52,7 +54,7 @@ fn strand_depth_toward(in: StrandOut, l: vec3<f32>) -> f32 {
 
 fn strand_keep(in: StrandOut) -> bool {
     let h = hash13(vec3<f32>(in.clip.xy, frame.time.w * 0.618 + f32(in.hair % 4096u) * 0.37));
-    return h < in.coverage;
+    return h < lock_coverage(in.lock, in.coverage);
 }
 
 fn strand_base_color(kind: u32, random: f32) -> vec3<f32> {
@@ -167,7 +169,7 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
 // anti-aliasing", Persson 2011; the two-pass hair of Scheuermann 2004).
 @fragment
 fn fs_strand_fringe(in: StrandOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(strand_shade(in), in.coverage * FRINGE_ALPHA);
+    return vec4<f32>(strand_shade(in), lock_coverage(in.lock, in.coverage) * FRINGE_ALPHA);
 }
 
 const FRINGE_ALPHA: f32 = 0.7;
@@ -178,7 +180,9 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let v = normalize(-in.rel);
     // A normal facing the camera across the fiber.
     let nc = normalize(v - t * dot(v, t) + vec3<f32>(0.0, 1e-5, 0.0));
-    let random = in.attrs.y;
+    // A lock's fibers differ across it, a few bands of its own.
+    let band = select(0.0, floor((in.lock.x + 1.0) * 4.0) * 0.618, in.lock.y > 0.0);
+    let random = fract(in.attrs.y + band);
     let base = strand_base_color(kind, random);
     let occ = in.attrs.x;
     // Glints: fibers differ in how they catch the light.
