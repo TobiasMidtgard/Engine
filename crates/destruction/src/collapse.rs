@@ -633,6 +633,7 @@ fn ctx<'a>(
         stats: &mut out.stats,
         dust_events: Vec::new(),
         noise_events: Vec::new(),
+        broken: Vec::new(),
     }
 }
 

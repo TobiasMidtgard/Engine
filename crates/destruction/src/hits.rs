@@ -293,6 +293,10 @@ pub struct Ctx<'a> {
     pub noise_events: Vec<(DVec3, f32)>,
     /// Shatter debris on the bake threads ([`Ctx::later`]); false with [`crate::LoadAtOnce`].
     pub defer: bool,
+    /// Props broken in this pass: still in the queries until the commands apply, so a second
+    /// hit on one in the same pass neither breaks it again (twice the pieces) nor despawns it
+    /// twice (the PC laps' "Entity despawned" warnings, 17 Nov 2026).
+    pub broken: Vec<Entity>,
 }
 
 impl Ctx<'_> {
@@ -409,6 +413,7 @@ pub fn apply_hits_system(
             dust_events: Vec::new(),
             noise_events: Vec::new(),
             defer,
+            broken: Vec::new(),
         };
         for hit in hits {
             ctx.stats.hits += 1;
@@ -1511,6 +1516,10 @@ pub(crate) fn break_fracturable(
     speed: f32,
     base_velocity: Vec3,
 ) {
+    if ctx.broken.contains(&e) {
+        return;
+    }
+    ctx.broken.push(e);
     let props = ctx.table.get(f.material);
     let (ext, int) = piece_colors(f.color, f.material, ctx.table, ctx.textured);
     let half = f.shape.half_extents();
