@@ -14,8 +14,8 @@
 //! character. Conventional names: `speed` (m/s), `direction` (rad, the way the character moves
 //! relative to its facing: 0 ahead, positive toward its left, counter-clockwise seen from above
 //! like yaw and `turn`, ±π backwards), `lean` (−1..1), `aim_pitch`/`aim_yaw` (rad), `effort`
-//! (0..1, drives muscle flex), `crouch` (0..1); triggers `jump`, `dash`, `block`,
-//! `attack_light`, `attack_heavy`, `hit_react`, `land`.
+//! (0..1, drives muscle flex), `crouch` (0..1), `prone` (0 or 1: lies down and crawls);
+//! triggers `jump`, `dash`, `block`, `attack_light`, `attack_heavy`, `hit_react`, `land`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -286,7 +286,7 @@ pub(crate) fn register(app: &mut App) {
     app.add_message::<AnimationTrigger>()
         .add_message::<AnimationEvent>()
         .register_component::<AnimationParams>(
-            "Named animation inputs: speed (m/s), direction, lean, aim, effort (muscle flex), crouch.",
+            "Named animation inputs: speed (m/s), direction, lean, aim, effort (muscle flex), crouch, prone.",
         )
         .register_component::<Ragdoll>("0 = animated, 1 = limp ragdoll; between = physical animation.")
         .register_component::<BodyRequest>(
