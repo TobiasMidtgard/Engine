@@ -553,7 +553,7 @@ pub fn update(world: &mut World) {
 
 /// The goods worth a row for island `i`: kept, made or used there (every good when fewer than
 /// three are, early on).
-fn island_goods(econ: &Economy, i: usize) -> Vec<Good> {
+pub(super) fn island_goods(econ: &Economy, i: usize) -> Vec<Good> {
     let Some(b) = econ.islands.get(i) else {
         return Good::ALL.to_vec();
     };

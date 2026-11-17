@@ -38,6 +38,8 @@ pub struct Hud {
     /// The island the top bar shows.
     pub island: usize,
     info_open: bool,
+    /// The goods the top bar shows: those of the island in view.
+    goods: Vec<Good>,
     /// `--hud-demo`: after a moment, open a workshop's card and hover a build tile, so a
     /// headless tour's screenshots show the whole HUD at work.
     demo: Option<f32>,
@@ -152,18 +154,28 @@ fn good_cell(g: Good) -> El {
     )
 }
 
-fn top_bar() -> El {
-    // Rows of six goods.
-    let row = |goods: &[Good]| {
-        El::new()
-            .class("row")
-            .with_style(|s| s.gap(6.0))
-            .children(goods.iter().map(|g| good_cell(*g)))
-    };
+/// The goods wells in two rows at most (twelve to a row), for the island's own goods.
+fn goods_rows(goods: &[Good]) -> Vec<El> {
+    let per_row = goods.len().div_ceil(2).clamp(6, 12);
+    goods
+        .chunks(per_row)
+        .map(|row| {
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(6.0))
+                .children(row.iter().map(|g| good_cell(*g)))
+        })
+        .collect()
+}
+
+/// The top bar, with the wells for `goods` (the goods kept, made or used on the island in
+/// view; they change as the view moves to another island).
+fn top_bar(goods: &[Good]) -> El {
     let goods = El::new()
         .class("col")
+        .id("isle.goods")
         .with_style(|s| s.gap(4.0))
-        .children(Good::ALL.chunks(6).map(row));
+        .children(goods_rows(goods));
     let speed = El::new()
         .class("row")
         .with_style(|s| s.gap(8.0))
@@ -574,7 +586,11 @@ pub fn setup(world: &mut World) {
         world.resource_mut::<Hud>().demo = Some(0.0);
     }
     update_data_now(world);
-    if let Err(e) = screens::spawn_screen(world, hud_screen(TOP, 0), &top_bar()) {
+    if let Err(e) = screens::spawn_screen(
+        world,
+        hud_screen(TOP, 0),
+        &top_bar(&world.resource::<Hud>().goods.clone()),
+    ) {
         engine::core::log::warn!("archipelago top bar: {e}");
     }
     let tool = *world.resource::<Tool>();
@@ -1042,6 +1058,17 @@ fn update_data_now(world: &mut World) {
     // Another island in view: its crops decide which farms the bar offers first.
     if moved {
         refresh_items(world);
+    }
+    // The top bar's goods follow the island's: rebuild the wells when that set changes.
+    let goods = ledger::island_goods(&econ, isle);
+    if world
+        .get_resource::<Hud>()
+        .is_some_and(|h| h.goods != goods)
+    {
+        if let Some(e) = engine_ui::input::find_id(world, "isle.goods") {
+            let _ = engine_ui::el::replace_children(world, e, &goods_rows(&goods));
+        }
+        world.resource_mut::<Hud>().goods = goods;
     }
 }
 
