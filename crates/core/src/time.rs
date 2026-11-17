@@ -232,11 +232,13 @@ impl Default for FixedTime {
             accumulator: 0.0,
             max_steps: 8,
             // `ENGINE_STEP_BUDGET_MS` overrides it (A/B runs on the PC; `time.set_step_budget`
-            // at run time).
+            // at run time). 1/60 s since 17 Nov 2026: on the PC's streaming lap it halved the
+            // frames over 50 ms (562-611 -> 280 a lap) and ended the 4-step catch-up frames,
+            // against 1/30 s; a frame near the 120 FPS target never reaches it.
             budget_secs: std::env::var("ENGINE_STEP_BUDGET_MS")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
-                .map_or(1.0 / 30.0, |ms| (ms / 1000.0).max(0.0)),
+                .map_or(1.0 / 60.0, |ms| (ms / 1000.0).max(0.0)),
             steps: 0,
             current_step: 0,
             last_step: false,
@@ -320,7 +322,7 @@ impl FixedTime {
         self.max_steps = max.max(1);
     }
 
-    /// Wall-clock seconds the fixed steps of one real-time frame may take (default 1/30 s).
+    /// Wall-clock seconds the fixed steps of one real-time frame may take (default 1/60 s).
     /// When the steps cost more than that, the frame stops stepping and drops the backlog, so
     /// the world runs slower than real time instead of the frame rate collapsing: each slow
     /// frame would otherwise run more catch-up steps, making the next frame slower still.
@@ -633,7 +635,7 @@ pub(crate) fn register_api(app: &mut App) {
     .register_api(
         "time.set_step_budget",
         "Wall-clock ms the fixed steps of one frame may take before the rest are dropped (the \
-         world then runs slower than real time instead of the frame rate falling); default 33.3, \
+         world then runs slower than real time instead of the frame rate falling); default 16.7, \
          ENGINE_STEP_BUDGET_MS at start.",
         r#"{"ms": 16.7}"#,
         |world, args| {
