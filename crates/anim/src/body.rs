@@ -173,6 +173,7 @@ pub(crate) fn answer_requests(
             {
                 continue;
             }
+            let _span = tracing::info_span!("body: answer a request").entered();
             if rebuild {
                 strip(world, entity);
             }
@@ -184,7 +185,11 @@ pub(crate) fn answer_requests(
             let off_frame = world
                 .get_resource::<EngineConfig>()
                 .is_some_and(|c| c.off_frame());
-            match mesh_job(&request).filter(|_| off_frame) {
+            let job = {
+                let _span = tracing::info_span!("body: which mesh").entered();
+                mesh_job(&request).filter(|_| off_frame)
+            };
+            match job {
                 Some((key, make)) if !mesh_built(world, &key) => {
                     wait_for_mesh(world, key, make, entity, request)
                 }
@@ -637,11 +642,18 @@ fn build(world: &mut World, entity: Entity, request: BodyRequest) {
     let params = e.get::<AnimationParams>().cloned();
     let model = match kind {
         BodyKind::Human => {
-            let (mut model, outfit) = person(&request);
+            let _span = tracing::info_span!("body: person").entered();
+            let (mut model, outfit) = {
+                let _span = tracing::info_span!("body: person: which").entered();
+                person(&request)
+            };
             if drawn_elsewhere(world, entity) {
                 model = None;
             }
-            give_humanoid_body(world, entity, outfit);
+            {
+                let _span = tracing::info_span!("body: person: give body").entered();
+                give_humanoid_body(world, entity, outfit);
+            }
             if let Some(m) = &model {
                 world.entity_mut(entity).insert(m.clone());
             }
@@ -662,6 +674,7 @@ fn build(world: &mut World, entity: Entity, request: BodyRequest) {
             None
         }
         BodyKind::Wild(wild) => {
+            let _span = tracing::info_span!("body: wild animal").entered();
             let scale = request
                 .height
                 .map_or(1.0, |h| crate::build::wild::scale_for_height(wild, h));
