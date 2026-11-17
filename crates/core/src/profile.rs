@@ -639,6 +639,8 @@ mod hitch {
         /// When the last frame ended, and when the first did.
         last: Option<Instant>,
         first: Option<Instant>,
+        /// The first frame's end on the wall clock, for the heading.
+        first_wall: Option<std::time::SystemTime>,
         /// The fixed clock at the last frame's end (see [`super::frame_done`]).
         fixed: Option<(u64, f64)>,
         /// Lines not written yet.
@@ -675,6 +677,8 @@ mod hitch {
         let mut log = log().lock();
         let mut spans = std::mem::take(&mut log.spans);
         let first = *log.first.get_or_insert(now);
+        log.first_wall
+            .get_or_insert_with(std::time::SystemTime::now);
         let before = std::mem::replace(&mut log.fixed, fixed);
         let Some(last) = log.last.replace(now) else {
             return;
@@ -698,13 +702,13 @@ mod hitch {
         let Some(after) = threshold() else {
             return;
         };
-        let (lines, heading) = {
+        let (lines, heading, first_wall) = {
             let mut log = log().lock();
             if log.failed || (log.lines.is_empty() && log.started) {
                 return;
             }
             let heading = !std::mem::replace(&mut log.started, true);
-            (std::mem::take(&mut log.lines), heading)
+            (std::mem::take(&mut log.lines), heading, log.first_wall)
         };
         let write = || -> std::io::Result<()> {
             let mut file = if heading {
@@ -716,6 +720,15 @@ mod hitch {
                      threads",
                     after.as_secs_f64() * 1000.0
                 )?;
+                // The log's lines carry UTC times; `hitch-summary.py --from-utc` lines the
+                // two up through this.
+                if let Some(wall) = first_wall {
+                    writeln!(
+                        file,
+                        "# seconds count from the first frame, at {}",
+                        utc(wall)
+                    )?;
+                }
                 file
             } else {
                 std::fs::OpenOptions::new().append(true).open(FILE)?
@@ -729,6 +742,30 @@ mod hitch {
             log().lock().failed = true;
             tracing::warn!("could not write {FILE}: {e}");
         }
+    }
+
+    /// `2026-11-17T08:33:24.301Z`.
+    pub(super) fn utc(t: std::time::SystemTime) -> String {
+        let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let secs = d.as_secs() as i64;
+        let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+        // Days to a civil date (Howard Hinnant's algorithm).
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+            rem / 3600,
+            rem / 60 % 60,
+            rem % 60,
+            d.subsec_millis()
+        )
     }
 
     /// More rows a line, for a closer look (`ENGINE_HITCH_ROWS`).
@@ -2205,6 +2242,16 @@ mod tests {
                 "chain: engine_core::a 20.00 -> engine_core::b 30.00 -> engine_core::c 10.00"
             ),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn hitch_headings_give_the_first_frame_in_utc() {
+        let t = std::time::UNIX_EPOCH + Duration::from_millis(1_794_904_404_301);
+        assert_eq!(hitch::utc(t), "2026-11-17T08:33:24.301Z");
+        assert_eq!(
+            hitch::utc(std::time::UNIX_EPOCH),
+            "1970-01-01T00:00:00.000Z"
         );
     }
 

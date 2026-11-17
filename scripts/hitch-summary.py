@@ -12,13 +12,24 @@ more fixed steps is "(fixed-step catch-up)".
 
 Prints how many frames each cause held, the time they took in all and the worst one, so the
 list reads as "what to fix first". `--from`/`--to` keep only frames in that span of seconds
-(to leave out the loading screen).
+(to leave out the loading screen); `--from-utc`/`--to-utc` take the log's UTC times instead
+(`2026-11-17T08:33:24` or `08:33:24`), through the file's "first frame, at" heading.
 """
 
 import argparse
 import collections
+import datetime
 import re
 import sys
+
+FIRST = re.compile(r"^# seconds count from the first frame, at (\S+)Z")
+
+
+def utc(text, day):
+    """Seconds since the epoch of `text`, a full UTC time or a time of day on `day`."""
+    if "T" not in text:
+        text = f"{day}T{text}"
+    return datetime.datetime.fromisoformat(text).replace(tzinfo=datetime.timezone.utc).timestamp()
 
 LINE = re.compile(
     r"^frame (\d+) at ([\d.]+) s: ([\d.]+) ms"
@@ -68,10 +79,29 @@ def main():
     ap.add_argument("file")
     ap.add_argument("--from", dest="start", type=float, default=0.0)
     ap.add_argument("--to", dest="end", type=float, default=float("inf"))
+    ap.add_argument("--from-utc", help="like --from, as a UTC time from the game's log")
+    ap.add_argument("--to-utc", help="like --to, as a UTC time from the game's log")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--over", type=float, default=0.0, help="only frames longer than this, ms")
     ap.add_argument("--list", action="store_true", help="also list every frame with its blame")
     args = ap.parse_args()
+
+    if args.from_utc or args.to_utc:
+        first = None
+        for line in open(args.file, encoding="utf-8", errors="replace"):
+            m = FIRST.match(line)
+            if m:
+                first = m.group(1)
+                break
+        if first is None:
+            print("the file has no \"first frame, at\" heading (written since 17 Nov 2026)")
+            return 1
+        zero = utc(first, None)
+        day = first.split("T")[0]
+        if args.from_utc:
+            args.start = utc(args.from_utc, day) - zero
+        if args.to_utc:
+            args.end = utc(args.to_utc, day) - zero
 
     by = collections.defaultdict(lambda: [0, 0.0, 0.0, ""])
     frames = []
