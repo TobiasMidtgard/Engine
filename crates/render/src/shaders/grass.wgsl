@@ -116,6 +116,11 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
 // and every run that is a pixel of the picture is the prepass's surface and says so
 // (`in_prepass_known`): its light comes from the screen light pass without asking, and the
 // runs a 2x2 block adds around a thin blade no longer work out the fallback lighting.
+//
+// The cut fronds' cut is the prepass's alone: where the prepass cut a frond away, the depth is
+// another surface's and this never runs. Working the cut out again here could only disagree
+// with the prepass by a rounding (two programs, and `@invariant` covers positions only) and
+// leave a pixel the prepass kept without a color.
 @fragment @early_depth_test(force)
 fn fs_main(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     in_prepass_known(in.rel);
@@ -128,11 +133,11 @@ fn fs_main(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec
 // reads the shadow maps itself for the light through the blade (`own_sun`).
 @fragment
 fn fs_main_old(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // GRASS_CUT main
     return grass_fragment(in, front, true);
 }
 
 fn grass_fragment(in: GrassOut, front: bool, own_sun: bool) -> vec4<f32> {
-    // GRASS_CUT main
     let s = grass_surface(in, front);
     // Debug views (RenderSettings.debug_view), as for meshes.
     switch frame.counts.z {

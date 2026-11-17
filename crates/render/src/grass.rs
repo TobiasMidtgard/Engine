@@ -835,7 +835,9 @@ fn scene_source() -> String {
     .join("\n")
 }
 
-/// [`scene_source`] for fronds cut into pinnae: the same shaders with the cut switched on.
+/// [`scene_source`] for fronds cut into pinnae: the same shaders with the cut switched on, in
+/// the prepass and in the old way's scene program (the scene program draws where the prepass
+/// left its depth, so the prepass's cut is its cut).
 fn cut_source() -> String {
     scene_source()
         .replace(

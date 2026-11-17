@@ -225,6 +225,16 @@ fn ferns_and_a_crate(debug_skip: u32, name: &str) -> Option<(RgbaImage, Option<u
         ),
     ));
     let img = render(&mut app, name, 8)?;
+    if debug_skip & shade_skip::COUNT_MESH_RUNS != 0 {
+        // A count is read back frames after it was taken, sooner or later with the machine's
+        // speed, and the blades move from frame to frame: three more pictures of this same
+        // moment, each waiting for the GPU, and the count read is this moment's in every run.
+        let path =
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}_again.png"));
+        for _ in 0..3 {
+            capture_now(&mut app.world, &path).expect("screenshot");
+        }
+    }
     let described = app.world.resource::<Renderer>().describe();
     let grass = described["features"]
         .as_array()
@@ -281,12 +291,10 @@ fn grass_lit_only_where_it_shows_is_the_same_picture() {
     eprintln!(
         "the blades' pixel program in the scene pass: {runs} runs, {runs_before} the old way"
     );
-    if runs_before > 0 {
-        assert!(
-            runs <= runs_before,
-            "{runs} runs against {runs_before} the old way"
-        );
-    }
+    assert!(
+        runs > 0 && runs <= runs_before,
+        "{runs} runs against {runs_before} the old way"
+    );
 }
 
 /// A person's bones standing at the origin and nothing drawn of them: what people's capsule
