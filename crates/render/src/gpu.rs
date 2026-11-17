@@ -118,14 +118,19 @@ fn noop_options() -> wgpu::NoopBackendOptions {
     options
 }
 
-/// How the GPU allocator takes memory from the driver: in blocks of 16 to 64 MB that it hands
+/// How the GPU allocator takes memory from the driver: in blocks of 4 to 16 MB that it hands
 /// out pieces of, with anything larger in an allocation of its own. wgpu's "performance" preset
 /// takes 128 to 256 MB blocks, and a block only goes back to the driver once everything in it is
 /// freed; with thousands of textures and buffers of a few MB each coming and going (zones
 /// streaming, images recompressed), gigabytes stayed reserved in mostly empty blocks, which is
 /// what the driver, Task Manager and the other programs on the card see. Smaller blocks empty
-/// far more often. `ENGINE_GPU_BLOCK_MB=<n>` sets the largest block (256 = the old preset), to
-/// compare on one build.
+/// far more often. `ENGINE_GPU_BLOCK_MB=<n>` sets the largest block (256 = the old preset, 64 =
+/// the 16 to 64 MB blocks used until 17 November 2026), to compare on one build.
+///
+/// Measured on an RTX 5080 at 2560x1440 in a streamed flight round the showcase valley, two
+/// flights each: 9.6 to 9.8 GB reserved with these blocks against 11.1 to 11.3 with 16 to 64 MB
+/// ones (0.7 GB empty inside blocks instead of 1.7 to 1.9), about 350 blocks instead of 150,
+/// and the same slow frames (3 and 4 either way) and frame rates.
 fn memory_hints() -> wgpu::MemoryHints {
     const MB: u64 = 1 << 20;
     let largest = std::env::var("ENGINE_GPU_BLOCK_MB")
@@ -138,7 +143,7 @@ fn memory_hints() -> wgpu::MemoryHints {
             suballocated_device_memory_block_size: (n / 4).max(4) * MB..n * MB,
         },
         None => wgpu::MemoryHints::Manual {
-            suballocated_device_memory_block_size: 16 * MB..64 * MB,
+            suballocated_device_memory_block_size: 4 * MB..16 * MB,
         },
     }
 }

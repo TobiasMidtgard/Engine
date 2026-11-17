@@ -657,6 +657,21 @@ impl ImageCache {
         // 100 ms upload under the lock held up every other texture lookup of the frame (probe
         // lighting once waited a second for 226 mean colors).
         let known = inner.images.contains_key(&index);
+        // Why an image goes up as RGBA8 and may stay so shows in its texture's label: the
+        // memory census (`ENGINE_GPU_CENSUS`) adds textures up by label.
+        let label = if image.format != PixelFormat::Rgba8 {
+            "material image (float)"
+        } else if compression == TextureCompression::Off {
+            "material image"
+        } else if usage == TextureUse::Exact {
+            "material image (exact)"
+        } else if planned.is_none() {
+            "material image (not whole blocks)"
+        } else if inner.rewritten.contains(&index) {
+            "material image (rewritten)"
+        } else {
+            "material image"
+        };
         inner.uploading.insert((index, slot));
         drop(guard);
         let key = match (&planned, &disk) {
@@ -700,7 +715,7 @@ impl ImageCache {
         } else {
             let uploaded = {
                 let _span = crate::perf::HitchStep::new("images: upload");
-                upload_image(gpu, image, srgb, aliasable)
+                upload_labelled(gpu, image, srgb, aliasable, label)
             };
             uploaded.map(|(texture, view)| {
                 let shape = (texture.width(), texture.height(), texture.mip_level_count());
@@ -1800,6 +1815,17 @@ pub(crate) fn upload_image(
     srgb: bool,
     aliasable: bool,
 ) -> Option<(wgpu::Texture, wgpu::TextureView)> {
+    upload_labelled(gpu, image, srgb, aliasable, "material image")
+}
+
+/// [`upload_image`] with the texture's label.
+fn upload_labelled(
+    gpu: &GpuShared,
+    image: &Image,
+    srgb: bool,
+    aliasable: bool,
+    label: &'static str,
+) -> Option<(wgpu::Texture, wgpu::TextureView)> {
     if !image.is_valid() {
         tracing::warn!(
             "image data or mip chain does not match its size ({image:?}); not uploading it"
@@ -1851,7 +1877,7 @@ pub(crate) fn upload_image(
         return None;
     };
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("material image"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width,
             height,
