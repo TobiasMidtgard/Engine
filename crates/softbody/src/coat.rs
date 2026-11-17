@@ -11,8 +11,10 @@
 //!   Each strand is the blend of the three guides around its root (the weights that rebuild
 //!   the root from theirs), scaled to its own length, so it moves exactly as they do.
 //! - **Motion**: on a skinned body the guides are skinned with the bones under their roots
-//!   every frame (linear blend, from `grown_on` to the current `SkeletonPose`), written as the
-//!   child's `HairGuidesPosed`; a body of rigid pieces carries its fur rigidly, without guides.
+//!   (linear blend, from `grown_on` to the current `SkeletonPose`), and on a body of rigid
+//!   pieces with the pieces, when the renderer draws the coat and only then
+//!   (`engine_render::StrandGuidesWhenDrawn`): every coat in the world posed every frame was
+//!   4 ms of the main thread wherever the camera stood, most of it for animals out of view.
 //!
 //! Grooms are cached by the coat's shared arrays, so a pack of wolves built from one mesh grows
 //! one groom. Building runs on a worker (`off_frame`).
@@ -23,9 +25,11 @@ use std::sync::Arc;
 use engine_assets::{Assets, Handle};
 use engine_core::off_frame::OffFrameCommands;
 use engine_core::prelude::*;
-use engine_render::{StrandFiber, StrandFollow, StrandGroom, StrandInstance};
+use engine_render::{
+    StrandFiber, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance,
+};
 use engine_world::animation::{BonePose, SkeletonPose};
-use engine_world::{FurCoat, FurStyle, HairGuidesPosed};
+use engine_world::{FurCoat, FurStyle};
 
 use crate::strand_draw::{RootGrid, follow};
 
@@ -33,7 +37,7 @@ use crate::strand_draw::{RootGrid, follow};
 pub const MAX_STRANDS: usize = 200_000;
 /// Strands per guide, on average.
 pub const STRANDS_PER_GUIDE: usize = 40;
-/// Guides on one coat at most (skinned every frame).
+/// Guides on one coat at most (skinned every frame the coat is drawn).
 const MAX_GUIDES: usize = 3_000;
 /// Hair longer than this (m) gets more points per strand (a mane, a tail, feathering).
 const LONG: f32 = 0.08;
@@ -763,8 +767,9 @@ pub fn skin_guides(
     }
 }
 
-/// Grow grooms for new coats (once per shared coat), give each coat a drawing child, skin the
-/// guides of skinned coats every frame, and drop drawings whose coat is gone or changed.
+/// Grow grooms for new coats (once per shared coat), give each coat a drawing child (its
+/// guides skinned when it is drawn: [`pose_coat`]), and drop drawings whose coat is gone or
+/// changed.
 #[allow(clippy::type_complexity)]
 pub fn draw_coats(
     mut commands: Commands,
@@ -775,13 +780,11 @@ pub fn draw_coats(
         Option<&CoatGrowing>,
         Option<&SkeletonPose>,
         Option<&ChildOf>,
-        Option<&GlobalTransform>,
     )>,
-    mut drawn: Query<(Entity, &CoatStrands, &ChildOf, &mut HairGuidesPosed)>,
+    drawn: Query<(Entity, &ChildOf), With<CoatStrands>>,
     cache: Res<CoatGrooms>,
 ) {
-    for (entity, coat, shown, growing, pose, parent, gt) in &coats {
-        let down = down_in(gt);
+    for (entity, coat, shown, growing, pose, parent) in &coats {
         // A rigid piece of a body: drawn with its body's other pieces (`draw_piece_coats`).
         if coat.joints.is_empty() && parent.is_some() {
             continue;
@@ -801,16 +804,9 @@ pub fn draw_coats(
             commands.entity(entity).remove::<CoatDrawn>();
         }
         if let Some(parts) = cache.0.get(&key) {
-            // Posed from the first frame it draws (the renderer takes rest guides otherwise).
             let entities = parts
                 .iter()
-                .map(|g| {
-                    let mut posed = Vec::new();
-                    if let Some(p) = pose.filter(|p| p.bones.len() == coat.grown_on.len()) {
-                        skin_guides(g, &coat.grown_on, &p.bones, down, &mut posed);
-                    }
-                    spawn_child(&mut commands, entity, g.clone(), posed)
-                })
+                .map(|g| spawn_child(&mut commands, entity, g.clone()))
                 .collect();
             commands
                 .entity(entity)
@@ -864,29 +860,44 @@ pub fn draw_coats(
             },
         );
     }
-    for (e, strands, parent, mut posed) in &mut drawn {
-        let Ok((_, coat, Some(d), _, pose, _, gt)) = coats.get(parent.parent()) else {
+    for (e, parent) in &drawn {
+        if !coats
+            .get(parent.parent())
+            .ok()
+            .and_then(|c| c.2)
+            .is_some_and(|d| d.entities.contains(&e))
+        {
             commands.entity(e).despawn();
-            continue;
-        };
-        if !d.entities.contains(&e) {
-            commands.entity(e).despawn();
-            continue;
         }
-        let (Some(pose), false) = (pose, strands.groom.rest.is_empty()) else {
-            continue;
-        };
-        if pose.bones.len() != coat.grown_on.len() {
-            continue;
-        }
-        skin_guides(
-            &strands.groom,
-            &coat.grown_on,
-            &pose.bones,
-            down_in(gt),
-            &mut posed.points,
-        );
     }
+}
+
+/// A coat's guides as its body stands now, for the renderer when it draws the coat
+/// ([`StrandGuidesWhenDrawn`]): skinned with the body's bones, long hair hung out of the body.
+/// `false` (the guides stay at rest) for a coat without guides or a body without the bones
+/// the coat was grown on.
+fn pose_coat(world: &World, strands: Entity, out: &mut Vec<Vec3>) -> bool {
+    let (Some(drawn), Some(body)) = (
+        world.get::<CoatStrands>(strands),
+        world.get::<ChildOf>(strands).map(ChildOf::parent),
+    ) else {
+        return false;
+    };
+    let (Some(coat), Some(pose)) = (world.get::<FurCoat>(body), world.get::<SkeletonPose>(body))
+    else {
+        return false;
+    };
+    if drawn.groom.rest.is_empty() || pose.bones.len() != coat.grown_on.len() {
+        return false;
+    }
+    skin_guides(
+        &drawn.groom,
+        &coat.grown_on,
+        &pose.bones,
+        down_in(world.get::<GlobalTransform>(body)),
+        out,
+    );
+    true
 }
 
 /// World down in the model space of a body placed at `gt`.
@@ -896,12 +907,7 @@ fn down_in(gt: Option<&GlobalTransform>) -> Vec3 {
     })
 }
 
-fn spawn_child(
-    commands: &mut Commands,
-    body: Entity,
-    groom: Arc<CoatGroom>,
-    posed: Vec<Vec3>,
-) -> Entity {
+fn spawn_child(commands: &mut Commands, body: Entity, groom: Arc<CoatGroom>) -> Entity {
     let handle = groom.handle;
     commands
         .spawn((
@@ -910,10 +916,7 @@ fn spawn_child(
             GlobalTransform::default(),
             ChildOf(body),
             StrandInstance::new(handle),
-            HairGuidesPosed {
-                version: 0,
-                points: posed,
-            },
+            StrandGuidesWhenDrawn(pose_coat),
             CoatStrands { groom },
         ))
         .id()
@@ -1024,18 +1027,14 @@ pub fn combine_pieces(pieces: &[(FurCoat, BonePose)]) -> FurCoat {
 }
 
 /// Bodies of rigid pieces: grow one groom on all of a body's coated pieces (once per set of
-/// shared coats), drawn on one child of the body, its guides moved with the pieces every
-/// frame; drop drawings whose pieces changed or went.
+/// shared coats), drawn on one child of the body, its guides moved with the pieces when it is
+/// drawn ([`pose_pieces`]); drop drawings whose pieces changed or went.
 #[allow(clippy::type_complexity)]
 pub fn draw_piece_coats(
     mut commands: Commands,
     pieces: Query<(Entity, &FurCoat, &ChildOf, &Transform)>,
-    bodies: Query<(
-        Option<&PiecesDrawn>,
-        Option<&PiecesGrowing>,
-        Option<&GlobalTransform>,
-    )>,
-    mut drawn: Query<(Entity, &PieceCoatStrands, &ChildOf, &mut HairGuidesPosed)>,
+    bodies: Query<(Option<&PiecesDrawn>, Option<&PiecesGrowing>)>,
+    drawn: Query<(Entity, &ChildOf), With<PieceCoatStrands>>,
     cache: Res<PieceGrooms>,
 ) {
     // Each body's coated pieces, in a fixed order (by coat, then where they sit), so every
@@ -1049,7 +1048,8 @@ pub fn draw_piece_coats(
                 .push((CoatKey::of(coat), e, *t));
         }
     }
-    let mut bones: HashMap<Entity, Vec<BonePose>> = HashMap::new();
+    // Bodies whose drawing stands as it is.
+    let mut kept: Vec<Entity> = Vec::new();
     for (body, mut list) in by_body {
         list.sort_by(|a, b| {
             a.0.cmp(&b.0)
@@ -1057,14 +1057,14 @@ pub fn draw_piece_coats(
                 .then(a.2.translation.z.total_cmp(&b.2.translation.z))
                 .then(a.2.translation.y.total_cmp(&b.2.translation.y))
         });
-        let Ok((shown, growing, gt)) = bodies.get(body) else {
+        let Ok((shown, growing)) = bodies.get(body) else {
             continue;
         };
         let order: Vec<Entity> = list.iter().map(|p| p.1).collect();
         let key: Arc<[CoatKey]> = list.iter().map(|p| p.0).collect();
         if let Some(d) = shown {
             if d.key == key && d.pieces == order {
-                bones.insert(body, list.iter().map(|p| bone_pose(&p.2)).collect());
+                kept.push(body);
                 continue;
             }
             for e in &d.entities {
@@ -1073,14 +1073,9 @@ pub fn draw_piece_coats(
             commands.entity(body).remove::<PiecesDrawn>();
         }
         if let Some((parts, grown_on)) = cache.0.get(&key) {
-            let now: Vec<BonePose> = list.iter().map(|p| bone_pose(&p.2)).collect();
             let entities = parts
                 .iter()
                 .map(|g| {
-                    let mut posed = Vec::new();
-                    if now.len() == grown_on.len() {
-                        skin_guides(g, grown_on, &now, down_in(gt), &mut posed);
-                    }
                     commands
                         .spawn((
                             Name::new(if g.long { "Long hair" } else { "Fur" }),
@@ -1088,10 +1083,7 @@ pub fn draw_piece_coats(
                             GlobalTransform::default(),
                             ChildOf(body),
                             StrandInstance::new(g.handle),
-                            HairGuidesPosed {
-                                version: 0,
-                                points: posed,
-                            },
+                            StrandGuidesWhenDrawn(pose_pieces),
                             PieceCoatStrands {
                                 groom: g.clone(),
                                 grown_on: grown_on.clone(),
@@ -1154,31 +1146,51 @@ pub fn draw_piece_coats(
             },
         );
     }
-    for (e, strands, parent, mut posed) in &mut drawn {
+    for (e, parent) in &drawn {
         let body = parent.parent();
-        let Some(now) = bones.get(&body) else {
-            // Its body's pieces changed (being redrawn) or went.
-            if !bodies
+        // Its body's pieces changed (being redrawn) or went.
+        if !kept.contains(&body)
+            && !bodies
                 .get(body)
                 .ok()
                 .and_then(|b| b.0)
                 .is_some_and(|d| d.entities.contains(&e))
-            {
-                commands.entity(e).despawn();
-            }
-            continue;
-        };
-        if now.len() == strands.grown_on.len() {
-            let down = down_in(bodies.get(body).ok().and_then(|b| b.2));
-            skin_guides(
-                &strands.groom,
-                &strands.grown_on,
-                now,
-                down,
-                &mut posed.points,
-            );
+        {
+            commands.entity(e).despawn();
         }
     }
+}
+
+/// The guides of a body of rigid pieces as the pieces stand now, for the renderer when it
+/// draws the coat ([`StrandGuidesWhenDrawn`]): each piece a bone, in the order drawn.
+fn pose_pieces(world: &World, strands: Entity, out: &mut Vec<Vec3>) -> bool {
+    let (Some(drawn), Some(body)) = (
+        world.get::<PieceCoatStrands>(strands),
+        world.get::<ChildOf>(strands).map(ChildOf::parent),
+    ) else {
+        return false;
+    };
+    let Some(pieces) = world.get::<PiecesDrawn>(body) else {
+        return false;
+    };
+    if drawn.groom.rest.is_empty() || pieces.pieces.len() != drawn.grown_on.len() {
+        return false;
+    }
+    let mut now = Vec::with_capacity(pieces.pieces.len());
+    for piece in &pieces.pieces {
+        let Some(t) = world.get::<Transform>(*piece) else {
+            return false;
+        };
+        now.push(bone_pose(t));
+    }
+    skin_guides(
+        &drawn.groom,
+        &drawn.grown_on,
+        &now,
+        down_in(world.get::<GlobalTransform>(body)),
+        out,
+    );
+    true
 }
 
 #[cfg(test)]
@@ -1427,6 +1439,143 @@ mod tests {
                 assert!(p.distance(want) < 1e-4, "piece 1 carries its guides");
             }
         }
+    }
+
+    #[test]
+    fn a_drawn_coat_is_posed_when_the_renderer_asks_and_at_no_other_time() {
+        use engine_core::ecs::system::RunSystemOnce;
+        let coat = tube();
+        let grown = grow(&coat, None).remove(0);
+        let mut world = World::new();
+        let mut assets = Assets::<StrandGroom>::default();
+        let groom = Arc::new(CoatGroom {
+            handle: assets.add(grown.groom.clone()),
+            per: grown.per,
+            rest: grown.groom.guides.iter().map(|p| Vec3::from(*p)).collect(),
+            skin: grown.skin,
+            long: false,
+            drape: None,
+        });
+        world.insert_resource(assets);
+        let mut cache = CoatGrooms::default();
+        cache
+            .0
+            .insert(CoatKey::of(&coat), vec![groom.clone()].into());
+        world.insert_resource(cache);
+        let mut pose = SkeletonPose {
+            names: vec!["a".to_string(), "b".to_string()].into(),
+            parents: vec![None, Some(0)].into(),
+            bones: vec![BonePose::default(); 2],
+        };
+        pose.bones[1].translation = Vec3::Y * 0.1;
+        let body = world
+            .spawn((coat.clone(), pose.clone(), GlobalTransform::default()))
+            .id();
+        world.run_system_once(draw_coats).unwrap();
+        let child = world.get::<CoatDrawn>(body).expect("drawn").entities[0];
+        // The child carries no posed points of its own to keep up to date: the renderer asks
+        // for them when it draws the coat.
+        assert!(world.get::<engine_world::HairGuidesPosed>(child).is_none());
+        let ask = world
+            .get::<StrandGuidesWhenDrawn>(child)
+            .expect("posed when drawn")
+            .0;
+        let mut out = Vec::new();
+        assert!(ask(&world, child, &mut out));
+        let mut want = Vec::new();
+        skin_guides(&groom, &coat.grown_on, &pose.bones, Vec3::NEG_Y, &mut want);
+        assert_eq!(out.len(), groom.rest.len());
+        assert_eq!(out, want, "the body's pose now");
+        // The body moves on; asked again, the guides are where it stands then, with no system
+        // run in between.
+        world.get_mut::<SkeletonPose>(body).unwrap().bones[1].translation = Vec3::Y * 0.3;
+        assert!(ask(&world, child, &mut out));
+        let rise = out
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| a.y - b.y)
+            .fold(0.0f32, f32::max);
+        assert!(
+            (rise - 0.2).abs() < 1e-4,
+            "the far end rose with its bone: {rise}"
+        );
+        // The system leaves a standing drawing alone, and drops it with its coat.
+        world.run_system_once(draw_coats).unwrap();
+        assert_eq!(world.get::<CoatDrawn>(body).unwrap().entities, vec![child]);
+        assert!(world.get_entity(child).is_ok());
+        // Without the bones it was grown on the coat stays at rest.
+        world.entity_mut(body).remove::<SkeletonPose>();
+        assert!(!ask(&world, child, &mut out));
+        world.entity_mut(body).remove::<CoatDrawn>();
+        world.run_system_once(draw_coats).unwrap();
+        assert!(
+            world.get_entity(child).is_err(),
+            "a drawing nobody owns goes"
+        );
+    }
+
+    #[test]
+    fn a_body_of_pieces_is_posed_from_where_its_pieces_stand_when_asked() {
+        use engine_core::ecs::system::RunSystemOnce;
+        let mut piece = tube();
+        piece.joints = Vec::new().into();
+        piece.weights = Vec::new().into();
+        piece.grown_on = Vec::new().into();
+        let at = |y: f32| Transform::from_xyz(0.0, y as f64, 0.0);
+        let coat = combine_pieces(&[
+            (piece.clone(), bone_pose(&at(0.0))),
+            (piece.clone(), bone_pose(&at(0.5))),
+        ]);
+        let grown = grow(&coat, None).remove(0);
+        let mut world = World::new();
+        let mut assets = Assets::<StrandGroom>::default();
+        let groom = Arc::new(CoatGroom {
+            handle: assets.add(grown.groom.clone()),
+            per: grown.per,
+            rest: grown.groom.guides.iter().map(|p| Vec3::from(*p)).collect(),
+            skin: grown.skin,
+            long: false,
+            drape: None,
+        });
+        world.insert_resource(assets);
+        let body = world.spawn(GlobalTransform::default()).id();
+        let low = world.spawn((piece.clone(), ChildOf(body), at(0.0))).id();
+        let high = world.spawn((piece.clone(), ChildOf(body), at(0.5))).id();
+        let key: Arc<[CoatKey]> = vec![CoatKey::of(&piece); 2].into();
+        let mut cache = PieceGrooms::default();
+        cache
+            .0
+            .insert(key, (vec![groom.clone()].into(), coat.grown_on.clone()));
+        world.insert_resource(cache);
+        world.run_system_once(draw_piece_coats).unwrap();
+        let drawn = world.get::<PiecesDrawn>(body).expect("drawn").clone();
+        assert_eq!(drawn.pieces, vec![low, high]);
+        let child = drawn.entities[0];
+        let ask = world
+            .get::<StrandGuidesWhenDrawn>(child)
+            .expect("posed when drawn")
+            .0;
+        let mut out = Vec::new();
+        assert!(ask(&world, child, &mut out));
+        let off = out
+            .iter()
+            .zip(&groom.rest)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0.0f32, f32::max);
+        assert!(off < 1e-5, "as grown: {off}");
+        // The upper piece lifts: its guides go with it, the lower piece's stay.
+        world.get_mut::<Transform>(high).unwrap().translation.y = 0.7;
+        assert!(ask(&world, child, &mut out));
+        for (k, (p, r)) in out.iter().zip(&groom.rest).enumerate() {
+            let lift = if groom.skin[k].0[0] == 0 { 0.0 } else { 0.2 };
+            assert!(p.distance(*r + Vec3::Y * lift) < 1e-4, "guide point {k}");
+        }
+        // The drawing stands while its pieces do.
+        world.run_system_once(draw_piece_coats).unwrap();
+        assert!(world.get_entity(child).is_ok());
+        // A piece gone: nothing to pose from (and the system redraws the body).
+        world.despawn(high);
+        assert!(!ask(&world, child, &mut out));
     }
 
     #[test]

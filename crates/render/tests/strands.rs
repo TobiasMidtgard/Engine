@@ -12,8 +12,10 @@ use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::settings::shade_skip;
 use engine_render::{
-    AmbientLight, RenderDisabled, Renderer, StrandFiber, StrandGroom, StrandInstance, capture_now,
+    AmbientLight, RenderDisabled, Renderer, StrandFiber, StrandFollow, StrandGroom,
+    StrandGuidesWhenDrawn, StrandInstance, capture_now,
 };
+use engine_world::HairGuidesPosed;
 use image::RgbImage;
 
 const W: u32 = 320;
@@ -304,6 +306,201 @@ fn hidden_strands_are_left_out_without_a_trace() {
         differ, 0,
         "leaving out hidden strands changed the picture (worst {worst}/255)"
     );
+}
+
+/// The curtain with one guide down its middle that every strand follows.
+fn guided_curtain() -> StrandGroom {
+    let mut g = curtain();
+    g.guides = (0..POINTS)
+        .map(|j| [0.0, 0.1 - 0.2 * j as f32 / (POINTS - 1) as f32, 0.0])
+        .collect();
+    g.follow = vec![
+        StrandFollow {
+            guides: [0, u32::MAX, u32::MAX],
+            weights: [1.0, 0.0, 0.0],
+        };
+        STRANDS
+    ];
+    g
+}
+
+/// Where the guide is posed: the whole curtain 4 cm to the side.
+const SWUNG: Vec3 = Vec3::new(0.04, 0.0, 0.0);
+
+/// Times the renderer asked for the guides of the curtain in view and of the one behind the
+/// camera.
+static ASKED_IN_VIEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static ASKED_BEHIND: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn swung(world: &World, instance: Entity, out: &mut Vec<Vec3>) -> bool {
+    let Some(groom) = world
+        .get::<StrandInstance>(instance)
+        .and_then(|i| world.resource::<Assets<StrandGroom>>().get(i.groom))
+    else {
+        return false;
+    };
+    out.clear();
+    out.extend(groom.guides.iter().map(|p| Vec3::from(*p) + SWUNG));
+    true
+}
+
+fn swung_in_view(world: &World, instance: Entity, out: &mut Vec<Vec3>) -> bool {
+    ASKED_IN_VIEW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    swung(world, instance, out)
+}
+
+fn swung_behind(world: &World, instance: Entity, out: &mut Vec<Vec3>) -> bool {
+    ASKED_BEHIND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    swung(world, instance, out)
+}
+
+/// How the guided curtain's guides reach the renderer.
+#[derive(Clone, Copy, PartialEq)]
+enum Guides {
+    /// Not at all: the curtain hangs as groomed.
+    AtRest,
+    /// Posed points on the instance, as a simulation writes them every frame.
+    Written,
+    /// A function the renderer asks when it draws the instance; and a second curtain behind
+    /// the camera with one of its own.
+    WhenDrawn,
+}
+
+/// The guided curtain before the dark wall, half a meter from the camera.
+fn render_guided(guides: Guides, shot: &str) -> Option<RgbImage> {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = W;
+        w.height = H;
+    }
+    app.add_plugins(RenderPlugin);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.anti_aliasing = AntiAliasing::None;
+        s.tonemapper = Tonemapper::None;
+        s.bloom_intensity = 0.0;
+        s.vignette = 0.0;
+        s.film_grain = 0.0;
+        s.sharpness = 0.0;
+        s.screen_space_reflections = false;
+        s.screen_space_gi = false;
+    }
+    let groom = guided_curtain();
+    let posed: Vec<Vec3> = groom
+        .guides
+        .iter()
+        .map(|p| Vec3::from(*p) + SWUNG)
+        .collect();
+    let groom = app.world.resource_mut::<Assets<StrandGroom>>().add(groom);
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(40.0)
+        },
+        Transform::from_xyz(0.0, 0.0, 0.5).looking_at(DVec3::ZERO, Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.3, -0.5, -1.0), Vec3::Y),
+    ));
+    w.spawn((
+        Transform::from_xyz(0.0, 0.0, -0.3),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [2.0, 2.0, 0.02],
+            },
+            StandardMaterial::color(0.05, 0.06, 0.08),
+        ),
+    ));
+    let hair = w
+        .spawn((Transform::default(), StrandInstance::new(groom)))
+        .id();
+    match guides {
+        Guides::AtRest => {}
+        Guides::Written => {
+            w.entity_mut(hair).insert(HairGuidesPosed {
+                version: 0,
+                points: posed,
+            });
+        }
+        Guides::WhenDrawn => {
+            w.entity_mut(hair)
+                .insert(StrandGuidesWhenDrawn(swung_in_view));
+            w.spawn((
+                Transform::from_xyz(0.0, 0.0, 5.0),
+                StrandInstance::new(groom),
+                StrandGuidesWhenDrawn(swung_behind),
+            ));
+        }
+    }
+    app.update_n(6);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return None;
+    }
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(shot);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(shot));
+    }
+    Some(image::open(&path).expect("read the shot").to_rgb8())
+}
+
+/// Pixels of `a` and `b` that differ by more than 2/255 in a channel, and the largest
+/// difference.
+fn differing(a: &RgbImage, b: &RgbImage) -> (u32, i32) {
+    let (mut differ, mut worst) = (0, 0);
+    for (a, b) in a.pixels().zip(b.pixels()) {
+        let d = (0..3)
+            .map(|c| (a.0[c] as i32 - b.0[c] as i32).abs())
+            .max()
+            .unwrap_or(0);
+        worst = worst.max(d);
+        differ += (d > 2) as u32;
+    }
+    (differ, worst)
+}
+
+#[test]
+fn guides_are_posed_for_the_hair_that_is_drawn_and_no_other() {
+    use std::sync::atomic::Ordering::Relaxed;
+    // An animal's coat is thousands of guide points skinned on the CPU; a herd out of view
+    // was skinned every frame all the same. An instance can carry a function instead of
+    // posed points: the renderer asks it for the instances the frame draws.
+    let Some(rest) = render_guided(Guides::AtRest, "strands_guides_at_rest.png") else {
+        return;
+    };
+    let Some(written) = render_guided(Guides::Written, "strands_guides_written.png") else {
+        return;
+    };
+    let (in_view, behind) = (ASKED_IN_VIEW.load(Relaxed), ASKED_BEHIND.load(Relaxed));
+    assert_eq!((in_view, behind), (0, 0), "nobody carried a function yet");
+    let Some(asked) = render_guided(Guides::WhenDrawn, "strands_guides_when_drawn.png") else {
+        return;
+    };
+    let (in_view, behind) = (ASKED_IN_VIEW.load(Relaxed), ASKED_BEHIND.load(Relaxed));
+    let (moved, _) = differing(&rest, &written);
+    let (differ, worst) = differing(&written, &asked);
+    eprintln!(
+        "guides asked for when drawn: {in_view} times for the curtain in view, {behind} for the one behind the camera; posing moves {moved} pixels; written or asked for, {differ} pixels differ by more than 2/255, the worst by {worst}"
+    );
+    assert!(
+        moved > 2000,
+        "the swung curtain should not look like the one at rest: {moved} pixels moved"
+    );
+    assert_eq!(
+        differ, 0,
+        "guides asked for when drawn gave another picture than the same guides written (worst {worst}/255)"
+    );
+    assert!(
+        in_view >= 6,
+        "the curtain in view is posed every frame it is drawn: {in_view} times in 6 frames"
+    );
+    assert_eq!(behind, 0, "the curtain behind the camera is never posed");
 }
 
 /// A patch of short fine fur, 20 cm square in the plane z = 0 and facing the camera: `strands`

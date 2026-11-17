@@ -14,6 +14,7 @@
 //! Fields may be added before R2 lands: build these with `..Default::default()`.
 
 use engine_assets::{Asset, Handle};
+use engine_core::math::Vec3;
 use engine_core::prelude::*;
 
 /// What kind of fibre a groom is made of: it picks the scattering model.
@@ -148,6 +149,25 @@ fn white() -> [f32; 3] {
 
 fn yes() -> bool {
     true
+}
+
+/// Poses an instance's guides when the renderer draws it, in place of an
+/// `engine_world::HairGuidesPosed` filled every frame: a herd's coats are thousands of guide
+/// points each, and most of the herd is out of view most of the time.
+///
+/// The function fills `out` with the groom's guides as they stand now ([`StrandGroom::guides`]
+/// order and length, the instance's model space) from what the world holds for the instance,
+/// and says whether it could (`false`, or another length: the guides stay at rest). The
+/// renderer calls it once a frame for each instance it draws and for no other, after
+/// transforms have propagated and not on the main thread alone, so it reads the world and
+/// nothing else. An instance carrying a matching `HairGuidesPosed` too is drawn from that.
+#[derive(Component, Clone, Copy)]
+pub struct StrandGuidesWhenDrawn(pub fn(&World, Entity, &mut Vec<Vec3>) -> bool);
+
+impl std::fmt::Debug for StrandGuidesWhenDrawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StrandGuidesWhenDrawn")
+    }
 }
 
 impl StrandInstance {

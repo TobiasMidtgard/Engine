@@ -681,7 +681,7 @@ fn set_bit(bits: &mut Vec<u64>, index: u32) {
 /// The calling thread runs the first job itself, before it waits: a scope's thread otherwise
 /// starts by ticking the pool's queue, where it may pick up another system's long task while
 /// the render waits.
-fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
+pub(crate) fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
     let mut jobs = jobs.peekable();
     let Some(first) = jobs.next() else {
         return;

@@ -3,7 +3,8 @@
 //!
 //! A frame, in the renderer's order:
 //!
-//! 1. `prepare` copies the instances out of the world: transform, level of detail, guides.
+//! 1. `prepare` copies the instances out of the world: transform, level of detail, guides
+//!    (those of the instances it draws: a [`StrandGuidesWhenDrawn`] is asked only for them).
 //! 2. `prepare_frame` uploads new grooms (strands shuffled once, so any prefix of them spreads
 //!    over the whole groom and a level of detail is a prefix), the instances and the guides'
 //!    offsets from rest.
@@ -40,7 +41,7 @@ use engine_world::HairGuidesPosed;
 use crate::features::{FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase};
 use crate::frame::ViewData;
 use crate::settings::{RenderSettings, shade_skip};
-use crate::strands::{StrandFiber, StrandGroom, StrandInstance, StrandLod};
+use crate::strands::{StrandFiber, StrandGroom, StrandGuidesWhenDrawn, StrandInstance, StrandLod};
 
 const COMMON: &str = include_str!("shaders/strands_common.wgsl");
 const POSE: &str = include_str!("shaders/strands_pose.wgsl");
@@ -159,6 +160,9 @@ struct Draw {
     distance: f32,
     /// Posed guide points, when they match the groom.
     guides: Option<Vec<Vec3>>,
+    /// Who poses them now that it is drawn ([`StrandGuidesWhenDrawn`]), and how many points
+    /// the groom's guides have.
+    pose: Option<(StrandGuidesWhenDrawn, usize)>,
 }
 
 /// What the frame draws, as `prepare_frame` laid it out.
@@ -860,6 +864,7 @@ impl RenderFeature for StrandFeature {
             &StrandInstance,
             &GlobalTransform,
             Option<&HairGuidesPosed>,
+            Option<&StrandGuidesWhenDrawn>,
         )>();
         let Some(assets) = world.get_resource::<Assets<StrandGroom>>() else {
             return;
@@ -868,7 +873,7 @@ impl RenderFeature for StrandFeature {
         let mut incoming = Vec::new();
         let origin = view.origin;
         let px_per_m = view.proj.y_axis.y * view.height as f32 * 0.5;
-        for (entity, inst, gt, posed) in q.iter(world) {
+        for (entity, inst, gt, posed, when_drawn) in q.iter(world) {
             if !inst.visible || inst.lod == Some(StrandLod::Hidden) {
                 continue;
             }
@@ -946,6 +951,9 @@ impl RenderFeature for StrandFeature {
             let guides = posed
                 .filter(|p| !groom.guides.is_empty() && p.points.len() == groom.guides.len())
                 .map(|p| p.points.clone());
+            let pose = when_drawn
+                .filter(|_| guides.is_none() && !groom.guides.is_empty())
+                .map(|w| (*w, groom.guides.len()));
             draws.push(Draw {
                 entity,
                 groom: index,
@@ -957,10 +965,25 @@ impl RenderFeature for StrandFeature {
                 stepped,
                 distance,
                 guides,
+                pose,
             });
         }
         draws.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         draws.truncate(MAX_INSTANCES);
+        // Guides posed when drawn: only now, for what the frame draws, side by side (a coat
+        // out of view costs nothing; one in view the same skinning it cost every frame).
+        let world: &World = world;
+        crate::mesh_feature::run_jobs(draws.iter_mut().filter(|d| d.pose.is_some()).map(|d| {
+            move || {
+                let Some((pose, points)) = d.pose else {
+                    return;
+                };
+                let mut out = Vec::with_capacity(points);
+                if (pose.0)(world, d.entity, &mut out) && out.len() == points {
+                    d.guides = Some(out);
+                }
+            }
+        }));
         self.incoming = incoming;
         self.draws = Some(draws);
     }

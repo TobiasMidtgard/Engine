@@ -177,7 +177,9 @@ pub use sprites::{
     SpriteAnimationMode, SpriteAtlas, SpriteFeature, SpriteFilter, TILE_FLIP_DIAGONAL, TILE_FLIP_X,
     TILE_FLIP_Y, TILE_FRAME_MASK, TileMap,
 };
-pub use strands::{StrandFiber, StrandFollow, StrandGroom, StrandInstance, StrandLod};
+pub use strands::{
+    StrandFiber, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance, StrandLod,
+};
 pub use surface_weather::{SURFACE_PUDDLE_SCALE_M, SURFACE_SNOW_SCALE_M};
 pub use texture::{Image, ImageLoader, PixelFormat};
 pub use virtual_geometry::{Displacement, DisplacementSource};
