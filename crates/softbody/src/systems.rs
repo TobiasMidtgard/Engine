@@ -1380,7 +1380,7 @@ pub(crate) fn beside_frame(
 /// A heavy body's solve beside the frame: its own copy of the sim, and how it was prepared.
 struct InFlight {
     entity: Entity,
-    sim: Sim,
+    sim: Box<Sim>,
     prep: Prepared,
     solved: Option<Solved>,
     /// Its particles, for the trace.
@@ -1480,6 +1480,10 @@ pub fn kick_heavy_bodies(
     let mut work: Vec<(f32, InFlight)> = Vec::new();
     for (e, mut b) in &mut bodies {
         if !b.kicked {
+            // No longer sent: its spare copy goes.
+            if b.spare.is_some() {
+                b.spare = None;
+            }
             continue;
         }
         let b = &mut *b;
@@ -1490,7 +1494,13 @@ pub fn kick_heavy_bodies(
         if !prep.swap {
             prep.steps += owed;
         }
-        let sim = b.sim.clone();
+        let sim = match b.spare.take() {
+            Some(mut spare) => {
+                Sim::clone_from(&mut spare, &b.sim);
+                spare
+            }
+            None => Box::new(b.sim.clone()),
+        };
         // Its loads are the copy's to apply.
         b.sim.loads.clear();
         work.push((
@@ -1610,7 +1620,10 @@ pub fn join_heavy_bodies(
         }
         job.solved += 1;
         let b = &mut *b;
-        b.sim = f.sim;
+        let mut sim = f.sim;
+        std::mem::swap(&mut b.sim, &mut sim);
+        // The state it left with is the next copy's buffers.
+        b.spare = Some(sim);
         finish(b, f.prep, solved, &colliders, &env);
     }
 }

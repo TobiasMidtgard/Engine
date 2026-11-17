@@ -160,6 +160,10 @@ pub struct SoftBodySim {
     /// Fixed steps of this frame it was not stepped in, owed to the step that sends it beside
     /// the frame (`systems::kick_heavy_bodies`).
     pub(crate) owed: u32,
+    /// The copy last sent beside the frame, kept while it is sent each step so the next copy
+    /// reuses its buffers (`systems::kick_heavy_bodies`): copying a 25,000-particle groom
+    /// anew took 1.6 ms of the main thread a frame (VM), most of it allocating.
+    pub(crate) spare: Option<Box<Sim>>,
     pub(crate) snapshot: Vec<Option<(DVec3, Quat)>>,
     /// Time its last step spent asking the world (ground, water, wind, colliders near it), ms.
     pub env_ms: f32,
@@ -267,6 +271,7 @@ impl SoftBodySim {
             overlaps: false,
             kicked: false,
             owed: 0,
+            spare: None,
             snapshot: Vec::new(),
             env_ms: 0.0,
             sleep_wind: Vec3::ZERO,
