@@ -1880,7 +1880,15 @@ impl<'a> EntityCommands<'a> {
     /// ```
     #[track_caller]
     pub fn despawn(&mut self) {
-        self.queue_handled(entity_command::despawn(), warn);
+        // Engine patch 3 (PATCHES.md): the warning for an entity already gone names the line
+        // that asked, which the stock `queue_handled(despawn(), warn)` warning does not.
+        let entity = self.entity;
+        let at = core::panic::Location::caller();
+        let caller = MaybeLocation::caller();
+        self.commands.queue(move |world: &mut World| match world.get_entity_mut(entity) {
+            Ok(e) => e.despawn_with_caller(caller),
+            Err(err) => log::warn!("despawn of {entity} asked at {at}: {err}"),
+        });
     }
 
     /// Despawns the entity.

@@ -44,3 +44,14 @@ To go back to stock bevy_ecs: delete the `bevy_ecs` line under `[patch.crates-io
   frame, Last 0.78 -> 0.20, PostUpdate 1.55 -> 1.35, a fixed step 2.97 -> 2.71.
 - **Safety**: it is chosen only when `can_run` says nothing is running, so it has the whole
   world as the task would, and on the thread the task would have run on.
+
+## 3. A despawn of an entity already gone names the line that asked (`src/system/commands/mod.rs`)
+
+- **What**: `EntityCommands::despawn` queues a world command that despawns the entity if it
+  still exists and otherwise warns `despawn of <entity> asked at <file:line:col>: <error>`.
+  Stock, the same case warns through `queue_handled(despawn(), warn)` with only the closure's
+  type name, which is the same for every caller. `try_despawn` is unchanged (silent).
+- **Why**: the PC streaming laps log 64-118 of these a lap (17 Nov) from some of the 200-odd
+  `despawn()` calls in the engine, and nothing in the stock warning says which.
+- **Safety**: the same despawn (`despawn_with_caller` with the same caller) in the same place
+  in the command queue; only the warning's text and its log target differ.
