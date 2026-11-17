@@ -45,7 +45,7 @@ struct Shown {
     coins: f32,
 }
 
-fn ring(met: f32) -> Color {
+pub(super) fn ring(met: f32) -> Color {
     if met >= 0.99 {
         Color::hex(0x4f9a3c)
     } else if met > 0.05 {
@@ -121,7 +121,7 @@ fn need_badge(n: &Shown) -> El {
 }
 
 /// A labelled meter: `label` on the left, `value` on the right, the bar between.
-fn meter(label: &str, frac: f32, value: String, fill: Color) -> El {
+pub(super) fn meter(label: &str, frac: f32, value: String, fill: Color) -> El {
     El::new()
         .class("row")
         .with_style(|s| s.gap(10.0).align_items(Align::Center))

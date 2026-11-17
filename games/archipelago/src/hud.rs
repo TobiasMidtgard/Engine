@@ -30,6 +30,7 @@ mod ledger;
 mod map;
 mod routes;
 mod shelf;
+mod works;
 
 /// The bars' own state between frames.
 #[derive(Resource, Default)]
@@ -547,43 +548,6 @@ fn card_row(i: usize) -> El {
 
 fn info_card(kind: Kind) -> El {
     let d = kind.def();
-    // What goes in and comes out, as badges.
-    let chain = match (d.input, d.output) {
-        (Some(i), Some(o)) => Some(
-            El::new()
-                .class("row")
-                .with_style(|s| {
-                    s.gap(10.0)
-                        .justify(Justify::Center)
-                        .align_items(Align::Center)
-                })
-                .child(brass::badge(i.icon(), 42.0).tooltip(i.name(), "Taken from the warehouse."))
-                .children(d.input2.map(|j| {
-                    El::new()
-                        .class("row")
-                        .with_style(|s| s.gap(10.0).align_items(Align::Center))
-                        .child(
-                            El::text("+")
-                                .class("ink_title")
-                                .text_style(|t| t.size(20.0))
-                                .pick_ignore(),
-                        )
-                        .child(
-                            brass::badge(j.icon(), 42.0)
-                                .tooltip(j.name(), "Taken from the warehouse, with the first."),
-                        )
-                }))
-                .child(El::icon("isle_arrow").with_style(|s| s.size(34.0, 20.0).pick(Pick::Ignore)))
-                .child(brass::badge(o.icon(), 50.0).tooltip(o.name(), "Carted to the warehouse.")),
-        ),
-        (None, Some(o)) => Some(
-            El::new()
-                .class("row")
-                .with_style(|s| s.gap(10.0).justify(Justify::Center))
-                .child(brass::badge(o.icon(), 50.0).tooltip(o.name(), "Carted to the warehouse.")),
-        ),
-        _ => None,
-    };
     let card = brass::parchment()
         .with_style(|s| {
             s.position(Position::Absolute)
@@ -622,8 +586,7 @@ fn info_card(kind: Kind) -> El {
                 ),
         )
         .child(brass::divider(316.0))
-        .child_opt(chain)
-        .child_opt(d.output.map(|_| progress_bar()))
+        .child_opt(d.output.map(|_| works::card_placeholder()))
         .child_opt((kind == Kind::House).then(house::card_placeholder))
         .children((0..6).map(card_row))
         .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
@@ -642,18 +605,6 @@ fn info_card(kind: Kind) -> El {
 }
 
 /// The batch in progress, as a brass bar (its fill is sized in [`update_data_now`]).
-fn progress_bar() -> El {
-    El::new()
-        .class("brass_track")
-        .with_style(|s| s.width(pct(100.0)).height(12.0))
-        .child(
-            El::new()
-                .class("brass_fill")
-                .id("isle.sel.progress")
-                .with_style(|s| s.width(pct(0.0))),
-        )
-}
-
 fn hud_screen(key: &str, layer: i32) -> Screen {
     Screen {
         key: key.into(),
@@ -717,6 +668,7 @@ pub fn setup(world: &mut World) {
     ledger::install(world);
     routes::install(world);
     house::install(world);
+    works::install(world);
     shelf::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
@@ -766,6 +718,7 @@ pub fn show_card(world: &mut World) {
         update_data_now(world);
         shelf::card_opened(world);
         house::card_opened(world);
+        works::card_opened(world);
     }
 }
 
@@ -983,8 +936,6 @@ fn update_data_now(world: &mut World) {
     let (mut title, mut sub) = (String::new(), String::new());
     let mut progress: Option<f32> = None;
     let mut paused = false;
-    let good = |s: &str| format!("[color=#2f6e28]{s}[/color]");
-    let bad = |s: &str| format!("[color=#9a2f1c]{s}[/color]");
     if let Some(e) = selected
         && let Some(b) = world.get::<Building>(e).cloned()
     {
@@ -1027,27 +978,7 @@ fn update_data_now(world: &mut World) {
         } else if let Some(p) = world.get::<Producer>(e) {
             paused = p.paused;
             progress = Some(p.progress);
-            let status = p.status.text().to_string();
-            rows[0] = (
-                "Status".into(),
-                if p.paused {
-                    bad("Paused")
-                } else if p.efficiency > 0.5 {
-                    good(&status)
-                } else {
-                    bad(&status)
-                },
-            );
-            rows[1] = ("Output".into(), format!("{:.0}%", p.efficiency * 100.0));
-            rows[2] = (
-                "Cycle".into(),
-                format!("one every {:.0} s at full strength", d.cycle_s),
-            );
-            rows[3] = d.workers.map_or(Default::default(), |(t, n)| {
-                ("Workers".into(), format!("{n} {}", t.name().to_lowercase()))
-            });
-            rows[4] = ("Made".into(), format!("{} so far", p.made));
-            rows[5] = ("Upkeep".into(), format!("{:.0} coins a minute", d.upkeep));
+            // Status, chain, workers, site and upkeep: the works section (hud/works.rs).
         } else {
             // (The three item holders show their sockets instead: the card stays short.)
             if crate::items::Host::of(b.kind).is_none() {
@@ -1207,6 +1138,7 @@ pub fn update_data(world: &mut World) {
         map::update(world, 0.2);
         shelf::update(world);
         house::refresh(world);
+        works::refresh(world);
     }
     demo_step(world, dt);
 }
