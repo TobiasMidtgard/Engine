@@ -264,7 +264,7 @@ fn variants() -> Vec<Variant> {
             "grass_old_way",
             r,
             json!({"debug_skip": 268_435_456}),
-            "grass in the scene pass as before 17 Nov (its cut fronds lit at every layer before the depth test, and every run reads whether it is the prepass's surface): `scene: grass` costs this much MORE the old way",
+            "grass in the scene pass as before 17 Nov (its cut fronds lit at every layer before the depth test, every run reads whether it is the prepass's surface, and the light through a blade reads the sun's shadow maps a second time): `scene: grass` costs this much MORE the old way",
         ),
         v(
             "count_grass_runs",
@@ -283,6 +283,54 @@ fn variants() -> Vec<Variant> {
             r,
             json!({"grass_density": 0.0}),
             "grass and ground plants",
+        ),
+        v(
+            "ray_scene_10k",
+            r,
+            json!({"ray_scene_stress": 10_000}),
+            "a measurement, not a cut (the frame costs MORE): 10,000 more instances in the rays' scene, copies of those there spread 256 m each way, and the instances' structure built again every frame. Read `probe gi build` (the build), `probe gi` and `world reflections` (tracing through it), and in the json rows the CPU's part: `render.cpu.probe gi build`, `render.cpu.submit`, `render.gi.ms_instances`, `render.cpu_ms`",
+        ),
+        v(
+            "ray_scene_20k",
+            r,
+            json!({"ray_scene_stress": 20_000}),
+            "the same with 20,000",
+        ),
+        v(
+            "ray_scene_40k",
+            r,
+            json!({"ray_scene_stress": 40_000}),
+            "the same with 40,000",
+        ),
+        v(
+            "ray_sun",
+            r,
+            json!({"ray_sun_shadows": true}),
+            "a measurement, not a cut: one ray toward the sun from every pixel the prepass drew, against the rays' scene as it is today (pass `ray shadows`; nothing reads what the rays find)",
+        ),
+        v(
+            "ray_sun_10k",
+            r,
+            json!({"ray_sun_shadows": true, "ray_scene_stress": 10_000}),
+            "the sun's rays through the scene of ray_scene_10k (read `ray shadows` against that row)",
+        ),
+        v(
+            "ray_sun_40k",
+            r,
+            json!({"ray_sun_shadows": true, "ray_scene_stress": 40_000}),
+            "the sun's rays through the scene of ray_scene_40k",
+        ),
+        v(
+            "count_ray_sun",
+            r,
+            json!({"ray_sun_shadows": true, "debug_skip": 262_144}),
+            "a count: the sun's rays shot and those stopped (in the json state as render.gi.sun_rays and render.gi.sun_hits)",
+        ),
+        v(
+            "count_ray_sun_40k",
+            r,
+            json!({"ray_sun_shadows": true, "ray_scene_stress": 40_000, "debug_skip": 262_144}),
+            "the count through the scene of ray_scene_40k",
         ),
         v(
             "skip_lighting",
@@ -1049,8 +1097,8 @@ fn triangles(bridge: &mut Bridge) -> Option<u64> {
     bridge.call("render.stats", json!({})).ok()?["stats"]["triangles"].as_u64()
 }
 
-/// The meshes' exact shader runs of the last frame read back (`shade_skip::COUNT_MESH_RUNS`).
-/// A feature's shader run counts (`key`: `mesh_runs` or `grass_runs`), where one reports them.
+/// A feature's exact shader run counts of the last frame read back
+/// (`shade_skip::COUNT_MESH_RUNS`; `key`: `mesh_runs` or `grass_runs`), where one reports them.
 fn runs_of(bridge: &mut Bridge, key: &str) -> Option<Value> {
     let at = bridge.call("render.stats", json!({})).ok()?;
     at["renderer"]["features"]
@@ -1064,6 +1112,24 @@ fn runs_of(bridge: &mut Bridge, key: &str) -> Option<Value> {
 fn round3(x: f64) -> f64 {
     (x * 1000.0).round() / 1000.0
 }
+
+/// What a reading keeps besides the passes' GPU times: the CPU time of recording the rays'
+/// structures' builds and the sun's rays, of placing the instances and of the gather as a
+/// whole, of finishing and submitting the frame's commands (wgpu walks a top-level structure's
+/// instances again there), the render's CPU time in all, and the probes traced and what a
+/// thousand of their rays cost.
+const RAY_ROWS: [&str; 10] = [
+    "render.cpu.probe gi build",
+    "render.cpu.ray shadows",
+    "render.cpu.finish commands",
+    "render.cpu.wait for the finishing threads",
+    "render.cpu.submit",
+    "render.cpu_ms",
+    "render.gi.ms_instances",
+    "render.gi.extract_ms",
+    "render.gi.probes_updated",
+    "render.gi.gpu_ms_per_kray",
+];
 
 /// Read the render rows of distinct frames for `secs`.
 fn sample(bridge: &mut Bridge, secs: f32) -> Result<Sample, String> {
@@ -1082,9 +1148,12 @@ fn sample(bridge: &mut Bridge, secs: f32) -> Result<Sample, String> {
         out.frame_ms += stats.get("frame_ms").and_then(Value::as_f64).unwrap_or(0.0);
         if let Some(metrics) = stats.get("metrics").and_then(Value::as_object) {
             for (key, value) in metrics {
+                // (The last line: the CPU's part of the rays' scene and how the probes' rays
+                // went, for the `ray_scene_*` rows. Not passes: no table or sum takes them.)
                 let wanted = key.starts_with("render.gpu")
                     || key.starts_with("render.extra_views_gpu")
-                    || key == "render.extra_views_ms";
+                    || key == "render.extra_views_ms"
+                    || RAY_ROWS.contains(&key.as_str());
                 if let (true, Some(v)) = (wanted, value.as_f64()) {
                     *out.sums.entry(key.clone()).or_default() += v;
                 }

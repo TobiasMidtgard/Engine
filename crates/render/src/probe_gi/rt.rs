@@ -176,6 +176,8 @@ pub(super) struct HwScene {
     capacity: u32,
     /// The top-level structure's slots that may hold an instance (the last placement's).
     slots: usize,
+    /// The copies the last placement added for a measurement (`place`'s `stress`).
+    stress: u32,
     /// Build the top-level structure this frame (its instances changed, or a structure they
     /// point at). Set at first, so the empty scene is built before any ray reads it.
     tlas_dirty: bool,
@@ -214,6 +216,25 @@ fn create_tlas(device: &wgpu::Device, capacity: u32) -> wgpu::Tlas {
     })
 }
 
+/// How far the measurement's copies spread from what they copy, meters each way along x and z
+/// (512 m across: about what sun shadows and reflections will want of a ray scene), and along y.
+const STRESS_REACH: [f32; 3] = [256.0, 3.0, 256.0];
+
+/// Where copy `k` of the measurement's stands, from the instance it copies (meters): the R2
+/// sequence over the reach, so any number of copies covers it evenly and none stand in rows.
+fn stress_offset(k: u32) -> [f32; 3] {
+    // 1/g, 1/g^2, 1/g^3 of the plastic number's three-dimensional cousin (g^4 = g + 1).
+    const STEP: [f64; 3] = [
+        0.819_172_513_396_164_4,
+        0.671_043_606_703_789_2,
+        0.549_700_477_901_970_3,
+    ];
+    let k = f64::from(k) + 1.0;
+    [0, 1, 2].map(|axis| {
+        (((0.5 + STEP[axis] * k).fract() * 2.0 - 1.0) * f64::from(STRESS_REACH[axis])) as f32
+    })
+}
+
 /// The indices of `mesh`'s triangles that `bvh::build_mesh` keeps: those whose corners are all
 /// in range, in order (a trailing partial triangle is dropped).
 pub(super) fn kept_indices(positions: usize, indices: &[u32]) -> Vec<u32> {
@@ -237,6 +258,7 @@ impl HwScene {
             tlas: create_tlas(device, FIRST_CAPACITY),
             capacity: FIRST_CAPACITY,
             slots: 0,
+            stress: 0,
             tlas_dirty: true,
             budget_used: 0,
             builds_now: 0,
@@ -456,37 +478,74 @@ impl HwScene {
     /// Put the instances in the top-level structure: slot `i` holds mesh `placements[i].0`'s
     /// structure moved by `placements[i].1` (anchor-relative mesh -> world, rows of a 3x4), and
     /// answers rays with `i` (the instance row `instances[i]`). A slot whose mesh has no
-    /// structure holds nothing. True when the structure was made again with more room (bind it
-    /// again).
-    pub(super) fn place(&mut self, device: &wgpu::Device, placements: &[(u32, [f32; 12])]) -> bool {
+    /// structure holds nothing. True when the structure was made again with more or less room
+    /// (bind it again).
+    ///
+    /// `stress` (`RenderSettings::ray_scene_stress`, a measurement): that many more slots after
+    /// them, each a copy of one of the instances moved by [`stress_offset`], answering rays
+    /// with the row of the instance it copies. The caller places every frame while it is not
+    /// 0, so the structure is built again every frame.
+    pub(super) fn place(
+        &mut self,
+        device: &wgpu::Device,
+        placements: &[(u32, [f32; 12])],
+        stress: u32,
+    ) -> bool {
         let mut grown = false;
-        let needed = placements.len() as u32;
-        if needed > self.capacity {
-            while self.capacity < needed {
-                self.capacity *= 2;
-            }
+        let most = device.limits().max_tlas_instance_count as usize;
+        let copies = if placements.is_empty() {
+            0
+        } else {
+            (stress as usize).min(most.saturating_sub(placements.len()))
+        };
+        let total = placements.len() + copies;
+        let needed = total as u32;
+        // (Back to a structure of the usual size once the measurement's copies are gone.)
+        let fit = needed.next_power_of_two().max(FIRST_CAPACITY);
+        if needed > self.capacity || (copies == 0 && self.stress != 0 && fit < self.capacity) {
+            self.capacity = fit;
             self.tlas = create_tlas(device, self.capacity);
             self.slots = 0;
             grown = true;
         }
         let mut instances = 0;
         // The slots of this list and the last (those past both are empty).
-        for i in 0..placements.len().max(self.slots) {
-            let now = placements.get(i).and_then(|&(key, to_world)| {
+        for i in 0..total.max(self.slots) {
+            let now = if i < placements.len() {
+                let (key, to_world) = placements[i];
                 self.meshes
                     .get(&key)
                     .map(|m| wgpu::TlasInstance::new(&m.blas, to_world, i as u32, 0xff))
-            });
+            } else if i < total {
+                let copy = i - placements.len();
+                let of = copy % placements.len();
+                let (key, mut to_world) = placements[of];
+                let by = stress_offset(copy as u32);
+                for (axis, by) in by.into_iter().enumerate() {
+                    to_world[axis * 4 + 3] += by;
+                }
+                self.meshes
+                    .get(&key)
+                    .map(|m| wgpu::TlasInstance::new(&m.blas, to_world, of as u32, 0xff))
+            } else {
+                None
+            };
             instances += now.is_some() as u32;
             if now.is_none() && self.tlas[i].is_none() {
                 continue;
             }
             self.tlas[i] = now;
         }
-        self.slots = placements.len();
+        self.slots = total;
+        self.stress = stress;
         self.stats.instances = instances;
         self.tlas_dirty = true;
         grown
+    }
+
+    /// The copies asked of the last [`place`](Self::place) (its `stress`).
+    pub(super) fn stress(&self) -> u32 {
+        self.stress
     }
 
     /// Record this frame's builds: the meshes' new structures, then the top-level one when its

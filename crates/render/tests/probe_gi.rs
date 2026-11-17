@@ -10,8 +10,11 @@
 //! smaller than a plane of probes never starts them all over. On a GPU with ray queries
 //! (lavapipe has them) the rays trace through the GPU's acceleration structures, lighting each
 //! scene as the software walk does, and a large mesh is in them the frame it shows up, its
-//! structure compacted once built. Needs a GPU or lavapipe; passes with a note when neither is
-//! available.
+//! structure compacted once built. Two measurements for the ray-traced lighting round ride on
+//! that path: a ray toward the sun from every pixel is stopped where the shadow maps' shadow
+//! falls (`ray_sun_shadows`), and the copies that stand in for a full ray scene are in the rays
+//! while asked for and gone after (`ray_scene_stress`). Needs a GPU or lavapipe; passes with a
+//! note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -1371,5 +1374,159 @@ fn on_ray_tracing_hardware_a_large_mesh_is_in_the_rays_at_once() {
     assert!(
         on < off * 0.7,
         "inside the sphere: {on:.1}, {off:.1} without probes"
+    );
+}
+
+/// The ground seen from above with no sky in view, the sun from the side, and (`roof`) a thin
+/// roof 3 m square 2 m up whose shadow falls beside it. The sun's rays on, and counted.
+fn under_the_sun(roof: bool) -> App {
+    let mut app = app_rays(true);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.ray_sun_shadows = true;
+        s.debug_skip = engine_render::settings::shade_skip::COUNT_MESH_RUNS;
+    }
+    let w = &mut app.world;
+    ground(w);
+    sun(w, 110_000.0, DVec3::new(1.0, -1.0, 0.0));
+    camera(w, DVec3::new(0.0, 7.0, 5.0), DVec3::ZERO, 14.0);
+    if roof {
+        slab(w, DVec3::new(0.0, 2.0, 0.0), DVec3::new(3.0, 0.1, 3.0), 0.3);
+    }
+    app
+}
+
+/// The sun's rays counted in a frame of the scene as it stands: rays shot, rays stopped. A
+/// count is read back frames after it was taken, sooner or later with the machine's speed, so
+/// four pictures are taken first: each waits for the GPU, and by the fourth the count read is
+/// one taken since the first (the rays' structures were built long before).
+fn sun_counts(app: &mut App) -> (u32, u32) {
+    let dir = std::env::temp_dir().join("engine-probe-gi");
+    let _ = std::fs::create_dir_all(&dir);
+    for _ in 0..4 {
+        capture_now(&mut app.world, dir.join("rt_sun_count.png")).expect("screenshot");
+    }
+    let d = app.world.resource::<Diagnostics>();
+    let count = |name: &str| {
+        d.get(name)
+            .filter(|n| *n >= 0.0)
+            .expect("the rays are counted") as u32
+    };
+    (count("render.gi.sun_rays"), count("render.gi.sun_hits"))
+}
+
+/// `RenderSettings::ray_sun_shadows` (a measurement for the ray-traced lighting round): every
+/// pixel the prepass drew shoots one ray toward the sun through the hardware rays' scene. Over
+/// open ground none is stopped; under a roof the rays stopped are the pixels the shadow maps
+/// leave dark, the same shadow found two ways.
+#[test]
+fn the_suns_rays_are_stopped_where_the_shadow_falls() {
+    let mut open = under_the_sun(false);
+    open.update_n(8);
+    if open.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    if !on_hardware(&open) {
+        eprintln!("skipping: the GPU has no ray queries");
+        return;
+    }
+    let (rays, hits) = sun_counts(&mut open);
+    assert_eq!(
+        rays,
+        W * H,
+        "a ray from every pixel: the ground fills the view"
+    );
+    assert_eq!(hits, 0, "nothing stands between open ground and the sun");
+
+    let mut roofed = under_the_sun(true);
+    roofed.update_n(8);
+    assert!(on_hardware(&roofed));
+    let (rays, hits) = sun_counts(&mut roofed);
+    assert_eq!(rays, W * H);
+    // The pixels the frame draws in shadow: under half the open ground's brightness.
+    let lit = brightness(&mut open, "rt_sun_open.png", [0.0, 0.0, 1.0, 1.0]);
+    let dir = std::env::temp_dir().join("engine-probe-gi");
+    let path = dir.join("rt_sun_roof.png");
+    capture_now(&mut roofed.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join("rt_sun_roof.png"));
+    }
+    let image = image::open(&path).expect("read the shot").to_rgb8();
+    let dark = image
+        .pixels()
+        .filter(|p| (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0 < lit * 0.5)
+        .count() as u32;
+    eprintln!(
+        "{hits} of {rays} rays stopped; {dark} pixels drawn in shadow (open ground {lit:.1})"
+    );
+    assert!(
+        dark > 300,
+        "the roof's shadow is in view: {dark} dark pixels"
+    );
+    assert!(
+        hits.abs_diff(dark) * 8 <= dark,
+        "the rays stopped ({hits}) are the pixels in shadow ({dark})"
+    );
+}
+
+/// `RenderSettings::ray_scene_stress` (a measurement): that many copies of the instances join
+/// the hardware rays' scene and its top-level structure is built again every frame, through a
+/// structure with more room when they don't fit the first; switched off, they are gone, the
+/// structure is no longer built each frame and the room is lit as it was.
+#[test]
+fn the_ray_scenes_stand_in_copies_come_and_go() {
+    let mut app = app_rays(true);
+    {
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.6, 0.7, Some((1.4, -0.5)));
+        ground(w);
+        sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
+        camera(w, EYE, TARGET, 12.0);
+    }
+    app.update_n(12);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    if !on_hardware(&app) {
+        eprintln!("skipping: the GPU has no ray queries");
+        return;
+    }
+    let diag = |app: &App, name: &str| {
+        app.world
+            .resource::<Diagnostics>()
+            .get(name)
+            .unwrap_or(-1.0)
+    };
+    let own = diag(&app, "render.gi.rt_instances");
+    assert!(own >= 9.0, "the room and the ground are in the rays: {own}");
+    assert_eq!(diag(&app, "render.gi.rt_tlas_built"), 0.0, "a still scene");
+    let before = brightness(&mut app, "rt_stress_before.png", UPPER);
+    // More than the first structure holds (1024).
+    for copies in [300u32, 3000] {
+        app.world.resource_mut::<RenderSettings>().ray_scene_stress = copies;
+        for _ in 0..3 {
+            app.update();
+            assert_eq!(diag(&app, "render.gi.rt_instances"), own + copies as f64);
+            assert_eq!(
+                diag(&app, "render.gi.rt_tlas_built"),
+                1.0,
+                "built again every frame"
+            );
+        }
+        assert!(on_hardware(&app));
+    }
+    app.world.resource_mut::<RenderSettings>().ray_scene_stress = 0;
+    app.update_n(2);
+    assert_eq!(diag(&app, "render.gi.rt_instances"), own);
+    assert_eq!(diag(&app, "render.gi.rt_tlas_built"), 0.0, "and left alone");
+    app.update_n(12);
+    assert!(on_hardware(&app));
+    let after = brightness(&mut app, "rt_stress_after.png", UPPER);
+    eprintln!("the room's upper part: {before:.1} before the copies, {after:.1} after");
+    assert!(
+        (after - before).abs() <= before * 0.05 + 1.0,
+        "the room is lit as before the copies: {before:.1}, {after:.1}"
     );
 }

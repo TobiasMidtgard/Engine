@@ -383,3 +383,42 @@ fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     textureStore(reflect_out, id.xy, out);
 }
+
+// The sun's rays (`cs_sun`; `RenderSettings::ray_sun_shadows`, a measurement for now): one ray
+// toward the sun from every pixel the prepass drew, against the same scene, from the side of
+// the surface the sun is on (as the shadow maps are read). `sun_out`.r: 1 where the ray reached
+// the sky within `SUN_RAY_REACH`, 0 where something stopped it. Nothing reads it yet. The
+// normals and depth are `reflect_normal` and `reflect_depth`, at the view's full size.
+@group(2) @binding(5) var sun_out: texture_storage_2d<rgba8unorm, write>;
+// Rays shot and rays stopped, counted while `COUNT_SUN_RAYS` is set (cleared before the pass).
+@group(2) @binding(6) var<storage, read_write> sun_counts: array<atomic<u32>, 4>;
+
+// How far a ray looks for something between its pixel and the sun, meters.
+const SUN_RAY_REACH: f32 = 512.0;
+// `shade_skip::COUNT_MESH_RUNS`: the counts of the frame's work are asked for.
+const COUNT_SUN_RAYS: u32 = 262144u;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_sun(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(sun_out);
+    if (any(id.xy >= size)) { return; }
+    let px = vec2<i32>(id.xy);
+    let nr = textureLoad(reflect_normal, px, 0);
+    let z = textureLoad(reflect_depth, px, 0);
+    // The sky, a pixel the prepass gave no normal, or no sun: no ray.
+    if (z <= 0.0 || nr.w < 0.5 || frame.sun_color.w < 0.5) {
+        textureStore(sun_out, id.xy, vec4<f32>(1.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(size);
+    let pos = view_position(uv, z);
+    let rel = (frame.inv_view * vec4<f32>(pos, 1.0)).xyz;
+    let n = sunlit_side(oct_decode(nr.xy));
+    let origin = rel + n * (0.02 + 0.002 * -pos.z);
+    let stopped = trace_scene(origin, frame.sun_dir.xyz, SUN_RAY_REACH, true).instance != 0xffffffffu;
+    if (shade_skip(COUNT_SUN_RAYS)) {
+        atomicAdd(&sun_counts[0], 1u);
+        if (stopped) { atomicAdd(&sun_counts[1], 1u); }
+    }
+    textureStore(sun_out, id.xy, vec4<f32>(select(1.0, 0.0, stopped), 0.0, 0.0, 1.0));
+}

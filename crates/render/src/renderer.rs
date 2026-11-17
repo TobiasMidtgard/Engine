@@ -3282,6 +3282,18 @@ impl Renderer {
             self.finisher
                 .hand_off(device, &mut encoder, &mut part, "lighting");
         }
+        // One ray toward the sun from every pixel of that depth (a measurement for now:
+        // `RenderSettings::ray_sun_shadows`).
+        if !extra && settings.ray_sun_shadows {
+            self.perf.pass(&mut cpu, &mut encoder, "ray shadows");
+            self.probe_gi.encode_sun(
+                &self.shared.device,
+                &mut encoder,
+                frame_group,
+                &self.targets,
+                settings.debug_skip & crate::settings::shade_skip::COUNT_MESH_RUNS != 0,
+            );
+        }
         // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
         // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass
         // group).

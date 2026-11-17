@@ -44,6 +44,8 @@ mod rt;
 mod schedule;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use bevy_ecs::change_detection::Tick;
 use bevy_ecs::entity::{EntityHashMap, EntityHashSet};
@@ -68,6 +70,11 @@ pub(crate) const MAX_PROBES: u32 = TILES_X * TILES_X;
 /// Rays per probe at most (`MAX_RAYS` in probe_gi.wgsl).
 const MAX_RAYS: u32 = 256;
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// What the sun's rays found, a texel a pixel (`cs_sun`'s `sun_out`): a format a compute pass
+/// may write on every GPU.
+const SUN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// `cs_sun`'s `sun_counts`: four counters.
+const SUN_COUNTS_BYTES: u64 = 16;
 /// Triangles whose hierarchies may be built per frame where the gather runs (at least one mesh
 /// is).
 const BUILD_TRIANGLES_PER_FRAME: usize = 8_000;
@@ -544,6 +551,70 @@ struct Active {
     group: Option<wgpu::BindGroup>,
     /// The rays' scene in the GPU's acceleration structures, on the hardware path.
     hw: Option<rt::HwScene>,
+    /// The sun's rays (`RenderSettings::ray_sun_shadows`), on the hardware path.
+    sun: Option<SunRays>,
+}
+
+/// One ray toward the sun from every pixel (`cs_sun`, a measurement for now): its program, its
+/// output and the count of its rays.
+struct SunRays {
+    pipeline: wgpu::ComputePipeline,
+    /// Group 2: the prepass's normals and depth, `out`, `counts`.
+    layout: wgpu::BindGroupLayout,
+    /// What each pixel's ray found (r: 1 the sun, 0 something in the way), made at first use
+    /// and again when the view's size changes. 4 bytes a pixel, 14.7 MB at 2560x1440.
+    out: Option<crate::targets::Tex>,
+    /// The rays shot and those stopped, counted by the pass while
+    /// `shade_skip::COUNT_MESH_RUNS` is set, and their copy for the CPU to read.
+    counts: wgpu::Buffer,
+    read: wgpu::Buffer,
+    /// `SUN_COUNT_*`.
+    state: Arc<AtomicU8>,
+    /// This frame's commands copy the counts out: map the copy once they are submitted.
+    copied: bool,
+    /// The latest counts read: rays, hits.
+    latest: Option<[u32; 2]>,
+}
+
+const SUN_COUNT_FREE: u8 = 0;
+const SUN_COUNT_MAPPING: u8 = 1;
+const SUN_COUNT_MAPPED: u8 = 2;
+const SUN_COUNT_FAILED: u8 = 3;
+
+impl SunRays {
+    /// Take in the counts that arrived, and ask for those last frame's commands copied out
+    /// (they are submitted by now).
+    fn take_counts(&mut self) {
+        if std::mem::take(&mut self.copied) {
+            self.state.store(SUN_COUNT_MAPPING, Ordering::Release);
+            let state = self.state.clone();
+            self.read
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    let to = if r.is_ok() {
+                        SUN_COUNT_MAPPED
+                    } else {
+                        SUN_COUNT_FAILED
+                    };
+                    state.store(to, Ordering::Release);
+                });
+        }
+        match self.state.load(Ordering::Acquire) {
+            SUN_COUNT_MAPPED => {
+                if let Ok(view) = self.read.slice(..).get_mapped_range() {
+                    let n = |at: usize| u32::from_le_bytes([0, 1, 2, 3].map(|b| view[at * 4 + b]));
+                    self.latest = Some([n(0), n(1)]);
+                }
+                self.read.unmap();
+                self.state.store(SUN_COUNT_FREE, Ordering::Release);
+            }
+            SUN_COUNT_FAILED => {
+                self.read.unmap();
+                self.state.store(SUN_COUNT_FREE, Ordering::Release);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Probe GI's state, owned by the renderer for the main view (extra views go without).
@@ -986,6 +1057,74 @@ impl ProbeGi {
                 cache: None,
             })
         };
+        // The sun's rays: the prepass's normals and depth as the reflections read them, what
+        // the rays found, and their count.
+        let sun = hardware.then(|| {
+            let inputs = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ray shadow inputs"),
+                entries: &[
+                    layout_entry(
+                        0,
+                        S::COMPUTE,
+                        wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                    ),
+                    layout_entry(
+                        1,
+                        S::COMPUTE,
+                        wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                    ),
+                    layout_entry(
+                        5,
+                        S::COMPUTE,
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: SUN_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                    ),
+                    layout_entry(6, S::COMPUTE, storage(false)),
+                ],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("ray shadows"),
+                bind_group_layouts: &[Some(&shared.frame_layout), Some(&layout), Some(&inputs)],
+                immediate_size: 0,
+            });
+            let counts = |label, usage| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: SUN_COUNTS_BYTES,
+                    usage,
+                    mapped_at_creation: false,
+                })
+            };
+            SunRays {
+                pipeline: pipeline("cs_sun", &pipeline_layout),
+                layout: inputs,
+                out: None,
+                counts: counts(
+                    "ray shadow counts",
+                    wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                ),
+                read: counts(
+                    "ray shadow counts readback",
+                    wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                ),
+                state: Default::default(),
+                copied: false,
+                latest: None,
+            }
+        });
         let usage = wgpu::BufferUsages::STORAGE;
         let grow_usage = usage | wgpu::BufferUsages::COPY_SRC;
         self.active = Some(Active {
@@ -1017,6 +1156,7 @@ impl ProbeGi {
             updates: GrowBuffer::new(device, "probe gi updates", usage, 4096),
             group: None,
             hw: hardware.then(|| rt::HwScene::new(device)),
+            sun,
         });
         // The new buffers hold nothing yet.
         self.store.gpu_nodes = 0;
@@ -1984,8 +2124,10 @@ impl ProbeGi {
             // The instances' structure, when they came, went or moved, or a mesh's structure
             // they point at changed (built again, compacted); the GPU builds it in
             // `encode_scene`.
-            if placements_changed || hw.tlas_dirty() {
-                regroup |= hw.place(device, &placed.placements);
+            // (And every frame while a measurement adds its copies, and once more after it.)
+            let stress = settings.ray_scene_stress;
+            if placements_changed || hw.tlas_dirty() || stress != 0 || hw.stress() != 0 {
+                regroup |= hw.place(device, &placed.placements, stress);
             }
         }
         part(6);
@@ -2292,6 +2434,84 @@ impl ProbeGi {
         true
     }
 
+    /// Shoot one ray toward the sun from every pixel the prepass drew
+    /// (`RenderSettings::ray_sun_shadows`, a measurement: nothing reads what they find), after
+    /// the prepass's depth was copied. `count` (`shade_skip::COUNT_MESH_RUNS`): the pass counts
+    /// its rays and those stopped, for `render.gi.sun_rays` and `sun_hits` a few frames on.
+    /// False, recording nothing, off the hardware path or before the scene's first frame.
+    pub fn encode_sun(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_group: &wgpu::BindGroup,
+        targets: &crate::targets::Targets,
+        count: bool,
+    ) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let (Some(group), Some(sun)) = (&active.group, active.sun.as_mut()) else {
+            return false;
+        };
+        sun.take_counts();
+        if !count {
+            sun.latest = None;
+        }
+        let size = (targets.width, targets.height);
+        let out = match &mut sun.out {
+            Some(t) if (t.width, t.height) == size => t,
+            slot => slot.insert(crate::targets::Tex::new(
+                device,
+                "ray shadows",
+                size.0,
+                size.1,
+                SUN_FORMAT,
+                wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            )),
+        };
+        let inputs = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray shadow inputs"),
+            layout: &sun.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&targets.prepass_normal.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&targets.prepass_depth.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&out.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: sun.counts.as_entire_binding(),
+                },
+            ],
+        });
+        if count {
+            encoder.clear_buffer(&sun.counts, 0, None);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ray shadows"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&sun.pipeline);
+            pass.set_bind_group(0, frame_group, &[]);
+            pass.set_bind_group(1, group, &[]);
+            pass.set_bind_group(2, &inputs, &[]);
+            pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);
+        }
+        if count && !sun.copied && sun.state.load(Ordering::Acquire) == SUN_COUNT_FREE {
+            encoder.copy_buffer_to_buffer(&sun.counts, 0, &sun.read, 0, SUN_COUNTS_BYTES);
+            sun.copied = true;
+        }
+        true
+    }
+
     /// `render.gi.*` diagnostics.
     pub fn publish(&self, d: &mut Diagnostics) {
         let on = self.active.is_some();
@@ -2339,6 +2559,12 @@ impl ProbeGi {
             d.set("render.gi.rt_fences", hw.fences() as f64);
         }
         d.set("render.gi.rt_losses", self.hw_losses as f64);
+        // The sun's rays counted in the latest frame read back (-1: not counted now).
+        if let Some(sun) = self.active.as_ref().and_then(|a| a.sun.as_ref()) {
+            let [rays, hits] = sun.latest.map_or([-1.0; 2], |n| n.map(f64::from));
+            d.set("render.gi.sun_rays", rays);
+            d.set("render.gi.sun_hits", hits);
+        }
     }
 }
 

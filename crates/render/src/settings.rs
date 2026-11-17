@@ -205,9 +205,12 @@ pub mod shade_skip {
     /// With `trial_cut::MESHES_ONCE`: the pixels lit from the stored material are drawn
     /// magenta (a picture of what the cut reaches; meshes left to the old way keep their look).
     pub const SHOW_MESHES_ONCE: u32 = 131072;
-    /// Not a skip: count the meshes' vertex runs, triangles and fragment runs in the prepass
-    /// and the scene pass of the main view (mesh_counts.rs; `render.stats`, the meshes'
-    /// `mesh_runs`). Needs pipeline statistics queries.
+    /// Not a skip: count the meshes' and the grass's vertex runs, triangles and fragment runs
+    /// in the prepass and the scene pass of the main view (mesh_counts.rs; `render.stats`, the
+    /// meshes' `mesh_runs` and the grass's `grass_runs`; needs pipeline statistics queries),
+    /// the fog's froxels lit (volumetrics.rs) and the sun's rays and those stopped
+    /// (`RenderSettings::ray_sun_shadows`; `render.gi.sun_rays`, `render.gi.sun_hits`; the one
+    /// reader of this bit in a shader, probe_gi.wgsl `cs_sun`).
     pub const COUNT_MESH_RUNS: u32 = 262144;
     /// Skinned meshes are not posed (they freeze where they are; a new one stays in its bind
     /// pose): what posing them on the GPU costs in `compute meshes`.
@@ -247,9 +250,10 @@ pub mod shade_skip {
     pub const STRANDS_NEAR_COUNT: u32 = 134217728;
     /// Grass in the scene pass as until 17 Nov 2026: its pipelines test for a depth nearer or
     /// equal and write it (so the cut fronds' program, which discards, runs before the test at
-    /// every layer), and every run reads whether it is the prepass's surface (grass.rs,
-    /// grass.wgsl `fs_main_old`). The same picture: what lighting only the blades that show
-    /// saves in `scene: grass`. Read on the CPU.
+    /// every layer), every run reads whether it is the prepass's surface, and the light
+    /// through a blade reads the sun's shadow maps a second time (grass.rs, grass.wgsl
+    /// `fs_main_old`). The same picture: what lighting only the blades that show, and reading
+    /// their sunlight once, saves in `scene: grass`. Read on the CPU.
     pub const GRASS_OLD_WAY: u32 = 268435456;
 }
 
@@ -598,6 +602,19 @@ pub struct RenderSettings {
     /// same scene and the same light; off traces in software everywhere
     /// (`ENGINE_RAY_QUERIES=off` leaves the device without ray queries).
     pub gi_hardware_rays: bool,
+    /// A measurement, 0 (off) by default: this many more instances in the rays' scene on the
+    /// hardware path, copies of the instances there spread 256 m each way around them, and the
+    /// instances' structure built again every frame. What a ray scene with the ground, the
+    /// leaves and the water in it costs to build and to trace through before those are in it
+    /// (`gpu_sweep` rows `ray_scene_10k`, `_20k`, `_40k`; passes "probe gi build", "probe gi",
+    /// "world reflections", "ray shadows"). The copies show in the probes' light and in
+    /// reflections while it is on.
+    pub ray_scene_stress: u32,
+    /// A measurement, off by default: one ray toward the sun from every pixel the prepass drew,
+    /// against the rays' scene on the hardware path (pass "ray shadows", `gpu_sweep` row
+    /// `ray_sun`; with `shade_skip::COUNT_MESH_RUNS` the rays and their hits are counted,
+    /// `render.gi.sun_rays` and `render.gi.sun_hits`). Nothing reads what the rays find yet.
+    pub ray_sun_shadows: bool,
     /// How far light spreads under skin, meters at full strength (screen-space subsurface
     /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
     /// 0 = off.
@@ -897,6 +914,8 @@ impl Default for RenderSettings {
             gi_hysteresis: 0.9,
             gi_shadowed_lights: 8,
             gi_hardware_rays: true,
+            ray_scene_stress: 0,
+            ray_sun_shadows: false,
             subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,
