@@ -155,6 +155,108 @@ fn clear_thighs(p: vec3<f32>, bones: vec4<u32>, prev: bool, margin: f32) -> vec3
     return q;
 }
 
+// A tabard's panel hangs from the belt like a board on a hinge: a stride swings it out as a
+// whole, front panel over the leading thigh and back panel over the trailing one, instead of
+// each point being pushed out of the thighs on its own (that bulged the cloth into fins and let
+// the coat underneath through). `p`: the point skinned to the hips alone; `bind`: where it
+// is unposed; `rest_y`: its rest height. The swing turns the point about `axis`
+// by `angle` round the belt line.
+struct Panel {
+    p: vec3<f32>,
+    axis: vec3<f32>,
+    angle: f32,
+};
+
+// The panel's top (the belt, `skirt::TABARD`) and its length to the hem, rest m.
+const PANEL_TOP: f32 = 0.125;
+const PANEL_LENGTH: f32 = 0.465;
+
+// The steepest a panel through `p` hanging `d` below the belt (along `up`, out along `fwd`)
+// must lean to clear thighs from hip joints `a_l`, `a_r` to knees `k_l`, `k_r`.
+fn panel_slope(
+    p: vec3<f32>,
+    up: vec3<f32>,
+    fwd: vec3<f32>,
+    d: f32,
+    a: array<vec3<f32>, 2>,
+    k: array<vec3<f32>, 2>,
+) -> f32 {
+    var slope = 0.0;
+    for (var s = 0u; s < 2u; s++) {
+        for (var i = 0u; i <= 5u; i++) {
+            let t = f32(i) / 5.0;
+            let c = a[s] + (k[s] - a[s]) * t;
+            // Clear of the thigh and of the coat over it, which flares toward its hem.
+            let r = mix(character.thigh.w, character.knee.w, t) + 0.03 + 0.025 * t;
+            // How far below the belt this part of the thigh is, and how far it reaches past
+            // the panel's line through the point.
+            let below = d - dot(c - p, up);
+            if (below < 0.04 || below > PANEL_LENGTH + 0.02) {
+                continue;
+            }
+            slope = max(slope, (dot(c - p, fwd) + r) / below);
+        }
+    }
+    return slope;
+}
+
+// Out from the hips through `p`, level and square to the line through the hip joints.
+fn panel_out(p: vec3<f32>, up: vec3<f32>, hip_l: vec3<f32>, hip_r: vec3<f32>) -> vec3<f32> {
+    let across = normalize(hip_l - hip_r);
+    let out_of = p - (hip_l + hip_r) * 0.5;
+    return normalize(out_of - up * dot(out_of, up) - across * dot(out_of, across));
+}
+
+fn hang_panel(p: vec3<f32>, bind: vec3<f32>, rest_y: f32, bones: vec4<u32>, prev: bool) -> Panel {
+    var out: Panel;
+    out.p = p;
+    out.axis = vec3<f32>(1.0, 0.0, 0.0);
+    out.angle = 0.0;
+    if (pose.info.y == 0u || character.thigh.w <= 0.0) {
+        return out;
+    }
+    let o = select(0u, pose.info.x, prev);
+    let hips = pose.bones[o + bones.x];
+    let up = normalize((hips * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
+    let mirror = vec3<f32>(-1.0, 1.0, 1.0);
+    let bl = pose.bones[o + bones.y];
+    let br = pose.bones[o + bones.z];
+    let a = array<vec3<f32>, 2>(
+        (bl * vec4<f32>(character.thigh.xyz, 1.0)).xyz,
+        (br * vec4<f32>(character.thigh.xyz * mirror, 1.0)).xyz,
+    );
+    let k = array<vec3<f32>, 2>(
+        (bl * vec4<f32>(character.knee.xyz, 1.0)).xyz,
+        (br * vec4<f32>(character.knee.xyz * mirror, 1.0)).xyz,
+    );
+    // How far below the belt the point hangs.
+    let d = clamp(PANEL_TOP - rest_y, 0.0, PANEL_LENGTH);
+    let fwd = panel_out(p, up, a[0], a[1]);
+    // Only the lean the stride adds: standing, the panel hangs as it was cut, clear of the
+    // legs (the margins above are generous).
+    let ra = array<vec3<f32>, 2>(character.thigh.xyz, character.thigh.xyz * mirror);
+    let rk = array<vec3<f32>, 2>(character.knee.xyz, character.knee.xyz * mirror);
+    let up0 = vec3<f32>(0.0, 1.0, 0.0);
+    // Measured from the top of the point's column, so a whole column leans as one.
+    let top0 = bind + up0 * d;
+    let standing = panel_slope(top0, up0, panel_out(bind, up0, ra[0], ra[1]), 0.0, ra, rk);
+    let slope = panel_slope(p + up * d, up, fwd, 0.0, a, k) - max(standing, 0.0);
+    if (slope <= 0.0 || d <= 0.0) {
+        return out;
+    }
+    let angle = min(atan(slope), 1.1);
+    out.p = p + fwd * (d * sin(angle)) + up * (d * (1.0 - cos(angle)));
+    out.axis = normalize(cross(-up, fwd));
+    out.angle = angle;
+    return out;
+}
+
+// `v` turned by `angle` about the unit `axis`.
+fn turn(v: vec3<f32>, axis: vec3<f32>, angle: f32) -> vec3<f32> {
+    let c = cos(angle);
+    return v * c + cross(axis, v) * sin(angle) + axis * dot(axis, v) * (1.0 - c);
+}
+
 // How wounded (x) and bleeding (y) what these bones move is (`BodyInjuries`, per bone).
 fn bone_injury(bones: vec4<u32>, w: vec4<f32>) -> vec2<f32> {
     var out = vec2<f32>(0.0);

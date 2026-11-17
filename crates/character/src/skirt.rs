@@ -282,7 +282,10 @@ pub fn thigh(pack: &HumanPack, morphed: &[Vec3]) -> Option<[[f32; 4]; 2]> {
             .then(|| verts.iter().map(|v| morphed[*v as usize]).sum::<Vec3>() / verts.len() as f32)
     };
     let (hip, knee) = (joint("upper_leg_l")?, joint("lower_leg_l")?);
+    // The thigh's own bone and the twist bone near its top (the 64-bone skin shares the
+    // upper thigh between them, so the leg bone alone rarely holds a vertex).
     let leg = pack.bone("upper_leg_l")? as u8;
+    let twist = pack.bone("thigh_twist_01_l").map(|b| b as u8);
     let axis = knee - hip;
     let len2 = axis.length_squared().max(1e-6);
     // Distances from the axis of the vertices the thigh moves, near each end.
@@ -290,7 +293,7 @@ pub fn thigh(pack: &HumanPack, morphed: &[Vec3]) -> Option<[[f32; 4]; 2]> {
     let mut near_knee = Vec::new();
     for (v, s) in pack.skin.iter().enumerate() {
         let w: u32 = (0..4)
-            .filter(|k| s.bones[*k] == leg)
+            .filter(|k| s.bones[*k] == leg || Some(s.bones[*k]) == twist)
             .map(|k| s.weights[k] as u32)
             .sum();
         if w < 160 || v >= morphed.len() {
@@ -315,9 +318,11 @@ pub fn thigh(pack: &HumanPack, morphed: &[Vec3]) -> Option<[[f32; 4]; 2]> {
 
 /// Skin a skirt added to `skin` from vertex `first` on to the hips and thighs: the waistband
 /// rides the hips, the hem the thighs, and around the front and back both thighs in turn, so
-/// the skirt swings with a stride without tearing open between the legs. Without a rig, the
-/// skin keeps the anchors' weights.
-pub fn reweight(pack: &HumanPack, skin: &mut SkinMesh, first: usize) {
+/// the skirt swings with a stride without tearing open between the legs. A tabard's panels
+/// (`shell.panels`) ride the hips alone and swing clear of the thighs as a whole (`hang_panel`
+/// in common.wgsl), which still finds the thighs among their bones. Without a rig, the skin
+/// keeps the anchors' weights.
+pub fn reweight(pack: &HumanPack, skin: &mut SkinMesh, first: usize, shell: &Shell) {
     let (Some(hips), Some(left), Some(right)) = (
         pack.bone("hips"),
         pack.bone("upper_leg_l"),
@@ -339,7 +344,11 @@ pub fn reweight(pack: &HumanPack, skin: &mut SkinMesh, first: usize) {
     for i in first..skin.positions.len() {
         let k = ring(i);
         let t = k as f32 / (rows.max(2) - 1) as f32;
-        let legs = 0.85 * t * t * (3.0 - 2.0 * t);
+        let legs = if shell.panels.is_some() {
+            0.0
+        } else {
+            0.85 * t * t * (3.0 - 2.0 * t)
+        };
         // Base mesh +X is the person's left.
         let lean = ((skin.positions[i].x - center_x(k)) / 0.08).clamp(-1.0, 1.0);
         let l = 0.5 + 0.5 * lean;

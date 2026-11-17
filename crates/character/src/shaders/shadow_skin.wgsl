@@ -23,8 +23,11 @@ fn vs_skin_shadow(
     let hand = Bent(position_curvature.xyz + m.dp, normalize(normal.xyz + m.dn));
     let local = hand.p + hand.n * cloth_lift(rest.xyz, m2.x);
     var p = (skin_matrix(bones, weights, false) * vec4<f32>(local, 1.0)).xyz;
-    let margin = shell_margin(u32(normal.w + 0.5));
-    if (margin > 0.0) {
+    let part = u32(normal.w + 0.5);
+    let margin = shell_margin(part);
+    if (part == 8u) {
+        p = hang_panel(p, local, rest.y, bones, false).p;
+    } else if (margin > 0.0) {
         p = clear_thighs(p, bones, false, margin);
     }
     var clip = shadow_view.view_proj * vec4<f32>(model_point(p), 1.0);

@@ -196,7 +196,7 @@ pub fn build(
     for shell in shells.iter().flatten() {
         let first = skin.positions.len();
         skin.add_part(pack, &skirt::build(pack, &morphed, shell));
-        skirt::reweight(pack, &mut skin, first);
+        skirt::reweight(pack, &mut skin, first, shell);
     }
     if let Some(fit) = headgear.hood() {
         skin.add_part(pack, &hood::build(pack, &morphed, lm0.head, fit));

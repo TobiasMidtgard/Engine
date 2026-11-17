@@ -69,15 +69,22 @@ fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     var p = (now * vec4<f32>(hand.p + lift, 1.0)).xyz;
     var p_prev = (skin_matrix(in.bones, in.weights, true)
         * vec4<f32>(hand_prev.p + lift, 1.0)).xyz;
-    // Shells round the legs, each outside the one under it.
-    let margin = shell_margin(u32(in.normal.w + 0.5));
-    if (margin > 0.0) {
+    // Shells round the legs, each outside the one under it; a tabard's panels swing clear.
+    let part = u32(in.normal.w + 0.5);
+    let margin = shell_margin(part);
+    var normal = (now * vec4<f32>(n, 0.0)).xyz;
+    if (part == 8u) {
+        let swing = hang_panel(p, hand.p + lift, in.rest.y, in.bones, false);
+        p = swing.p;
+        normal = turn(normal, swing.axis, swing.angle);
+        p_prev = hang_panel(p_prev, hand_prev.p + lift, in.rest.y, in.bones, true).p;
+    } else if (margin > 0.0) {
         p = clear_thighs(p, in.bones, false, margin);
         p_prev = clear_thighs(p_prev, in.bones, true, margin);
     }
     let rel = model_point(p);
     out.rel = rel;
-    out.normal = model_dir((now * vec4<f32>(n, 0.0)).xyz);
+    out.normal = model_dir(normal);
     out.rest = in.rest.xyz;
     out.m0 = in.m0;
     out.m1 = in.m1;
