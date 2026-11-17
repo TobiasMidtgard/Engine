@@ -737,6 +737,7 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         .iter()
         .filter(|i| i.region() == k && unseen(world, i.center.x, i.center.y) < 0.5)
         .collect();
+    let known = !named.is_empty();
     for isle in named {
         let mut p = at(isle.center.x, isle.center.y + isle.radius * 1.05);
         let spec = TextSpec {
@@ -812,9 +813,11 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         );
     }
     // Nothing seen here yet: say so across the blank chart.
-    let blank = world.get_resource::<MapTable>().is_some_and(|m| {
-        m.fog.len() == FOG * FOG && m.fog.iter().sum::<f32>() / (FOG * FOG) as f32 > 0.85
-    });
+    // (Only while no island here has been seen: a far town's sight circle is already a start.)
+    let blank = !known
+        && world.get_resource::<MapTable>().is_some_and(|m| {
+            m.fog.len() == FOG * FOG && m.fog.iter().sum::<f32>() / (FOG * FOG) as f32 > 0.85
+        });
     if blank {
         let mid = Vec2::new(r.x + r.w * 0.5, r.y + r.h * 0.84);
         let title = TextSpec {

@@ -235,7 +235,9 @@ fn workforce(t: Tier) -> El {
 }
 
 /// The book.
-pub fn el(shown: usize, settled: &[bool]) -> El {
+/// `goods`: the goods kept, made or used on the shown island (the others are listed in one
+/// line under the table).
+pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
     // Tabs for the shown island's region: its settled islands (and the shown one).
     let region = island::islands()[shown].region();
     let tabs = El::new().class("row").with_style(|s| s.gap(8.0)).children(
@@ -307,7 +309,8 @@ pub fn el(shown: usize, settled: &[bool]) -> El {
                 .child(head("a minute", 54.0, true))
                 .child(head("need met", 48.0, true)),
         )
-        .children(Good::ALL.into_iter().map(good_row));
+        .children(goods.iter().copied().map(good_row))
+        .child_opt(others(goods));
     let spine = El::new().with_style(|s| {
         s.width(14.0)
             .background(Fill::Linear {
@@ -548,6 +551,51 @@ pub fn update(world: &mut World) {
     }
 }
 
+/// The goods worth a row for island `i`: kept, made or used there (every good when fewer than
+/// three are, early on).
+fn island_goods(econ: &Economy, i: usize) -> Vec<Good> {
+    let Some(b) = econ.islands.get(i) else {
+        return Good::ALL.to_vec();
+    };
+    let v: Vec<Good> = Good::ALL
+        .into_iter()
+        .filter(|g| {
+            let n = g.index();
+            b.stock[n] > 0.5 || b.made_per_min[n] > 0.01 || b.used_per_min[n] > 0.01
+        })
+        .collect();
+    if v.len() < 3 { Good::ALL.to_vec() } else { v }
+}
+
+/// One line for the goods not kept on this island: their icons, faded.
+fn others(goods: &[Good]) -> Option<El> {
+    let rest: Vec<Good> = Good::ALL
+        .into_iter()
+        .filter(|g| !goods.contains(g))
+        .collect();
+    (!rest.is_empty()).then(|| {
+        El::new()
+            .class("row")
+            .with_style(|s| {
+                s.gap(4.0)
+                    .align_items(Align::Center)
+                    .margin([8.0, 0.0, 0.0, 0.0])
+            })
+            .child(
+                El::text("Not kept here")
+                    .class("ink_label")
+                    .text_style(|t| t.nowrap())
+                    .with_style(|s| s.margin([0.0, 6.0, 0.0, 0.0]))
+                    .pick_ignore(),
+            )
+            .children(rest.into_iter().map(|g| {
+                El::icon(g.icon())
+                    .tooltip(g.name(), "Nobody keeps, makes or uses it here yet.")
+                    .with_style(|s| s.size(20.0, 20.0).opacity(0.45))
+            }))
+    })
+}
+
 /// Open the ledger on `island`, or close it.
 pub fn show(world: &mut World, island: Option<usize>) {
     let was_open = world.resource::<Ledger>().open;
@@ -572,7 +620,8 @@ pub fn show(world: &mut World, island: Option<usize>) {
         .iter()
         .map(|b| b.harbours > 0 || b.population.iter().sum::<f32>() > 0.0)
         .collect();
-    if engine_ui::screens::spawn_screen(world, screen, &el(i, &settled)).is_ok() {
+    let goods = island_goods(world.resource::<Economy>(), i);
+    if engine_ui::screens::spawn_screen(world, screen, &el(i, &settled, &goods)).is_ok() {
         world.resource_mut::<Ledger>().open = true;
     }
 }

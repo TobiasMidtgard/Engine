@@ -71,6 +71,40 @@ pub fn install(world: &mut World) {
     }
 }
 
+/// Room for the goods toggles in a stop's row: all eighteen goods fit across.
+const GOODS_W: f32 = 18.0 * 23.0;
+
+/// The goods worth offering on a route's stops, in the goods' order: what is carried already,
+/// and what any island on the route keeps, makes or uses. Every good when none of that
+/// narrows it down (a new route to an empty harbour).
+fn route_goods(world: &mut World, r: &crate::fleet::Route) -> Vec<Good> {
+    let isles: Vec<usize> = r
+        .stops
+        .iter()
+        .filter_map(|st| building(world, st.at).map(|b| b.island))
+        .collect();
+    let econ = world.get_resource::<crate::sim::Economy>();
+    let goods: Vec<Good> = Good::ALL
+        .into_iter()
+        .filter(|g| {
+            let n = *g as usize;
+            r.stops
+                .iter()
+                .any(|st| st.load.contains(g) || st.unload.contains(g))
+                || econ.is_some_and(|e| {
+                    isles.iter().filter_map(|&i| e.islands.get(i)).any(|b| {
+                        b.stock[n] > 0.5 || b.made_per_min[n] > 0.01 || b.used_per_min[n] > 0.01
+                    })
+                })
+        })
+        .collect();
+    if goods.len() < 3 {
+        Good::ALL.to_vec()
+    } else {
+        goods
+    }
+}
+
 fn building(world: &mut World, id: u32) -> Option<Building> {
     let mut q = world.query::<&Building>();
     q.iter(world).find(|b| b.id == id).cloned()
@@ -289,7 +323,7 @@ fn good_toggle(g: Good, on: bool, action: String, tint: Color) -> El {
         .on_click(action)
         .tooltip(g.name(), if on { "Click to stop" } else { "Click to add" })
         .with_style(move |s| {
-            s.size(24.0, 24.0)
+            s.size(22.0, 22.0)
                 .padding(2.0)
                 .radius(4.0)
                 .background(if on {
@@ -301,7 +335,7 @@ fn good_toggle(g: Good, on: bool, action: String, tint: Color) -> El {
                 .opacity(if on { 1.0 } else { 0.32 })
                 .pick(Pick::Block)
         })
-        .child(El::icon(g.icon()).with_style(|s| s.size(20.0, 20.0).pick(Pick::Ignore)))
+        .child(El::icon(g.icon()).with_style(|s| s.size(18.0, 18.0).pick(Pick::Ignore)))
 }
 
 fn mini(icon: &str, action: String, tip: &str) -> El {
@@ -325,6 +359,7 @@ fn editor(world: &mut World, i: usize, r: &crate::fleet::Route) -> El {
         .with_style(|s| s.gap(8.0).margin([6.0, 0.0, 0.0, 0.0]))
         .child(brass::divider(300.0));
     let n = r.stops.len();
+    let goods = route_goods(world, r);
     for (k, st) in r.stops.iter().enumerate() {
         let name = building(world, st.at)
             .map(|b| island::islands()[b.island].name)
@@ -332,16 +367,21 @@ fn editor(world: &mut World, i: usize, r: &crate::fleet::Route) -> El {
         let row = |which: &str, list: &[Good], tint: Color| {
             El::new()
                 .class("row")
-                .with_style(|s| s.gap(1.0))
+                .with_style(|s| s.gap(1.0).align_items(Align::Start))
                 .child(small_label(which))
-                .children(Good::ALL.into_iter().map(|g| {
-                    good_toggle(
-                        g,
-                        list.contains(&g),
-                        format!("isle.route.stop.{which}:{i}:{k}:{}", g.name()),
-                        tint,
-                    )
-                }))
+                .child(
+                    El::new()
+                        .class("row")
+                        .with_style(|s| s.gap(1.0).wrap(true).width(GOODS_W))
+                        .children(goods.iter().copied().map(|g| {
+                            good_toggle(
+                                g,
+                                list.contains(&g),
+                                format!("isle.route.stop.{which}:{i}:{k}:{}", g.name()),
+                                tint,
+                            )
+                        })),
+                )
         };
         col = col.child(
             El::new()

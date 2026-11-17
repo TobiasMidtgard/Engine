@@ -259,8 +259,22 @@ fn top_bar() -> El {
         .child(cartouche)
 }
 
-/// A build tile: the building's badge, its name and a price line.
-fn tile(icon: &str, name: &str, price: El, action: String, selected: bool, i: usize) -> El {
+/// A build tile: the building's badge, its name and a price line. `compact` for a category
+/// with many buildings, so the bar still fits beside the map table.
+fn tile(
+    icon: &str,
+    name: &str,
+    price: El,
+    action: String,
+    selected: bool,
+    i: usize,
+    compact: bool,
+) -> El {
+    let (w, badge, text) = if compact {
+        (84.0, 44.0, 12.5)
+    } else {
+        (98.0, 52.0, 14.0)
+    };
     El::new()
         .class("brass_tile")
         .on_click(action)
@@ -270,24 +284,26 @@ fn tile(icon: &str, name: &str, price: El, action: String, selected: bool, i: us
                 .align_items(Align::Center)
                 .gap(2.0)
                 .padding([10.0, 6.0, 8.0, 6.0])
-                .width(98.0)
+                .width(w)
                 .enter(
                     Enter::rise(0.32, 22.0)
                         .delay(0.035 * i as f32)
                         .ease(Ease::Back),
                 )
         })
-        .child(brass::badge(icon, 52.0))
+        .child(brass::badge(icon, badge))
         .child(
             El::text(name)
                 .class("ink")
-                .text_style(|t| t.bold().size(14.0).center().nowrap())
+                .text_style(move |t| t.bold().size(text).center().nowrap())
                 .pick_ignore(),
         )
         .child(price)
 }
 
-fn item_tile(k: Kind, selected: bool, i: usize) -> El {
+/// `grows`: false for a farm whose crop does not grow on the island in view (shown faded at
+/// the end of the row, with the reason in its tooltip).
+fn item_tile(k: Kind, selected: bool, i: usize, compact: bool, grows: Option<&str>) -> El {
     let d = k.def();
     let price = El::new()
         .class("row")
@@ -306,9 +322,14 @@ fn item_tile(k: Kind, selected: bool, i: usize) -> El {
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default()
     );
-    tile(kind_icon(k), d.name, price, action, selected, i)
+    let mut tip = cost_text(k);
+    if let Some(isle) = grows {
+        tip.push_str(&format!("\n[i]Does not grow on {isle}.[/i]"));
+    }
+    tile(kind_icon(k), d.name, price, action, selected, i, compact)
         .id(format!("isle.build:{k:?}"))
-        .tooltip(d.name, cost_text(k))
+        .with_style(move |s| s.opacity(if grows.is_some() { 0.5 } else { 1.0 }))
+        .tooltip(d.name, tip)
 }
 
 fn demolish_tile(selected: bool, i: usize) -> El {
@@ -323,6 +344,7 @@ fn demolish_tile(selected: bool, i: usize) -> El {
         "isle.tool:demolish".into(),
         selected,
         i,
+        false,
     )
     .tooltip(
         "Demolish",
@@ -330,9 +352,16 @@ fn demolish_tile(selected: bool, i: usize) -> El {
     )
 }
 
-fn bar_items(category: usize, tool: Tool) -> Vec<El> {
+/// The category's build tiles for island `isle` (the one in view): farms whose crop does not
+/// grow there go last, faded.
+fn bar_items(category: usize, tool: Tool, isle: usize) -> Vec<El> {
     let c = Category::ALL[category];
-    let mut v: Vec<El> = kinds_in(c)
+    let here = island::islands().get(isle);
+    let grows = |k: Kind| !k.def().needs_fertility || here.is_none_or(|i| i.fertility.allows(k));
+    let mut kinds = kinds_in(c);
+    kinds.sort_by_key(|k| !grows(*k));
+    let compact = kinds.len() > 8;
+    let mut v: Vec<El> = kinds
         .into_iter()
         .enumerate()
         .map(|(i, k)| {
@@ -341,7 +370,8 @@ fn bar_items(category: usize, tool: Tool) -> Vec<El> {
                 Tool::Road => k == Kind::Road,
                 _ => false,
             };
-            item_tile(k, sel, i)
+            let not_here = (!grows(k)).then(|| here.map_or("", |i| i.name));
+            item_tile(k, sel, i, compact, not_here)
         })
         .collect();
     if c == Category::Roads {
@@ -351,7 +381,7 @@ fn bar_items(category: usize, tool: Tool) -> Vec<El> {
     v
 }
 
-fn build_bar(category: usize, tool: Tool) -> El {
+fn build_bar(category: usize, tool: Tool, isle: usize) -> El {
     let tabs = El::new().class("row").with_style(|s| s.gap(14.0)).children(
         Category::ALL.iter().enumerate().map(|(i, c)| {
             brass::medallion(category_icon(*c), 52.0, &format!("isle.cat:{i}"))
@@ -385,8 +415,8 @@ fn build_bar(category: usize, tool: Tool) -> El {
             El::new()
                 .class("row")
                 .id("isle.items")
-                .with_style(|s| s.gap(12.0).margin([4.0, 0.0, 0.0, 0.0]))
-                .children(bar_items(category, tool)),
+                .with_style(|s| s.gap(10.0).margin([4.0, 0.0, 0.0, 0.0]))
+                .children(bar_items(category, tool, isle)),
         );
     let hint = El::text("{isle.hint}")
         .text_style(|t| t.bold().shadow().nowrap().size(17.0))
@@ -548,7 +578,11 @@ pub fn setup(world: &mut World) {
         engine::core::log::warn!("archipelago top bar: {e}");
     }
     let tool = *world.resource::<Tool>();
-    if let Err(e) = screens::spawn_screen(world, hud_screen(BAR, 0), &build_bar(2, tool)) {
+    if let Err(e) = screens::spawn_screen(
+        world,
+        hud_screen(BAR, 0),
+        &build_bar(2, tool, world.resource::<Hud>().island),
+    ) {
         engine::core::log::warn!("archipelago build bar: {e}");
     }
     map::install(world);
@@ -740,8 +774,9 @@ fn set_selected(world: &mut World, id: &str, on: bool) {
 
 fn refresh_items(world: &mut World) {
     let (cat, tool) = (world.resource::<Hud>().category, *world.resource::<Tool>());
+    let isle = world.resource::<Hud>().island;
     if let Some(e) = engine_ui::input::find_id(world, "isle.items") {
-        let _ = engine_ui::el::replace_children(world, e, &bar_items(cat, tool));
+        let _ = engine_ui::el::replace_children(world, e, &bar_items(cat, tool, isle));
     }
     for i in 0..Category::ALL.len() {
         set_selected(world, &format!("isle.cat:{i}"), i == cat);
@@ -999,8 +1034,14 @@ fn update_data_now(world: &mut World) {
     for (v, ..) in SPEEDS {
         set_selected(world, &format!("isle.speed:{v}"), econ.speed == v);
     }
-    if let Some(mut h) = world.get_resource_mut::<Hud>() {
+    let moved = world.get_resource_mut::<Hud>().is_some_and(|mut h| {
+        let moved = h.island != isle;
         h.island = isle;
+        moved
+    });
+    // Another island in view: its crops decide which farms the bar offers first.
+    if moved {
+        refresh_items(world);
     }
 }
 
