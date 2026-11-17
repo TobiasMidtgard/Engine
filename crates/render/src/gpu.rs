@@ -226,6 +226,32 @@ fn try_create(
             "no (probe GI and world reflections trace in software)"
         }
     );
+    // What the adapter offers for more ray tracing than that (textures at a hit need binding
+    // arrays, a still and a moving scene two structures a stage): read from the game's log.
+    {
+        let (has, limits) = (adapter.features(), adapter.limits());
+        let yes = |f: wgpu::Features| if has.contains(f) { "yes" } else { "no" };
+        tracing::info!(
+            "GPU for ray tracing: texture binding arrays {} (non-uniform indexing {}, partly \
+             bound {}), {} array elements and {} acceleration structures a shader stage, {} \
+             instances a top-level structure, {} triangles a bottom-level one, {} texture \
+             array layers, {} sampled textures and {} storage buffers a stage, storage \
+             buffers to {} MB, the hit triangle's corners {}, ray tracing pipelines {}",
+            yes(wgpu::Features::TEXTURE_BINDING_ARRAY),
+            yes(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING),
+            yes(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY),
+            limits.max_binding_array_elements_per_shader_stage,
+            limits.max_acceleration_structures_per_shader_stage,
+            limits.max_tlas_instance_count,
+            limits.max_blas_primitive_count,
+            limits.max_texture_array_layers,
+            limits.max_sampled_textures_per_shader_stage,
+            limits.max_storage_buffers_per_shader_stage,
+            limits.max_storage_buffer_binding_size >> 20,
+            yes(wgpu::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN),
+            yes(wgpu::Features::EXPERIMENTAL_RAY_TRACING_PIPELINES),
+        );
+    }
     let experimental_features = if ray_queries {
         // SAFETY: wgpu marks its ray queries experimental: a misuse may be undefined behavior
         // rather than a validation error. Only probe GI's hardware path uses them
