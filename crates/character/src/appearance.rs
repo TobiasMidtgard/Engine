@@ -653,7 +653,10 @@ fn generate(seed: u64, req: &AppearanceRequest) -> Appearance {
         }
         let v = r.normal() * 0.22;
         let v = if s.low.is_empty() { v.abs() * 0.6 } else { v };
-        a.set_slider(&s.key(), v);
+        // `set_slider`'s clamp, without its search of every slider by a key built for each:
+        // that made a person cost milliseconds, and a crowd's requests a 30 ms frame.
+        let lo = if s.low.is_empty() { 0.0 } else { -1.0 };
+        a.shape.insert(s.key(), v.clamp(lo, 1.0));
     }
     a
 }
