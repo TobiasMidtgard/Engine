@@ -777,8 +777,11 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             nutrients: t(0.1, 0.3, 1.0, 1.01),
             uptake: 0.05,
             seeds_per_year: 8.0,
-            seed_range_m: 9.0,
-            wind_dispersal: 0.6,
+            // New fronds come up from the spreading rhizome a few meters from the old ones,
+            // so ferns stand in patches with bare floor between (bracken stands are clonal;
+            // a spore rarely founds a plant far off: Marrs and Watt 2006).
+            seed_range_m: 4.5,
+            wind_dispersal: 0.3,
             establishment: 0.2,
             min_spacing_m: 1.3,
             bark_color: srgb(0x4f5a2a),
