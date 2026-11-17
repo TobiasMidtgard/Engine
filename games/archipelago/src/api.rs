@@ -383,6 +383,32 @@ pub fn register(app: &mut App) {
             Ok(json!({"focus": [cam.goal_focus.x, cam.goal_focus.z], "yaw": cam.goal_yaw, "dist": cam.goal_dist}))
         },
     )
+    .register_api("isle.items", "Items: renown and how many of each item building it allows, every Trading Union, Town Hall and Harbour Office with its slots and what each item is doing now, the shelf, and the pedlar's stock while he is moored.", "{}", |world, _| {
+        Ok(crate::items::state(world))
+    })
+    .register_api("isle.items.table", "Every item there is: where it goes, its rank, guild and what it does; and what three of a guild add.", "{}", |_, _| {
+        Ok(crate::items::catalogue())
+    })
+    .register_api("isle.item.socket", "Put a shelf item (uid from isle.items) into a slot of a Trading Union, Town Hall or Harbour Office; what was there goes back on the shelf.", r#"{"building": 41, "slot": 0, "uid": 7}"#, |world, args| {
+        let b = index(&args, "building")? as u32;
+        crate::items::socket(world, b, index(&args, "slot")?, index(&args, "uid")? as u32)?;
+        build::refresh(world);
+        Ok(crate::items::state(world))
+    })
+    .register_api("isle.item.unsocket", "Take the item out of a slot, back to the shelf.", r#"{"building": 41, "slot": 0}"#, |world, args| {
+        let b = index(&args, "building")? as u32;
+        crate::items::unsocket(world, b, index(&args, "slot")?)?;
+        build::refresh(world);
+        Ok(crate::items::state(world))
+    })
+    .register_api("isle.item.buy", "Buy one of the pedlar's offers (index from isle.items) while he is at the quay.", r#"{"offer": 0}"#, |world, args| {
+        let name = crate::items::buy(world, index(&args, "offer")?)?;
+        Ok(json!({"bought": name}))
+    })
+    .register_api("isle.item.sell", "Sell a shelf item for two fifths of its worth.", r#"{"uid": 7}"#, |world, args| {
+        let coins = crate::items::sell(world, index(&args, "uid")? as u32)?;
+        Ok(json!({"coins": coins}))
+    })
     .register_api("isle.check", "Whether a kind fits at a cell, and why not.", r#"{"kind": "house", "at": [3, 7], "rot": 0}"#, |world, args| {
         let kind = args["kind"].as_str().and_then(Kind::from_name).ok_or("unknown kind")?;
         let at = cell(&args, "at")?;

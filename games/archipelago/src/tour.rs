@@ -29,6 +29,8 @@ enum Aim {
     Home(crate::defs::Tier, usize),
     /// The first vessel of this craft.
     Craft(Craft),
+    /// The pedlar's barque.
+    Pedlar,
     At(f64, f64),
 }
 
@@ -397,6 +399,47 @@ fn views() -> Vec<View> {
             pitch_deg: Some(20.0),
             ..v("merchants", Aim::Home(T::Burghers, 12), 0.5, 46.0)
         },
+        // Round 7: the three buildings that hold items, their reach, and the pedlar.
+        View {
+            clean: true,
+            pitch_deg: Some(30.0),
+            ..v("town_hall", Aim::Front(K::TownHall, 0), 0.45, 62.0)
+        },
+        View {
+            card: true,
+            pitch_deg: Some(52.0),
+            ..v("town_hall_reach", Aim::Front(K::TownHall, 0), 0.3, 240.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(30.0),
+            ..v("trading_union", Aim::Front(K::TradingUnion, 0), -0.5, 44.0)
+        },
+        View {
+            card: true,
+            pitch_deg: Some(52.0),
+            ..v("union_reach", Aim::Front(K::TradingUnion, 0), 0.3, 260.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(32.0),
+            ..v("bakers_union", Aim::Front(K::TradingUnion, 1), 0.5, 64.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(28.0),
+            ..v("harbour_office", Aim::Front(K::HarbourOffice, 0), 0.5, 56.0)
+        },
+        View {
+            card: true,
+            pitch_deg: Some(55.0),
+            ..v("office_reach", Aim::Front(K::HarbourOffice, 0), 0.2, 400.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(16.0),
+            ..v("pedlar", Aim::Pedlar, 0.5, 120.0)
+        },
         v("harbour", Aim::Kind(K::Harbour, 0), 3.4, 190.0),
         v("market", Aim::Kind(K::Market, 0), 1.2, 90.0),
         View {
@@ -461,6 +504,12 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
             let mut q = world.query::<&Vessel>();
             q.iter(world).find(|v| v.craft == *c).map(|v| v.at)?
         }
+        Aim::Pedlar => {
+            let mut q = world.query::<&Vessel>();
+            q.iter(world)
+                .find(|v| matches!(v.roam, crate::fleet::Roam::Pedlar { .. }))
+                .map(|v| v.at)?
+        }
         Aim::At(x, z) => DVec3::new(*x, 0.0, *z),
     })
 }
@@ -503,13 +552,18 @@ fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
             fd.x.atan2(fd.y)
         });
     }
-    let Aim::Craft(c) = aim else {
-        return 0.0;
-    };
     let mut q = world.query::<&Vessel>();
-    q.iter(world)
-        .find(|v| v.craft == *c)
-        .map_or(0.0, |v| v.heading)
+    match aim {
+        Aim::Craft(c) => q
+            .iter(world)
+            .find(|v| v.craft == *c)
+            .map_or(0.0, |v| v.heading),
+        Aim::Pedlar => q
+            .iter(world)
+            .find(|v| matches!(v.roam, crate::fleet::Roam::Pedlar { .. }))
+            .map_or(0.0, |v| v.heading),
+        _ => 0.0,
+    }
 }
 
 /// Frames until the terrain's patches and the foliage are in, at most `cap_s` wall seconds.
@@ -581,6 +635,14 @@ pub fn run(mut app: App, only: Option<&str>) {
             serde_json::to_string_pretty(&list).unwrap_or_default(),
         );
     }
+    if let Ok(items) =
+        engine::core::registry::call_api(&mut app.world, "isle.items", serde_json::json!({}))
+    {
+        let _ = std::fs::write(
+            format!("{out}/items.json"),
+            serde_json::to_string_pretty(&items).unwrap_or_default(),
+        );
+    }
     let keys: Option<Vec<&str>> = only.map(|s| s.split(',').collect());
     for view in views() {
         if keys.as_ref().is_some_and(|k| !k.contains(&view.key)) {
@@ -598,7 +660,7 @@ pub fn run(mut app: App, only: Option<&str>) {
                 cam.goal_yaw = view.yaw + heading;
                 cam.goal_dist = view.dist;
                 cam.pitch_override = view.pitch_deg.map(f32::to_radians);
-                cam.free_height = matches!(view.aim, Aim::Craft(_));
+                cam.free_height = matches!(view.aim, Aim::Craft(_) | Aim::Pedlar);
                 cam.snap();
             }
         }
@@ -624,7 +686,7 @@ pub fn run(mut app: App, only: Option<&str>) {
         settle(&mut app, cap);
         // Exposure and the environment, following a moving craft.
         for _ in 0..8 {
-            if matches!(view.aim, Aim::Craft(_))
+            if matches!(view.aim, Aim::Craft(_) | Aim::Pedlar)
                 && let Some(p) = aim_point(&mut app.world, &view.aim)
             {
                 let mut q = app.world.query::<&mut StrategyCam>();

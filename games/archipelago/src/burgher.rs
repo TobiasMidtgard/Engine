@@ -272,7 +272,7 @@ pub fn look(kind: Kind, seed: u64, out: &mut Vec<Piece>) -> bool {
 // ------------------------------------------------------------------------------ helpers
 
 /// A quad seen from the side `out` points to.
-fn face(p: &mut Parts, m: Mat, q: [Vec3; 4], col: Vec4, out: Vec3) {
+pub(crate) fn face(p: &mut Parts, m: Mat, q: [Vec3; 4], col: Vec4, out: Vec3) {
     if (q[1] - q[0]).cross(q[3] - q[0]).dot(out) >= 0.0 {
         p.quad(m, q[0], q[1], q[2], q[3], col);
     } else {
@@ -328,7 +328,7 @@ fn mansard(p: &mut Parts, c: Vec3, l: f32, w: f32, h: f32, inset: f32, col: Vec4
 
 /// A dormer looking out along +Z: its front face at `at` (bottom middle), `w` wide, the
 /// window `h` high, running `depth` back into the roof.
-fn dormer(p: &mut Parts, at: Vec3, w: f32, h: f32, depth: f32, roof: Mat) {
+pub(crate) fn dormer(p: &mut Parts, at: Vec3, w: f32, h: f32, depth: f32, roof: Mat) {
     p.cuboid(
         Mat::Paint,
         at + v3(-w * 0.5, 0.0, -depth),
@@ -360,7 +360,7 @@ fn dormer(p: &mut Parts, at: Vec3, w: f32, h: f32, depth: f32, roof: Mat) {
 }
 
 /// A chimney from `base` up to `top`, with a cap and two pots.
-fn chimney(p: &mut Parts, m: Mat, base: Vec3, top: f32, col: Vec4) {
+pub(crate) fn chimney(p: &mut Parts, m: Mat, base: Vec3, top: f32, col: Vec4) {
     p.cuboid(
         m,
         base + v3(-0.42, 0.0, -0.36),
@@ -391,7 +391,7 @@ fn chimney(p: &mut Parts, m: Mat, base: Vec3, top: f32, col: Vec4) {
 
 /// A signboard hanging from an iron bracket on a wall facing +Z at `at` (the bracket's
 /// root), `w × h`, seen from both sides along the street.
-fn hanging_sign(p: &mut Parts, at: Vec3, w: f32, h: f32, col: Vec4, mark: Vec4) {
+pub(crate) fn hanging_sign(p: &mut Parts, at: Vec3, w: f32, h: f32, col: Vec4, mark: Vec4) {
     let out = at + v3(0.0, 0.0, w + 0.35);
     p.beam(Mat::Iron, at, out, 0.06, Vec4::ONE);
     p.beam(
@@ -489,7 +489,7 @@ fn framing_x(p: &mut Parts, z0: f32, z1: f32, y0: f32, y1: f32, x: f32, col: Vec
 
 /// Steps up to a door on a wall facing +Z: `n` treads `w` wide from the ground at
 /// `z0 + n·0.32` back to `z0`, rising to `top`.
-fn steps(p: &mut Parts, x: f32, z0: f32, w: f32, n: usize, top: f32, col: Vec4) {
+pub(crate) fn steps(p: &mut Parts, x: f32, z0: f32, w: f32, n: usize, top: f32, col: Vec4) {
     for k in 0..n {
         let y = top * (n - k) as f32 / n as f32;
         p.cuboid(

@@ -60,6 +60,66 @@ pub fn place_near(
     None
 }
 
+/// [`place_near`] with the building's front turned toward `face` (a landmark looks at its
+/// square, an office at its quay).
+pub fn place_facing(
+    world: &mut World,
+    kind: Kind,
+    target: DVec2,
+    max_cells: i32,
+    face: DVec2,
+) -> Option<Entity> {
+    let t = grid::cell_of(target.x, target.y);
+    let (w, d) = kind.def().size;
+    let half = IVec2::new(w / 2, d / 2);
+    let want = (face - target).normalize_or_zero();
+    let mut rots: Vec<u8> = (0..4).collect();
+    rots.sort_by(|a, b| {
+        let dot = |r: u8| grid::front_dir(r).as_dvec2().dot(want);
+        dot(*b)
+            .partial_cmp(&dot(*a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for r in 0..max_cells {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dz.abs() != r {
+                    continue;
+                }
+                // The best turn only: a landmark with its back to the square is no use.
+                let rot = rots[0];
+                let origin = t + IVec2::new(dx, dz) - half;
+                if grid::check(world.resource::<Grid>(), kind, origin, rot).is_err() {
+                    continue;
+                }
+                let Ok(e) = place(world, kind, origin, rot, false) else {
+                    continue;
+                };
+                if join_to_roads(world, e) {
+                    return Some(e);
+                }
+                build::demolish(world, e);
+            }
+        }
+    }
+    None
+}
+
+/// Put new items of these names into a building's slots, in order.
+pub fn stock_slots(world: &mut World, e: Option<Entity>, names: &[&str]) {
+    let Some(e) = e else { return };
+    for (slot, name) in names.iter().enumerate() {
+        let Some(i) = crate::items::ITEMS.iter().position(|d| d.name == *name) else {
+            engine::core::log::warn!("archipelago: no item called {name}");
+            continue;
+        };
+        let held = world.resource_mut::<crate::items::Items>().mint(i);
+        if let Some(mut inst) = world.get_mut::<crate::items::Institution>(e) {
+            inst.slots[slot] = Some(held);
+        }
+    }
+}
+
 /// Lay roads from a building's edge to the nearest road (or to `fallback` cells) over
 /// buildable ground. False if no road is within reach.
 pub fn join_to_roads(world: &mut World, e: Entity) -> bool {
@@ -713,6 +773,21 @@ pub fn build_start(world: &mut World) {
     world.insert_resource(TownCentre(DVec3::new(town.x, ty, town.y)));
     street_grid(world, town, 170.0, 7, false);
     place_near(world, Kind::Market, town, 20, true);
+    // The Town Hall looks across the market toward the sea; the Harbour Office stands
+    // behind the quay.
+    let hb = world.get::<Building>(h_harbour).cloned().unwrap();
+    let hc = grid::footprint_center(hb.kind, hb.origin, hb.rot);
+    let seaward = (hc - town).normalize_or_zero();
+    let hall = place_facing(world, Kind::TownHall, town - seaward * 34.0, 12, town);
+    let office = place_facing(
+        world,
+        Kind::HarbourOffice,
+        hc - seaward * 36.0 + DVec2::new(seaward.y, -seaward.x) * 22.0,
+        14,
+        hc,
+    );
+    stock_slots(world, hall, &["Town crier", "Baker's round"]);
+    stock_slots(world, office, &["Stevedore gang", "Harbour pilot"]);
     place_near(
         world,
         Kind::Chapel,
@@ -739,8 +814,6 @@ pub fn build_start(world: &mut World) {
     let inner = fill_houses(world, town, 100.0, 16, Tier::Labourers);
     let outer = fill_houses(world, town, 190.0, 44, Tier::Fisherfolk);
     let _ = (core, inner, outer);
-    let hb = world.get::<Building>(h_harbour).cloned().unwrap();
-    let hc = grid::footprint_center(hb.kind, hb.origin, hb.rot);
     let along = DVec2::new(
         grid::front_dir(hb.rot).y as f64,
         -grid::front_dir(hb.rot).x as f64,
@@ -777,6 +850,45 @@ pub fn build_start(world: &mut World) {
     place_near(world, Kind::Saltery, toward(0.25, 205.0), 30, true);
     place_near(world, Kind::Furrier, toward(2.0, 255.0), 30, true);
     place_near(world, Kind::LampMaker, toward(1.15, 205.0), 30, true);
+    // The Trading Union among the manufactories: glass, lamps, furs, a weaver and a sawmill
+    // are in its reach.
+    let union = place_facing(world, Kind::TradingUnion, toward(1.65, 205.0), 16, town);
+    stock_slots(world, union, &["Flying-shuttle loom", "Wick-trimming jig"]);
+    // What the company has on the shelf, and the pedlar lying off the quay with his stock.
+    {
+        let mut items = world.resource_mut::<crate::items::Items>();
+        for name in [
+            "Fishwives' stalls",
+            "Quay lights",
+            "Steam saw",
+            "Works foreman",
+            "Journeyman miller",
+        ] {
+            if let Some(i) = crate::items::ITEMS.iter().position(|d| d.name == name) {
+                items.gain(i);
+            }
+        }
+    }
+    {
+        let (m, heading) = mooring(&hb);
+        let out = grid::front_dir(hb.rot).as_dvec2();
+        let side = DVec2::new(out.y, -out.x);
+        let quay = m + out * 46.0 - side * 58.0;
+        let away = quay + out * 1300.0 + side * 500.0;
+        let e = spawn_vessel(
+            world,
+            Craft::Barque,
+            "Pedlar's barque Magpie",
+            DVec3::new(quay.x, 0.0, quay.y),
+            heading,
+            None,
+            Roam::Pedlar { quay, away },
+            7_707,
+        );
+        if let Some(mut v) = world.get_mut::<crate::fleet::Vessel>(e) {
+            v.doing = crate::fleet::Doing::Moored(crate::fleet::PEDLAR_STAYS_S);
+        }
+    }
     // --- Brannsey: grain, flour, bread, hops and ale.
     let b_harbour = harbour_toward(world, 1, isles[0].center);
     if let Some(bh) = b_harbour {
@@ -852,6 +964,27 @@ pub fn build_start(world: &mut World) {
             true,
         );
         woodcutters_near(world, 1, village, 1);
+        // (A fifth mill: the master baker's ovens take a third more flour.)
+        place_near(
+            world,
+            Kind::Mill,
+            village + DVec2::new(70.0, -120.0),
+            30,
+            true,
+        );
+        // A second Trading Union among the bakeries: the master baker and the mash tun.
+        let union = place_facing(
+            world,
+            Kind::TradingUnion,
+            village + DVec2::new(10.0, -62.0),
+            16,
+            village,
+        );
+        stock_slots(
+            world,
+            union,
+            &["Master baker Odalys Brandt", "Copper mash tun"],
+        );
     }
     // --- Northmoor: sheep, timber and an airship mast.
     let n_harbour = harbour_toward(world, 3, isles[0].center);
@@ -1275,6 +1408,11 @@ pub fn build_start(world: &mut World) {
             }
         }
     }
+    // The pedlar's first stock (no specialist the company already has).
+    let owned = crate::items::specialists_owned(world);
+    let mut items = world.resource_mut::<crate::items::Items>();
+    items.restock(&owned);
+    items.market_open = true;
     crate::fleet::spawn_traffic(world);
     prune_roads(world);
     build::flush_paint(world);
@@ -1292,12 +1430,13 @@ pub fn build_start(world: &mut World) {
 pub fn prewarm(world: &mut World, seconds: f32) {
     let mut sys = bevy_ecs::system::SystemState::<(
         ResMut<Economy>,
-        Query<(&Building, &mut House)>,
+        Query<(&Building, &mut House, Option<&crate::items::Boost>)>,
         Query<(
             Entity,
             &Building,
             &mut crate::sim::Producer,
             Option<&crate::sim::RoadLink>,
+            Option<&crate::items::Boost>,
         )>,
         ResMut<crate::sim::Shipments>,
     )>::new(world);
@@ -1336,7 +1475,7 @@ pub fn prewarm(world: &mut World, seconds: f32) {
         // Deliver at once while warming up.
         let jobs = std::mem::take(&mut ship.carts);
         for (e, g, out) in jobs {
-            if out && let Ok((_, b, _, _)) = producers.get(e) {
+            if out && let Ok((_, b, _, _, _)) = producers.get(e) {
                 let isle = b.island;
                 econ.islands[isle].add(g, 1.0);
             }
@@ -1380,6 +1519,7 @@ pub mod tests {
         w.init_resource::<crate::draw::Drawn>();
         w.init_resource::<crate::fleet::SeaChart>();
         w.init_resource::<Routes>();
+        w.init_resource::<crate::items::Items>();
         w.init_resource::<engine::world::SurfaceMaterials>();
         w.init_resource::<bevy_ecs::message::Messages<engine::world::terrain::TerrainEdit>>();
         w
@@ -1607,8 +1747,9 @@ pub mod tests {
         // income, and a full Fisherfolk house with fish, clothes and a market pays just that.
         let mut paid = 0.0;
         let mut full_fisher = 0;
-        for h in w.query::<&House>().iter(&w) {
-            assert!(h.income <= h.tier.full_income() + 1e-3);
+        for (h, boost) in w.query::<(&House, Option<&crate::items::Boost>)>().iter(&w) {
+            // (Items in reach are the only thing that adds to it.)
+            assert!(boost.is_some() || h.income <= h.tier.full_income() + 1e-3);
             paid += h.income;
             if h.tier == Tier::Fisherfolk && h.residents > 9.9 && h.income > 1.99 {
                 full_fisher += 1;

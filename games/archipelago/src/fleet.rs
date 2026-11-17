@@ -15,6 +15,7 @@ use crate::draw::{Art, Body, Spin, spawn_model};
 use crate::globe::{self, Frame};
 use crate::grid;
 use crate::island;
+use crate::items::Boost;
 use crate::logistics::along;
 use crate::sim::{Building, Economy};
 use crate::vessels::Craft;
@@ -365,6 +366,8 @@ pub struct Vessel {
     pub seed: u64,
     /// Height above the sea to fly at (aircraft).
     pub altitude: f32,
+    /// How much faster than its craft it sails this leg (the last quay's pilots).
+    pub haste: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -379,7 +382,14 @@ pub enum Roam {
     Loop { points: Arc<Vec<DVec3>> },
     /// Off duty: lying at a harbour's mooring or an airship mast until given a route.
     Idle { at: DVec3 },
+    /// The pedlar of items: anchors off `quay` with his stock for a while, then stands out
+    /// to `away` for more.
+    Pedlar { quay: DVec2, away: DVec2 },
 }
+
+/// Seconds the pedlar lies off the quay with his stock, and stays away.
+pub const PEDLAR_STAYS_S: f32 = 240.0;
+const PEDLAR_AWAY_S: f32 = 45.0;
 
 fn lengths(path: &[DVec3]) -> Arc<Vec<f64>> {
     let mut out = vec![0.0];
@@ -459,6 +469,7 @@ pub fn spawn_vessel(
         roam,
         seed,
         altitude,
+        haste: 0.0,
     };
     let mut e = world.spawn((
         Name::new(format!("{}: {name}", craft.name())),
@@ -544,11 +555,54 @@ fn arrive(world: &mut World, v: &mut Vessel) {
                 return;
             };
             let stop = &route.stops[v.next_stop % route.stops.len()];
+            let mut boost = Boost::default();
             if let Some(b) = building_by_id(world, stop.at) {
-                trade(world, v, &b, stop);
+                let landed = trade(world, v, &b, stop);
+                // The quay's items: quicker turnround, a duty on what was landed, a pilot out.
+                let mut q = world.query::<(&Building, &Boost)>();
+                if let Some((_, x)) = q.iter(world).find(|(x, _)| x.id == b.id) {
+                    boost = x.clone();
+                }
+                let duty = landed as f64 * boost.duty as f64;
+                if duty > 0.0 {
+                    world.resource_mut::<Economy>().coins += duty;
+                    world.resource_mut::<crate::items::Items>().duty_earned += duty;
+                }
+                // A packet home from over the ocean may have fished something up.
+                let isle_of =
+                    |world: &mut World, id: u32| building_by_id(world, id).map(|b| b.island);
+                let far = route
+                    .stops
+                    .iter()
+                    .any(|s| isle_of(world, s.at).is_some_and(|i| i >= 4));
+                if far && b.island < 4 && !v.craft.flies() {
+                    crate::items::flotsam(world, &v.name);
+                }
             }
             v.next_stop = (v.next_stop + 1) % route.stops.len().max(1);
-            v.doing = Doing::Moored(if v.craft.flies() { 14.0 } else { 18.0 });
+            v.haste = boost.sail;
+            v.doing =
+                Doing::Moored(if v.craft.flies() { 14.0 } else { 18.0 } * (1.0 - boost.loading));
+        }
+        (Roam::Pedlar { quay, .. }, None) => {
+            let here = v.path.last().copied().unwrap_or_default();
+            if (DVec2::new(here.x, here.z) - *quay).length() < 30.0 {
+                v.doing = Doing::Moored(PEDLAR_STAYS_S);
+                let owned = crate::items::specialists_owned(world);
+                let mut items = world.resource_mut::<crate::items::Items>();
+                items.restock(&owned);
+                items.market_open = true;
+                engine_ui::toast::notify(
+                    world,
+                    engine_ui::toast::ToastKind::Info,
+                    "",
+                    "The pedlar is in",
+                    &format!("{} lies off the quay with five items for sale.", v.name),
+                    6.0,
+                );
+            } else {
+                v.doing = Doing::Lingering(PEDLAR_AWAY_S);
+            }
         }
         (Roam::Fishing { home, .. }, None) => {
             let here = v.path.last().copied().unwrap_or_default();
@@ -564,7 +618,7 @@ fn arrive(world: &mut World, v: &mut Vessel) {
     }
 }
 
-fn trade(world: &mut World, v: &mut Vessel, b: &Building, stop: &Stop) {
+fn trade(world: &mut World, v: &mut Vessel, b: &Building, stop: &Stop) -> u32 {
     let (slots, per) = v.craft.hold();
     let mut econ = world.resource_mut::<Economy>();
     exchange(
@@ -574,7 +628,7 @@ fn trade(world: &mut World, v: &mut Vessel, b: &Building, stop: &Stop) {
         &stop.unload,
         slots,
         per,
-    );
+    )
 }
 
 /// What a warehouse takes of a good from a ship: above this the rest stays aboard for the
@@ -584,7 +638,8 @@ pub const WAREHOUSE_WANTS: f64 = 40.0;
 pub const ISLAND_KEEPS: f64 = 8.0;
 
 /// A ship's call at a quay: land what the stop takes (up to [`WAREHOUSE_WANTS`] in stock),
-/// then load what it gives (down to [`ISLAND_KEEPS`]), `per` to a slot of the hold.
+/// then load what it gives (down to [`ISLAND_KEEPS`]), `per` to a slot of the hold. Returns
+/// how much it landed.
 pub fn exchange(
     books: &mut crate::sim::IslandBooks,
     cargo: &mut Vec<(Good, u32)>,
@@ -592,13 +647,15 @@ pub fn exchange(
     unload: &[Good],
     slots: u32,
     per: u32,
-) {
+) -> u32 {
+    let mut landed = 0;
     for (g, n) in cargo.iter_mut() {
         if unload.contains(g) {
             let room = (WAREHOUSE_WANTS - books.get(*g)).floor().max(0.0) as u32;
             let k = (*n).min(room);
             books.add(*g, k as f64);
             *n -= k;
+            landed += k;
         }
     }
     cargo.retain(|(_, n)| *n > 0);
@@ -624,6 +681,7 @@ pub fn exchange(
             None => cargo.push((*g, n)),
         }
     }
+    landed
 }
 
 /// Leave a mooring (or a fishing ground) for the next place.
@@ -674,6 +732,16 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
                 return;
             }
             Some(*at)
+        }
+        (Roam::Pedlar { quay, away }, None) => {
+            let to = if (from - *quay).length() < 30.0 {
+                // Weighing anchor: the market closes.
+                world.resource_mut::<crate::items::Items>().market_open = false;
+                *away
+            } else {
+                *quay
+            };
+            Some(DVec3::new(to.x, 0.0, to.y))
         }
         (Roam::None, None) => None,
     };
@@ -751,7 +819,9 @@ pub fn sail(world: &mut World) {
         let target_speed = if sailing {
             // Ease off over the last stretch.
             let left = (total - v.s).max(0.0) as f32;
-            v.craft.speed() * (left / (v.craft.half_length() * 4.0 + 20.0)).clamp(0.25, 1.0)
+            v.craft.speed()
+                * (1.0 + v.haste)
+                * (left / (v.craft.half_length() * 4.0 + 20.0)).clamp(0.25, 1.0)
         } else {
             0.0
         };

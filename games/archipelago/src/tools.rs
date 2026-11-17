@@ -129,10 +129,14 @@ pub fn action(world: &mut World, a: &str) {
     {
         build::demolish(world, e);
         select(world, None);
-    } else if let Some(rest) = a.strip_prefix("isle.route.")
-        && let Err(msg) = route_action(world, rest)
+    } else if let Some(rest) = a.strip_prefix("isle.route.") {
+        if let Err(msg) = route_action(world, rest) {
+            toast(world, "Trade route", &msg);
+        }
+    } else if let Some(rest) = a.strip_prefix("isle.item.")
+        && let Err(msg) = crate::items::action(world, rest)
     {
-        toast(world, "Trade route", &msg);
+        toast(world, "Items", &msg);
     }
 }
 
@@ -431,8 +435,18 @@ fn preview(world: &mut World, tool: Tool) -> Option<Preview> {
 
 /// Draw the ghost of what the tool would do.
 pub fn ghost(world: &mut World) {
-    if !world.contains_resource::<Ghost>()
-        || world.resource::<EngineConfig>().headless && world.resource::<Tool>() == &Tool::Select
+    if !world.contains_resource::<Ghost>() {
+        return;
+    }
+    // A selected Trading Union, Town Hall or Harbour Office shows its reach.
+    let holder = world
+        .resource::<Hand>()
+        .selected
+        .filter(|e| world.get::<crate::items::Institution>(*e).is_some());
+    if world.resource::<EngineConfig>().headless
+        && world.resource::<Tool>() == &Tool::Select
+        && holder.is_none()
+        && world.resource::<Ghost>().marks.anchors.is_empty()
     {
         return;
     }
@@ -452,6 +466,7 @@ pub fn ghost(world: &mut World) {
     let mut groups: HashMap<(ModelKey, Mat), Vec<MapRow>> = HashMap::new();
     let mut hint = String::new();
     let mut ok_all = true;
+    let p_building = p.as_ref().and_then(|x| x.2);
     if let Some((cells, ok, building, msg)) = p {
         ok_all = ok;
         hint = msg;
@@ -496,6 +511,73 @@ pub fn ghost(world: &mut World) {
             }
         }
     }
+    // The reach of an item building: the one in the hand, or the one selected.
+    let reach = match (tool, &p_building, holder) {
+        (Tool::Build { kind, .. }, Some((_, origin, rot)), _)
+            if crate::items::Host::of(kind).is_some() =>
+        {
+            let c = grid::footprint_center(kind, *origin, *rot);
+            crate::island::island_at(c.x, c.y).map(|isle| {
+                let r = kind.def().reach as f64 * CELL_M;
+                let host = crate::items::Host::of(kind).unwrap();
+                let inside: Vec<(Building, u32)> = world
+                    .query::<&Building>()
+                    .iter(world)
+                    .filter(|b| {
+                        b.island == isle
+                            && host.acts_on(b.kind)
+                            && (grid::footprint_center(b.kind, b.origin, b.rot) - c).length() <= r
+                    })
+                    .map(|b| (b.clone(), 0))
+                    .collect();
+                (host, c, r, inside)
+            })
+        }
+        (Tool::Select, _, Some(e)) => world.get::<Building>(e).cloned().and_then(|b| {
+            let host = crate::items::Host::of(b.kind)?;
+            let inside = crate::items::in_reach(world, e)
+                .into_iter()
+                .map(|(_, b, n)| (b, n))
+                .collect();
+            Some((
+                host,
+                grid::footprint_center(b.kind, b.origin, b.rot),
+                b.kind.def().reach as f64 * CELL_M,
+                inside,
+            ))
+        }),
+        _ => None,
+    };
+    let mut ring: Vec<MapRow> = Vec::new();
+    if let Some((host, c, r, inside)) = reach {
+        let col = crate::art::hexc(host.colour());
+        let tint = [col.x, col.y, col.z];
+        // A dashed ring on the ground.
+        let n = (std::f64::consts::TAU * r / 4.4) as usize;
+        for i in 0..n {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            let at = c + DVec2::new(a.cos(), a.sin()) * r;
+            let y = grid::cell_range(grid::cell_of(at.x, at.y)).1.max(0.0) + 0.16;
+            ring.push(MapRow {
+                at: DVec3::new(at.x, y, at.y),
+                yaw: -(a as f32),
+                scale: 2.3,
+                tint,
+            });
+        }
+        // A glow under everything it acts on, brighter where an item is at work.
+        for (b, items) in inside {
+            let bc = grid::footprint_center(b.kind, b.origin, b.rot);
+            let (w, d) = b.kind.footprint(b.rot);
+            let k = if items > 0 { 1.0 } else { 0.45 };
+            ring.push(MapRow {
+                at: DVec3::new(bc.x, b.base_y + 0.14, bc.y),
+                yaw: 0.0,
+                scale: w.max(d) as f32 * CELL_M as f32 + 3.0,
+                tint: [tint[0] * k, tint[1] * k, tint[2] * k],
+            });
+        }
+    }
     let mut ghost = std::mem::take(&mut *world.resource_mut::<Ghost>());
     // Allowed tiles and blocked ones are two sets (key: allowed).
     let good = ok_all && tool != Tool::Demolish;
@@ -503,6 +585,8 @@ pub fn ghost(world: &mut World) {
     if !tiles.is_empty() {
         marks.insert(good, tiles);
     }
+    marks.entry(true).or_default().extend(ring);
+    marks.retain(|_, rows| !rows.is_empty());
     let tile = ghost.tile.clone();
     ghost.marks.set(world, marks, |_| tile.clone());
     ghost.sets.set(world, groups, |key| {

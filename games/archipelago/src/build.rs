@@ -261,6 +261,21 @@ pub fn place(
     }
     let isle = grid::check(world.resource::<Grid>(), kind, origin, rot)
         .map_err(|b| b.message().to_string())?;
+    if charge && crate::items::Host::of(kind).is_some() {
+        // The company's renown says how many of each it may keep.
+        let allowed = crate::items::allowed(world.resource::<Economy>());
+        let have = world
+            .query::<&Building>()
+            .iter(world)
+            .filter(|b| b.kind == kind)
+            .count();
+        if have >= allowed {
+            return Err(format!(
+                "The company's renown allows {allowed} of these; more people in higher \
+                 tiers raise it."
+            ));
+        }
+    }
     if charge {
         pay(world, kind, isle)?;
     }
@@ -300,6 +315,9 @@ pub fn place(
     if def.output.is_some() {
         e.insert((Producer::default(), RoadLink::default()));
     }
+    if crate::items::Host::of(kind).is_some() {
+        e.insert(crate::items::Institution::default());
+    }
     let entity = e.id();
     let cells = grid::footprint(kind, origin, rot);
     {
@@ -315,13 +333,19 @@ pub fn place(
         }
         Kind::SaltWorks => paint_cells(world, &cells, "sand"),
         Kind::ClayPit => paint_cells(world, &cells, "mud"),
-        Kind::Market => paint_cells(world, &cells, "gravel"),
+        Kind::Market | Kind::TownHall | Kind::TradingUnion | Kind::HarbourOffice => {
+            paint_cells(world, &cells, "gravel")
+        }
         Kind::Harbour => {
             world.resource_mut::<Economy>().islands[isle].harbours += 1;
         }
         _ => {}
     }
-    if def.site == Site::Land && !crate::fields::is_farm(kind) && kind != Kind::House {
+    if def.site == Site::Land
+        && !crate::fields::is_farm(kind)
+        && kind != Kind::House
+        && crate::items::Host::of(kind).is_none()
+    {
         // A trodden yard round the building (houses keep their grass: they have gardens).
         paint_cells(world, &cells, "dirt");
     }
@@ -519,6 +543,7 @@ pub fn demolish(world: &mut World, e: Entity) {
         return;
     };
     crate::fields::release_all(world, e);
+    crate::items::vacate(world, e);
     if matches!(b.kind, Kind::Market | Kind::Harbour | Kind::Chapel) {
         crate::streets::mark_all(world);
     }
@@ -658,6 +683,8 @@ pub fn refresh(world: &mut World) {
         return;
     }
     world.resource_mut::<Changed>().any = false;
+    // Items first: what they add up to for each building, which the services below read.
+    crate::items::apply(world);
     let roads = world.resource::<Grid>().roads.clone();
     // Distance over roads from every harbour, island by island (one BFS for all).
     let mut dist: HashMap<IVec2, (u32, IVec2)> = HashMap::new();
@@ -759,15 +786,23 @@ pub fn refresh(world: &mut World) {
         let i = SERVICES.iter().position(|k| *k == b.kind).unwrap_or(0);
         street_reach(b, &roads, &paved, &mut by_road[i]);
     }
-    let mut q = world.query::<(&Building, &mut House)>();
-    for (b, mut h) in q.iter_mut(world) {
+    // What the buildings that make nothing cost to run.
+    world.resource_mut::<Economy>().public_upkeep = all
+        .iter()
+        .filter(|(_, b)| b.kind.def().output.is_none())
+        .map(|(_, b)| b.kind.def().upkeep)
+        .sum();
+    let mut q = world.query::<(&Building, &mut House, Option<&crate::items::Boost>)>();
+    for (b, mut h, boost) in q.iter_mut(world) {
         let c = grid::footprint_center(b.kind, b.origin, b.rot);
         let door = grid::ring(b.kind, b.origin, b.rot);
         for (i, kind) in SERVICES.into_iter().enumerate() {
             h.services[i] = services
                 .iter()
                 .any(|(k, isle, p, r)| *k == kind && *isle == b.island && (*p - c).length() <= *r)
-                || door.iter().any(|c| by_road[i].contains(c));
+                || door.iter().any(|c| by_road[i].contains(c))
+                // An item can stand in for the building.
+                || boost.is_some_and(|x| x.serves.contains(&kind));
         }
         h.paved = door.iter().any(|c| paved.contains(c));
     }

@@ -105,6 +105,9 @@ pub const MODELS: &[ModelKey] = &[
     "bench",
     "hand_cart",
     "tub_shrub",
+    "trading_union",
+    "town_hall",
+    "harbour_office",
     "walker_0_0",
     "walker_0_1",
     "walker_0_2",
@@ -219,6 +222,9 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
         | Kind::School
         | Kind::Tavern => {
             crate::burgher::look(kind, seed, &mut out);
+        }
+        Kind::TradingUnion | Kind::TownHall | Kind::HarbourOffice => {
+            crate::halls::look(kind, seed, &mut out);
         }
         Kind::House if biome != Biome::Temperate => {
             crate::regional::house_look(biome, tier, seed, &mut out);
@@ -2824,6 +2830,7 @@ pub fn build_model(key: ModelKey) -> Parts {
         _ => crate::regional::build(key)
             .or_else(|| crate::civic::build(key))
             .or_else(|| crate::burgher::build(key))
+            .or_else(|| crate::halls::build(key))
             .or_else(|| crate::walkers::build(key))
             .unwrap_or_default(),
     }
@@ -2874,6 +2881,7 @@ mod tests {
             .iter()
             .chain(crate::civic::MODELS)
             .chain(crate::burgher::MODELS)
+            .chain(crate::halls::MODELS)
         {
             assert!(MODELS.contains(key), "{key} is not listed");
         }

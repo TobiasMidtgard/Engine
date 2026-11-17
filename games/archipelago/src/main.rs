@@ -25,9 +25,11 @@ mod fleet;
 mod fog;
 mod globe;
 mod grid;
+mod halls;
 mod hud;
 mod icons;
 mod island;
+mod items;
 mod logistics;
 mod looks;
 mod orders;
@@ -89,6 +91,7 @@ pub fn add_game(app: &mut App) {
         .init_resource::<fleet::SeaChart>()
         .init_resource::<fleet::Routes>()
         .init_resource::<tools::Tool>()
+        .init_resource::<items::Items>()
         .init_resource::<world::Woods>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, sim::economy_system)
@@ -105,6 +108,7 @@ pub fn add_game(app: &mut App) {
                 hud::read_actions,
                 tools::input,
                 town::upgrade_looks,
+                items::tick,
                 build::refresh,
                 draw::redraw_buildings,
                 streets::redraw_streets,

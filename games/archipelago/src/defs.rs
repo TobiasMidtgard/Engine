@@ -416,6 +416,10 @@ pub enum Kind {
     LampMaker,
     School,
     Tavern,
+    // The three buildings that hold items.
+    TradingUnion,
+    TownHall,
+    HarbourOffice,
 }
 
 /// Where a building may stand.
@@ -811,6 +815,44 @@ pub const DEFS: &[Def] = &[
         upkeep: 15.0,
         reach: 16,
         ..def(Kind::Tavern, "Tavern", Category::Public, (4, 3))
+    },
+    Def {
+        blurb: "Holds items that act on every works and farm in its reach: specialists, \
+                devices and charters that speed batches, spare workers or change what a works \
+                takes and gives.",
+        coins: 600,
+        cost: &[(Good::Planks, 10), (Good::Bricks, 8)],
+        upkeep: 25.0,
+        reach: 26,
+        ..def(
+            Kind::TradingUnion,
+            "Trading Union",
+            Category::Public,
+            (5, 4),
+        )
+    },
+    Def {
+        blurb: "Holds items that act on every house in its reach: more coins for a met need, \
+                room for more people, a need or a public building done without.",
+        coins: 800,
+        cost: &[(Good::Planks, 10), (Good::Bricks, 12)],
+        upkeep: 30.0,
+        reach: 24,
+        ..def(Kind::TownHall, "Town Hall", Category::Public, (5, 5))
+    },
+    Def {
+        blurb: "Holds items that act on the quay, fisheries and masts in its reach: ships turn \
+                round sooner and sail faster, the warehouse holds more, customs take a duty.",
+        coins: 600,
+        cost: &[(Good::Planks, 12), (Good::Bricks, 6)],
+        upkeep: 25.0,
+        reach: 40,
+        ..def(
+            Kind::HarbourOffice,
+            "Harbour Office",
+            Category::Harbour,
+            (4, 4),
+        )
     },
     Def {
         blurb: "Mooring mast for cargo airships that fly routes over land and sea.",

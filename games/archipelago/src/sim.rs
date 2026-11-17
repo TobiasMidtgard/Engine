@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::defs::{Good, Kind, MAX_SERVICES, NEED_PER_PERSON_MIN, Need, Tier};
 use crate::island;
+use crate::items::Boost;
 
 /// A placed building.
 #[derive(Component, Clone, Debug)]
@@ -122,6 +123,9 @@ pub struct IslandBooks {
     pub made_per_min: [f32; Good::COUNT],
     pub used_per_min: [f32; Good::COUNT],
     pub harbours: u32,
+    /// Warehouse room that items add (see `items::apply`).
+    #[serde(default)]
+    pub extra_room: f64,
 }
 
 impl IslandBooks {
@@ -159,6 +163,8 @@ pub struct Economy {
     pub upkeep_per_min: f64,
     /// Game seconds since the start.
     pub clock_s: f64,
+    /// Coins a minute the buildings that make nothing cost to run (set by `build::refresh`).
+    pub public_upkeep: f32,
 }
 
 impl Default for Economy {
@@ -171,6 +177,7 @@ impl Default for Economy {
             taxes_per_min: 0.0,
             upkeep_per_min: 0.0,
             clock_s: 0.0,
+            public_upkeep: 0.0,
         }
     }
 }
@@ -196,8 +203,14 @@ const SMOOTH_S: f32 = 30.0;
 pub fn step(
     dt: f32,
     econ: &mut Economy,
-    houses: &mut Query<(&Building, &mut House)>,
-    producers: &mut Query<(Entity, &Building, &mut Producer, Option<&RoadLink>)>,
+    houses: &mut Query<(&Building, &mut House, Option<&Boost>)>,
+    producers: &mut Query<(
+        Entity,
+        &Building,
+        &mut Producer,
+        Option<&RoadLink>,
+        Option<&Boost>,
+    )>,
     shipments: &mut Shipments,
 ) {
     if dt <= 0.0 {
@@ -210,15 +223,24 @@ pub fn step(
         b.population = [0.0; Tier::COUNT];
         b.jobs = [0.0; Tier::COUNT];
     }
-    for (b, h) in houses.iter() {
+    // What houses do without because an item provides it.
+    let mut spared = vec![[0.0f64; Good::COUNT]; n];
+    for (b, h, boost) in houses.iter() {
         econ.islands[b.island].population[h.tier.index()] += h.residents;
+        for g in boost.map_or(&[][..], |x| &x.provides) {
+            if h.tier.needs().0.contains(g) {
+                spared[b.island][g.index()] +=
+                    (h.residents * NEED_PER_PERSON_MIN * g.need_share() / 60.0 * dt) as f64;
+            }
+        }
     }
-    for (_, b, p, _) in producers.iter() {
+    for (_, b, p, _, boost) in producers.iter() {
         if p.paused {
             continue;
         }
         if let Some((tier, w)) = b.kind.def().workers {
-            econ.islands[b.island].jobs[tier.index()] += w as f32;
+            econ.islands[b.island].jobs[tier.index()] +=
+                w as f32 * (1.0 - boost.map_or(0.0, |x| x.hands));
         }
     }
     // Workers: higher tiers can't fill lower jobs in this round; each tier staffs its own.
@@ -243,7 +265,7 @@ pub fn step(
             }
         }
         for g in Good::ALL {
-            let d = demand[g.index()];
+            let d = (demand[g.index()] - spared[i][g.index()]).max(0.0);
             if d <= 0.0 {
                 continue;
             }
@@ -258,7 +280,7 @@ pub fn step(
     }
     // Houses: each met need brings its people and pays its coins; then they move up.
     let mut taxes = 0.0f64;
-    for (b, mut h) in houses.iter_mut() {
+    for (b, mut h, boost) in houses.iter_mut() {
         let books = &econ.islands[b.island];
         let mut people = 0.0;
         let mut coins = 0.0;
@@ -269,6 +291,7 @@ pub fn step(
         let mut service = 0;
         for w in h.tier.wants() {
             let met = match w.need {
+                Need::Good(g) if boost.is_some_and(|x| x.provides.contains(&g)) => 1.0,
                 Need::Good(g) => books.supply[g.index()].min(1.0),
                 Need::Service(_) => {
                     service += 1;
@@ -276,7 +299,7 @@ pub fn step(
                 }
             };
             people += w.people * met;
-            coins += w.coins * met;
+            coins += (w.coins + boost.map_or(0.0, |x| x.pay_for(w.need))) * met;
             if w.people > 0.0 {
                 basic += 1.0;
                 basic_met += met;
@@ -287,20 +310,25 @@ pub fn step(
                 lux_met += met;
             }
         }
-        let cap = h.tier.capacity();
-        let target = people.max(0.2 * cap);
+        let share = basic_met / basic;
+        // Lodgers an item finds room for come as the basic needs are met, and pay like
+        // everyone else in the house.
+        let base = h.tier.capacity();
+        let lodgers = boost.map_or(0.0, |x| x.lodgers);
+        let cap = base + lodgers;
+        coins += boost.map_or(0.0, |x| x.flat_pay());
+        let target = (people + lodgers * share).max(0.2 * base);
         let rate = 0.4 * dt;
         h.residents += (target - h.residents).clamp(-rate, rate);
         // A house that is not full pays for the people it has.
-        h.income = coins * (h.residents / cap).min(1.0);
+        h.income = coins * (h.residents / base).min(cap / base);
         taxes += (h.income / 60.0 * dt) as f64;
-        let share = basic_met / basic;
         let happy = if lux > 0.0 { lux_met / lux } else { 1.0 };
         let content = h.residents >= cap - 0.25 && share > 0.95 && happy > 0.8;
         h.content_s = if content { h.content_s + dt } else { 0.0 };
     }
     // Upgrades take materials from the house's island.
-    for (b, mut h) in houses.iter_mut() {
+    for (b, mut h, _) in houses.iter_mut() {
         if h.content_s < 20.0 {
             continue;
         }
@@ -326,11 +354,13 @@ pub fn step(
         }
     }
     // Workshops.
-    let mut upkeep = 0.0f64;
+    let mut upkeep = (econ.public_upkeep / 60.0 * dt) as f64;
     let mut made = vec![[0.0f32; Good::COUNT]; n];
-    for (e, b, mut p, link) in producers.iter_mut() {
+    let plain = Boost::default();
+    for (e, b, mut p, link, boost) in producers.iter_mut() {
         let def = b.kind.def();
-        upkeep += (def.upkeep / 60.0 * dt) as f64;
+        let boost = boost.unwrap_or(&plain);
+        upkeep += ((def.upkeep - boost.thrift).max(0.0) / 60.0 * dt) as f64;
         let Some(out) = def.output else { continue };
         let books = &mut econ.islands[b.island];
         if p.paused {
@@ -350,6 +380,13 @@ pub fn step(
             continue;
         }
         let staff = def.workers.map_or(1.0, |(t, _)| books.workforce[t.index()]);
+        // Items can change what a batch takes.
+        let input = def.input.map(|g| boost.input(g));
+        let input2 = if boost.spare2 {
+            None
+        } else {
+            def.input2.map(|g| boost.input(g))
+        };
         if staff < 0.05 {
             p.status = Status::NoWorkers;
             p.efficiency = 0.0;
@@ -364,15 +401,15 @@ pub fn step(
             p.efficiency = 0.0;
             continue;
         }
-        if let Some(inp) = def.input
+        if let Some(inp) = input
             && !p.input_ready
         {
             // Both goods of a batch or neither.
-            let second = def.input2.is_none_or(|g| books.get(g) >= 1.0);
+            let second = input2.is_none_or(|g| books.get(g) >= 1.0);
             if second && books.take(inp, 1.0) {
                 p.input_ready = true;
                 shipments.carts.push((e, inp, false));
-                if let Some(g) = def.input2 {
+                if let Some(g) = input2 {
                     books.take(g, 1.0);
                     shipments.carts.push((e, g, false));
                 }
@@ -388,13 +425,20 @@ pub fn step(
         } else {
             Status::Working
         };
-        p.progress += dt / def.cycle_s * p.efficiency;
+        p.progress += dt / def.cycle_s * p.efficiency * (1.0 + boost.faster);
         if p.progress >= 1.0 {
             p.progress -= 1.0;
             p.held += 1.0;
             p.made += 1;
             p.input_ready = false;
             made[b.island][out.index()] += 1.0;
+            // The extra goods items bring, each every nth batch.
+            for (g, nth) in &boost.bonus {
+                if p.made.is_multiple_of(*nth) {
+                    made[b.island][g.index()] += 1.0;
+                    shipments.carts.push((e, *g, true));
+                }
+            }
         }
         while p.held >= 1.0 {
             p.held -= 1.0;
@@ -403,7 +447,11 @@ pub fn step(
     }
     // Warehouses.
     for b in econ.islands.iter_mut() {
-        b.capacity = b.harbours as f64 * HARBOUR_CAPACITY;
+        b.capacity = if b.harbours > 0 {
+            b.harbours as f64 * HARBOUR_CAPACITY + b.extra_room
+        } else {
+            0.0
+        };
     }
     for (i, b) in econ.islands.iter_mut().enumerate() {
         for g in 0..Good::COUNT {
@@ -426,8 +474,14 @@ pub fn step(
 pub fn economy_system(
     time: Res<Time>,
     mut econ: ResMut<Economy>,
-    mut houses: Query<(&Building, &mut House)>,
-    mut producers: Query<(Entity, &Building, &mut Producer, Option<&RoadLink>)>,
+    mut houses: Query<(&Building, &mut House, Option<&Boost>)>,
+    mut producers: Query<(
+        Entity,
+        &Building,
+        &mut Producer,
+        Option<&RoadLink>,
+        Option<&Boost>,
+    )>,
     mut shipments: ResMut<Shipments>,
 ) {
     let dt = time.delta_secs() * econ.speed;
