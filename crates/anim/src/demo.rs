@@ -818,11 +818,25 @@ pub fn spawn_humanoid(world: &mut World, outfit: humanoid::Outfit, transform: Tr
 
 /// Give an entity that already has its place the generated body of a person: the humanoid
 /// rig with its locomotion graph, muscles and foot IK, and the athlete's ponytail.
+/// The asset key of a generated person's mesh in `outfit`.
+pub(crate) fn humanoid_mesh_key(outfit: humanoid::Outfit) -> &'static str {
+    match outfit {
+        humanoid::Outfit::Athlete => "anim/humanoid/athlete",
+        humanoid::Outfit::Lifter => "anim/humanoid/lifter",
+        humanoid::Outfit::Shirt => "anim/humanoid/shirt",
+    }
+}
+
+/// The asset key of a wild animal's mesh of `scale` and `look`.
+pub(crate) fn wild_mesh_key(kind: wild::Wild, scale: f32, look: wild::Look) -> String {
+    format!("anim/{}/{}", wild::skeleton_name(kind, scale), look.key())
+}
+
 pub fn give_humanoid_body(world: &mut World, person: Entity, outfit: humanoid::Outfit) {
-    let (key, material) = match outfit {
-        humanoid::Outfit::Athlete => ("anim/humanoid/athlete", SkinMaterial::default()),
-        humanoid::Outfit::Lifter => ("anim/humanoid/lifter", SkinMaterial::default()),
-        humanoid::Outfit::Shirt => ("anim/humanoid/shirt", shirt_detail()),
+    let key = humanoid_mesh_key(outfit);
+    let material = match outfit {
+        humanoid::Outfit::Shirt => shirt_detail(),
+        _ => SkinMaterial::default(),
     };
     let handle = mesh_handle(world, key, || humanoid::mesh(outfit));
     let mut anim = animator(world, humanoid::SKELETON, humanoid::GRAPH);
@@ -1546,7 +1560,7 @@ pub fn give_wild_body(
             }
         }
     }
-    let key = format!("anim/{skeleton}/{}", look.key());
+    let key = wild_mesh_key(kind, scale, look);
     let handle = mesh_handle(world, &key, || wild::mesh(kind, scale, look));
     let graph = kind.graph_name();
     let anim = animator(world, &skeleton, &graph);
@@ -1554,7 +1568,13 @@ pub fn give_wild_body(
     world.entity_mut(e).insert((
         AnimatorSettings::new(&skeleton, &graph),
         anim,
-        SkinnedMeshRenderer::new(handle, wild::material(kind, scale)),
+        SkinnedMeshRenderer::new(
+            handle,
+            SkinMaterial {
+                tint: wild::tint(look),
+                ..wild::material(kind, scale)
+            },
+        ),
         morphs,
         MuscleRig::new(dog::muscles()),
         wild::gait(kind, scale),

@@ -176,21 +176,20 @@ impl Look {
     /// A key for meshes of this look (looks are quantized so a herd shares a few meshes).
     pub fn key(&self) -> String {
         format!(
-            "a{}s{}t{}c{}",
+            "a{}s{}t{}",
             (self.antlers * 4.0).round() as i32,
             u8::from(self.spots),
             u8::from(self.stripes),
-            (self.shade * 2.0).round() as i32
         )
     }
 
-    /// The look as its key says it (quantized).
+    /// The look as its key says it (quantized; the shade isn't in the mesh, see [`tint`]).
     fn quantized(self) -> Look {
         Look {
             antlers: (self.antlers * 4.0).round() / 4.0,
             spots: self.spots,
             stripes: self.stripes,
-            shade: (self.shade * 2.0).round() / 2.0,
+            shade: 0.0,
         }
     }
 }
@@ -440,13 +439,16 @@ struct Coat {
     tail: Paint,
 }
 
-fn shade(rgb: [f32; 3], k: f32) -> [f32; 3] {
-    let m = 1.0 + 0.12 * k;
-    rgb.map(|c| (c * m).min(1.0))
+/// The material tint that shades an animal's coat darker or paler ([`Look::shade`]). It is
+/// the material's, not the mesh's, so animals that differ only in shade share one mesh: the
+/// meshes take seconds each to build.
+pub fn tint(look: Look) -> [f32; 4] {
+    let m = 1.0 + 0.12 * look.shade;
+    [m, m, m, 1.0]
 }
 
 fn coat(kind: Wild, look: Look) -> Coat {
-    let f = |rgb: [f32; 3], amount: f32| Paint::fur(shade(rgb, look.shade), amount);
+    let f = |rgb: [f32; 3], amount: f32| Paint::fur(rgb, amount);
     match kind {
         // Red deer in summer coat: red-brown, a buff rump and belly, darker legs and face.
         Wild::Deer => Coat {

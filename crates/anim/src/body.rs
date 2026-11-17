@@ -31,7 +31,7 @@
 //! and `fist` curves and what the hand holds ([`HandGrip`]), so a character module curls the
 //! fingers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use engine_core::prelude::*;
@@ -41,6 +41,7 @@ use engine_world::character::{
 };
 use engine_world::{LocomotionMode, LocomotionState, MoveIntent};
 
+use crate::SkinnedMesh;
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::build::dog;
 use crate::build::humanoid::{self, Outfit};
@@ -59,6 +60,7 @@ use crate::ragdoll::RagdollRig;
 use crate::retarget::{HandGrip, Retarget};
 use crate::skin::{SkinPose, SkinnedMeshRenderer};
 use crate::xform::smoothing;
+use engine_assets::Assets;
 
 /// The fetched people: file name, the generated outfit that stands in for them, standing
 /// height (m).
@@ -174,9 +176,104 @@ pub(crate) fn answer_requests(
             if rebuild {
                 strip(world, entity);
             }
-            build(world, entity, request);
+            // A generated mesh not built yet is made on a worker (one to three seconds
+            // each, so a zone's herd built here held a frame for half a minute); the body
+            // goes on when it is in.
+            // (Headless runs, tests and tools build at once, as `EngineConfig::off_frame`
+            // asks.)
+            let off_frame = world
+                .get_resource::<EngineConfig>()
+                .is_some_and(|c| c.off_frame());
+            match mesh_job(&request).filter(|_| off_frame) {
+                Some((key, make)) if !mesh_built(world, &key) => {
+                    wait_for_mesh(world, key, make, entity, request)
+                }
+                _ => build(world, entity, request),
+            }
         }
     });
+}
+
+type MakeMesh = Box<dyn FnOnce() -> SkinnedMesh + Send>;
+
+/// Bodies waiting for their generated mesh, by its asset key (one build each, however many
+/// ask for it).
+#[derive(Resource, Default)]
+struct MeshesBuilding(HashMap<String, Vec<(Entity, BodyRequest)>>);
+
+/// The generated mesh a request's body uses, if it is one this module makes (a person's
+/// outfit, a wild animal): its asset key and how to make it.
+fn mesh_job(request: &BodyRequest) -> Option<(String, MakeMesh)> {
+    use crate::build::wild;
+    match request.kind.as_str() {
+        "human" | "person" => {
+            let (_, outfit) = person(request);
+            Some((
+                crate::demo::humanoid_mesh_key(outfit).to_string(),
+                Box::new(move || humanoid::mesh(outfit)),
+            ))
+        }
+        other => {
+            let kind = wild::Wild::of_kind(other)?;
+            let scale = request
+                .height
+                .map_or(1.0, |h| wild::scale_for_height(kind, h));
+            let look = wild::Look::of(kind, &request.kind, scale, request.seed);
+            Some((
+                crate::demo::wild_mesh_key(kind, scale, look),
+                Box::new(move || wild::mesh(kind, scale, look)),
+            ))
+        }
+    }
+}
+
+fn mesh_built(world: &World, key: &str) -> bool {
+    world
+        .get_resource::<Assets<SkinnedMesh>>()
+        .is_some_and(|a| a.loaded_by_key(key).is_some())
+}
+
+/// Build `entity`'s body once its mesh `key` is made (queuing the build if no one else
+/// already has).
+fn wait_for_mesh(
+    world: &mut World,
+    key: String,
+    make: MakeMesh,
+    entity: Entity,
+    request: BodyRequest,
+) {
+    let mut building = world.get_resource_or_init::<MeshesBuilding>();
+    let waiting = building.0.entry(key.clone()).or_default();
+    waiting.push((entity, request));
+    if waiting.len() > 1 {
+        return;
+    }
+    engine_core::off_frame::off_frame(
+        world,
+        format!("anim mesh {key}"),
+        make,
+        move |world: &mut World, mesh: SkinnedMesh| {
+            world
+                .get_resource_or_init::<Assets<SkinnedMesh>>()
+                .get_or_insert_keyed(&key, move || mesh);
+            let waiting = world
+                .get_resource_mut::<MeshesBuilding>()
+                .and_then(|mut b| b.0.remove(&key))
+                .unwrap_or_default();
+            for (entity, request) in waiting {
+                // Only if it still asks for this body and hasn't got it (a changed request
+                // is answered on its own).
+                let current = world.get_entity(entity).ok().and_then(|e| {
+                    let asks = e.get::<BodyRequest>()? == &request;
+                    let has = e.get::<Body>().is_some_and(|b| b.request == request);
+                    (asks && !has).then_some(())
+                });
+                if current.is_some() {
+                    build(world, entity, request);
+                }
+            }
+        },
+    );
 }
 
 /// Whether a character module draws this person (see the module docs).
