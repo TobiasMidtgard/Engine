@@ -314,6 +314,10 @@ pub fn build(pack: &HumanPack, skin: &SkinMesh, a: &Appearance) -> FaceShapes {
     const BATCH: usize = 8;
     let mut per_vertex: Vec<Vec<[u32; 4]>> = vec![Vec::new(); n];
     let mut moved = vec![Vec3::ZERO; n];
+    // The normal offsets are measured against the unmoved skin's normals found the same way,
+    // not against the skin's own (smoothed across seams differently): that difference is no
+    // expression's, and kept a near-zero entry on most face vertices for every channel.
+    let rest_normals = vertex_normals(&skin.positions, &skin.indices);
     for start in (0..CHANNELS.len()).step_by(BATCH) {
         let end = (start + BATCH).min(CHANNELS.len());
         let k = end - start;
@@ -352,7 +356,7 @@ pub fn build(pack: &HumanPack, skin: &SkinMesh, a: &Appearance) -> FaceShapes {
             for i in 0..n {
                 let dp = moved[i];
                 let dn = if i < n_skin {
-                    normals[i] - skin.normals[i]
+                    normals[i] - rest_normals[i]
                 } else {
                     Vec3::ZERO
                 };

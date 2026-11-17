@@ -1533,7 +1533,7 @@ impl GuideGrid {
     }
 }
 
-/// Occlusion of every point from the hair around it: a density grid (2.5 mm cells) of all
+/// Occlusion of every point from the hair around it: a density grid (3 mm cells) of all
 /// points, summed along the way out from the head center (light into a hairdo comes mostly
 /// from outside it).
 fn occlude(set: &mut StrandSet, head: Vec3) {
@@ -1565,18 +1565,19 @@ fn occlude(set: &mut StrandSet, head: Vec3) {
     }
 }
 
-/// Grid cell of the hair shadow density (m).
-const SHADOW_CELL: f32 = 0.0025;
+/// Grid cell of the hair shadow density (m). 3 mm, with the reach below, keeps the 6 cm march
+/// of the 2.5 mm grid in a little over half the cells (long hair's grid was 28 MB at 2.5 mm).
+const SHADOW_CELL: f32 = 0.003;
 /// How far the shader marches toward a light (cells); the grid keeps this margin around the
 /// hair.
-pub const SHADOW_REACH: usize = 24;
+pub const SHADOW_REACH: usize = 20;
 /// Optical depth of one cell inside the skin (the body is opaque); the most a cell holds.
 pub const BODY_TAU: f32 = 4.0;
 /// Hair is more opaque than its fibers' bare cross-section: drawn hairs are still a little fewer
 /// than real ones (see `HAIR_WIDTH`), and light crossing a fiber is mostly turned away.
 const HAIR_OPACITY: f32 = 2.2;
 
-/// How much hair and body fills the space around the hair: per 2.5 mm cell, the optical depth
+/// How much hair and body fills the space around the hair: per 3 mm cell, the optical depth
 /// of crossing its hair and of crossing its body, each as a share of [`BODY_TAU`] in a byte
 /// (two bytes a cell, x fastest, then y, then z). Uploaded as a 3D texture; the strand shader
 /// marches each light through both, the skin shader through the hair only (the skin shades
@@ -1617,7 +1618,7 @@ impl ShadowGrid {
     }
 }
 
-/// The density of the scalp hair and beard (their fibers splatted into 2.5 mm cells) and of the
+/// The density of the scalp hair and beard (their fibers splatted into 3 mm cells) and of the
 /// body (the skin as a 2 cm opaque shell), around the hair with a margin of the shader's reach.
 /// `None` without hair that shades itself. Like the deep opacity maps of Unreal's grooms, but
 /// one grid serves every light, in any direction.

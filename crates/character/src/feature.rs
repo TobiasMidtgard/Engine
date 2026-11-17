@@ -187,16 +187,23 @@ impl GpuCharacter {
     }
 }
 
-/// Skin vertex; must match `SkinIn` in skin.wgsl.
+/// Skin vertex; must match `SkinIn` in skin.wgsl. 56 bytes: the normal (with the part id in w)
+/// goes as half floats and the twelve masks as unorm bytes, so a person's skin takes about half
+/// the video memory it did as floats (the shaders still read floats).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct SkinVertex {
     position_curvature: [f32; 4],
-    normal: [f32; 4],
-    rest: [f32; 4],
-    masks: [f32; 12],
+    rest: [f32; 3],
+    normal: [u16; 4],
+    masks: [u8; 12],
     bones: [u8; 4],
     weights: [u8; 4],
+}
+
+/// A mask in [0, 1] as an unorm byte.
+fn unorm8(x: f32) -> u8 {
+    (x.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Faces whose skin reaches fewer pixels than this (the subsurface profile's reach at full
@@ -219,10 +226,27 @@ const LOADING_UPLOAD_BUDGET_MS: f64 = 10.0;
 /// where single hairs show.
 const FRINGE_HEAD_PIXELS: f32 = 120.0;
 
-const SKIN_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
-    0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-    6 => Uint8x4, 7 => Unorm8x4
-];
+/// `SkinVertex`'s fields in its order: position, rest, normal, masks (three), bones, weights.
+const SKIN_ATTRIBUTES: [wgpu::VertexAttribute; 8] = {
+    use wgpu::VertexFormat as F;
+    const fn at(location: u32, format: F, offset: u64) -> wgpu::VertexAttribute {
+        wgpu::VertexAttribute {
+            format,
+            offset,
+            shader_location: location,
+        }
+    }
+    [
+        at(0, F::Float32x4, 0),
+        at(2, F::Float32x3, 16),
+        at(1, F::Float16x4, 28),
+        at(3, F::Unorm8x4, 36),
+        at(4, F::Unorm8x4, 40),
+        at(5, F::Unorm8x4, 44),
+        at(6, F::Uint8x4, 48),
+        at(7, F::Unorm8x4, 52),
+    ]
+};
 
 /// The fixed part of the pose buffer; must match `struct Pose` in common.wgsl (its bone
 /// matrices follow: this frame's, then last frame's).
@@ -931,12 +955,15 @@ impl CharacterFeature {
                 let p = m.skin.positions[i];
                 let n = m.skin.normals[i];
                 let r = m.skin.rest[i];
-                let mut masks = [0.0; 12];
-                masks.copy_from_slice(&m.skin.masks[i * 12..i * 12 + 12]);
+                let mut masks = [0; 12];
+                for (b, x) in masks.iter_mut().zip(&m.skin.masks[i * 12..i * 12 + 12]) {
+                    *b = unorm8(*x);
+                }
+                let h = face::f16_bits;
                 SkinVertex {
                     position_curvature: [p.x, p.y, p.z, m.skin.curvature[i]],
-                    normal: [n.x, n.y, n.z, part(i) as f32],
-                    rest: [r.x, r.y, r.z, 0.0],
+                    rest: [r.x, r.y, r.z],
+                    normal: [h(n.x), h(n.y), h(n.z), h(part(i) as f32)],
                     masks,
                     bones: m.skin.bones.get(i).copied().unwrap_or_default(),
                     weights: m.skin.weights.get(i).copied().unwrap_or([255, 0, 0, 0]),
@@ -1818,7 +1845,7 @@ mod tests {
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
         assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 23 * 16);
-        assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
+        assert_eq!(std::mem::size_of::<SkinVertex>(), 56);
         assert_eq!(
             std::mem::size_of::<GpuPose>(),
             5 * 16 + INJURY_BONES / 2 * 16 + 2 * 16 * 16
