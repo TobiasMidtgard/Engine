@@ -30,9 +30,10 @@ fn vs_subsurface(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.0);
 }
 
-// How strongly a pixel scatters (0 = not marked).
+// How strongly a pixel scatters (0 = not marked; a thin sheet's 3 is no strength either).
 fn sss_strength(px: vec2<i32>) -> f32 {
-    return saturate(textureLoad(sss_normal, px, 0).w - 1.0);
+    let w = textureLoad(sss_normal, px, 0).w;
+    return select(0.0, saturate(w - 1.0), w < 2.5);
 }
 
 fn sss_view_depth(px: vec2<i32>) -> f32 {

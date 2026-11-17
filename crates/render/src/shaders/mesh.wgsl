@@ -1318,6 +1318,9 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
         if (!kept) {
             discard;
         }
+        if (material_is_thin(mat.flags.x)) {
+            return prepass_output_thin(normalize(in.normal), 0.6, in.motion_now, in.motion_prev);
+        }
         return prepass_output(normalize(in.normal), 0.6, in.motion_now, in.motion_prev);
     }
     vt_feedback_on = vt_feedback_pixel(in.clip.xy);
@@ -1326,6 +1329,9 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
     let m = evaluate_material(si, false);
     if (!kept || ((mat.flags.x & 15u) == 1u && m.base.a < mat.params.w)) {
         discard;
+    }
+    if (m.thin) {
+        return prepass_output_thin(m.normal, m.roughness, in.motion_now, in.motion_prev);
     }
     return prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
 }
@@ -1456,7 +1462,10 @@ fn once_fragment(in: OnceVertexOut, front: bool, holes: bool) -> OnceOutput {
     if (!kept || (holes && (flags & 15u) == 1u && m.base.a < mat.params.w)) {
         discard;
     }
-    let basic = prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
+    var basic = prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
+    if (m.thin) {
+        basic.normal.w = PREPASS_THIN;
+    }
     var out: OnceOutput;
     out.normal = basic.normal;
     out.motion = basic.motion;

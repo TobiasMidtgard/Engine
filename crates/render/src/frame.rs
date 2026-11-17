@@ -222,6 +222,22 @@ pub struct PreviousView {
     pub rotation: Quat,
 }
 
+impl PreviousView {
+    /// The previous frame's view in the frame the world moved to (a floating-origin move, or a
+    /// jump that re-anchors it). A camera carried along by a plain rebase then stands where it
+    /// stood (no cut: its histories hold), and one a trip put back at the same coordinates is
+    /// as far from it as the trip went (a cut: the old place's fog, lighting and image
+    /// histories are dropped instead of showing over the new place).
+    pub fn follow(&mut self, s: &engine_world::WorldShift) {
+        self.origin = s.point(self.origin);
+        if !s.is_translation_only() {
+            self.rotation = s.orientation(self.rotation);
+            // Camera-relative, world-aligned: old offsets are the new ones turned back.
+            self.view_proj *= Mat4::from_quat(s.rotation.inverse().as_quat());
+        }
+    }
+}
+
 /// Everything about the current view, in camera-relative coordinates.
 #[derive(Debug, Clone)]
 pub struct ViewData {

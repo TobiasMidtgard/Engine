@@ -82,6 +82,7 @@ mod gpu_cache;
 pub mod grass;
 pub mod image_cache;
 mod impostor;
+mod inline_materials;
 mod lens;
 pub mod material;
 pub mod material_library;
@@ -329,7 +330,12 @@ impl Plugin for RenderPlugin {
                 gltf_loader::spawn_pending_gltf_scenes.before(UpdateSet::Propagate),
             )
             .add_systems(Update, sprites::animate_sprites)
+            .init_resource::<inline_materials::InlineMaterialUsers>()
             .add_systems(Extract, resolve_mesh_renderers)
+            .add_systems(
+                Extract,
+                inline_materials::release_inline_materials.after(resolve_mesh_renderers),
+            )
             .add_systems(Extract, virtual_texture::poll_virtual_textures)
             .add_systems(Render, renderer::render_system)
             .add_render_feature(sky_feature::SkyFeature::default())

@@ -447,7 +447,10 @@ fn cs_scatter(
             let w = log2(1.0 + clip.w * v.y) * v.z;
             if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)) && w <= 1.0 && history_holds(uv, w)) {
                 let h = textureSampleLevel(scatter_history, linear_clamp, vec3<f32>(uv, w), 0.0);
-                value = mix(value, vec4<f32>(h.rgb * froxels.params.x, h.a), froxels.jitter.w);
+                // Rescaled to this frame's exposure, but never past what a froxel may hold: the
+                // history is half floats, and above 65504 they turn infinite for good.
+                let held = min(h.rgb * froxels.params.x, vec3<f32>(60000.0));
+                value = mix(value, vec4<f32>(held, h.a), froxels.jitter.w);
             }
         }
     }

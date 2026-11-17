@@ -18,7 +18,7 @@
 // Screen-space results of the depth prepass (see `RenderFeature::draw_prepass`). In the prepass
 // itself and in passes that write them, these hold neutral 1x1 stand-ins.
 @group(0) @binding(10) var ao_map: texture_2d<f32>;          // ambient occlusion (R, 1 = open)
-@group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written (1..2: subsurface strength + 1)
+@group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written (1..2: subsurface strength + 1, 3: a thin sheet)
 @group(0) @binding(12) var prepass_depth: texture_depth_2d;  // depth after the prepass (reverse-Z, 0 = nothing)
 // Atmosphere look-up tables (see lib_atmosphere.wgsl).
 @group(0) @binding(13) var transmittance_lut: texture_2d<f32>; // sunlight transmittance to the top of the atmosphere
@@ -269,6 +269,17 @@ fn prepass_output(normal: vec3<f32>, roughness: f32, clip_now: vec4<f32>, clip_p
         motion = (clip_now.xy / clip_now.w - clip_prev.xy / clip_prev.w) * vec2<f32>(0.5, -0.5);
     }
     out.motion = motion;
+    return out;
+}
+
+// What `prepass_output_thin` writes to the normal's w: a sheet with nothing behind its face
+// (a leaf, a petal, cloth, a card), so screen-space shadows take it as a plane, not a solid.
+const PREPASS_THIN: f32 = 3.0;
+
+// `prepass_output` for a thin sheet (double-sided or alpha-masked materials).
+fn prepass_output_thin(normal: vec3<f32>, roughness: f32, clip_now: vec4<f32>, clip_prev: vec4<f32>) -> PrepassOutput {
+    var out = prepass_output(normal, roughness, clip_now, clip_prev);
+    out.normal.w = PREPASS_THIN;
     return out;
 }
 
@@ -625,6 +636,12 @@ fn far_shadow_visibility(rel: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
 // prepass depth and returns 0 where something closer to the camera blocks the ray. Catches the
 // small shadows (pebbles, grass, a foot on the ground) the shadow map is too coarse for. Only
 // for surfaces in the prepass, within 60 m.
+//
+// A solid caster is taken to fill a quarter meter (and more far off) behind its front face. A
+// thin sheet (`PREPASS_THIN`: a leaf, a petal) fills nothing behind it: the ray is blocked only
+// where it crosses the sheet's plane, within half a step of a sample. Taken as solid, a leaf
+// 1 mm thick shaded every ray passing up to 25 cm behind it, a dark streak hanging under each
+// leaf on the ground below it on screen (Foliage's garden beds).
 const CONTACT_STEPS: i32 = 10;
 const CONTACT_STEPS_CUT: i32 = 6;
 
@@ -658,7 +675,18 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         // object floating in front (thickness).
         let bias = 0.01 + ray * 0.003;
         let thickness = 0.25 + ray * 0.02;
-        if (diff > bias && diff < thickness) {
+        var hit = diff > bias && diff < thickness;
+        let caster = textureLoad(prepass_normal, clamp(px, vec2<i32>(0), size - 1), 0);
+        if (caster.w > PREPASS_THIN - 0.5 && diff < thickness) {
+            // Distance from the sheet's plane: the sheet's point under the sample is the
+            // sample scaled back to the sheet's depth, so their offset is the sample's times
+            // diff / ray.
+            let sheet = oct_decode(caster.xy);
+            let off_plane = abs(dot(q, sheet)) * abs(diff) / max(ray, 1e-4);
+            let half_step = 0.5 * len / f32(steps) * abs(dot(l, sheet));
+            hit = off_plane <= half_step + bias * 0.25;
+        }
+        if (hit) {
             // Fade with distance along the ray and toward the 60 m limit.
             shadow = mix(1.0, t * 0.5, 1.0 - smoothstep(40.0, 60.0, depth));
             break;

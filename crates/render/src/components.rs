@@ -477,8 +477,13 @@ impl InstanceRow {
     }
 }
 
-/// Handles resolved from a [`MeshRenderer`] (managed by the engine).
+/// Handles resolved from a [`MeshRenderer`] (managed by the engine). Its hooks count who draws
+/// each inline material, so ones nothing draws any more are freed (`inline_materials`).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[component(
+    on_insert = crate::inline_materials::resolved_inserted,
+    on_discard = crate::inline_materials::resolved_discarded
+)]
 pub struct ResolvedMesh {
     pub mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,

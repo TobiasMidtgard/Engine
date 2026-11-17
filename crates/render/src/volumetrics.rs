@@ -51,6 +51,9 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const MAX_FOG_VOLUMES: usize = 64;
 /// Weight of last frame's froxels in this frame's.
 const HISTORY_WEIGHT: f32 = 0.9;
+/// Largest change of exposure between frames the history is rescaled over (16 = four stops);
+/// beyond it the history starts over.
+const MAX_HISTORY_RESCALE: f32 = 16.0;
 /// The grid never has more columns or rows than this; larger outputs get larger tiles.
 const MAX_COLUMNS: u32 = 320;
 const MAX_ROWS: u32 = 192;
@@ -587,7 +590,15 @@ impl Volumetrics {
             self.grid = Some(grid);
         }
 
-        let history = self.history_ready && view.history_valid && self.history_exposure > 0.0;
+        // Exposure jumping more than four stops in a frame (a script setting it, a meter snapping
+        // after a cut) drops the history: rescaled that far, its dim froxels' half-float steps
+        // and its brightest ones' clamp would show for the many frames the history takes to
+        // fade.
+        let rescale = view.exposure / self.history_exposure.max(f32::MIN_POSITIVE);
+        let history = self.history_ready
+            && view.history_valid
+            && self.history_exposure > 0.0
+            && (1.0 / MAX_HISTORY_RESCALE..=MAX_HISTORY_RESCALE).contains(&rescale);
         self.reach = settings.trial_cuts_more & trial_cut_more::FOG_REACH != 0;
         let columns = size[0] * size[1];
         self.counting = self.reach && settings.debug_skip & shade_skip::COUNT_MESH_RUNS != 0;
@@ -602,11 +613,7 @@ impl Volumetrics {
                 if history { HISTORY_WEIGHT } else { 0.0 },
             ],
             params: [
-                if history {
-                    view.exposure / self.history_exposure
-                } else {
-                    1.0
-                },
+                if history { rescale } else { 1.0 },
                 self.reach as u32 as f32,
                 (self.reach_history && history) as u32 as f32,
                 (self.reach && settings.debug_skip & shade_skip::MARK_FOG_OUT_OF_REACH != 0) as u32

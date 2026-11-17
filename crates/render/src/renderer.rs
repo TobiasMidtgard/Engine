@@ -709,6 +709,9 @@ pub struct Renderer {
     returned: Option<RenderReturn>,
     /// Each `ExtraView` camera's own resources and history, by camera.
     extra_views: HashMap<Entity, ExtraViewState>,
+    /// Where the [`engine_world::WorldShift`] messages were read up to (every view's previous
+    /// frame follows them).
+    shifts: bevy_ecs::message::MessageCursor<engine_world::WorldShift>,
     /// The `render.extra_views_gpu.<pass>` and `render.extra_views_cpu.<step>` keys the extra
     /// views set last.
     extra_view_passes: std::collections::HashSet<String>,
@@ -1563,6 +1566,7 @@ impl Renderer {
             borrowed: view.borrowed,
             returned: None,
             extra_views: HashMap::new(),
+            shifts: Default::default(),
             extra_view_passes: Default::default(),
             extra_view_logged: None,
             main_thread_submit_ms: 0.0,
@@ -1878,6 +1882,18 @@ impl Renderer {
             },
             loading.map(|l| started + std::time::Duration::from_secs_f64(l.budget_ms / 1000.0)),
         );
+
+        // The world moved to a new frame: every view's previous frame moves with it, so cuts
+        // and reprojection compare places in one frame.
+        if let Some(shift) = world
+            .get_resource::<bevy_ecs::message::Messages<engine_world::WorldShift>>()
+            .and_then(|m| self.shifts.read(m).copied().reduce(|a, b| a.then(&b)))
+        {
+            let extra = self.extra_views.values_mut().map(|e| &mut e.view.previous);
+            for p in std::iter::once(&mut self.previous).chain(extra).flatten() {
+                p.follow(&shift);
+            }
+        }
 
         // New features.
         if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>()
@@ -2309,6 +2325,13 @@ impl Renderer {
             view.history_valid = false;
             self.meter.restart();
             self.exposure.snap = true;
+        }
+        if !is_extra && let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            // 1 on a frame whose histories (temporal AA, fog, reflections, exposure) start over.
+            d.set(
+                "render.history_cut",
+                f64::from(u8::from(!view.history_valid)),
+            );
         }
         // A mirror borrowing the main view's maps takes their placement too.
         let borrowed = if is_extra {
