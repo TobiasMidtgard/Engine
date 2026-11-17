@@ -26,6 +26,8 @@ const PIECE: usize = N / PIECES;
 /// Where the bank's foot lies, meters above the sea (a little under it, so the edge meets the
 /// water and the ground cleanly). Seen ground has no fog surface at all.
 const FOOT_M: f64 = -25.0;
+/// How steeply the bank rises from its foot (its slope there, as a share of a straight ramp's).
+const SHOULDER: f64 = 2.2;
 
 /// One piece of the fog: face, and its place on the face.
 type PieceId = (u8, u8, u8);
@@ -275,13 +277,16 @@ fn piece_mesh(fog: &FogOfWar, id: PieceId) -> (Option<Mesh>, DQuat, DVec3) {
                 (pi * PIECE + i) as i64 - 1,
                 (pj * PIECE + j) as i64 - 1,
             );
-            // A rounded shoulder: steep at the foot, flattening toward the top.
-            let t = ((unseen - 0.22) / 0.78).clamp(0.0, 1.0);
-            let rise = (t * t * (3.0 - 2.0 * t)).powf(0.6);
+            // A rounded shoulder: steep at the foot, flattening toward the top. Under the
+            // foot the slope runs straight on down into the ground: the bank's edge on the
+            // sea is then a level line of the smooth mask (a foot flattened at the edge put
+            // a saw's teeth in it, a cell long).
+            let t = (unseen - 0.22) / 0.78;
+            let rise = 1.0 - (1.0 - t.clamp(0.0, 1.0)).powf(SHOULDER);
             let h_top = top(d);
-            let h = FOOT_M + (h_top - FOOT_M) * rise;
-            any |= rise > 0.0;
-            risen[j * w + i] = rise > 0.0;
+            let h = FOOT_M + (h_top - FOOT_M) * if t < 0.0 { SHOULDER * t } else { rise };
+            any |= t > 0.0;
+            risen[j * w + i] = t > 0.0;
             rises[j * w + i] = rise as f32;
             pos[j * w + i] = (inv * (d * (globe::RADIUS_M + h) - origin)).as_vec3();
             // Hollows a little greyer than crests.
