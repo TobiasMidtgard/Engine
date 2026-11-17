@@ -2353,12 +2353,11 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
         var out: SurfaceFog;
         out.inscatter = fog.rgb;
         out.transmittance = vec3<f32>(fog.a);
-        if (dist > 200.0) {
-            let overcast = smoothstep(0.55, 0.88, frame.weather.z);
-            let deck_lit = (1.0 - a.air_t) * (fog_sky_light() + frame.ambient.rgb) * overcast;
-            out.inscatter = out.inscatter * a.air_t + a.air_light + pre_expose(deck_lit);
-            out.transmittance *= a.air_t;
-        }
+        // (From the camera out: the table's air starts clear at the camera.)
+        let overcast = smoothstep(0.55, 0.88, frame.weather.z);
+        let deck_lit = (1.0 - a.air_t) * (fog_sky_light() + frame.ambient.rgb) * overcast;
+        out.inscatter = out.inscatter * a.air_t + a.air_light + pre_expose(deck_lit);
+        out.transmittance *= a.air_t;
         return out;
     }
     if (start < dist) {
@@ -2378,9 +2377,12 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
     var out: SurfaceFog;
     out.inscatter = fog.rgb;
     out.transmittance = vec3<f32>(fog.a);
-    // Aerial perspective: the atmosphere between the camera and distant geometry (negligible
-    // closer than a couple hundred meters).
-    if (dist > 200.0) {
+    // Aerial perspective: the atmosphere between the camera and the surface. Nearer than
+    // `AIR_NEAR` it is that far's, thinned in proportion (the air that close is all alike):
+    // one short march instead of a full one, and no edge where the full one starts. (Air was
+    // left out nearer than 200 m once; in a small planet's thick air the ground within showed
+    // as a disc of clearer, more saturated color.)
+    if (dist > AIR_NEAR) {
         let a = atmosphere(vec3(0.0), dir, dist, 8);
         // Under an overcast sky the air is lit by the cloud deck's grey light and the ground
         // below it, not by the sun the clouds dim: it scatters that light back in as much as
@@ -2391,9 +2393,24 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
         let deck_lit = (1.0 - a.transmittance) * (fog_sky_light() + frame.ambient.rgb) * overcast;
         out.inscatter = out.inscatter * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb + deck_lit);
         out.transmittance *= a.transmittance;
+    } else if (dist > 0.0) {
+        let a = atmosphere(vec3(0.0), dir, AIR_NEAR, 2);
+        let k = dist / AIR_NEAR;
+        let t = pow(max(a.transmittance, vec3<f32>(1e-6)), vec3<f32>(k));
+        // The light builds up as the transmittance falls.
+        let lost = max(vec3<f32>(1.0) - a.transmittance, vec3<f32>(1e-6));
+        let share = select(vec3<f32>(k), (vec3<f32>(1.0) - t) / lost, lost > vec3<f32>(1e-4));
+        let overcast = smoothstep(0.55, 0.88, frame.weather.z);
+        let deck_lit = (1.0 - t) * (fog_sky_light() + frame.ambient.rgb) * overcast;
+        out.inscatter = out.inscatter * t + pre_expose(a.radiance * share * frame.sun_color.rgb + deck_lit);
+        out.transmittance *= t;
     }
     return out;
 }
+
+// Within this distance of the camera, meters, `surface_fog` takes the air's haze from one
+// short march to this distance, thinned in proportion.
+const AIR_NEAR: f32 = 200.0;
 
 // Applies fog and atmospheric haze (`surface_fog`) to pre-exposed color seen at camera-relative
 // `rel`.
