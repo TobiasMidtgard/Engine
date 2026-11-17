@@ -153,6 +153,20 @@ pub const MODELS: &[ModelKey] = &[
     "jar",
     "canoe",
     "banana",
+    "quay_tropic",
+    "quay_arid",
+    "quay_arctic",
+    "fishery_tropic",
+    "fishery_arid",
+    "fishery_arctic",
+    "market_tropic",
+    "market_arid",
+    "market_arctic",
+    "chapel_tropic",
+    "chapel_arid",
+    "chapel_arctic",
+    "sacks",
+    "torch",
 ];
 
 /// Which of a model's three variants a building with this seed gets.
@@ -175,6 +189,9 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
         Kind::House if biome != Biome::Temperate => {
             crate::regional::house_look(biome, tier, seed, &mut out);
         }
+        // The far regions build their own quays, fisheries, markets and houses of worship.
+        Kind::Harbour | Kind::Fishery | Kind::Market | Kind::Chapel
+            if crate::civic::look(kind, biome, seed, &mut out) => {}
         Kind::CanePlantation
         | Kind::Distillery
         | Kind::DateGrove
@@ -2765,6 +2782,7 @@ pub fn build_model(key: ModelKey) -> Parts {
         "hand_cart" => hand_cart(),
         "tub_shrub" => tub_shrub(),
         _ => crate::regional::build(key)
+            .or_else(|| crate::civic::build(key))
             .or_else(|| crate::walkers::build(key))
             .unwrap_or_default(),
     }
@@ -2811,7 +2829,7 @@ mod tests {
                 }
             }
         }
-        for key in crate::regional::MODELS {
+        for key in crate::regional::MODELS.iter().chain(crate::civic::MODELS) {
             assert!(MODELS.contains(key), "{key} is not listed");
         }
     }

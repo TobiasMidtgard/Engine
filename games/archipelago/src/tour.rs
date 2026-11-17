@@ -22,6 +22,9 @@ enum Aim {
     FarTown(usize),
     /// The first building of this kind on an island.
     Kind(crate::defs::Kind, usize),
+    /// The first building of this kind on an island, seen from its front: yaw 0 looks
+    /// straight at the front, a positive yaw walks round to its left.
+    Front(crate::defs::Kind, usize),
     /// The first vessel of this craft.
     Craft(Craft),
     At(f64, f64),
@@ -189,6 +192,84 @@ fn views() -> Vec<View> {
         },
         View {
             clean: true,
+            fog: false,
+            pitch_deg: Some(30.0),
+            ..v("sarrow_quay", Aim::Kind(K::Harbour, 5), 2.0, 150.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(24.0),
+            ..v("sarrow_wharf", Aim::Front(K::Harbour, 5), 0.55, 66.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(22.0),
+            ..v("sarrow_fishery", Aim::Front(K::Fishery, 5), 0.6, 34.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(30.0),
+            ..v("sarrow_market", Aim::Front(K::Market, 5), 0.5, 52.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("sarrow_chapel", Aim::Front(K::Chapel, 5), 0.6, 60.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(24.0),
+            ..v("amber_wharf", Aim::Front(K::Harbour, 9), 0.55, 66.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(22.0),
+            ..v("amber_fishery", Aim::Front(K::Fishery, 9), 0.6, 34.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(30.0),
+            ..v("amber_market", Aim::Front(K::Market, 9), 0.5, 52.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("amber_chapel", Aim::Front(K::Chapel, 9), 0.6, 60.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(24.0),
+            ..v("frost_wharf", Aim::Front(K::Harbour, 12), 0.55, 66.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(22.0),
+            ..v("frost_fishery", Aim::Front(K::Fishery, 12), 0.6, 34.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(30.0),
+            ..v("frost_market", Aim::Front(K::Market, 12), 0.5, 52.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("frost_chapel", Aim::Front(K::Chapel, 12), 3.7, 60.0)
+        },
+        View {
+            clean: true,
             pitch_deg: Some(26.0),
             ..v("date_grove", Aim::Kind(K::DateGrove, 9), 3.9, 120.0)
         },
@@ -292,7 +373,7 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
             let (_, c) = crate::town::far_site(*i)?;
             DVec3::new(c.x, 0.0, c.y)
         }
-        Aim::Kind(k, isle) => {
+        Aim::Kind(k, isle) | Aim::Front(k, isle) => {
             let mut q = world.query::<&Building>();
             let b = q
                 .iter(world)
@@ -318,6 +399,18 @@ fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
             let d = (mid - quay).normalize_or_zero();
             (-d.x).atan2(-d.y) as f32
         });
+    }
+    if let Aim::Front(k, isle) = aim {
+        // The yaw that looks at the building's front from before it.
+        let mut q = world.query::<&Building>();
+        return q
+            .iter(world)
+            .filter(|b| b.kind == *k && b.island == *isle)
+            .min_by_key(|b| b.id)
+            .map_or(0.0, |b| {
+                let fd = crate::grid::front_dir(b.rot).as_vec2();
+                fd.x.atan2(fd.y)
+            });
     }
     let Aim::Craft(c) = aim else {
         return 0.0;

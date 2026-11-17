@@ -14,7 +14,7 @@ use crate::defs::{CELL_M, Kind, Tier};
 use crate::globe::Biome;
 use crate::looks::{ModelKey, Piece, WHITE, h01, lump, shutters, small_boat, variant};
 
-const SNOW: Vec4 = Vec4::new(0.95, 0.97, 1.0, 1.0);
+pub(crate) const SNOW: Vec4 = Vec4::new(0.95, 0.97, 1.0, 1.0);
 
 /// The models this module builds (they are listed in `looks::MODELS`; this list checks that).
 #[cfg(test)]
@@ -388,7 +388,7 @@ pub fn pan_pieces(seed: u64, k: u64, at: Vec3, strip_t: f32) -> Vec<Piece> {
 // ------------------------------------------------------------------------------ helpers
 
 /// A flat quad facing up, from `(x0, z0)` to `(x1, z1)` at height `y`.
-fn up_quad(p: &mut Parts, m: Mat, x: (f32, f32), z: (f32, f32), y: f32, col: Vec4) {
+pub(crate) fn up_quad(p: &mut Parts, m: Mat, x: (f32, f32), z: (f32, f32), y: f32, col: Vec4) {
     p.quad(
         m,
         v3(x.0, y, z.1),
@@ -402,7 +402,16 @@ fn up_quad(p: &mut Parts, m: Mat, x: (f32, f32), z: (f32, f32), y: f32, col: Vec
 /// Snow lying on a gabled roof built by `gable_roof` with the same numbers, down the upper
 /// `share` of both slopes, its lower edge uneven.
 #[allow(clippy::too_many_arguments)]
-fn roof_snow(p: &mut Parts, c: Vec3, l: f32, w: f32, h: f32, over: f32, ridge_z: bool, share: f32) {
+pub(crate) fn roof_snow(
+    p: &mut Parts,
+    c: Vec3,
+    l: f32,
+    w: f32,
+    h: f32,
+    over: f32,
+    ridge_z: bool,
+    share: f32,
+) {
     let mut s = Parts::default();
     let (hl, hw) = (l * 0.5 + over, w * 0.5 + over);
     let drop = h / (w * 0.5) * over;
@@ -481,7 +490,7 @@ fn stack(p: &mut Parts, base: Vec3, r: f32, h: f32) {
 }
 
 /// A railing from `a` to `b` (posts about every 1.1 m, a top and a middle rail).
-fn railing(p: &mut Parts, a: Vec3, b: Vec3, h: f32, col: Vec4) {
+pub(crate) fn railing(p: &mut Parts, a: Vec3, b: Vec3, h: f32, col: Vec4) {
     let len = (b - a).length();
     let n = (len / 1.1).ceil().max(1.0) as usize;
     for i in 0..=n {
@@ -499,7 +508,7 @@ fn railing(p: &mut Parts, a: Vec3, b: Vec3, h: f32, col: Vec4) {
 }
 
 /// A low parapet round a flat roof `l` × `w` centred on `c` (the roof's height).
-fn parapet(p: &mut Parts, c: Vec3, l: f32, w: f32, h: f32, col: Vec4) {
+pub(crate) fn parapet(p: &mut Parts, c: Vec3, l: f32, w: f32, h: f32, col: Vec4) {
     let t = 0.28;
     let (hl, hw) = (l * 0.5, w * 0.5);
     p.cuboid(
@@ -548,7 +557,7 @@ fn parapet(p: &mut Parts, c: Vec3, l: f32, w: f32, h: f32, col: Vec4) {
 }
 
 /// Roof beam ends poking through a mud wall that faces `normal`, along its head.
-fn beam_ends(p: &mut Parts, mid: Vec3, normal: Vec3, len: f32) {
+pub(crate) fn beam_ends(p: &mut Parts, mid: Vec3, normal: Vec3, len: f32) {
     let along = Vec3::Y.cross(normal).normalize();
     let n = (len / 0.85) as i32;
     for i in 0..n {
@@ -1226,7 +1235,7 @@ fn canoe() -> Parts {
 
 // ------------------------------------------------------------------ the Amber Reach: dry
 
-fn mud(v: usize) -> Vec4 {
+pub(crate) fn mud(v: usize) -> Vec4 {
     [hexc(0xc79f6d), hexc(0xd9bb8c), hexc(0xb98659)][v % 3]
 }
 

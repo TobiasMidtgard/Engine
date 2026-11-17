@@ -603,6 +603,7 @@ fn far_lands(world: &mut World) -> FarLands {
     if let Some((h, town)) = far_town(world, 9, 14, 85.0, 40) {
         out.amber = Some(h);
         let at = ring(9, town);
+        place_near(world, Kind::Chapel, at(2.2, 70.0), 20, true);
         along_shore(world, h, Kind::Fishery, 2, 75.0);
         for (a, r) in [(-0.8, 230.0), (0.75, 240.0)] {
             place_near(world, Kind::DateGrove, at(a, r), 40, true);
@@ -624,6 +625,7 @@ fn far_lands(world: &mut World) -> FarLands {
     if let Some((h, town)) = far_town(world, 12, 14, 85.0, 38) {
         out.frost = Some(h);
         let at = ring(12, town);
+        place_near(world, Kind::Chapel, at(2.2, 70.0), 20, true);
         along_shore(world, h, Kind::Fishery, 2, 75.0);
         along_shore(world, h, Kind::OilWorks, 1, 150.0);
         // (Where the woods are up in the hills, out of a road's reach, planks come by sea.)

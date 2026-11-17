@@ -15,6 +15,7 @@ mod api;
 mod art;
 mod build;
 mod camera;
+mod civic;
 mod defs;
 mod draw;
 mod effects;
