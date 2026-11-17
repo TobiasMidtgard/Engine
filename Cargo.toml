@@ -95,3 +95,4 @@ codegen-units = 16
 # third_party/rapier3d/PATCHES.md. Delete this entry (and the folder) to go back to stock.
 [patch.crates-io]
 rapier3d = { path = "third_party/rapier3d" }
+bevy_ecs = { path = "third_party/bevy_ecs" }
