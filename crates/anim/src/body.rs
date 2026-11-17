@@ -199,7 +199,14 @@ pub(crate) fn answer_requests(
     });
 }
 
-type MakeMesh = Box<dyn FnOnce() -> SkinnedMesh + Send>;
+type MakeMesh = Box<dyn FnOnce() -> Made + Send>;
+
+/// What a worker makes for a body: its mesh, and for a wild animal of a new size its skeleton
+/// and clips (6 to 9 ms a size, which held the frame the herd came in on).
+struct Made {
+    mesh: SkinnedMesh,
+    rig: Option<(crate::Skeleton, Vec<crate::AnimationClip>)>,
+}
 
 /// Bodies waiting for their generated mesh, by its asset key (one build each, however many
 /// ask for it).
@@ -215,7 +222,10 @@ fn mesh_job(request: &BodyRequest) -> Option<(String, MakeMesh)> {
             let (_, outfit) = person(request);
             Some((
                 crate::demo::humanoid_mesh_key(outfit).to_string(),
-                Box::new(move || humanoid::mesh(outfit)),
+                Box::new(move || Made {
+                    mesh: humanoid::mesh(outfit),
+                    rig: None,
+                }),
             ))
         }
         other => {
@@ -226,7 +236,14 @@ fn mesh_job(request: &BodyRequest) -> Option<(String, MakeMesh)> {
             let look = wild::Look::of(kind, &request.kind, scale, request.seed);
             Some((
                 crate::demo::wild_mesh_key(kind, scale, look),
-                Box::new(move || wild::mesh(kind, scale, look)),
+                Box::new(move || {
+                    let skeleton = wild::skeleton(kind, scale);
+                    let clips = wild::action_clips(kind, &skeleton, scale);
+                    Made {
+                        mesh: wild::mesh(kind, scale, look),
+                        rig: Some((skeleton, clips)),
+                    }
+                }),
             ))
         }
     }
@@ -257,7 +274,18 @@ fn wait_for_mesh(
         world,
         format!("anim mesh {key}"),
         make,
-        move |world: &mut World, mesh: SkinnedMesh| {
+        move |world: &mut World, Made { mesh, rig }: Made| {
+            if let Some((skeleton, clips)) = rig {
+                let mut lib = world.get_resource_or_init::<AnimationLibrary>();
+                if !lib.skeletons.contains_key(&skeleton.name) {
+                    lib.add_skeleton(skeleton);
+                }
+                for clip in clips {
+                    if !lib.clips.contains_key(&clip.name) {
+                        lib.add_clip(clip);
+                    }
+                }
+            }
             world
                 .get_resource_or_init::<Assets<SkinnedMesh>>()
                 .get_or_insert_keyed(&key, move || mesh);
