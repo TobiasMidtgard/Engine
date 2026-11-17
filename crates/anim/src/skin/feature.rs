@@ -60,10 +60,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crossbeam_channel::{Receiver, Sender};
+
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use engine_assets::{Assets, Handle};
+use engine_core::off_frame::OffFrameSettings;
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
@@ -838,6 +842,15 @@ struct MeshData {
     indices: Vec<u32>,
 }
 
+/// A mesh laid out for the static buffers on a worker (a person's or an animal's took 5 to
+/// 15 ms here, more for a fetched character, and a crowd arriving held frames for it).
+struct LaidOut {
+    index: u32,
+    version: u64,
+    derived: Arc<Derived>,
+    data: MeshData,
+}
+
 /// A storage buffer the GPU writes; grows to the next power of two.
 struct OutputBuffer {
     buffer: wgpu::Buffer,
@@ -905,6 +918,10 @@ pub struct SkinningFeature {
     derived: HashMap<u32, (u64, Arc<Derived>)>,
     /// Reused while laying out a new mesh.
     scratch: MeshData,
+    /// New meshes being laid out on a worker (canonical index → version), and those done.
+    laying_out: HashMap<u32, u64>,
+    laid_out: HashMap<u32, LaidOut>,
+    layouts: Option<(Sender<LaidOut>, Receiver<LaidOut>)>,
     /// Grown static buffers' contents still to copy (at the start of `compute`).
     copies: Vec<Copy>,
     query: Option<QueryState<SkinQuery>>,
@@ -1052,24 +1069,38 @@ impl SkinningFeature {
         version: u64,
         mesh: &SkinnedMesh,
         frame: u64,
+        laid_out: Option<LaidOut>,
     ) -> bool {
         let Some(statics) = self.statics.as_mut() else {
             return false;
         };
         let index = handle.index();
-        let derived = {
-            let _span = tracing::info_span!("skin: derive").entered();
-            match self.derived.get(&index) {
-                Some((v, d)) if *v == version => d.clone(),
-                _ => {
-                    let d = Arc::new(Derived::of(mesh));
-                    self.derived.insert(index, (version, d.clone()));
-                    d
-                }
+        let (derived, mut owned) = match laid_out {
+            Some(l) => {
+                self.derived.insert(index, (version, l.derived.clone()));
+                (l.derived, Some(l.data))
+            }
+            None => {
+                let _span = tracing::info_span!("skin: derive").entered();
+                let derived = match self.derived.get(&index) {
+                    Some((v, d)) if *v == version => d.clone(),
+                    _ => {
+                        let d = Arc::new(Derived::of(mesh));
+                        self.derived.insert(index, (version, d.clone()));
+                        d
+                    }
+                };
+                (derived, None)
             }
         };
         let _span = tracing::info_span!("skin: append").entered();
-        Self::mesh_data(mesh, scratch);
+        let scratch = match owned.as_mut() {
+            Some(data) => data,
+            None => {
+                Self::mesh_data(mesh, scratch);
+                scratch
+            }
+        };
         let rest_size = std::mem::size_of::<GpuRest>() as u64;
         let morph_size = std::mem::size_of::<GpuMorph>() as u64;
         let vertex_base = (statics.rest.used / rest_size) as u32;
@@ -1223,6 +1254,7 @@ impl SkinningFeature {
                     slot.version,
                     mesh,
                     slot.last_used,
+                    None,
                 );
             }
         }
@@ -1659,23 +1691,76 @@ impl RenderFeature for SkinningFeature {
                 self.pack(&gpu.device, &gpu.queue, Some(assets));
             }
         }
+        if let Some((_, done)) = &self.layouts {
+            for l in done.try_iter() {
+                if self.laying_out.get(&l.index) == Some(&l.version) {
+                    self.laying_out.remove(&l.index);
+                }
+                self.laid_out.insert(l.index, l);
+            }
+        }
+        // Laid out on a worker in a game (headless runs and tools at once, as
+        // `EngineConfig::off_frame` asks, so a screenshot has everyone in it).
+        let workers = AsyncComputeTaskPool::try_get().filter(|_| {
+            world_ref
+                .get_resource::<EngineConfig>()
+                .is_some_and(|c| c.off_frame())
+                && world_ref
+                    .get_resource::<OffFrameSettings>()
+                    .is_none_or(|s| !s.inline)
+        });
         if !new.is_empty() {
             let _span = tracing::info_span!("skin: new meshes").entered();
             new.sort_unstable_by_key(|n| n.0.index());
+            // (Layouts of meshes no one draws any more go.)
+            self.laid_out
+                .retain(|index, _| new.iter().any(|n| n.0.index() == *index));
             let mut copies = Vec::new();
             let mut scratch = std::mem::take(&mut self.scratch);
             for (handle, version) in new {
                 let Some(mesh) = assets.get(handle) else {
                     continue;
                 };
-                let update = self.slots.contains_key(&handle.index());
+                let index = handle.index();
+                let ready = self
+                    .laid_out
+                    .get(&index)
+                    .is_some_and(|l| l.version == version)
+                    || self.derived.get(&index).is_some_and(|(v, _)| *v == version);
+                if !ready && let Some(pool) = workers {
+                    if self.laying_out.get(&index) != Some(&version) {
+                        self.laying_out.insert(index, version);
+                        let (send, _) = self
+                            .layouts
+                            .get_or_insert_with(crossbeam_channel::unbounded);
+                        let send = send.clone();
+                        let mesh = mesh.clone();
+                        pool.spawn(async move {
+                            let mut data = MeshData::default();
+                            Self::mesh_data(&mesh, &mut data);
+                            let _ = send.send(LaidOut {
+                                index,
+                                version,
+                                derived: Arc::new(Derived::of(&mesh)),
+                                data,
+                            });
+                        })
+                        .detach();
+                    }
+                    continue;
+                }
+                let update = self.slots.contains_key(&index);
                 if !gpu.uploads.take(
-                    SKIN_UPLOAD_KEY | handle.index() as u64,
+                    SKIN_UPLOAD_KEY | index as u64,
                     Self::mesh_bytes(mesh),
                     update,
                 ) {
                     continue;
                 }
+                let laid_out = self
+                    .laid_out
+                    .remove(&index)
+                    .filter(|l| l.version == version);
                 self.append_mesh(
                     &gpu.device,
                     &gpu.queue,
@@ -1685,6 +1770,7 @@ impl RenderFeature for SkinningFeature {
                     version,
                     mesh,
                     frame,
+                    laid_out,
                 );
             }
             self.scratch = scratch;

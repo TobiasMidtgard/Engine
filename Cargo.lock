@@ -1382,6 +1382,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "bytemuck",
+ "crossbeam-channel",
  "engine_assets",
  "engine_core",
  "engine_render",

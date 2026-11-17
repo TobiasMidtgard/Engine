@@ -671,3 +671,41 @@ fn fur_shells_grow_strands_over_the_skin() {
         "the fur is a solid slab: {after} red of {total} pixels"
     );
 }
+
+/// In a game, a character's mesh is laid out for the GPU on a worker (5 to 15 ms each, and a
+/// crowd arriving held frames for it); it is drawn a few frames later all the same.
+#[test]
+fn a_character_laid_out_on_a_worker_is_drawn() {
+    let mut app = headless_app();
+    app.update();
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    // As a windowed game builds (off-frame work on), still drawn offscreen.
+    app.world.resource_mut::<EngineConfig>().headless = false;
+    let w = &mut app.world;
+    w.spawn((
+        DirectionalLight {
+            illuminance: 80_000.0,
+            ..Default::default()
+        },
+        Transform::default().looking_at(DVec3::new(-0.3, -0.7, -0.6), Vec3::Y),
+    ));
+    w.spawn((
+        Camera::perspective(40.0),
+        Transform::from_xyz(0.0, 1.15, 3.6).looking_at(DVec3::new(0.0, 1.05, 0.0), Vec3::Y),
+    ));
+    spawn_humanoid(
+        w,
+        Outfit::Athlete,
+        Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+    );
+    let started = std::time::Instant::now();
+    let mut top = 0;
+    while top <= 400 && started.elapsed().as_secs() < 60 {
+        app.update_n(5);
+        top = red_pixels(&capture(&mut app, "anim_worker.png"), 0.4, 0.6, 0.25, 0.55);
+    }
+    assert!(top > 400, "the athlete never came in ({top} red pixels)");
+}
