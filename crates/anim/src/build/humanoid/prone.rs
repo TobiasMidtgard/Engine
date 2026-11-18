@@ -9,6 +9,7 @@
 //! ([`PRONE_CRAWL_SPEED`] × half a cycle each pull).
 
 use super::*;
+use crate::build::weapons::{GRIP, RIFLE_AXIS, RIFLE_BUTT, RIFLE_FORE, RIFLE_SHOT_AT, RIFLE_UP};
 
 /// The graph parameter the body lies down by (0 standing or crouched, 0.5 on hands and knees,
 /// 1 flat on the floor). The module ramps it toward the contract-style `prone` (0 or 1)
@@ -24,6 +25,17 @@ pub const PRONE_IDLE: &str = "prone_idle";
 pub const PRONE_CRAWL: &str = "prone_crawl";
 pub const PRONE_BACK: &str = "prone_back";
 pub const PRONE_KNEEL: &str = "prone_kneel";
+/// Aiming a long gun lying down (the prone firing position), and a shot from it (the `shot`
+/// event as it goes off, like [`RIFLE_FIRE`]'s).
+pub const PRONE_RIFLE_AIM: &str = "prone_rifle_aim";
+pub const PRONE_RIFLE_FIRE: &str = "prone_rifle_fire";
+/// A rifleman lying still, not aiming: the gun in the shoulder, the muzzle down, looking
+/// over the sights.
+pub const PRONE_RIFLE_READY: &str = "prone_rifle_ready";
+/// The graph parameter the lying body takes up the firing position by (0..1): the module
+/// eases it toward 1 while a rifleman lying down (`rifle_carry` up, [`PRONED`] near 1) has
+/// `aim` up.
+pub const PRONE_AIMED: &str = "prone_aimed";
 
 /// One crawl cycle: a pull on the left forearm and right knee, then on the right and left, s.
 const CRAWL_SECS: f32 = 1.6;
@@ -219,6 +231,94 @@ fn kneel_key() -> Key {
     }
 }
 
+/// The prone firing position (FM 3-22.9, "prone unsupported"): legs spread and
+/// straight, toes out, the body a little to the left of the line of fire, the chest up on
+/// both elbows, the butt in the pocket of the right shoulder, the right elbow out on the
+/// ground, the left under the gun with the hand on the fore grip, the cheek down on the stock.
+/// `kick` (0..1) is a shot's recoil: the gun back into the shoulder and the muzzle up, the
+/// shoulders rocked back; `breath` (−1..1) lifts the chest a few millimetres; `ready` (0..1)
+/// lowers the muzzle and lifts the head off the stock to look over the sights.
+fn aim_pose(s: &Skeleton, kick: f32, breath: f32, ready: f32) -> Vec<(&'static str, Xf)> {
+    let legs = [AIM_LEG; 2];
+    let mut key = lying(0.0, [FOREARM; 2], legs);
+    key.spine = AIM_SPINE;
+    key.spine[1] += 1.2 * breath;
+    key.hips.z += 0.012 * kick;
+    key.hips.y += 0.002 * breath;
+    key.effort = 0.35;
+    let k = body_scale(s);
+    let (_, model) = key.forward(s);
+    let shoulder = model[s.bone(UPPER_ARM[1])].t / k;
+    // Built square to the body, the gun pointing `AIM_ANGLE` to its left (and level at a
+    // target on the ground ahead, climbing a few degrees as it kicks); then the whole body
+    // turns right about the butt so the gun points ahead.
+    let climb = (AIM_DROP + 4.0 * kick - 9.0 * ready).to_radians();
+    let across = Quat::from_rotation_y(AIM_ANGLE.to_radians());
+    let dir = across * Vec3::new(0.0, climb.sin(), -climb.cos());
+    let up = across * Vec3::new(0.0, climb.cos(), climb.sin());
+    let butt = shoulder + AIM_POCKET - dir * 0.022 * kick;
+    let fist = butt + dir * RIFLE_BUTT;
+    let held = rifle_frame(dir, up);
+    let fore = fist + dir * RIFLE_FORE;
+    let turn = across.inverse();
+    let ankle = |side: usize| mirror(AIM_FEET, side);
+    let targets = [
+        Some(fore - held * GRIP),
+        Some(fist - held * GRIP),
+        Some(ankle(0)),
+        Some(ankle(1)),
+    ];
+    let mut pose = key.reach(s, targets, [Some(held), Some(held), None, None], AIM_POLES);
+    for (name, x) in pose.iter_mut() {
+        match *name {
+            "hips" => {
+                let pivot = butt * k;
+                x.t = turn * (x.t - pivot) + pivot;
+                x.r = turn * x.r;
+            }
+            // The cheek down on the stock: the head turned along the gun and tilted right
+            // over it.
+            "head" => {
+                let [turn, tilt] = AIM_HEAD.map(|a| a * (1.0 - 0.6 * ready));
+                x.r = x.r
+                    * Quat::from_rotation_x((16.0 * ready).to_radians())
+                    * Quat::from_rotation_y(turn.to_radians())
+                    * Quat::from_rotation_z(-tilt.to_radians());
+            }
+            _ => {}
+        }
+    }
+    pose
+}
+
+/// The rotation that turns a long gun held in the right fist (its barrel along
+/// [`RIFLE_AXIS`], top along [`RIFLE_UP`] in the hand's frame) to point `dir`, top `up`.
+fn rifle_frame(dir: Vec3, up: Vec3) -> Quat {
+    let frame = |a: Vec3, f: Vec3| Quat::from_mat3(&Mat3::from_cols(a, f, a.cross(f)));
+    (frame(dir, up) * frame(RIFLE_AXIS, RIFLE_UP).inverse()).normalize()
+}
+
+/// The firing position's body: turned right of the line of fire (degrees, the left shoulder
+/// ahead, the legs off to the left behind), back arched up on the elbows, and a gun a degree
+/// or two down at a target on the ground ahead.
+const AIM_ANGLE: f32 = 35.0;
+const AIM_SPINE: [f32; 4] = [8.0, 16.0, 14.0, 22.0];
+const AIM_DROP: f32 = -1.5;
+/// The butt's heel from the right shoulder joint: in, ahead of it and a little down.
+const AIM_POCKET: Vec3 = Vec3::new(-0.09, -0.05, 0.03);
+/// The head turned left along the gun and tilted right onto the stock, degrees.
+const AIM_HEAD: [f32; 2] = [20.0, 14.0];
+/// Legs straight and spread, toes turned out (the inside of each foot on the ground).
+const AIM_LEG: [f32; 4] = [0.0, 18.0, 4.0, -55.0];
+const AIM_FEET: Vec3 = Vec3::new(0.27, 0.08, 1.18);
+/// The right elbow out to the side on the ground, the left down under the gun.
+const AIM_POLES: [Vec3; 4] = [
+    Vec3::new(0.2, -1.0, 0.0),
+    Vec3::new(0.6, -1.0, 0.1),
+    Vec3::new(-1.0, 0.0, -0.2),
+    Vec3::new(1.0, 0.0, -0.2),
+];
+
 fn lying_clip(
     name: &str,
     secs: f32,
@@ -242,27 +342,79 @@ pub(super) fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         lying_clip(PRONE_KNEEL, 1.0, 0.4, move |_| {
             Key::sample(s, &[kneel, Key { at: 1.0, ..kneel }], 0.0).1
         }),
+        lying_clip(PRONE_RIFLE_AIM, 3.2, 0.3, |ph| {
+            aim_pose(s, 0.0, (std::f32::consts::TAU * ph).sin(), 0.0)
+        })
+        .with_curve("grip", 2, |_| 1.0),
+        lying_clip(PRONE_RIFLE_READY, 3.2, 0.15, |ph| {
+            aim_pose(s, 0.0, (std::f32::consts::TAU * ph).sin(), 1.0)
+        })
+        .with_curve("grip", 2, |_| 1.0),
+        {
+            let secs = FIRE_SECS;
+            let kick = move |ph: f32| {
+                keyed(
+                    ph * secs,
+                    &[
+                        (RIFLE_SHOT_AT, 0.0),
+                        (RIFLE_SHOT_AT + 0.04, 1.0),
+                        (secs, 0.0),
+                    ],
+                )
+            };
+            AnimationClip::from_fn(
+                PRONE_RIFLE_FIRE,
+                secs,
+                (secs * 60.0) as usize + 1,
+                false,
+                move |ph| aim_pose(s, kick(ph), 0.0, 0.0),
+            )
+            .with_curve("floor", 2, |_| 1.0)
+            .with_curve("grip", 2, |_| 1.0)
+            .with_curve("effort", 8, move |ph| 0.4 + 0.4 * kick(ph))
+            .with_event(RIFLE_SHOT_AT / secs, "shot", Some("hand_r"))
+        },
     ]
 }
+
+/// A prone shot: the kick and the settle back on the target, s.
+const FIRE_SECS: f32 = 0.3;
 
 /// Lying down by [`PRONED`] over everything `standing` does: through hands and knees to the
 /// floor, then still or crawling by `speed` and `heading`.
 pub(super) fn graph(standing: NodeDef) -> NodeDef {
-    let by_speed = |clips: &[(f32, &str)]| NodeDef::Blend1d {
+    let ready = |node: NodeDef| NodeDef::Blend1d {
+        param: RIFLE_CARRY.into(),
+        children: vec![
+            Blend1dChild { at: 0.0, node },
+            Blend1dChild {
+                at: 1.0,
+                node: NodeDef::clip(PRONE_RIFLE_READY),
+            },
+        ],
+        sync: false,
+        match_speed: false,
+    };
+    // Still, or crawling at `speed` (a rifleman lying still keeps the gun in the shoulder,
+    // ready).
+    let by_speed = |speed: f32, clip: &str| NodeDef::Blend1d {
         param: "speed".into(),
-        children: clips
-            .iter()
-            .map(|&(at, clip)| Blend1dChild {
-                at,
+        children: vec![
+            Blend1dChild {
+                at: 0.0,
+                node: ready(NodeDef::clip(PRONE_IDLE)),
+            },
+            Blend1dChild {
+                at: speed,
                 node: NodeDef::clip(clip),
-            })
-            .collect(),
+            },
+        ],
         sync: true,
         match_speed: true,
     };
     let pi = std::f32::consts::PI;
-    let ahead = || by_speed(&[(0.0, PRONE_IDLE), (PRONE_CRAWL_SPEED, PRONE_CRAWL)]);
-    let back = || by_speed(&[(0.0, PRONE_IDLE), (PRONE_BACK_SPEED, PRONE_BACK)]);
+    let ahead = || by_speed(PRONE_CRAWL_SPEED, PRONE_CRAWL);
+    let back = || by_speed(PRONE_BACK_SPEED, PRONE_BACK);
     // Sideways the body crawls slowly on (a mover turns it to face the way it goes).
     let lying = NodeDef::Blend1d {
         param: "heading".into(),
@@ -277,6 +429,22 @@ pub(super) fn graph(standing: NodeDef) -> NodeDef {
         .map(|(at, node)| Blend1dChild { at, node })
         .collect(),
         sync: true,
+        match_speed: false,
+    };
+    // A rifleman aiming lies in the firing position instead.
+    let lying = NodeDef::Blend1d {
+        param: PRONE_AIMED.into(),
+        children: vec![
+            Blend1dChild {
+                at: 0.0,
+                node: lying,
+            },
+            Blend1dChild {
+                at: 1.0,
+                node: NodeDef::clip(PRONE_RIFLE_AIM),
+            },
+        ],
+        sync: false,
         match_speed: false,
     };
     NodeDef::Blend1d {
@@ -311,4 +479,28 @@ pub(super) fn upright_only(t: TransitionDef) -> TransitionDef {
         when: Condition::All(vec![t.when, Condition::param(PRONED, Cmp::Lt, 0.25)]),
         ..t
     }
+}
+
+/// The prone shot's state, beside `move`.
+pub(super) fn states() -> Vec<StateDef> {
+    vec![StateDef {
+        name: PRONE_RIFLE_FIRE.into(),
+        node: NodeDef::one_shot(PRONE_RIFLE_FIRE),
+        speed: 1.0,
+        speed_param: None,
+    }]
+}
+
+/// Lying down with a long gun, `fire` shoots from the firing position (taken up in the
+/// shot's first frames when it wasn't aimed), back to lying as before when it's done.
+pub(super) fn transitions() -> Vec<TransitionDef> {
+    let lying = Condition::All(vec![
+        Condition::param(RIFLE_CARRY, Cmp::Gt, 0.5),
+        Condition::param(PRONED, Cmp::Gt, 0.75),
+        Condition::trigger("fire"),
+    ]);
+    vec![
+        TransitionDef::new("move", PRONE_RIFLE_FIRE, lying, 0.06),
+        TransitionDef::new(PRONE_RIFLE_FIRE, "move", Condition::Finished, 0.12),
+    ]
 }

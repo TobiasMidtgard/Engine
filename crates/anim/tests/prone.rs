@@ -148,10 +148,36 @@ fn a_crawler_pulls_on_a_planted_forearm_and_knee_in_turn() {
     assert!(bone(&app, e, "head").y < 0.6, "head up crawling");
 }
 
+/// The muzzle's way and how far the left fist is from the fore grip (model space).
+fn gun(app: &App, e: Entity) -> (Vec3, f32) {
+    use engine_anim::build::weapons::{RIFLE_AXIS, RIFLE_FORE};
+    let pose = app.world.get::<SkeletonPose>(e).unwrap();
+    let bone = |b: &str| pose.bones[pose.index_of(b).unwrap()];
+    let fist =
+        |b: engine_world::animation::BonePose| b.translation + b.rotation * engine_anim::grip::GRIP;
+    let (r, l) = (bone("hand_r"), bone("hand_l"));
+    let muzzle = r.rotation * RIFLE_AXIS;
+    let fore = fist(r) + muzzle * RIFLE_FORE;
+    (muzzle, (fist(l) - fore).length())
+}
+
+#[derive(Resource, Default)]
+struct Said(Vec<String>);
+
+fn listen(
+    mut said: ResMut<Said>,
+    mut events: MessageReader<engine_world::animation::AnimationEvent>,
+) {
+    said.0.extend(events.read().map(|e| e.name.clone()));
+}
+
 #[test]
-fn lying_down_a_rifleman_told_to_aim_stays_on_the_floor() {
+fn lying_down_a_rifleman_aims_on_both_elbows_and_shoots_without_getting_up() {
+    use engine_anim::build::humanoid::PRONE_AIMED;
     use engine_world::combat::{ItemClass, Loadout};
     let mut app = app();
+    app.world.init_resource::<Said>();
+    app.add_systems(Last, listen);
     let e = person(&mut app);
     app.world.entity_mut(e).insert(Loadout {
         main: ItemClass::Firearm,
@@ -161,11 +187,69 @@ fn lying_down_a_rifleman_told_to_aim_stays_on_the_floor() {
     run(&mut app, 0.5);
     prone(&mut app, e, true);
     run(&mut app, PRONE_SECS as f64 + 0.5);
+    // Lying still with it: in the shoulder, the muzzle down off the target.
+    let (muzzle, off) = gun(&app, e);
+    assert!(
+        (-0.3..-0.08).contains(&muzzle.y) && muzzle.z < -0.9 && off < 0.06,
+        "ready lying: muzzle {muzzle}, left fist {off} m off the fore grip"
+    );
     app.world
         .get_mut::<AnimationParams>(e)
         .unwrap()
         .set("aim", 1.0);
     run(&mut app, 1.0);
+    let aimed = app
+        .world
+        .get::<AnimationParams>(e)
+        .unwrap()
+        .get(PRONE_AIMED);
+    assert!(aimed > 0.99, "prone_aimed {aimed}");
+    let (muzzle, off) = gun(&app, e);
+    assert!(
+        muzzle.dot(Vec3::NEG_Z) > 0.995,
+        "aimed lying: muzzle {muzzle}"
+    );
+    assert!(off < 0.06, "left fist {off} m off the fore grip");
     let head = bone(&app, e, "head").y;
     assert!(head < 0.6, "head {head}: aiming stood the body up");
+    // Propped on both elbows, the gun a forearm's height off the ground.
+    for elbow in ["lower_arm_l", "lower_arm_r"] {
+        let y = bone(&app, e, elbow).y;
+        assert!(y < 0.14, "{elbow} {y} m up: not down on the ground");
+    }
+    let fist = bone(&app, e, "hand_r").y;
+    assert!((0.15..0.4).contains(&fist), "right hand {fist} m up");
+    assert!(lowest(&app, e) > -0.03, "a bone under the floor aiming");
+    // A shot kicks the gun back and up, goes off, and settles back on the target, all lying.
+    let before = bone(&app, e, "hand_r");
+    app.world
+        .write_message(engine_world::animation::AnimationTrigger {
+            entity: e,
+            name: "fire".into(),
+        });
+    let mut kicked: f32 = 0.0;
+    let mut climb: f32 = 0.0;
+    for _ in 0..30 {
+        app.update();
+        kicked = kicked.max(bone(&app, e, "hand_r").z - before.z);
+        climb = climb.max(gun(&app, e).0.y);
+        assert!(bone(&app, e, "head").y < 0.6, "the shot stood the body up");
+    }
+    assert!(
+        app.world.resource::<Said>().0.iter().any(|s| s == "shot"),
+        "no shot"
+    );
+    assert!(kicked > 0.01, "the gun kicked back only {kicked} m");
+    assert!(climb > 0.02, "the muzzle climbed only to {climb}");
+    let (muzzle, _) = gun(&app, e);
+    assert!(muzzle.dot(Vec3::NEG_Z) > 0.995, "after the shot: {muzzle}");
+    // Lowered again, and up out of it standing.
+    app.world
+        .get_mut::<AnimationParams>(e)
+        .unwrap()
+        .set("aim", 0.0);
+    prone(&mut app, e, false);
+    run(&mut app, PRONE_SECS as f64 + 1.0);
+    let head = bone(&app, e, "head").y;
+    assert!(head > 1.5, "head {head}: not up again");
 }

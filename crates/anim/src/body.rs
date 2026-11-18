@@ -123,6 +123,9 @@ pub struct BodyMotion {
     /// How far lying down, 0..1 (ramped toward the contract-style `prone` over
     /// [`humanoid::PRONE_SECS`]; 0.5 is on hands and knees).
     pub prone: f32,
+    /// How far into the prone firing position, 0..1 (eased in while a rifleman lying down
+    /// aims).
+    pub prone_aim: f32,
     owners: [Owner; PARAMS.len()],
 }
 
@@ -138,7 +141,7 @@ enum Owner {
     Others,
 }
 
-const PARAMS: [&str; 9] = [
+const PARAMS: [&str; 10] = [
     "speed",
     "turn",
     "move_effort",
@@ -148,7 +151,12 @@ const PARAMS: [&str; 9] = [
     "grade",
     humanoid::CROUCHED,
     humanoid::PRONED,
+    humanoid::PRONE_AIMED,
 ];
+
+/// How quickly a rifleman lying down takes up the firing position or leaves it, s (time
+/// constant).
+const PRONE_AIM_EASE: f32 = 0.1;
 
 /// How quickly a person drops into a crouch or rises from one, s (time constant).
 const CROUCH_EASE: f32 = 0.14;
@@ -440,6 +448,15 @@ pub(crate) fn drive_bodies(
         let target = if params.get("prone") > 0.5 { 1.0 } else { 0.0 };
         let step = dt / humanoid::PRONE_SECS;
         motion.prone += (target - motion.prone).clamp(-step, step);
+        // Lying down with a long gun, `aim` takes up the firing position.
+        let aiming = params.get("aim") > 0.5
+            && params.get(crate::build::weapons::RIFLE_CARRY) > 0.5
+            && motion.prone > 0.9;
+        let target = if aiming { 1.0 } else { 0.0 };
+        motion.prone_aim += (target - motion.prone_aim) * smoothing(dt, PRONE_AIM_EASE);
+        if (motion.prone_aim - target).abs() < 1e-3 {
+            motion.prone_aim = target;
+        }
         let values = [
             Some(motion.speed),
             Some((motion.yaw_rate / 1.2).clamp(-1.0, 1.0)),
@@ -451,6 +468,7 @@ pub(crate) fn drive_bodies(
             Some(grade_param(motion.grade)),
             Some(motion.crouch),
             Some(motion.prone),
+            Some(motion.prone_aim),
         ];
         for (i, (name, value)) in PARAMS.iter().zip(values).enumerate() {
             let Some(value) = value else {

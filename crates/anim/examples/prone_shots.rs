@@ -2,12 +2,16 @@
 //! lying on the forearms, frames of the low crawl, and a film of the whole thing.
 //!
 //! ```text
-//! cargo run -p engine_anim --example prone_shots --release -- <strip|film> [out_dir] [width] [height]
+//! cargo run -p engine_anim --example prone_shots --release -- <strip|film|rifle|rifle_film> [out_dir] [width] [height]
 //! ```
 //!
 //! * `strip`: going down (four frames), lying still, eight frames of a crawl cycle, from the
 //!   side and from ahead.
 //! * `film`: frames at 30 fps (`film_000.png`..): standing, down, crawling 2 m, still, up.
+//! * `rifle`: a rifleman lying, crawling with the gun, aiming it lying and firing, from the
+//!   side, from ahead and from above behind.
+//! * `rifle_film`: frames at 30 fps (`film_000.png`..): a rifleman goes down, aims, fires
+//!   three shots, crawls on, aims and fires again, and gets up.
 //!
 //! Needs a GPU or a software Vulkan driver (lavapipe). Time runs in fixed 1/60 s steps.
 
@@ -18,7 +22,8 @@ use engine_render::prelude::*;
 use engine_render::renderer::Renderer;
 use engine_render::{RenderDisabled, capture_now};
 use engine_world::WorldPlugin;
-use engine_world::animation::{AnimationParams, BodyRequest};
+use engine_world::animation::{AnimationParams, AnimationTrigger, BodyRequest};
+use engine_world::combat::{ItemClass, Loadout};
 use engine_world::locomotion::MoveIntent;
 
 const STEP: f64 = 1.0 / 60.0;
@@ -105,6 +110,21 @@ impl Stage {
                 MoveIntent::default(),
             ))
             .id()
+    }
+
+    fn set(&mut self, e: Entity, param: &str, value: f32) {
+        self.app
+            .world
+            .get_mut::<AnimationParams>(e)
+            .unwrap()
+            .set(param, value);
+    }
+
+    fn cue(&mut self, e: Entity, name: &str) {
+        self.app.world.write_message(AnimationTrigger {
+            entity: e,
+            name: name.into(),
+        });
     }
 
     fn run(&mut self, secs: f64) {
@@ -245,6 +265,94 @@ fn main() {
                         &out.join(format!("film_{:03}.png", f / 2)),
                         cam + DVec3::new(5.0, 1.25, 0.2),
                         cam + DVec3::new(0.0, 0.7, 0.2),
+                    );
+                }
+            }
+        }
+        "rifle" => {
+            let e = s.person(DVec3::ZERO, 23);
+            s.app.world.entity_mut(e).insert(Loadout {
+                main: ItemClass::Firearm,
+                off: ItemClass::None,
+                two_handed: true,
+            });
+            s.ready();
+            s.run(0.5);
+            let behind = |p: DVec3| {
+                (
+                    p + DVec3::new(1.0, 2.3, 3.4),
+                    p + DVec3::new(0.0, 0.2, -0.2),
+                )
+            };
+            let views = |s: &mut Stage, name: &str| {
+                let p = s.at(e);
+                for (view, (eye, target)) in [
+                    ("side", side(p)),
+                    ("ahead", ahead(p)),
+                    ("behind", behind(p)),
+                ] {
+                    s.shoot(&out.join(format!("{name}_{view}.png")), eye, target);
+                }
+            };
+            views(&mut s, "0_standing");
+            s.prone(e, true);
+            s.run(2.0);
+            views(&mut s, "1_lying");
+            for _ in 0..(2.0 / STEP) as usize {
+                s.step(e, DVec3::Z, 0.45);
+            }
+            views(&mut s, "2_crawling");
+            s.run(1.0);
+            s.set(e, "aim", 1.0);
+            s.run(1.2);
+            views(&mut s, "3_aimed");
+            s.cue(e, "fire");
+            s.run(0.05);
+            views(&mut s, "4_kick");
+            s.run(0.6);
+            s.set(e, "aim", 0.0);
+            s.run(1.2);
+            views(&mut s, "5_lowered");
+        }
+        "rifle_film" => {
+            let e = s.person(DVec3::ZERO, 23);
+            s.app.world.entity_mut(e).insert(Loadout {
+                main: ItemClass::Firearm,
+                off: ItemClass::None,
+                two_handed: true,
+            });
+            s.ready();
+            s.once = true;
+            s.run(0.5);
+            // (from s, prone, aim, speed m/s)
+            let plan = [
+                (0.0, false, false, 0.0),
+                (0.5, true, false, 0.0),
+                (2.8, true, true, 0.0),
+                (5.6, true, false, 0.0),
+                (6.4, true, false, 0.45),
+                (9.0, true, false, 0.0),
+                (9.6, true, true, 0.0),
+                (11.6, false, false, 0.0),
+            ];
+            let shots = [3.6, 4.2, 4.8, 10.6];
+            let frames = (13.6 / STEP) as usize;
+            let mut cam = s.at(e);
+            for f in 0..frames {
+                let t = f as f64 * STEP;
+                let &(_, prone, aim, speed) = plan.iter().rev().find(|p| p.0 <= t).unwrap();
+                s.prone(e, prone);
+                s.set(e, "aim", if aim { 1.0 } else { 0.0 });
+                if shots.iter().any(|&at| (t - at).abs() < STEP * 0.5) {
+                    s.cue(e, "fire");
+                }
+                s.step(e, DVec3::Z, speed);
+                cam += (s.at(e) - cam) * 0.08;
+                if f % 2 == 0 {
+                    s.shoot(
+                        &out.join(format!("film_{:03}.png", f / 2)),
+                        cam + DVec3::new(3.6, 1.0, -1.6),
+                        cam + DVec3::new(0.0, 0.45, 0.2),
                     );
                 }
             }

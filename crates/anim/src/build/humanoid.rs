@@ -34,8 +34,8 @@ pub use parkour::{
     WALL_KICK, WALL_RUN, WALL_RUN_SECS, WALL_TILT,
 };
 pub use prone::{
-    PRONE_BACK, PRONE_BACK_SPEED, PRONE_CRAWL, PRONE_CRAWL_SPEED, PRONE_IDLE, PRONE_KNEEL,
-    PRONE_SECS, PRONED,
+    PRONE_AIMED, PRONE_BACK, PRONE_BACK_SPEED, PRONE_CRAWL, PRONE_CRAWL_SPEED, PRONE_IDLE,
+    PRONE_KNEEL, PRONE_RIFLE_AIM, PRONE_RIFLE_FIRE, PRONE_RIFLE_READY, PRONE_SECS, PRONED,
 };
 
 pub const SKELETON: &str = "humanoid";
@@ -4707,6 +4707,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             ]
             .into_iter()
             .chain(parkour::states())
+            .chain(prone::states())
             .collect(),
             transitions: vec![
                 TransitionDef::new(
@@ -4846,6 +4847,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             .chain(rifle())
             .chain(parkour::transitions())
             .map(prone::upright_only)
+            .chain(prone::transitions())
             .collect(),
             initial: Some("move".into()),
         },
