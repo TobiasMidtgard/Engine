@@ -4845,6 +4845,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             .chain(bow_hold())
             .chain(rifle())
             .chain(parkour::transitions())
+            .map(prone::upright_only)
             .collect(),
             initial: Some("move".into()),
         },

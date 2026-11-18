@@ -147,3 +147,25 @@ fn a_crawler_pulls_on_a_planted_forearm_and_knee_in_turn() {
     assert!(floor > -0.03, "a bone {floor} under the floor crawling");
     assert!(bone(&app, e, "head").y < 0.6, "head up crawling");
 }
+
+#[test]
+fn lying_down_a_rifleman_told_to_aim_stays_on_the_floor() {
+    use engine_world::combat::{ItemClass, Loadout};
+    let mut app = app();
+    let e = person(&mut app);
+    app.world.entity_mut(e).insert(Loadout {
+        main: ItemClass::Firearm,
+        off: ItemClass::None,
+        two_handed: true,
+    });
+    run(&mut app, 0.5);
+    prone(&mut app, e, true);
+    run(&mut app, PRONE_SECS as f64 + 0.5);
+    app.world
+        .get_mut::<AnimationParams>(e)
+        .unwrap()
+        .set("aim", 1.0);
+    run(&mut app, 1.0);
+    let head = bone(&app, e, "head").y;
+    assert!(head < 0.6, "head {head}: aiming stood the body up");
+}

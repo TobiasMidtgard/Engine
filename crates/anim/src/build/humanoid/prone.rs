@@ -299,3 +299,16 @@ pub(super) fn graph(standing: NodeDef) -> NodeDef {
         match_speed: false,
     }
 }
+
+/// Out of `move` only while not lying down: a stance, a swing, a jump or a shot stands the
+/// body up, so lying (or going down) it stays on the floor instead. Falls and get-ups (from
+/// anywhere) are untouched.
+pub(super) fn upright_only(t: TransitionDef) -> TransitionDef {
+    if t.from != "move" {
+        return t;
+    }
+    TransitionDef {
+        when: Condition::All(vec![t.when, Condition::param(PRONED, Cmp::Lt, 0.25)]),
+        ..t
+    }
+}
