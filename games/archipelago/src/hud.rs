@@ -30,6 +30,7 @@ mod ledger;
 mod map;
 mod routes;
 mod shelf;
+mod store;
 mod works;
 
 /// The bars' own state between frames.
@@ -587,6 +588,7 @@ fn info_card(kind: Kind) -> El {
         )
         .child(brass::divider(316.0))
         .child_opt(d.output.map(|_| works::card_placeholder()))
+        .child_opt((kind == Kind::Harbour).then(store::card_placeholder))
         .child_opt((kind == Kind::House).then(house::card_placeholder))
         .children((0..6).map(card_row))
         .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
@@ -669,6 +671,7 @@ pub fn setup(world: &mut World) {
     routes::install(world);
     house::install(world);
     works::install(world);
+    store::install(world);
     shelf::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
@@ -719,6 +722,7 @@ pub fn show_card(world: &mut World) {
         shelf::card_opened(world);
         house::card_opened(world);
         works::card_opened(world);
+        store::card_opened(world);
     }
 }
 
@@ -981,15 +985,9 @@ fn update_data_now(world: &mut World) {
             // Status, chain, workers, site and upkeep: the works section (hud/works.rs).
         } else {
             // (The three item holders show their sockets instead: the card stays short.)
-            if crate::items::Host::of(b.kind).is_none() {
+            // (The harbour shows its warehouse instead: hud/store.rs.)
+            if crate::items::Host::of(b.kind).is_none() && b.kind != Kind::Harbour {
                 rows[0] = ("About".into(), d.blurb.to_string());
-            }
-            if b.kind == Kind::Harbour {
-                let books = &econ.islands[b.island];
-                rows[1] = (
-                    "Storage".into(),
-                    format!("{:.0} of each good", books.capacity),
-                );
             }
         }
     }
@@ -1139,6 +1137,7 @@ pub fn update_data(world: &mut World) {
         shelf::update(world);
         house::refresh(world);
         works::refresh(world);
+        store::refresh(world);
     }
     demo_step(world, dt);
 }
