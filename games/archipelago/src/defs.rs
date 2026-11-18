@@ -420,6 +420,8 @@ pub enum Kind {
     TradingUnion,
     TownHall,
     HarbourOffice,
+    /// Makes consumable items (oil, bunting, coal, ale, spares, fireworks) for the shelf.
+    Chandler,
 }
 
 /// Where a building may stand.
@@ -861,7 +863,27 @@ pub const DEFS: &[Def] = &[
         upkeep: 30.0,
         ..def(Kind::AirshipMast, "Airship mast", Category::Harbour, (5, 5))
     },
+    Def {
+        blurb: "Rope, canvas and barrels: makes the consumable items, one each batch, in turn \
+                a barrel of lamp oil, bunting, a coal bunker, a cask of ale, a crate of spares \
+                and fireworks.",
+        coins: 350,
+        cost: &[(Good::Planks, 6), (Good::Bricks, 2)],
+        workers: Some((Tier::Labourers, 12)),
+        input: Some(Good::Planks),
+        input2: Some(Good::Wool),
+        cycle_s: 120.0,
+        upkeep: 15.0,
+        ..def(Kind::Chandler, "Ship chandler", Category::Harbour, (4, 3))
+    },
 ];
+
+impl Def {
+    /// Whether it runs batches: everything with an output, and the Ship chandler.
+    pub fn works(&self) -> bool {
+        self.output.is_some() || self.kind == Kind::Chandler
+    }
+}
 
 impl Kind {
     pub fn def(self) -> &'static Def {

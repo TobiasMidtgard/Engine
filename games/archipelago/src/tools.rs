@@ -133,10 +133,14 @@ pub fn action(world: &mut World, a: &str) {
         if let Err(msg) = route_action(world, rest) {
             toast(world, "Trade route", &msg);
         }
-    } else if let Some(rest) = a.strip_prefix("isle.item.")
-        && let Err(msg) = crate::items::action(world, rest)
+    } else if let Some(rest) = a.strip_prefix("isle.item.") {
+        if let Err(msg) = crate::items::action(world, rest) {
+            toast(world, "Items", &msg);
+        }
+    } else if let Some(rest) = a.strip_prefix("isle.gear.")
+        && let Err(msg) = crate::gear::action(world, rest)
     {
-        toast(world, "Items", &msg);
+        toast(world, "Gear", &msg);
     }
 }
 

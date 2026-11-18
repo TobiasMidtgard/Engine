@@ -108,6 +108,7 @@ pub const MODELS: &[ModelKey] = &[
     "trading_union",
     "town_hall",
     "harbour_office",
+    "chandler",
     "walker_0_0",
     "walker_0_1",
     "walker_0_2",
@@ -223,7 +224,7 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
         | Kind::Tavern => {
             crate::burgher::look(kind, seed, &mut out);
         }
-        Kind::TradingUnion | Kind::TownHall | Kind::HarbourOffice => {
+        Kind::TradingUnion | Kind::TownHall | Kind::HarbourOffice | Kind::Chandler => {
             crate::halls::look(kind, seed, &mut out);
         }
         Kind::House if biome != Biome::Temperate => {

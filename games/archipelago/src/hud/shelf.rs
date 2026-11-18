@@ -60,6 +60,7 @@ fn host_name(h: items::Host) -> &'static str {
         items::Host::Union => "Trading Union",
         items::Host::Hall => "Town Hall",
         items::Host::Office => "Harbour Office",
+        items::Host::Ship => "ship",
     }
 }
 

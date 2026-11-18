@@ -19,13 +19,14 @@ use crate::regional::up_quad;
 
 /// The models this module builds (they are listed in `looks::MODELS`; a test checks that).
 #[cfg(test)]
-pub const MODELS: &[ModelKey] = &["trading_union", "town_hall", "harbour_office"];
+pub const MODELS: &[ModelKey] = &["trading_union", "town_hall", "harbour_office", "chandler"];
 
 pub fn build(key: ModelKey) -> Option<Parts> {
     Some(match key {
         "trading_union" => trading_union(),
         "town_hall" => town_hall(),
         "harbour_office" => harbour_office(),
+        "chandler" => chandler(),
         _ => return None,
     })
 }
@@ -99,6 +100,16 @@ pub fn look(kind: Kind, seed: u64, out: &mut Vec<Piece>) -> bool {
             out.push(Piece::at("lamp_post", v3(-7.2, 0.0, 7.2)));
             out.push(Piece::at("lamp_post", v3(7.2, 0.0, 7.2)));
             out.push(Piece::at("bench", v3(-2.4, 0.0, 2.4)));
+        }
+        Kind::Chandler => {
+            out.push(Piece::at("chandler", Vec3::ZERO));
+            for i in 0..3u64 {
+                out.push(Piece::at("barrel", v3(-6.8 + i as f32 * 0.85, 0.0, 3.4)));
+            }
+            out.push(Piece::at("crate", v3(4.4, 0.0, 4.6)).yaw(r(1) * 0.4));
+            out.push(Piece::at("crate", v3(5.5, 0.0, 4.9)).yaw(r(2) * 0.4));
+            out.push(Piece::at("hand_cart", v3(-1.0, 0.0, 4.6)).yaw(1.4));
+            out.push(Piece::at("lamp_post", v3(-7.4, 0.0, 5.4)));
         }
         _ => return false,
     }
@@ -1780,6 +1791,274 @@ fn harbour_office() -> Parts {
     p.finish()
 }
 
+// ------------------------------------------------------------------------ Ship chandler
+
+/// A brick shop with a sail loft under a timber gable and a hoist, a hanging sign of a
+/// lantern and rope, and a yard of spars, rope coils, blocks and an anchor: where lamp oil,
+/// spares, bunting and coal are put up for the fleet and the halls.
+fn chandler() -> Parts {
+    let mut p = Parts::default();
+    let brick = hexc(0x9a4a36);
+    let ashlar = hexc(ASHLAR);
+    let tar = hexc(0x2e2a26);
+    let rope = hexc(0xb89c6a);
+    let wood = hexc(0x8a6a48);
+    let navy = hexc(NAVY);
+    let (x0, x1, zb, zf) = (-7.2, 2.6, -5.2, 0.8);
+    let (floor, mid, wall) = (0.4, 3.4, 6.2);
+    p.cuboid(
+        Mat::Stone,
+        v3(x0 - 0.15, -3.0, zb - 0.15),
+        v3(x1 + 0.15, floor + 0.3, zf + 0.15),
+        shade(ashlar, 0.8),
+        false,
+    );
+    p.cuboid(
+        Mat::Brick,
+        v3(x0, floor + 0.3, zb),
+        v3(x1, wall, zf),
+        brick,
+        false,
+    );
+    p.cuboid(
+        Mat::Plaster,
+        v3(x0 - 0.06, mid - 0.1, zb - 0.06),
+        v3(x1 + 0.06, mid + 0.1, zf + 0.06),
+        ashlar,
+        true,
+    );
+    quoins(&mut p, (x0, x1), (zb, zf), (floor + 0.3, wall), ashlar);
+    // The sail loft: a timber-clad gable storey with the ridge along the street.
+    let cx = (x0 + x1) * 0.5;
+    let cz = (zb + zf) * 0.5;
+    p.gable_roof(
+        Mat::Slate,
+        Mat::Planks,
+        v3(cx, wall, cz),
+        x1 - x0,
+        zf - zb,
+        3.6,
+        0.45,
+        false,
+        Vec4::ONE,
+        wood,
+    );
+    // Gable-end loading door and the hoist beam over it, with a block and rope.
+    p.cuboid(
+        Mat::Planks,
+        v3(x1, wall + 0.2, cz - 0.7),
+        v3(x1 + 0.06, wall + 2.1, cz + 0.7),
+        shade(wood, 0.7),
+        true,
+    );
+    p.beam(
+        Mat::Timber,
+        v3(x1 - 0.4, wall + 2.8, cz),
+        v3(x1 + 1.6, wall + 2.8, cz),
+        0.24,
+        wood,
+    );
+    p.cuboid(
+        Mat::Iron,
+        v3(x1 + 1.3, wall + 2.1, cz - 0.15),
+        v3(x1 + 1.6, wall + 2.65, cz + 0.15),
+        tar,
+        true,
+    );
+    p.rod(
+        Mat::Canvas,
+        v3(x1 + 1.45, wall + 2.1, cz),
+        v3(x1 + 1.45, 2.0, cz),
+        0.03,
+        4,
+        rope,
+    );
+    p.box_at(
+        Mat::Planks,
+        v3(x1 + 1.45, 1.6, cz),
+        v3(0.45, 0.4, 0.45),
+        0.3,
+        wood,
+    );
+    // Shop front: a wide bow window, a door, and windows above.
+    p.door(v3(x0 + 2.0, floor + 0.3, zf), Vec3::Z, 1.3, 2.4, navy);
+    steps(
+        &mut p,
+        x0 + 2.0,
+        zf + 0.02,
+        1.9,
+        1,
+        floor + 0.3,
+        shade(ashlar, 0.95),
+    );
+    p.cuboid(
+        Mat::Paint,
+        v3(cx - 1.2, floor + 0.5, zf),
+        v3(cx + 3.4, floor + 0.9, zf + 0.5),
+        navy,
+        true,
+    );
+    p.windows(
+        v3(cx + 1.1, 2.1, zf + 0.52),
+        Vec3::Z,
+        3,
+        1.3,
+        1.9,
+        0.2,
+        WHITE,
+    );
+    p.cuboid(
+        Mat::Slate,
+        v3(cx - 1.3, floor + 2.95, zf),
+        v3(cx + 3.5, floor + 3.1, zf + 0.65),
+        Vec4::ONE,
+        true,
+    );
+    p.windows(v3(cx, 4.8, zf + 0.02), Vec3::Z, 4, 0.9, 1.4, 1.1, WHITE);
+    for y in [2.1, 4.8] {
+        p.windows(v3(cx, y, zb - 0.02), Vec3::NEG_Z, 4, 0.9, 1.4, 1.1, WHITE);
+        p.windows(v3(x0 - 0.02, y, cz), Vec3::NEG_X, 2, 0.9, 1.4, 1.2, WHITE);
+    }
+    // Fascia board over the shop front.
+    p.cuboid(
+        Mat::Paint,
+        v3(cx - 1.4, floor + 3.15, zf),
+        v3(cx + 3.6, floor + 3.75, zf + 0.12),
+        navy,
+        true,
+    );
+    p.cuboid(
+        Mat::Copper,
+        v3(cx - 0.6, floor + 3.3, zf + 0.12),
+        v3(cx + 2.8, floor + 3.6, zf + 0.16),
+        hexc(GOLD),
+        true,
+    );
+    chimney(
+        &mut p,
+        Mat::Brick,
+        v3(x0 + 1.0, wall + 0.6, cz),
+        wall + 4.6,
+        Vec4::ONE,
+    );
+    // Hanging sign on a bracket: a ship's lantern.
+    let sx = x0 + 3.6;
+    p.beam(Mat::Iron, v3(sx, 4.0, zf), v3(sx, 4.0, zf + 1.5), 0.08, tar);
+    p.cuboid(
+        Mat::Paint,
+        v3(sx - 0.04, 3.0, zf + 0.5),
+        v3(sx + 0.04, 3.9, zf + 1.4),
+        hexc(RED),
+        true,
+    );
+    disc(
+        &mut p,
+        Mat::Copper,
+        v3(sx + 0.06, 3.45, zf + 0.95),
+        Vec3::X,
+        0.3,
+        hexc(GOLD),
+    );
+    disc(
+        &mut p,
+        Mat::Copper,
+        v3(sx - 0.06, 3.45, zf + 0.95),
+        Vec3::NEG_X,
+        0.3,
+        hexc(GOLD),
+    );
+    // The yard: a spar rack, coils of rope, blocks and an anchor.
+    let (yx0, yx1) = (3.6, 7.6);
+    for x in [yx0, yx1] {
+        for z in [-4.8, -2.6] {
+            p.beam(Mat::Timber, v3(x, 0.0, z), v3(x, 2.4, z), 0.2, wood);
+        }
+        p.beam(Mat::Timber, v3(x, 2.3, -4.8), v3(x, 2.3, -2.6), 0.16, wood);
+    }
+    for (i, y) in [0.6f32, 1.2, 1.8, 2.45].into_iter().enumerate() {
+        let z = -4.4 + i as f32 * 0.5;
+        p.rod(
+            Mat::Timber,
+            v3(yx0 - 0.6, y, z),
+            v3(yx1 + 0.3, y, z),
+            0.14,
+            6,
+            shade(wood, 1.1),
+        );
+    }
+    for (i, at) in [v3(4.2, 0.0, -0.8), v3(5.4, 0.0, -1.1), v3(4.8, 0.38, -0.95)]
+        .into_iter()
+        .enumerate()
+    {
+        p.cylinder(
+            Mat::Canvas,
+            at,
+            0.55,
+            0.55,
+            0.38,
+            14,
+            shade(rope, 1.0 - i as f32 * 0.06),
+            true,
+        );
+        p.cylinder(
+            Mat::Canvas,
+            at + v3(0.0, 0.39, 0.0),
+            0.2,
+            0.2,
+            0.01,
+            10,
+            shade(rope, 0.6),
+            true,
+        );
+    }
+    // Anchor leaning on the yard wall: shank, stock and arms.
+    let a = v3(6.6, 0.0, 0.6);
+    p.rod(
+        Mat::Iron,
+        a + v3(0.0, 0.2, 0.0),
+        a + v3(0.0, 2.6, -0.5),
+        0.09,
+        6,
+        tar,
+    );
+    p.rod(
+        Mat::Iron,
+        a + v3(-0.8, 2.3, -0.44),
+        a + v3(0.8, 2.3, -0.44),
+        0.07,
+        6,
+        tar,
+    );
+    p.rod(
+        Mat::Iron,
+        a + v3(0.0, 0.2, 0.0),
+        a + v3(-0.7, 0.75, 0.05),
+        0.08,
+        6,
+        tar,
+    );
+    p.rod(
+        Mat::Iron,
+        a + v3(0.0, 0.2, 0.0),
+        a + v3(0.7, 0.75, 0.05),
+        0.08,
+        6,
+        tar,
+    );
+    ball(&mut p, Mat::Iron, a + v3(0.0, 2.75, -0.53), 0.14, tar);
+    // A low yard wall behind.
+    p.cuboid(
+        Mat::Brick,
+        v3(yx0 - 0.8, 0.0, -5.6),
+        v3(yx1 + 0.2, 1.1, -5.3),
+        brick,
+        false,
+    );
+    p.ground_occlusion(0.62, 2.0);
+    apron(&mut p, (-7.8, 7.8), (zf - 0.2, 5.8));
+    p.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1806,5 +2085,22 @@ mod tests {
             assert!(top > 12.5, "{key} is {top} m high");
             assert!(p.triangles() < 40_000, "{key}");
         }
+    }
+
+    #[test]
+    fn the_chandler_stands_on_its_lot() {
+        let p = build("chandler").unwrap();
+        let (w, d) = Kind::Chandler.def().size;
+        let (hw, hd) = (w as f32 * 2.0 + 0.05, d as f32 * 2.0 + 0.05);
+        let mut top = 0.0f32;
+        for m in p.meshes.values() {
+            for v in &m.vertices {
+                let [x, y, z] = v.position;
+                assert!(x.abs() <= hw && z.abs() <= hd, "chandler: ({x}, {y}, {z})");
+                top = top.max(y);
+            }
+        }
+        assert!(top > 8.0 && top < 13.0, "chandler is {top} m high");
+        assert!(p.triangles() < 20_000);
     }
 }

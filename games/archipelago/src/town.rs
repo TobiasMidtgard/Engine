@@ -786,8 +786,20 @@ pub fn build_start(world: &mut World) {
         14,
         hc,
     );
-    stock_slots(world, hall, &["Town crier", "Baker's round"]);
-    stock_slots(world, office, &["Stevedore gang", "Harbour pilot"]);
+    stock_slots(world, hall, &["Town crier", "Baker's round", "Town band"]);
+    stock_slots(
+        world,
+        office,
+        &["Stevedore gang", "Harbour pilot", "Noon gun"],
+    );
+    // The ship chandler beside the quay puts up lamp oil, spares, bunting and coal.
+    place_near(
+        world,
+        Kind::Chandler,
+        hc - seaward * 30.0 - DVec2::new(seaward.y, -seaward.x) * 26.0,
+        14,
+        true,
+    );
     place_near(
         world,
         Kind::Chapel,
@@ -853,7 +865,11 @@ pub fn build_start(world: &mut World) {
     // The Trading Union among the manufactories: glass, lamps, furs, a weaver and a sawmill
     // are in its reach.
     let union = place_facing(world, Kind::TradingUnion, toward(1.65, 205.0), 16, town);
-    stock_slots(world, union, &["Flying-shuttle loom", "Wick-trimming jig"]);
+    stock_slots(
+        world,
+        union,
+        &["Flying-shuttle loom", "Wick-trimming jig", "Rush order"],
+    );
     // What the company has on the shelf, and the pedlar lying off the quay with his stock.
     {
         let mut items = world.resource_mut::<crate::items::Items>();
@@ -863,6 +879,13 @@ pub fn build_start(world: &mut World) {
             "Steam saw",
             "Works foreman",
             "Journeyman miller",
+            "Barrel of lamp oil",
+            "Fireworks",
+            "Spare gears",
+            "Copper sheathing",
+            "Chronometer",
+            "Captain Jory Pell (lucky)",
+            "Crowd on all sail",
         ] {
             if let Some(i) = crate::items::ITEMS.iter().position(|d| d.name == name) {
                 items.gain(i);
@@ -888,6 +911,11 @@ pub fn build_start(world: &mut World) {
         if let Some(mut v) = world.get_mut::<crate::fleet::Vessel>(e) {
             v.doing = crate::fleet::Doing::Moored(crate::fleet::PEDLAR_STAYS_S);
         }
+    }
+    // `ARCH_FLEET_REVIEW=1`: one of every craft lying in a line off the home quay, for the
+    // fleet picture (tour view `fleet`). They never sail.
+    if std::env::var_os("ARCH_FLEET_REVIEW").is_some() {
+        fleet_review(world, &hb);
     }
     // --- Brannsey: grain, flour, bread, hops and ale.
     let b_harbour = harbour_toward(world, 1, isles[0].center);
@@ -1414,6 +1442,21 @@ pub fn build_start(world: &mut World) {
     items.restock(&owned);
     items.market_open = true;
     crate::fleet::spawn_traffic(world);
+    // The company's ships go out with some gear aboard.
+    crate::gear::fit_out(
+        world,
+        &[
+            (
+                "Morning Star",
+                &["Captain Maren Holt (bold)", "Studding sails"],
+            ),
+            ("SS Brannock", &["Screw propeller"]),
+            ("Albatross", &["Gas cell lining"]),
+            ("Kittiwake", &["Ship's cat"]),
+            ("PS Haverholm Belle", &["Full steam ahead"]),
+        ],
+    );
+    crate::gear::apply(world);
     prune_roads(world);
     build::flush_paint(world);
     world.resource_mut::<Changed>().any = true;
@@ -1500,6 +1543,48 @@ pub fn prewarm(world: &mut World, seconds: f32) {
         }
     }
     sys.apply(world);
+}
+
+/// One of every craft in a review line off the home quay: the hulls side by side, bows the same
+/// way, smallest nearest the shore; the airship and the biplane low over them.
+fn fleet_review(world: &mut World, hb: &Building) {
+    let (m, heading) = mooring(hb);
+    let out = grid::front_dir(hb.rot).as_dvec2();
+    let side = DVec2::new(out.y, -out.x);
+    let base = m + out * 190.0 - side * 150.0;
+    // Along the shore in line ahead, bows the same way, a gap of about 20 m between hulls.
+    let line = [
+        (Craft::Smack, 0.0, 0.0),
+        (Craft::Schooner, 40.0, 0.0),
+        (Craft::PaddleSteamer, 98.0, 0.0),
+        (Craft::Barque, 162.0, 0.0),
+        (Craft::Steamer, 232.0, 0.0),
+        (Craft::Clipper, 312.0, 0.0),
+        (Craft::Seaplane, 370.0, 0.0),
+        (Craft::Biplane, 120.0, 46.0),
+        (Craft::Airship, 215.0, 78.0),
+    ];
+    for (i, (craft, d, y)) in line.into_iter().enumerate() {
+        let lift = if craft == Craft::Airship || craft == Craft::Biplane {
+            -out * 40.0
+        } else {
+            DVec2::ZERO
+        };
+        let p = base + side * d + lift;
+        let e = spawn_vessel(
+            world,
+            craft,
+            &format!("Fleet review {}", craft.name()),
+            DVec3::new(p.x, y, p.y),
+            heading,
+            None,
+            Roam::None,
+            9_100 + i as u64,
+        );
+        if let Some(mut v) = world.get_mut::<crate::fleet::Vessel>(e) {
+            v.doing = crate::fleet::Doing::Moored(1.0e9);
+        }
+    }
 }
 
 #[cfg(test)]

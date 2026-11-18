@@ -409,6 +409,29 @@ pub fn register(app: &mut App) {
         let coins = crate::items::sell(world, index(&args, "uid")? as u32)?;
         Ok(json!({"coins": coins}))
     })
+    .register_api("isle.item.use", "Press the order or use the consumable in a slot of a Trading Union, Town Hall or Harbour Office.", r#"{"building": 41, "slot": 2}"#, |world, args| {
+        let b = index(&args, "building")? as u32;
+        let name = crate::items::use_item(world, b, index(&args, "slot")?)?;
+        Ok(json!({"started": name}))
+    })
+    .register_api("isle.gear", "Every vessel's captain and gear slots, what each item aboard is doing, and what the gear adds up to.", "{}", |world, _| {
+        Ok(serde_json::to_value(crate::gear::fleet(world)).unwrap_or_default())
+    })
+    .register_api("isle.gear.socket", "Put a shelf item aboard a vessel (vessel from isle.gear; slot 0 is the captain's).", r#"{"vessel": 120, "slot": 1, "uid": 7}"#, |world, args| {
+        let v = index(&args, "vessel")? as u32;
+        crate::gear::socket(world, v, index(&args, "slot")?, index(&args, "uid")? as u32)?;
+        Ok(json!({"ok": true}))
+    })
+    .register_api("isle.gear.unsocket", "Take an item from aboard a vessel, back to the shelf.", r#"{"vessel": 120, "slot": 1}"#, |world, args| {
+        let v = index(&args, "vessel")? as u32;
+        crate::gear::unsocket(world, v, index(&args, "slot")?)?;
+        Ok(json!({"ok": true}))
+    })
+    .register_api("isle.gear.use", "Press an order or use a consumable aboard a vessel.", r#"{"vessel": 120, "slot": 1}"#, |world, args| {
+        let v = index(&args, "vessel")? as u32;
+        let name = crate::gear::use_item(world, v, index(&args, "slot")?)?;
+        Ok(json!({"started": name}))
+    })
     .register_api("isle.check", "Whether a kind fits at a cell, and why not.", r#"{"kind": "house", "at": [3, 7], "rot": 0}"#, |world, args| {
         let kind = args["kind"].as_str().and_then(Kind::from_name).ok_or("unknown kind")?;
         let at = cell(&args, "at")?;

@@ -31,6 +31,9 @@ enum Aim {
     Craft(Craft),
     /// The pedlar's barque.
     Pedlar,
+    /// The fleet review line (`ARCH_FLEET_REVIEW=1`), seen from the beam: yaw 0 looks at the
+    /// hulls' sides.
+    Review,
     At(f64, f64),
 }
 
@@ -49,6 +52,10 @@ struct View {
     fog: bool,
     /// Select the building the view aims at, so its card shows.
     card: bool,
+    /// Set the clock to this hour for the view (and back after).
+    hour: Option<f32>,
+    /// Light the Fireworks over the building the view aims at.
+    show: bool,
 }
 
 const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
@@ -62,6 +69,8 @@ const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
         clean: false,
         fog: true,
         card: false,
+        hour: None,
+        show: false,
     }
 }
 
@@ -415,6 +424,19 @@ fn views() -> Vec<View> {
             pitch_deg: Some(30.0),
             ..v("trading_union", Aim::Front(K::TradingUnion, 0), -0.5, 44.0)
         },
+        // Round 8 build: the Ship chandler, and the Town Hall's fireworks at night.
+        View {
+            clean: true,
+            pitch_deg: Some(26.0),
+            ..v("chandler", Aim::Front(K::Chandler, 0), 0.5, 36.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(14.0),
+            hour: Some(20.6),
+            show: true,
+            ..v("fireworks", Aim::Front(K::TownHall, 0), 0.45, 150.0)
+        },
         View {
             card: true,
             pitch_deg: Some(52.0),
@@ -454,28 +476,40 @@ fn views() -> Vec<View> {
         View {
             pitch_deg: Some(18.0),
             clean: true,
+            fog: false,
             ..v("airship", Aim::Craft(Craft::Airship), 0.7, 260.0)
         },
         View {
             pitch_deg: Some(22.0),
             clean: true,
+            fog: false,
             ..v("steamer", Aim::Craft(Craft::Steamer), 2.3, 150.0)
         },
         v("northmoor", Aim::Island(3), 4.4, 1300.0),
         View {
             pitch_deg: Some(16.0),
             clean: true,
+            fog: false,
             ..v("clipper", Aim::Craft(Craft::Clipper), 2.2, 190.0)
         },
         View {
             pitch_deg: Some(20.0),
             clean: true,
+            fog: false,
             ..v("paddle", Aim::Craft(Craft::PaddleSteamer), 0.45, 110.0)
         },
         View {
             pitch_deg: Some(12.0),
             clean: true,
+            fog: false,
             ..v("seaplane", Aim::Craft(Craft::Seaplane), 2.1, 45.0)
+        },
+        // Needs ARCH_FLEET_REVIEW=1.
+        View {
+            pitch_deg: Some(7.0),
+            clean: true,
+            fog: false,
+            ..v("fleet", Aim::Review, 2.95, 300.0)
         },
     ]
 }
@@ -503,6 +537,18 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
         Aim::Craft(c) => {
             let mut q = world.query::<&Vessel>();
             q.iter(world).find(|v| v.craft == *c).map(|v| v.at)?
+        }
+        Aim::Review => {
+            let mut q = world.query::<&Vessel>();
+            let at: Vec<DVec3> = q
+                .iter(world)
+                .filter(|v| v.name.starts_with("Fleet review") && !v.craft.flies())
+                .map(|v| v.at)
+                .collect();
+            if at.is_empty() {
+                return None;
+            }
+            at.iter().copied().sum::<DVec3>() / at.len() as f64
         }
         Aim::Pedlar => {
             let mut q = world.query::<&Vessel>();
@@ -557,6 +603,10 @@ fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
         Aim::Craft(c) => q
             .iter(world)
             .find(|v| v.craft == *c)
+            .map_or(0.0, |v| v.heading),
+        Aim::Review => q
+            .iter(world)
+            .find(|v| v.name.starts_with("Fleet review"))
             .map_or(0.0, |v| v.heading),
         Aim::Pedlar => q
             .iter(world)
@@ -660,7 +710,7 @@ pub fn run(mut app: App, only: Option<&str>) {
                 cam.goal_yaw = view.yaw + heading;
                 cam.goal_dist = view.dist;
                 cam.pitch_override = view.pitch_deg.map(f32::to_radians);
-                cam.free_height = matches!(view.aim, Aim::Craft(_) | Aim::Pedlar);
+                cam.free_height = matches!(view.aim, Aim::Craft(_) | Aim::Pedlar | Aim::Review);
                 cam.snap();
             }
         }
@@ -677,6 +727,31 @@ pub fn run(mut app: App, only: Option<&str>) {
         if let Some(mut fog) = app.world.get_resource_mut::<crate::fog::FogOfWar>() {
             fog.shown = view.fog;
         }
+        let hour_was = view.hour.and_then(|h| {
+            let was = engine::core::registry::call_api(
+                &mut app.world,
+                "weather.time",
+                serde_json::json!({}),
+            )
+            .ok()?;
+            let _ = engine::core::registry::call_api(
+                &mut app.world,
+                "weather.time",
+                serde_json::json!({ "hour": h }),
+            );
+            was["hour"].as_f64()
+        });
+        let lit_at = if view.show {
+            if let Some(e) = aimed_building(&mut app.world, &view.aim).and_then(|b| {
+                let mut q = app.world.query::<(Entity, &Building)>();
+                q.iter(&app.world).find(|(_, x)| x.id == b.id).map(|x| x.0)
+            }) {
+                crate::effects::fireworks(&mut app.world, e);
+            }
+            Some(app.world.resource::<Time>().elapsed_secs())
+        } else {
+            None
+        };
         let t0 = std::time::Instant::now();
         // (A software renderer at 1440p needs longer: ARCH_TOUR_SETTLE_S.)
         let cap = std::env::var("ARCH_TOUR_SETTLE_S")
@@ -686,7 +761,7 @@ pub fn run(mut app: App, only: Option<&str>) {
         settle(&mut app, cap);
         // Exposure and the environment, following a moving craft.
         for _ in 0..8 {
-            if matches!(view.aim, Aim::Craft(_) | Aim::Pedlar)
+            if matches!(view.aim, Aim::Craft(_) | Aim::Pedlar | Aim::Review)
                 && let Some(p) = aim_point(&mut app.world, &view.aim)
             {
                 let mut q = app.world.query::<&mut StrategyCam>();
@@ -697,6 +772,12 @@ pub fn run(mut app: App, only: Option<&str>) {
                 }
             }
             app.update();
+        }
+        // Give the rockets time to climb and burst.
+        if let Some(t) = lit_at {
+            while app.world.resource::<Time>().elapsed_secs() - t < 1.4 {
+                app.update();
+            }
         }
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
@@ -721,6 +802,13 @@ pub fn run(mut app: App, only: Option<&str>) {
         match capture_now(&mut app.world, &path) {
             Ok(_) => engine::core::log::info!("tour: {path} ({:.1} s)", t0.elapsed().as_secs_f32()),
             Err(e) => engine::core::log::warn!("tour: {path}: {e}"),
+        }
+        if let Some(h) = hour_was {
+            let _ = engine::core::registry::call_api(
+                &mut app.world,
+                "weather.time",
+                serde_json::json!({ "hour": h }),
+            );
         }
     }
 }

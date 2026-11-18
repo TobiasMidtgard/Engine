@@ -312,7 +312,7 @@ pub fn place(
     if kind == Kind::House {
         e.insert(House::new(tier));
     }
-    if def.output.is_some() {
+    if def.works() {
         e.insert((Producer::default(), RoadLink::default()));
     }
     if crate::items::Host::of(kind).is_some() {
@@ -685,6 +685,7 @@ pub fn refresh(world: &mut World) {
     world.resource_mut::<Changed>().any = false;
     // Items first: what they add up to for each building, which the services below read.
     crate::items::apply(world);
+    crate::gear::apply(world);
     let roads = world.resource::<Grid>().roads.clone();
     // Distance over roads from every harbour, island by island (one BFS for all).
     let mut dist: HashMap<IVec2, (u32, IVec2)> = HashMap::new();
@@ -724,7 +725,7 @@ pub fn refresh(world: &mut World) {
     };
     let mut links: Vec<(Entity, Option<Arc<Vec<DVec3>>>)> = Vec::new();
     for (e, b) in &all {
-        if b.kind.def().output.is_none() {
+        if !b.kind.def().works() {
             continue;
         }
         let start = grid::ring(b.kind, b.origin, b.rot)
@@ -789,7 +790,7 @@ pub fn refresh(world: &mut World) {
     // What the buildings that make nothing cost to run.
     world.resource_mut::<Economy>().public_upkeep = all
         .iter()
-        .filter(|(_, b)| b.kind.def().output.is_none())
+        .filter(|(_, b)| !b.kind.def().works())
         .map(|(_, b)| b.kind.def().upkeep)
         .sum();
     let mut q = world.query::<(&Building, &mut House, Option<&crate::items::Boost>)>();

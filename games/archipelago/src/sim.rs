@@ -76,6 +76,8 @@ pub struct Producer {
     pub paused: bool,
     /// Batches finished, for the panel and tests.
     pub made: u32,
+    /// Share of a batch's goods an item has saved so far (a whole one makes a batch free).
+    pub saved: f32,
 }
 
 /// A house and its people.
@@ -165,6 +167,9 @@ pub struct Economy {
     pub clock_s: f64,
     /// Coins a minute the buildings that make nothing cost to run (set by `build::refresh`).
     pub public_upkeep: f32,
+    /// Batches the Ship chandler finished since `items::tick` last looked: each is a
+    /// consumable for the shelf.
+    pub chandlery: u32,
 }
 
 impl Default for Economy {
@@ -178,6 +183,7 @@ impl Default for Economy {
             upkeep_per_min: 0.0,
             clock_s: 0.0,
             public_upkeep: 0.0,
+            chandlery: 0,
         }
     }
 }
@@ -227,10 +233,16 @@ pub fn step(
     let mut spared = vec![[0.0f64; Good::COUNT]; n];
     for (b, h, boost) in houses.iter() {
         econ.islands[b.island].population[h.tier.index()] += h.residents;
-        for g in boost.map_or(&[][..], |x| &x.provides) {
-            if h.tier.needs().0.contains(g) {
+        let Some(boost) = boost else { continue };
+        for g in h.tier.needs().0 {
+            let less = if boost.provides.contains(g) {
+                1.0
+            } else {
+                boost.eats_less(*g)
+            };
+            if less > 0.0 {
                 spared[b.island][g.index()] +=
-                    (h.residents * NEED_PER_PERSON_MIN * g.need_share() / 60.0 * dt) as f64;
+                    (h.residents * NEED_PER_PERSON_MIN * g.need_share() / 60.0 * dt * less) as f64;
             }
         }
     }
@@ -239,6 +251,7 @@ pub fn step(
             continue;
         }
         if let Some((tier, w)) = b.kind.def().workers {
+            let tier = boost.and_then(|x| x.workers).unwrap_or(tier);
             econ.islands[b.island].jobs[tier.index()] +=
                 w as f32 * (1.0 - boost.map_or(0.0, |x| x.hands));
         }
@@ -299,7 +312,7 @@ pub fn step(
                 }
             };
             people += w.people * met;
-            coins += (w.coins + boost.map_or(0.0, |x| x.pay_for(w.need))) * met;
+            coins += (w.coins + boost.map_or(0.0, |x| x.pay_for(w.need) + x.per_need)) * met;
             if w.people > 0.0 {
                 basic += 1.0;
                 basic_met += met;
@@ -316,7 +329,7 @@ pub fn step(
         let base = h.tier.capacity();
         let lodgers = boost.map_or(0.0, |x| x.lodgers);
         let cap = base + lodgers;
-        coins += boost.map_or(0.0, |x| x.flat_pay());
+        coins += boost.map_or(0.0, |x| x.flat_pay() + x.tier_pay(h.tier));
         let target = (people + lodgers * share).max(0.2 * base);
         let rate = 0.4 * dt;
         h.residents += (target - h.residents).clamp(-rate, rate);
@@ -328,7 +341,7 @@ pub fn step(
         h.content_s = if content { h.content_s + dt } else { 0.0 };
     }
     // Upgrades take materials from the house's island.
-    for (b, mut h, _) in houses.iter_mut() {
+    for (b, mut h, boost) in houses.iter_mut() {
         if h.content_s < 20.0 {
             continue;
         }
@@ -344,9 +357,13 @@ pub fn step(
         if books.jobs[t] > 0.0 && books.population[t] - h.tier.capacity() < books.jobs[t] * 1.5 {
             continue;
         }
-        if cost.iter().all(|(g, c)| books.get(*g) >= *c as f64) {
-            for (g, c) in cost {
-                books.take(*g, *c as f64);
+        // (A Founder's portrait in reach: they move up without the building goods.)
+        let free = boost.is_some_and(|x| x.rise);
+        if free || cost.iter().all(|(g, c)| books.get(*g) >= *c as f64) {
+            if !free {
+                for (g, c) in cost {
+                    books.take(*g, *c as f64);
+                }
             }
             books.population[t] -= h.residents;
             h.tier = next;
@@ -355,13 +372,20 @@ pub fn step(
     }
     // Workshops.
     let mut upkeep = (econ.public_upkeep / 60.0 * dt) as f64;
+    let mut econ_chandlery = 0;
     let mut made = vec![[0.0f32; Good::COUNT]; n];
     let plain = Boost::default();
     for (e, b, mut p, link, boost) in producers.iter_mut() {
         let def = b.kind.def();
         let boost = boost.unwrap_or(&plain);
-        upkeep += ((def.upkeep - boost.thrift).max(0.0) / 60.0 * dt) as f64;
-        let Some(out) = def.output else { continue };
+        upkeep +=
+            ((def.upkeep * (1.0 - boost.upkeep_cut) - boost.thrift).max(0.0) / 60.0 * dt) as f64;
+        // (The Ship chandler makes items, not goods: see `items::tick`.)
+        let chandler = b.kind == Kind::Chandler;
+        let out = def.output;
+        if out.is_none() && !chandler {
+            continue;
+        }
         let books = &mut econ.islands[b.island];
         if p.paused {
             p.status = Status::Paused;
@@ -374,15 +398,21 @@ pub fn step(
             p.efficiency = 0.0;
             continue;
         }
-        if p.held >= 4.0 {
+        if p.held >= 4.0 + boost.stock {
             p.status = Status::Full;
             p.efficiency = 0.0;
             continue;
         }
-        let staff = def.workers.map_or(1.0, |(t, _)| books.workforce[t.index()]);
+        let staff = def.workers.map_or(1.0, |(t, _)| {
+            books.workforce[boost.workers.unwrap_or(t).index()]
+        });
         // Items can change what a batch takes.
-        let input = def.input.map(|g| boost.input(g));
-        let input2 = if boost.spare2 {
+        let input = if boost.free_input {
+            None
+        } else {
+            def.input.map(|g| boost.input(g))
+        };
+        let input2 = if boost.spare2 || boost.free_input {
             None
         } else {
             def.input2.map(|g| boost.input(g))
@@ -392,7 +422,8 @@ pub fn step(
             p.efficiency = 0.0;
             continue;
         }
-        if p.site < 0.05 {
+        let site = (p.site * (1.0 + boost.fields)).min(1.0);
+        if site < 0.05 {
             p.status = match b.kind {
                 Kind::Woodcutter => Status::NoTrees,
                 Kind::TrapperLodge => Status::NoWilds,
@@ -400,6 +431,14 @@ pub fn step(
             };
             p.efficiency = 0.0;
             continue;
+        }
+        // An item that saves goods makes every so many batches free.
+        if input.is_some() && !p.input_ready && boost.saves > 0.0 {
+            p.saved += boost.saves;
+            if p.saved >= 1.0 {
+                p.saved -= 1.0;
+                p.input_ready = true;
+            }
         }
         if let Some(inp) = input
             && !p.input_ready
@@ -419,7 +458,7 @@ pub fn step(
                 continue;
             }
         }
-        p.efficiency = staff * p.site;
+        p.efficiency = staff * site;
         p.status = if staff < 0.99 {
             Status::NoWorkers
         } else {
@@ -428,10 +467,24 @@ pub fn step(
         p.progress += dt / def.cycle_s * p.efficiency * (1.0 + boost.faster);
         if p.progress >= 1.0 {
             p.progress -= 1.0;
-            p.held += 1.0;
             p.made += 1;
             p.input_ready = false;
-            made[b.island][out.index()] += 1.0;
+            let Some(out) = out else {
+                econ_chandlery += 1;
+                continue;
+            };
+            // A spoilt batch is thrown away.
+            if boost.spoil == 0 || !p.made.is_multiple_of(boost.spoil) {
+                p.held += 1.0;
+                made[b.island][out.index()] += 1.0;
+            }
+            // One more of its own good every nth batch.
+            for nth in &boost.again {
+                if p.made.is_multiple_of(*nth) {
+                    p.held += 1.0;
+                    made[b.island][out.index()] += 1.0;
+                }
+            }
             // The extra goods items bring, each every nth batch.
             for (g, nth) in &boost.bonus {
                 if p.made.is_multiple_of(*nth) {
@@ -440,11 +493,13 @@ pub fn step(
                 }
             }
         }
+        let Some(out) = out else { continue };
         while p.held >= 1.0 {
             p.held -= 1.0;
             shipments.carts.push((e, out, true));
         }
     }
+    econ.chandlery += econ_chandlery;
     // Warehouses.
     for b in econ.islands.iter_mut() {
         b.capacity = if b.harbours > 0 {

@@ -368,6 +368,8 @@ pub struct Vessel {
     pub altitude: f32,
     /// How much faster than its craft it sails this leg (the last quay's pilots).
     pub haste: f32,
+    /// What the gear aboard adds up to ([`crate::gear`]).
+    pub kit: crate::gear::Kit,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -470,12 +472,14 @@ pub fn spawn_vessel(
         seed,
         altitude,
         haste: 0.0,
+        kit: crate::gear::Kit::default(),
     };
     let mut e = world.spawn((
         Name::new(format!("{}: {name}", craft.name())),
         t,
         v,
         Body { parts },
+        crate::gear::Gear::default(),
     ));
     if !craft.flies() {
         let beam = match craft {
@@ -531,7 +535,14 @@ pub fn plan_legs(world: &mut World) {
                 v.path = path;
                 v.s = 0.0;
             }
-            Doing::Sailing => arrive(world, &mut v),
+            Doing::Sailing => {
+                arrive(world, &mut v);
+                if v.route.is_some()
+                    && let Some(mut g) = world.get_mut::<crate::gear::Gear>(e)
+                {
+                    g.voyages += 1;
+                }
+            }
             _ => depart(world, &mut v, here),
         }
         if let Some(mut slot) = world.get_mut::<Vessel>(e) {
@@ -558,10 +569,31 @@ fn arrive(world: &mut World, v: &mut Vessel) {
             let mut boost = Boost::default();
             if let Some(b) = building_by_id(world, stop.at) {
                 let landed = trade(world, v, &b, stop);
+                {
+                    let mut items = world.resource_mut::<crate::items::Items>();
+                    if items.landed.len() <= b.island {
+                        items.landed.resize(b.island + 1, 0.0);
+                    }
+                    items.landed[b.island] += landed as f64;
+                }
                 // The quay's items: quicker turnround, a duty on what was landed, a pilot out.
                 let mut q = world.query::<(&Building, &Boost)>();
                 if let Some((_, x)) = q.iter(world).find(|(x, _)| x.id == b.id) {
                     boost = x.clone();
+                }
+                // A bribed harbourmaster: some of it goes missing on the quay.
+                let mut missing = (landed as f32 * boost.lost).round() as f64;
+                if missing > 0.0 {
+                    let mut econ = world.resource_mut::<Economy>();
+                    for g in &stop.unload {
+                        let take = missing.min(econ.islands[b.island].get(*g));
+                        econ.islands[b.island].take(*g, take);
+                        missing -= take;
+                    }
+                }
+                // Postage for every landing of a mail aircraft.
+                if v.kit.postage > 0.0 {
+                    world.resource_mut::<Economy>().coins += v.kit.postage as f64;
                 }
                 let duty = landed as f64 * boost.duty as f64;
                 if duty > 0.0 {
@@ -576,13 +608,16 @@ fn arrive(world: &mut World, v: &mut Vessel) {
                     .iter()
                     .any(|s| isle_of(world, s.at).is_some_and(|i| i >= 4));
                 if far && b.island < 4 && !v.craft.flies() {
-                    crate::items::flotsam(world, &v.name);
+                    crate::items::flotsam(world, &v.name, v.kit.luck);
                 }
             }
             v.next_stop = (v.next_stop + 1) % route.stops.len().max(1);
-            v.haste = boost.sail;
-            v.doing =
-                Doing::Moored(if v.craft.flies() { 14.0 } else { 18.0 } * (1.0 - boost.loading));
+            v.haste = boost.sail_for(v.craft);
+            v.doing = Doing::Moored(
+                if v.craft.flies() { 14.0 } else { 18.0 }
+                    * (1.0 - boost.loading)
+                    * (1.0 - v.kit.loads),
+            );
         }
         (Roam::Pedlar { quay, .. }, None) => {
             let here = v.path.last().copied().unwrap_or_default();
@@ -620,6 +655,7 @@ fn arrive(world: &mut World, v: &mut Vessel) {
 
 fn trade(world: &mut World, v: &mut Vessel, b: &Building, stop: &Stop) -> u32 {
     let (slots, per) = v.craft.hold();
+    let slots = slots + v.kit.hold;
     let mut econ = world.resource_mut::<Economy>();
     exchange(
         &mut econ.islands[b.island],
@@ -820,7 +856,7 @@ pub fn sail(world: &mut World) {
             // Ease off over the last stretch.
             let left = (total - v.s).max(0.0) as f32;
             v.craft.speed()
-                * (1.0 + v.haste)
+                * (1.0 + v.haste + v.kit.speed).max(0.3)
                 * (left / (v.craft.half_length() * 4.0 + 20.0)).clamp(0.25, 1.0)
         } else {
             0.0

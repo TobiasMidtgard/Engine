@@ -131,7 +131,116 @@ pub fn effects() -> Vec<EffectDesc> {
                 ..Default::default()
             }],
         ),
+        show(SHOW_S),
     ]
+}
+
+/// One colour of firework star: a burst of sparks at `height` every `every` seconds from
+/// `delay`, falling and fading in `col`.
+fn stars(
+    name: &str,
+    height: f32,
+    delay: f32,
+    every: f32,
+    col: [f32; 3],
+    lasts: f32,
+) -> EmitterDesc {
+    let [r, g, b] = col;
+    EmitterDesc {
+        name: name.into(),
+        bursts: vec![engine_vfx::Burst {
+            time: 0.0,
+            count: 90,
+            repeat: every,
+            cycles: (lasts / every).max(1.0) as u32,
+        }],
+        delay,
+        duration: Some(lasts),
+        shape: EmitShape::Sphere {
+            radius: 0.6,
+            surface: true,
+        },
+        offset: [0.0, height, 0.0],
+        speed: [14.0, 19.0],
+        gravity: 0.35,
+        drag: 1.6,
+        lifetime: [1.6, 2.4],
+        size: [0.35, 0.5],
+        sprite: Sprite::Spark,
+        facing: Facing::Velocity,
+        stretch: 0.05,
+        color: Gradient::new(&[
+            (0.0, [1.0, 1.0, 0.95, 1.0]),
+            (0.15, [r, g, b, 1.0]),
+            (0.7, [r * 0.9, g * 0.8, b * 0.8, 0.8]),
+            (1.0, [r * 0.6, g * 0.4, b * 0.3, 0.0]),
+        ]),
+        emissive: 40_000.0,
+        additive: 1.0,
+        soft: 0.0,
+        max_particles: 2000,
+        ..Default::default()
+    }
+}
+
+/// Rising shell trails: thin gold streaks shot up to where the stars burst.
+fn shells(lasts: f32) -> EmitterDesc {
+    EmitterDesc {
+        name: "shells".into(),
+        rate: 1.6,
+        duration: Some(lasts),
+        shape: EmitShape::Cone {
+            angle_deg: 9.0,
+            radius: 3.0,
+        },
+        speed: [42.0, 50.0],
+        gravity: 1.0,
+        lifetime: [1.0, 1.3],
+        size: [0.25, 0.3],
+        sprite: Sprite::Spark,
+        facing: Facing::Velocity,
+        stretch: 0.06,
+        color: Gradient::new(&[(0.0, [1.0, 0.8, 0.45, 1.0]), (1.0, [1.0, 0.5, 0.2, 0.0])]),
+        emissive: 20_000.0,
+        additive: 1.0,
+        ..Default::default()
+    }
+}
+
+/// How long the Fireworks item burns.
+pub const SHOW_S: f32 = 90.0;
+
+/// The show a Town Hall puts on (the Fireworks item), `lasts` seconds long.
+fn show(lasts: f32) -> EffectDesc {
+    EffectDesc {
+        name: "isle.fireworks".into(),
+        description: "A town's firework show: shells climb from the square and burst in gold, \
+                      red, green and blue stars over the roofs."
+            .into(),
+        emitters: vec![
+            shells(lasts),
+            stars("gold", 58.0, 0.0, 2.3, [1.0, 0.78, 0.3], lasts),
+            stars("red", 66.0, 0.3, 2.9, [1.0, 0.22, 0.18], lasts),
+            stars("green", 52.0, 0.6, 3.4, [0.35, 1.0, 0.4], lasts),
+            stars("blue", 72.0, 0.9, 3.8, [0.45, 0.6, 1.0], lasts),
+        ],
+        ..Default::default()
+    }
+}
+
+/// Start a firework show over building `e` (it burns as long as the item acts).
+pub fn fireworks(world: &mut World, e: Entity) {
+    let Some(b) = world.get::<Building>(e).cloned() else {
+        return;
+    };
+    let c = grid::footprint_center(b.kind, b.origin, b.rot);
+    let at = DVec3::new(c.x, b.base_y, c.y);
+    let Some(stand) = world.get_resource::<Frame>().map(|f| f.stand(at, 0.0)) else {
+        return;
+    };
+    let mut fx = ParticleEffect::new("isle.fireworks");
+    fx.despawn_when_done = true;
+    world.spawn((Name::new("fireworks"), stand, fx));
 }
 
 pub fn register(world: &mut World) {

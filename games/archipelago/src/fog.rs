@@ -386,7 +386,8 @@ pub fn update(world: &mut World) {
             let own =
                 v.route.is_some() || matches!(v.roam, Roam::Fishing { .. } | Roam::Idle { .. });
             if own {
-                let far = if v.craft.flies() { 1_600.0 } else { 1_000.0 };
+                let far =
+                    if v.craft.flies() { 1_600.0 } else { 1_000.0 } * (1.0 + v.kit.sight as f64);
                 fog.reveal_map(v.at.x, v.at.z, far);
             }
         }

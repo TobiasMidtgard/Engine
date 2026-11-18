@@ -12,6 +12,7 @@
 //! packets fish up, and from specialists who arrive where Burghers live well.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use engine::prelude::*;
 use serde::Serialize;
@@ -22,6 +23,7 @@ use crate::globe::Biome;
 use crate::grid;
 use crate::island::islands;
 use crate::sim::{Building, Economy, House, Producer};
+use crate::vessels::Craft;
 
 /// Which of the three buildings an item belongs in.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize)]
@@ -30,6 +32,8 @@ pub enum Host {
     Union,
     Hall,
     Office,
+    /// Gear and captains of ships, airships and planes.
+    Ship,
 }
 
 impl Host {
@@ -50,6 +54,7 @@ impl Host {
             Host::Union => Kind::TradingUnion,
             Host::Hall => Kind::TownHall,
             Host::Office => Kind::HarbourOffice,
+            Host::Ship => Kind::Harbour,
         }
     }
 
@@ -59,6 +64,7 @@ impl Host {
             Host::Union => kind.def().output.is_some() && kind != Kind::Fishery,
             Host::Hall => kind == Kind::House,
             Host::Office => matches!(kind, Kind::Harbour | Kind::Fishery | Kind::AirshipMast),
+            Host::Ship => false,
         }
     }
 
@@ -68,6 +74,7 @@ impl Host {
             Host::Union => 0xf0a030,
             Host::Hall => 0xb070f0,
             Host::Office => 0x38a8e8,
+            Host::Ship => 0x3cc0a0,
         }
     }
 }
@@ -194,6 +201,212 @@ pub enum Effect {
     Duty(f32),
     /// Quays and masts: ships leave this share faster for the next leg.
     Sail(f32),
+    /// Works: this share of batches take no input.
+    Saves(f32),
+    /// Works: one more of its own good every nth batch.
+    Again(u32),
+    /// Works: hires this tier's people instead of its own.
+    Workers(Tier),
+    /// Farms: make this share more of thin ground (their site counts that much more).
+    Fields(f32),
+    /// Works: upkeep this share lower.
+    Upkeep(f32),
+    /// Works: room for this many more finished goods.
+    Stock(f32),
+    /// The building: every item in it counts as one guild.
+    OneGuild,
+    /// Works: batches need no input.
+    FreeInput,
+    /// Fires, riots or sickness this many times as often (round 8).
+    Risk(Hazard, f32),
+    /// Works: every nth batch is spoilt.
+    Spoil(u32),
+    /// Houses: use this share less of a good (None: of every good).
+    EatLess(Option<Good>, f32),
+    /// Houses of this tier: this many coins a minute more.
+    PaysTier(Tier, f32),
+    /// Houses: this many coins a minute more for every need met.
+    PerNeed(f32),
+    /// Houses: move up a tier without the building goods.
+    Rise,
+    /// Quays: ships of this drive leave this share faster for the next leg.
+    SailFor(Drive, f32),
+    /// Quays: this share of what ships land goes missing.
+    Lost(f32),
+    /// Vessels: this share faster.
+    Speed(f32),
+    /// Vessels: load and unload this share sooner.
+    Loads(f32),
+    /// Vessels: this many more hold slots.
+    Hold(f32),
+    /// Vessels: clear the fog this share further around them.
+    Sight(f32),
+    /// Vessels: this many coins for every landing.
+    Postage(f32),
+    /// Vessels: flotsam this share more often.
+    Luck(f32),
+    /// Vessels: orders aboard last this share longer.
+    Longer(f32),
+    /// Vessels: orders aboard recharge this share sooner.
+    Recharge(f32),
+    /// What it will do once its round comes; does nothing yet.
+    Note(&'static str),
+}
+
+/// How an item acts.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "way")]
+pub enum Way {
+    /// Works while it sits in a slot.
+    Passive,
+    /// Pressed: acts for `lasts_s`, then recharges for `cooldown_s`.
+    Order { lasts_s: f32, cooldown_s: f32 },
+    /// Used up: `charges` uses, each acting for `lasts_s`.
+    Consumable { charges: u32, lasts_s: f32 },
+    /// Fires by itself when `on` happens in reach, acts for `lasts_s`, then recharges.
+    Triggered {
+        on: Cue,
+        lasts_s: f32,
+        recharge_s: f32,
+    },
+    /// Fills from `fill` up to `need`, then acts for `lasts_s` and starts again.
+    Charged { fill: Fill, need: f32, lasts_s: f32 },
+    /// Works while it sits in a slot, with a cost written into its effects.
+    TwoEdged,
+}
+
+impl Way {
+    pub fn name(self) -> &'static str {
+        match self {
+            Way::Passive => "passive",
+            Way::Order { .. } => "order",
+            Way::Consumable { .. } => "consumable",
+            Way::Triggered { .. } => "triggered",
+            Way::Charged { .. } => "charged",
+            Way::TwoEdged => "two-edged",
+        }
+    }
+
+    /// Whether its effects act all the time (not only while it runs).
+    pub fn always(self) -> bool {
+        matches!(self, Way::Passive | Way::TwoEdged)
+    }
+
+    /// Seconds it acts once started.
+    pub fn lasts(self) -> f32 {
+        match self {
+            Way::Order { lasts_s, .. }
+            | Way::Consumable { lasts_s, .. }
+            | Way::Triggered { lasts_s, .. }
+            | Way::Charged { lasts_s, .. } => lasts_s,
+            _ => 0.0,
+        }
+    }
+}
+
+/// What sets off a triggered item.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cue {
+    /// A works in reach waits for its goods.
+    Starved,
+    Fire,
+    Riot,
+    Sickness,
+    /// A ship in reach is going down.
+    Sinking,
+    /// The vessel's hull is low.
+    HullLow,
+    /// A raider comes into reach.
+    Raider,
+}
+
+/// What fills a charged item.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fill {
+    /// Batches made in reach.
+    Made,
+    /// Goods ships landed at the island.
+    Landed,
+    /// House-minutes of contentment in reach.
+    Content,
+    /// Voyages the vessel finished.
+    Voyages,
+    /// Enemies sunk.
+    Battle,
+}
+
+/// What an item does once, the moment it starts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Burst {
+    /// Every works it acts on finishes its batch.
+    Batch,
+    /// Names the shortest need of the houses in reach.
+    Census,
+    /// Every specialist in the building gains a star.
+    Star,
+    /// The vessel throws a third of her cargo over the side.
+    Overboard,
+    /// The vessel fishes a crate from the sea.
+    Flotsam,
+    /// Rockets burst over the building while the item acts.
+    Show,
+}
+
+/// What drives a vessel, for gear that fits only some.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Drive {
+    Sail,
+    Steam,
+    Air,
+    /// Anything that floats.
+    Sea,
+}
+
+impl Drive {
+    pub fn fits(self, c: Craft) -> bool {
+        match self {
+            Drive::Sail => c.sails(),
+            Drive::Steam => !c.sails() && !c.flies() && c != Craft::Smack,
+            Drive::Air => c.flies(),
+            Drive::Sea => !c.flies(),
+        }
+    }
+
+    pub fn words_pub(self) -> &'static str {
+        self.words()
+    }
+
+    fn words(self) -> &'static str {
+        match self {
+            Drive::Sail => "sailing ships",
+            Drive::Steam => "steamers",
+            Drive::Air => "airships and planes",
+            Drive::Sea => "ships",
+        }
+    }
+}
+
+/// The three troubles of round 8.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Hazard {
+    Fire,
+    Riot,
+    Sickness,
+}
+
+impl Hazard {
+    fn words(self) -> &'static str {
+        match self {
+            Hazard::Fire => "fires",
+            Hazard::Riot => "riots",
+            Hazard::Sickness => "sickness",
+        }
+    }
 }
 
 impl Effect {
@@ -203,6 +416,7 @@ impl Effect {
         match self {
             Effect::Faster(x) => format!("Batches {} % quicker", pct(x)),
             Effect::Hands(x) => format!("Needs {} % fewer workers", pct(x)),
+            Effect::Thrift(c) if c < 0.0 => format!("Upkeep {:.0} coins a minute more", -c * k),
             Effect::Thrift(c) => format!("Upkeep {:.0} coins a minute less", c * k),
             Effect::Bonus(g, n) => format!(
                 "Every {} batch also makes {}",
@@ -231,8 +445,51 @@ impl Effect {
             Effect::Storage(n) => format!("+{:.0} warehouse room on the island", n * k),
             Effect::Duty(c) => format!("{:.1} coins for every unit a ship lands", c * k),
             Effect::Sail(x) => format!("Ships leave {} % faster", pct(x)),
+            Effect::Saves(x) => format!("{} % of batches take no goods", pct(x)),
+            Effect::Again(n) => format!("One more every {} batch", nth(nth_at(n, k))),
+            Effect::Workers(t) => format!("Hires {} instead", low(t.name())),
+            Effect::Fields(x) => format!("Makes {} % more of thin ground", pct(x)),
+            Effect::Upkeep(x) => format!("Upkeep {} % lower", pct(x)),
+            Effect::Stock(n) => format!("Keeps {:.0} more of its goods", n * k),
+            Effect::OneGuild => "Every item here counts as one guild".into(),
+            Effect::FreeInput => "Batches need no goods".into(),
+            Effect::Risk(h, x) => format!(
+                "{} {:.0} times as often (from round 8)",
+                capital(h.words()),
+                x + 1.0
+            ),
+            Effect::Spoil(n) => format!("Every {} batch is spoilt", nth(n)),
+            Effect::EatLess(Some(g), x) => {
+                format!("Houses use {} % less {}", pct(x), low(g.name()))
+            }
+            Effect::EatLess(None, x) => format!("Houses use {} % less of every good", pct(x)),
+            Effect::PaysTier(t, c) => {
+                format!("+{:.1} coins a minute from each {} house", c * k, t.name())
+            }
+            Effect::PerNeed(c) => format!("+{:.1} coins a minute for every need met", c * k),
+            Effect::Rise => "Houses move up without building goods".into(),
+            Effect::SailFor(d, x) => format!("{} leave {} % faster", capital(d.words()), pct(x)),
+            Effect::Lost(x) => format!("{} % of what ships land goes missing", pct(x)),
+            Effect::Speed(x) if x < 0.0 => format!("{} % slower", -pct(x)),
+            Effect::Speed(x) => format!("{} % faster", pct(x)),
+            Effect::Loads(x) => format!("Loads {} % sooner", pct(x)),
+            Effect::Hold(n) => format!("+{:.0} hold slot{}", n, if n > 1.0 { "s" } else { "" }),
+            Effect::Sight(x) => format!("Clears the fog {} % further", pct(x)),
+            Effect::Postage(c) => format!("{:.0} coins of postage for every landing", c * k),
+            Effect::Luck(x) => format!("Flotsam {} % more often", pct(x)),
+            Effect::Longer(x) => format!("Orders aboard last {} % longer", pct(x)),
+            Effect::Recharge(x) => format!("Orders aboard recharge {} % sooner", pct(x)),
+            Effect::Note(t) => t.into(),
         }
     }
+}
+
+/// A sentence's first letter in capitals.
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
 }
 
 fn nth(n: u32) -> String {
@@ -272,6 +529,14 @@ pub struct ItemDef {
     pub effects: &'static [Effect],
     /// What its picture shows: a good or a building.
     pub icon: Icon,
+    /// How it acts: always, when pressed, used up, by itself, or when charged.
+    pub way: Way,
+    /// What it does once, the moment it starts.
+    pub burst: &'static [Burst],
+    /// Vessel gear that fits only ships of one drive.
+    pub drive: Option<Drive>,
+    /// The round it starts working in (0: it works now).
+    pub later: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -313,6 +578,10 @@ const fn item(name: &'static str, host: Host, sort: Sort, rank: Rank, icon: Icon
         on: &[],
         effects: &[],
         icon,
+        way: Way::Passive,
+        burst: &[],
+        drive: None,
+        later: 0,
     }
 }
 
@@ -321,8 +590,12 @@ use Host::{Hall, Office, Union};
 use Rank::{Common, Fine, Rare, Storied};
 use Sort::{Charter, Device, Specialist};
 
-/// Every item there is. An item is known by its place in this table.
-pub static ITEMS: &[ItemDef] = &[
+/// Every item there is: the first half of the table here, the rest in [`crate::catalog`].
+/// An item is known by its place in the joined table.
+pub static ITEMS: LazyLock<Vec<ItemDef>> = LazyLock::new(|| [BASE, crate::catalog::MORE].concat());
+
+/// The items of round 7: passive items for the three buildings.
+static BASE: &[ItemDef] = &[
     // ---- Trading Union: works and farms.
     ItemDef {
         blurb: "Keeps the stones dressed and the sails trimmed.",
@@ -908,7 +1181,7 @@ const STAR_GAIN: f32 = 0.2;
 /// How much more a specialist does in the climate they come from.
 const HOME_GAIN: f32 = 0.5;
 /// Items the shelf holds.
-pub const SHELF: usize = 12;
+pub const SHELF: usize = 20;
 /// The most slots a building can have.
 pub const MAX_SLOTS: usize = 5;
 /// Seconds between specialists arriving where Burghers live well.
@@ -927,6 +1200,17 @@ pub struct Held {
     pub item: usize,
     /// Seconds worked in a slot (specialists).
     pub xp: f32,
+    /// Seconds it goes on acting (orders, consumables, triggered and charged items).
+    pub left_s: f32,
+    /// Seconds until it can be used again.
+    pub cool_s: f32,
+    /// Uses left (consumables).
+    pub charges: u32,
+    /// How full it is (charged items), in its own unit.
+    pub fill: f32,
+    /// The running count it fills from, as last seen.
+    #[serde(skip)]
+    pub seen: f64,
 }
 
 impl Held {
@@ -936,6 +1220,24 @@ impl Held {
 
     pub fn stars(&self) -> u32 {
         STAR_S.iter().filter(|s| self.xp >= **s).count() as u32
+    }
+
+    /// Whether its effects act now.
+    pub fn acting(&self) -> bool {
+        let d = self.def();
+        d.later == 0 && (d.way.always() || self.left_s > 0.0)
+    }
+
+    /// Whether it can be pressed now.
+    pub fn ready(&self) -> bool {
+        let d = self.def();
+        d.later == 0
+            && self.left_s <= 0.0
+            && match d.way {
+                Way::Order { .. } => self.cool_s <= 0.0,
+                Way::Consumable { .. } => self.charges > 0,
+                _ => false,
+            }
     }
 
     /// How strongly it acts in a building standing in `biome`.
@@ -971,6 +1273,22 @@ pub struct Boost {
     pub loading: f32,
     pub duty: f32,
     pub sail: f32,
+    pub saves: f32,
+    pub again: Vec<u32>,
+    pub workers: Option<Tier>,
+    pub fields: f32,
+    pub upkeep_cut: f32,
+    pub stock: f32,
+    pub free_input: bool,
+    /// How many times as often fires, riots and sickness come, less one (round 8 reads it).
+    pub risk: [f32; 3],
+    pub spoil: u32,
+    pub eat_less: Vec<(Option<Good>, f32)>,
+    pub tier_pay: Vec<(Tier, f32)>,
+    pub per_need: f32,
+    pub rise: bool,
+    pub sail_for: Vec<(Drive, f32)>,
+    pub lost: f32,
     /// How many items act on it.
     pub items: u32,
 }
@@ -1008,7 +1326,59 @@ impl Boost {
             Effect::Sail(x) => self.sail = (self.sail + x * k).min(0.6),
             // (Warehouse room is the island's, not a building's: see `apply`.)
             Effect::Storage(_) => {}
+            Effect::Saves(x) => self.saves = (self.saves + x * k).min(0.75),
+            Effect::Again(n) => self.again.push(nth_at(n, k)),
+            Effect::Workers(t) => self.workers = Some(t),
+            Effect::Fields(x) => self.fields += x * k,
+            Effect::Upkeep(x) => self.upkeep_cut = (self.upkeep_cut + x * k).min(0.9),
+            Effect::Stock(n) => self.stock += n * k,
+            Effect::FreeInput => self.free_input = true,
+            Effect::Risk(h, x) => self.risk[h as usize] += x,
+            Effect::Spoil(n) => self.spoil = n,
+            Effect::EatLess(g, x) => self.eat_less.push((g, x * k)),
+            Effect::PaysTier(t, c) => self.tier_pay.push((t, c * k)),
+            Effect::PerNeed(c) => self.per_need += c * k,
+            Effect::Rise => self.rise = true,
+            Effect::SailFor(d, x) => self.sail_for.push((d, x * k)),
+            Effect::Lost(x) => self.lost = (self.lost + x * k).min(0.5),
+            // (Vessel gear and notes: see `gear`.)
+            Effect::OneGuild
+            | Effect::Speed(_)
+            | Effect::Loads(_)
+            | Effect::Hold(_)
+            | Effect::Sight(_)
+            | Effect::Postage(_)
+            | Effect::Luck(_)
+            | Effect::Longer(_)
+            | Effect::Recharge(_)
+            | Effect::Note(_) => {}
         }
+    }
+
+    /// Share less of good `g` a house uses.
+    pub fn eats_less(&self, g: Good) -> f32 {
+        self.eat_less
+            .iter()
+            .filter(|e| e.0.is_none_or(|x| x == g))
+            .map(|e| e.1)
+            .sum::<f32>()
+            .min(0.9)
+    }
+
+    /// Coins a minute more from a house of this tier.
+    pub fn tier_pay(&self, t: Tier) -> f32 {
+        self.tier_pay.iter().filter(|p| p.0 == t).map(|p| p.1).sum()
+    }
+
+    /// Share faster a vessel of this craft leaves.
+    pub fn sail_for(&self, c: Craft) -> f32 {
+        self.sail
+            + self
+                .sail_for
+                .iter()
+                .filter(|s| s.0.fits(c))
+                .map(|s| s.1)
+                .sum::<f32>()
     }
 
     /// The good a works takes where its table says `g`.
@@ -1055,6 +1425,10 @@ pub struct Items {
     seed: u64,
     /// Coins the customs have brought in so far.
     pub duty_earned: f64,
+    /// Goods ships have landed at each island so far (charged items fill from it).
+    pub landed: Vec<f64>,
+    /// Which of [`crate::catalog::CHANDLERY`] the chandler makes next.
+    chandler_next: usize,
 }
 
 impl Default for Items {
@@ -1067,6 +1441,8 @@ impl Default for Items {
             next_arrival_s: 420.0,
             seed: 0x51ED_270B_A5C3_9E11,
             duty_earned: 0.0,
+            landed: Vec::new(),
+            chandler_next: 0,
         }
     }
 }
@@ -1084,7 +1460,20 @@ impl Items {
     pub fn mint(&mut self, item: usize) -> Held {
         let uid = self.next_uid;
         self.next_uid += 1;
-        Held { uid, item, xp: 0.0 }
+        let charges = match ITEMS[item].way {
+            Way::Consumable { charges, .. } => charges,
+            _ => 0,
+        };
+        Held {
+            uid,
+            item,
+            xp: 0.0,
+            left_s: 0.0,
+            cool_s: 0.0,
+            charges,
+            fill: 0.0,
+            seen: -1.0,
+        }
     }
 
     /// A random row by rank weight; `only` narrows the choice.
@@ -1092,7 +1481,7 @@ impl Items {
         let pool: Vec<(usize, u32)> = ITEMS
             .iter()
             .enumerate()
-            .filter(|(_, d)| only(d))
+            .filter(|(_, d)| d.later == 0 && only(d))
             .map(|(i, d)| (i, d.rank.weight()))
             .collect();
         let total: u32 = pool.iter().map(|p| p.1).sum();
@@ -1214,13 +1603,22 @@ impl Seat {
             && (centre(b) - self.at).length() <= self.reach
     }
 
-    /// The guilds with three or more items here.
+    /// The guilds with three or more items here (with a Guild charter, every item counts
+    /// for the guild most of them belong to).
     fn sets(&self) -> Vec<Guild> {
         let mut n: HashMap<Guild, u32> = HashMap::new();
         for h in &self.held {
             if let Some(g) = h.def().guild {
                 *n.entry(g).or_default() += 1;
             }
+        }
+        if self
+            .held
+            .iter()
+            .any(|h| h.acting() && h.def().effects.contains(&Effect::OneGuild))
+            && let Some(top) = n.iter().max_by_key(|(g, c)| (**c, g.name())).map(|x| *x.0)
+        {
+            n.insert(top, self.held.len() as u32);
         }
         let mut out: Vec<Guild> = n
             .into_iter()
@@ -1281,7 +1679,7 @@ pub fn apply(world: &mut World) {
     let mut stored: HashSet<(usize, usize)> = HashSet::new();
     for s in &seats {
         let mut effects: Vec<(usize, Effect, f32)> = Vec::new();
-        for h in &s.held {
+        for h in s.held.iter().filter(|h| h.acting()) {
             for e in h.def().effects {
                 effects.push((h.item, *e, h.power(s.biome)));
             }
@@ -1302,7 +1700,7 @@ pub fn apply(world: &mut World) {
         // The same item in two buildings acts once.
         let mut seen: HashSet<usize> = HashSet::new();
         for s in seats.iter().filter(|s| s.covers(b)) {
-            for h in &s.held {
+            for h in s.held.iter().filter(|h| h.acting()) {
                 let d = h.def();
                 if d.fits(b.kind) && seen.insert(h.item) {
                     for eff in d.effects {
@@ -1442,12 +1840,19 @@ pub fn vacate(world: &mut World, e: Entity) {
     }
 }
 
-/// An ocean packet fished something out of the sea: one voyage in eight brings an item.
-pub fn flotsam(world: &mut World, ship: &str) {
-    let mut items = world.resource_mut::<Items>();
-    if !items.roll().is_multiple_of(8) {
+/// An ocean packet fished something out of the sea: one voyage in eight brings an item
+/// (a lucky captain makes it more often: `luck` 1.0 is twice as often).
+pub fn flotsam(world: &mut World, ship: &str, luck: f32) {
+    let odds = (8.0 / (1.0 + luck.max(0.0))).round().max(2.0) as u64;
+    if !world.resource_mut::<Items>().roll().is_multiple_of(odds) {
         return;
     }
+    flotsam_sure(world, ship);
+}
+
+/// A crate from the sea, for certain.
+pub fn flotsam_sure(world: &mut World, ship: &str) {
+    let mut items = world.resource_mut::<Items>();
     // (Nothing storied floats about.)
     let Some(i) = items.draw(|d| d.rank < Rank::Storied && d.sort != Sort::Specialist) else {
         return;
@@ -1472,6 +1877,8 @@ pub fn tick(world: &mut World) {
     if dt <= 0.0 {
         return;
     }
+    run_timers(world, dt);
+    crate::gear::tick(world, dt);
     // Experience.
     let mut grown: Vec<String> = Vec::new();
     let mut q = world.query::<&mut Institution>();
@@ -1541,6 +1948,228 @@ pub fn tick(world: &mut World) {
     }
 }
 
+// ---- Orders, consumables, triggered and charged items.
+
+/// Press the order (or use the consumable) in a slot.
+pub fn use_item(world: &mut World, building: u32, slot: usize) -> Result<&'static str, String> {
+    let e = crate::build::by_id(world, building).ok_or("No such building.")?;
+    let h = world
+        .get::<Institution>(e)
+        .and_then(|i| i.slots.get(slot).cloned().flatten())
+        .ok_or("That slot is empty.")?;
+    let d = h.def();
+    if d.later > 0 {
+        return Err(format!("{} works from round {}.", d.name, d.later));
+    }
+    if !h.ready() {
+        return Err(match d.way {
+            Way::Order { .. } if h.left_s > 0.0 => format!("{} is already under way.", d.name),
+            Way::Order { .. } => format!("{} is ready again in {:.0} s.", d.name, h.cool_s),
+            Way::Consumable { .. } => format!("{} is used up.", d.name),
+            _ => format!("{} acts by itself.", d.name),
+        });
+    }
+    start(world, e, slot);
+    Ok(d.name)
+}
+
+/// Start the item in a slot: it acts for its time from now, and its burst happens.
+fn start(world: &mut World, e: Entity, slot: usize) {
+    let bursts = {
+        let Some(mut inst) = world.get_mut::<Institution>(e) else {
+            return;
+        };
+        let Some(h) = inst.slots[slot].as_mut() else {
+            return;
+        };
+        let d = h.def();
+        h.left_s = d.way.lasts();
+        match d.way {
+            Way::Order { cooldown_s, .. } => h.cool_s = h.left_s + cooldown_s,
+            Way::Triggered { recharge_s, .. } => h.cool_s = h.left_s + recharge_s,
+            Way::Consumable { .. } => h.charges = h.charges.saturating_sub(1),
+            _ => {}
+        }
+        (d, d.burst)
+    };
+    let Some(seat) = seats(world).into_iter().find(|s| s.0 == e).map(|s| s.1) else {
+        return;
+    };
+    for b in bursts.1 {
+        match b {
+            Burst::Batch => {
+                let mut q = world.query::<(&Building, &mut Producer)>();
+                for (b, mut p) in q.iter_mut(world) {
+                    if seat.covers(b) && bursts.0.fits(b.kind) && b.kind.def().output.is_some() {
+                        p.input_ready = true;
+                        p.progress = p.progress.max(0.999);
+                    }
+                }
+            }
+            Burst::Census => census(world, &seat),
+            Burst::Star => {
+                if let Some(mut inst) = world.get_mut::<Institution>(e) {
+                    for h in inst.slots.iter_mut().flatten() {
+                        if h.def().sort == Sort::Specialist
+                            && let Some(next) = STAR_S.get(h.stars() as usize)
+                        {
+                            h.xp = *next;
+                        }
+                    }
+                }
+            }
+            Burst::Show => crate::effects::fireworks(world, e),
+            Burst::Overboard | Burst::Flotsam => {}
+        }
+    }
+    world.resource_mut::<Changed>().any = true;
+}
+
+/// The census: the need that is shortest among the houses in reach, as a toast.
+fn census(world: &mut World, seat: &Seat) {
+    let supply = world.resource::<Economy>().islands[seat.island].supply;
+    let mut houses = 0;
+    let mut worst: Option<(Good, f32)> = None;
+    for (b, h) in world.query::<(&Building, &House)>().iter(world) {
+        if !seat.covers(b) {
+            continue;
+        }
+        houses += 1;
+        for g in h.tier.needs().0 {
+            let s = supply[g.index()];
+            if worst.is_none_or(|w| s < w.1) {
+                worst = Some((*g, s));
+            }
+        }
+    }
+    let text = match worst {
+        Some((g, s)) if s < 0.98 => format!(
+            "{houses} houses counted. Shortest: {}, {:.0} % supplied.",
+            low(g.name()),
+            s * 100.0
+        ),
+        _ => format!("{houses} houses counted. Every need is met."),
+    };
+    news(world, engine_ui::toast::ToastKind::Info, "Census", &text);
+}
+
+/// Each frame: items in slots count down, triggered items watch for their cue, charged
+/// items fill, used-up consumables go, and the chandler's work reaches the shelf.
+fn run_timers(world: &mut World, dt: f32) {
+    // What each seat's items could see: works waiting for goods, batches made, content
+    // houses, goods landed.
+    let seats = seats(world);
+    let works: Vec<(Building, crate::sim::Status, u32)> = world
+        .query::<(&Building, &Producer)>()
+        .iter(world)
+        .map(|(b, p)| (b.clone(), p.status, p.made))
+        .collect();
+    let content: Vec<Building> = world
+        .query::<(&Building, &House)>()
+        .iter(world)
+        .filter(|(_, h)| h.content_s > 0.0)
+        .map(|(b, _)| b.clone())
+        .collect();
+    let landed = world.resource::<Items>().landed.clone();
+    let mut fire: Vec<(Entity, usize)> = Vec::new();
+    let mut changed = false;
+    let mut spent: Vec<&'static str> = Vec::new();
+    for (e, seat) in &seats {
+        let Some(inst) = world.get::<Institution>(*e).cloned() else {
+            continue;
+        };
+        let mut inst = inst;
+        let open = open_slots(world.resource::<Economy>(), seat.island);
+        for (i, slot) in inst.slots.iter_mut().enumerate().take(open) {
+            let Some(h) = slot.as_mut() else { continue };
+            let d = h.def();
+            if h.left_s > 0.0 {
+                h.left_s -= dt;
+                if h.left_s <= 0.0 {
+                    h.left_s = 0.0;
+                    changed = true;
+                    if matches!(d.way, Way::Consumable { .. }) && h.charges == 0 {
+                        spent.push(d.name);
+                        *slot = None;
+                        continue;
+                    }
+                }
+            }
+            h.cool_s = (h.cool_s - dt).max(0.0);
+            if d.later > 0 {
+                continue;
+            }
+            match d.way {
+                Way::Triggered {
+                    on: Cue::Starved, ..
+                } if h.cool_s <= 0.0 => {
+                    let hit = works.iter().any(|(b, st, _)| {
+                        *st == crate::sim::Status::NoInput && seat.covers(b) && d.fits(b.kind)
+                    });
+                    if hit {
+                        fire.push((*e, i));
+                    }
+                }
+                Way::Charged { fill, need, .. } if h.left_s <= 0.0 => {
+                    let total = match fill {
+                        Fill::Made => Some(
+                            works
+                                .iter()
+                                .filter(|(b, ..)| seat.covers(b) && d.fits(b.kind))
+                                .map(|w| w.2 as f64)
+                                .sum::<f64>(),
+                        ),
+                        Fill::Landed => Some(landed.get(seat.island).copied().unwrap_or(0.0)),
+                        _ => None,
+                    };
+                    if let Some(total) = total {
+                        if h.seen < 0.0 {
+                            h.seen = total;
+                        }
+                        h.fill += (total - h.seen) as f32;
+                        h.seen = total;
+                    } else if fill == Fill::Content {
+                        let n = content.iter().filter(|b| seat.covers(b)).count();
+                        h.fill += n as f32 * dt / 60.0;
+                    }
+                    if h.fill >= need {
+                        h.fill = 0.0;
+                        fire.push((*e, i));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(mut x) = world.get_mut::<Institution>(*e) {
+            *x = inst;
+        }
+    }
+    for (e, i) in fire {
+        start(world, e, i);
+    }
+    for name in spent {
+        news(
+            world,
+            engine_ui::toast::ToastKind::Info,
+            "Used up",
+            &format!("{name} has run its course."),
+        );
+    }
+    // The chandler's batches, in turn, onto the shelf.
+    let made = std::mem::take(&mut world.resource_mut::<Economy>().chandlery);
+    for _ in 0..made {
+        let mut items = world.resource_mut::<Items>();
+        let name = crate::catalog::CHANDLERY[items.chandler_next % crate::catalog::CHANDLERY.len()];
+        items.chandler_next += 1;
+        if let Some(i) = ITEMS.iter().position(|d| d.name == name) {
+            items.gain(i);
+        }
+    }
+    if changed {
+        world.resource_mut::<Changed>().any = true;
+    }
+}
+
 // ---- What the interface shows.
 
 /// An item as the interface shows it.
@@ -1568,6 +2197,25 @@ pub struct ItemView {
     pub now: Vec<String>,
     /// What it sells for.
     pub worth: u32,
+    /// How it acts: passive, order, consumable, triggered, charged or two-edged, with its
+    /// times and need.
+    pub way: Way,
+    /// "passive", "order", "consumable", "triggered", "charged" or "two-edged".
+    pub way_name: &'static str,
+    /// Seconds it goes on acting now (0 when idle).
+    pub left_s: f32,
+    /// Seconds until it can be pressed again (orders).
+    pub cool_s: f32,
+    /// Uses left (consumables).
+    pub charges: u32,
+    /// How full it is, out of `way.need` (charged items).
+    pub fill: f32,
+    /// Whether it can be pressed or used now.
+    pub ready: bool,
+    /// Whether its effects act now.
+    pub acting: bool,
+    /// The round it starts working in, if a later one.
+    pub later: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1616,11 +2264,20 @@ fn on_words(d: &ItemDef) -> String {
             Host::Union => "Every works and farm in reach".into(),
             Host::Hall => "Every house in reach".into(),
             Host::Office => "The quay, fisheries and masts in reach".into(),
+            Host::Ship => match d.drive {
+                Some(dr) => format!("Aboard {}", dr.words_pub()),
+                None => "Aboard any vessel".into(),
+            },
         }
     } else {
         let names: Vec<&str> = d.on.iter().map(|k| k.def().name).collect();
         format!("{} in reach", names.join(", "))
     }
+}
+
+/// An item as the interface shows it, away from any building (on the shelf or aboard).
+pub fn view_of(h: &Held, now: Vec<String>) -> ItemView {
+    view(h, None, now)
 }
 
 fn view(h: &Held, biome: Option<Biome>, now: Vec<String>) -> ItemView {
@@ -1649,6 +2306,15 @@ fn view(h: &Held, biome: Option<Biome>, now: Vec<String>) -> ItemView {
         effects: d.effects.iter().map(|e| e.line(k)).collect(),
         now,
         worth: d.rank.price() * 2 / 5,
+        way: d.way,
+        way_name: d.way.name(),
+        left_s: h.left_s.max(0.0),
+        cool_s: h.cool_s.max(0.0),
+        charges: h.charges,
+        fill: h.fill,
+        ready: h.ready(),
+        acting: h.acting(),
+        later: (d.later > 0).then_some(d.later),
     }
 }
 
@@ -1799,6 +2465,50 @@ fn doing(world: &mut World, seat: &Seat, h: &Held) -> Vec<String> {
                     ));
                 }
             }
+            Effect::Upkeep(x) => {
+                let n: f32 = works
+                    .iter()
+                    .map(|(b, _)| b.kind.def().upkeep * (x * k).min(0.9))
+                    .sum();
+                lines.push(format!("{n:.0} coins a minute saved on upkeep"));
+            }
+            Effect::Again(n) => {
+                let per: f32 = works
+                    .iter()
+                    .map(|(b, eff)| 60.0 / b.kind.def().cycle_s * eff / nth_at(n, k) as f32)
+                    .sum();
+                lines.push(format!("+{per:.1} goods a minute made twice"));
+            }
+            Effect::Saves(x) => {
+                let per: f32 = works
+                    .iter()
+                    .filter(|(b, _)| b.kind.def().input.is_some())
+                    .map(|(b, eff)| 60.0 / b.kind.def().cycle_s * eff * (x * k).min(0.9))
+                    .sum();
+                lines.push(format!("{per:.1} input goods a minute saved"));
+            }
+            Effect::PerNeed(c) => {
+                let n: usize = homes.iter().map(|(h, _)| h.tier.wants().len()).sum();
+                lines.push(format!(
+                    "+{:.1} coins a minute over {} houses",
+                    n as f32 * c * k,
+                    homes.len()
+                ));
+            }
+            Effect::Workers(t) => {
+                lines.push(format!(
+                    "{} works staffed by {}",
+                    works.len(),
+                    low(t.name())
+                ));
+            }
+            Effect::Fields(x) => lines.push(format!(
+                "{} farms get {:.0} % more field",
+                works.len(),
+                x * k * 100.0
+            )),
+            Effect::Note(t) => lines.push(t.into()),
+            _ => {}
         }
     }
     if works.is_empty() && homes.is_empty() && quays == 0 {
@@ -1883,6 +2593,14 @@ pub fn offers_view(world: &World) -> Vec<OfferView> {
                     uid: 0,
                     item: o.item,
                     xp: 0.0,
+                    left_s: 0.0,
+                    cool_s: 0.0,
+                    charges: match ITEMS[o.item].way {
+                        Way::Consumable { charges, .. } => charges,
+                        _ => 0,
+                    },
+                    fill: 0.0,
+                    seen: -1.0,
                 },
                 None,
                 Vec::new(),
@@ -1964,6 +2682,7 @@ pub fn catalogue() -> serde_json::Value {
 /// `isle.item.<verb>:<args>` from the interface's buttons.
 ///
 /// - `socket:<building id>:<slot>:<uid>`, `unsocket:<building id>:<slot>`
+/// - `use:<building id>:<slot>`: press an order or use a consumable
 /// - `buy:<offer index>`, `sell:<uid>`
 pub fn action(world: &mut World, a: &str) -> Result<(), String> {
     let mut parts = a.split(':');
@@ -1975,6 +2694,11 @@ pub fn action(world: &mut World, a: &str) -> Result<(), String> {
     match verb {
         "socket" => socket(world, arg(0)?, arg(1)? as usize, arg(2)?),
         "unsocket" => unsocket(world, arg(0)?, arg(1)? as usize),
+        "use" => {
+            let name = use_item(world, arg(0)?, arg(1)? as usize)?;
+            news(world, engine_ui::toast::ToastKind::Good, name, "Under way.");
+            Ok(())
+        }
         "buy" => {
             let name = buy(world, arg(0)? as usize)?;
             news(
@@ -2006,9 +2730,13 @@ mod tests {
     #[test]
     fn the_table_is_sound() {
         let mut names = HashSet::new();
-        for d in ITEMS {
+        for d in ITEMS.iter() {
             assert!(names.insert(d.name), "{} twice", d.name);
-            assert!(!d.effects.is_empty() && !d.blurb.is_empty(), "{}", d.name);
+            assert!(
+                (!d.effects.is_empty() || !d.burst.is_empty()) && !d.blurb.is_empty(),
+                "{}",
+                d.name
+            );
             // Everything it names is something its building acts on.
             for k in d.on {
                 assert!(d.host.acts_on(*k), "{} cannot act on {k:?}", d.name);
@@ -2018,15 +2746,70 @@ mod tests {
             for e in d.effects {
                 let house = matches!(
                     e,
-                    Effect::Pays(..) | Effect::Provides(_) | Effect::Serves(_) | Effect::Lodgers(_)
+                    Effect::Pays(..)
+                        | Effect::Provides(_)
+                        | Effect::Serves(_)
+                        | Effect::Lodgers(_)
+                        | Effect::EatLess(..)
+                        | Effect::PaysTier(..)
+                        | Effect::PerNeed(_)
+                        | Effect::Rise
                 );
-                assert_eq!(house, d.host == Host::Hall, "{}: {e:?}", d.name);
+                let ship = matches!(
+                    e,
+                    Effect::Speed(_)
+                        | Effect::Loads(_)
+                        | Effect::Hold(_)
+                        | Effect::Sight(_)
+                        | Effect::Postage(_)
+                        | Effect::Luck(_)
+                        | Effect::Longer(_)
+                        | Effect::Recharge(_)
+                );
+                if house {
+                    assert_eq!(d.host, Host::Hall, "{}: {e:?}", d.name);
+                }
+                if ship {
+                    assert_eq!(d.host, Host::Ship, "{}: {e:?}", d.name);
+                }
                 assert!(!e.line(1.0).is_empty());
             }
+            // Items for a later round say so, and nothing draws them yet.
+            assert_eq!(
+                d.later > 0,
+                !d.effects.is_empty() && d.effects.iter().all(|e| matches!(e, Effect::Note(_))),
+                "{}",
+                d.name
+            );
+            match d.way {
+                Way::Order {
+                    lasts_s,
+                    cooldown_s,
+                } => assert!(lasts_s > 0.0 && cooldown_s > lasts_s, "{}", d.name),
+                Way::Consumable { charges, lasts_s } => {
+                    assert!(charges > 0 && lasts_s >= 0.0, "{}", d.name)
+                }
+                Way::Triggered {
+                    lasts_s,
+                    recharge_s,
+                    ..
+                } => assert!(lasts_s > 0.0 && recharge_s > 0.0, "{}", d.name),
+                Way::Charged { need, lasts_s, .. } => {
+                    assert!(need > 0.0 && lasts_s >= 0.0, "{}", d.name)
+                }
+                Way::Passive | Way::TwoEdged => {}
+            }
+            // Only gear fits by drive.
+            assert!(d.drive.is_none() || d.host == Host::Ship, "{}", d.name);
         }
-        for host in Host::ALL {
+        for host in [Host::Union, Host::Hall, Host::Office, Host::Ship] {
             let n = ITEMS.iter().filter(|d| d.host == host).count();
             assert!(n >= 15, "{host:?} has {n} items");
+        }
+        assert!(ITEMS.len() >= 150, "{} items", ITEMS.len());
+        for name in crate::catalog::CHANDLERY {
+            let d = ITEMS.iter().find(|d| d.name == *name).expect(name);
+            assert!(matches!(d.way, Way::Consumable { .. }), "{name}");
         }
         // Every guild can be completed in one building.
         for g in Guild::ALL {
@@ -2042,11 +2825,7 @@ mod tests {
             .iter()
             .position(|d| d.name.starts_with("Master furrier"))
             .unwrap();
-        let mut h = Held {
-            uid: 1,
-            item: furrier,
-            xp: 0.0,
-        };
+        let mut h = Items::default().mint(furrier);
         assert_eq!(h.power(Biome::Temperate), 1.0);
         assert_eq!(h.power(Biome::Arctic), 1.5);
         h.xp = STAR_S[1];
@@ -2075,6 +2854,67 @@ mod tests {
             .find(|(_, b)| b.kind == kind && b.island == island)
             .map(|(e, b)| (e, b.clone()))
             .unwrap_or_else(|| panic!("no {kind:?} on island {island}"))
+    }
+
+    fn row(name: &str) -> usize {
+        ITEMS.iter().position(|d| d.name == name).expect(name)
+    }
+
+    #[test]
+    fn orders_run_then_cool_down() {
+        let mut w = start();
+        let (_, b) = holder(&mut w, Kind::TradingUnion, 0);
+        let slot = |w: &mut World| {
+            let e = crate::build::by_id(w, b.id).unwrap();
+            w.get::<Institution>(e).unwrap().slots[2].clone().unwrap()
+        };
+        assert_eq!(slot(&mut w).def().name, "Rush order");
+        assert!(slot(&mut w).ready() && !slot(&mut w).acting());
+        assert_eq!(use_item(&mut w, b.id, 2), Ok("Rush order"));
+        let h = slot(&mut w);
+        assert!(h.acting() && !h.ready() && h.left_s > 0.0 && h.cool_s > h.left_s);
+        assert!(use_item(&mut w, b.id, 2).unwrap_err().contains("under way"));
+        for _ in 0..45 {
+            run_timers(&mut w, 1.0);
+        }
+        let h = slot(&mut w);
+        assert!(!h.acting() && !h.ready(), "{} {}", h.left_s, h.cool_s);
+        assert!(
+            use_item(&mut w, b.id, 2)
+                .unwrap_err()
+                .contains("ready again")
+        );
+    }
+
+    #[test]
+    fn a_consumable_is_used_up_and_leaves_its_slot() {
+        let mut w = start();
+        // (A spent consumable says so in a toast.)
+        w.init_resource::<engine_ui::theme::Theme>();
+        let (e, b) = holder(&mut w, Kind::TownHall, 0);
+        let h = w.resource_mut::<Items>().mint(row("Fireworks"));
+        assert_eq!(h.charges, 1);
+        w.get_mut::<Institution>(e).unwrap().slots[2] = Some(h);
+        assert_eq!(use_item(&mut w, b.id, 2), Ok("Fireworks"));
+        let left = w.get::<Institution>(e).unwrap().slots[2].clone().unwrap();
+        assert!(left.acting() && left.charges == 0 && !left.ready());
+        for _ in 0..100 {
+            run_timers(&mut w, 1.0);
+        }
+        assert!(w.get::<Institution>(e).unwrap().slots[2].is_none());
+    }
+
+    #[test]
+    fn later_rounds_items_are_listed_but_never_drawn_or_used() {
+        let mut items = Items::default();
+        for _ in 0..400 {
+            if let Some(i) = items.draw(|_| true) {
+                assert_eq!(ITEMS[i].later, 0, "{}", ITEMS[i].name);
+            }
+        }
+        let quarantine = ITEMS.iter().position(|d| d.later > 0).unwrap();
+        let h = items.mint(quarantine);
+        assert!(!h.acting() && !h.ready());
     }
 
     #[test]
@@ -2121,7 +2961,7 @@ mod tests {
         assert!(boost.loading > 0.25 && boost.sail > 0.05, "{boost:?}");
         // The shelf has things to try, and the pedlar is in with five more.
         let state = state(&mut w);
-        assert_eq!(state["shelf"].as_array().unwrap().len(), 5);
+        assert_eq!(state["shelf"].as_array().unwrap().len(), 12);
         assert_eq!(state["offers"].as_array().unwrap().len(), 5);
         assert_eq!(state["buildings"].as_array().unwrap().len(), 4);
         assert_eq!(catalogue()["items"].as_array().unwrap().len(), ITEMS.len());
