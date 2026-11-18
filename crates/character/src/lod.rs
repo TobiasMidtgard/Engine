@@ -40,6 +40,10 @@ pub const HAIR_END: f32 = 60.0;
 /// the locks keep the hairdo's shape.
 pub const LOCKS_FROM: f32 = 2.0;
 pub const LOCKS_TO: f32 = 3.5;
+/// Hair that hands over to locks is kept on the GPU within this distance (m), with room to
+/// come in before the hand-over starts, and let go beyond `HAIRS_DROPPED`.
+pub const HAIRS_KEPT: f32 = 6.0;
+pub const HAIRS_DROPPED: f32 = 9.0;
 /// The fewest hairs a set keeps (as a share of all of them).
 const MIN_SHARE: f32 = 0.015;
 

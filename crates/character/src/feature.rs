@@ -212,6 +212,8 @@ const SUBSURFACE_MIN_PIXELS: f32 = 1.5;
 
 /// Frame time spent uploading people's meshes in play (ms).
 const UPLOAD_BUDGET_MS: f64 = 3.0;
+/// Frames a person's full hair stays on the GPU after the last view that had them near.
+const HAIRS_LINGER_FRAMES: u64 = 60;
 /// A body's bounding sphere around the hips (m, before the entity's scale): raised arms and
 /// loose hair inside.
 const BODY_RADIUS_M: f32 = 1.3;
@@ -281,8 +283,19 @@ const EYE_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4];
 
 struct GpuStrands {
-    group: wgpu::BindGroup,
+    /// Its buffers (`None`: hair handing over to locks while its person is far,
+    /// `GpuMeshes::keep_hairs`), and their upload on another thread while one is under way.
+    group: Option<wgpu::BindGroup>,
+    pending: Option<Arc<Mutex<Option<wgpu::BindGroup>>>>,
+    /// The `CharacterMeshes::strands` set it draws.
+    set: usize,
+    /// The last frame a view had its person within `lod::HAIRS_DROPPED` (hairs are let go
+    /// only once no view has wanted them for a while: views far apart in one frame don't
+    /// send them back and forth).
+    near_frame: u64,
     params: wgpu::Buffer,
+    /// The set's guide motion (or an empty buffer), bound beside its points.
+    motion_buffer: wgpu::Buffer,
     info: [u32; 4],
     /// The box its points are packed in (`PackedStrands`): corner and size.
     bounds: [[f32; 4]; 2],
@@ -425,16 +438,103 @@ impl GpuMeshes {
         pass.draw_indexed(0..count, 0, 0..1);
     }
 
+    /// Bring the hairs that hand over to locks onto the GPU as the person comes within
+    /// [`lod::HAIRS_KEPT`] m and let them go past [`lod::HAIRS_DROPPED`]: from afar only the
+    /// locks are drawn, and a head of long hair is some 36 MB of points, so a crowd keeps only
+    /// the few people near the camera in full. Off the frame (`off_frame`) the buffers are
+    /// made on another thread and the locks stand in until they are in; otherwise in the frame
+    /// when `may_upload`. `frame`: this view's `frame_index`. Returns whether it uploaded in the
+    /// frame.
+    fn keep_hairs(
+        &mut self,
+        l: &Layouts,
+        gpu: &GpuShared,
+        m: &Arc<CharacterMeshes>,
+        distance: f32,
+        (frame, off_frame, may_upload): (u64, bool, bool),
+    ) -> bool {
+        let mut uploaded = false;
+        for s in self
+            .strands
+            .iter_mut()
+            .filter(|s| s.role == StrandRole::HandsOver)
+        {
+            if let Some(done) = s
+                .pending
+                .as_ref()
+                .and_then(|p| p.lock().unwrap_or_else(|e| e.into_inner()).take())
+            {
+                s.group = Some(done);
+                s.pending = None;
+            }
+            if distance <= lod::HAIRS_DROPPED {
+                s.near_frame = frame;
+            } else {
+                if frame > s.near_frame + HAIRS_LINGER_FRAMES {
+                    s.group = None;
+                    s.pending = None;
+                }
+                continue;
+            }
+            if distance > lod::HAIRS_KEPT || s.group.is_some() || s.pending.is_some() {
+                continue;
+            }
+            if off_frame {
+                let slot = Arc::new(Mutex::new(None));
+                let (done, l, device, m, params, motion, set) = (
+                    slot.clone(),
+                    l.clone(),
+                    gpu.device.clone(),
+                    m.clone(),
+                    s.params.clone(),
+                    s.motion_buffer.clone(),
+                    s.set,
+                );
+                let spawned = std::thread::Builder::new()
+                    .name("character hair upload".into())
+                    .spawn(move || {
+                        let _span = tracing::info_span!("character hair upload").entered();
+                        let group = strand_group(&device, &l, &m, set, false, &params, &motion);
+                        *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(group);
+                    });
+                if spawned.is_ok() {
+                    s.pending = Some(slot);
+                }
+            } else if may_upload {
+                s.group = Some(strand_group(
+                    &gpu.device,
+                    l,
+                    m,
+                    s.set,
+                    false,
+                    &s.params,
+                    &s.motion_buffer,
+                ));
+                uploaded = true;
+            }
+        }
+        uploaded
+    }
+
     /// Pick this frame's detail for a person `distance` m from the camera.
     fn choose_detail(&mut self, gpu: &GpuShared, distance: f32) {
         self.coarse = self.coarse_count > 0 && distance > lod::COARSE_SKIN;
-        let locks = lod::lock_share(distance);
-        for s in &mut self.strands {
+        let share = lod::lock_share(distance);
+        // A set's locks stand in for its hairs in full while those are not on the GPU yet.
+        let missing: Vec<bool> = self
+            .strands
+            .iter()
+            .map(|s| s.role == StrandRole::HandsOver && s.group.is_none())
+            .collect();
+        for (i, s) in self.strands.iter_mut().enumerate() {
             let (mut drawn, stride, mut width) = lod::strands(s.kind, s.hairs, s.points, distance);
+            let hairs_missing = i > 0 && missing[i - 1];
             let fade = match s.role {
                 StrandRole::Hairs => 1.0,
-                StrandRole::HandsOver => 1.0 - locks,
+                StrandRole::HandsOver if s.group.is_none() => 0.0,
+                StrandRole::HandsOver => 1.0 - share,
                 StrandRole::Locks => {
+                    let locks = if hairs_missing { 1.0 } else { share };
                     // Every lock, as wide as its hairs (lod::strands thins hairs, not locks).
                     if drawn > 0 {
                         drawn = s.hairs;
@@ -786,6 +886,183 @@ const UPLOADS_IN_FLIGHT: usize = 4;
 
 /// The upload of `meshes` at `version` for `entity`: `Some` once done. Starts it when none is
 /// on its way (and fewer than [`UPLOADS_IN_FLIGHT`] are); a new version replaces an older one.
+/// Strand set `si`'s params `info` (its locks' with `locks`): points per hair, kind, hairs,
+/// guides they move with (0: none).
+fn strand_info(m: &CharacterMeshes, si: usize, locks: bool) -> [u32; 4] {
+    let set = &m.strands[si];
+    let hairs = set.strand_count();
+    let guides = set.guide_count();
+    let moves = guides > 0 && set.follow.len() == hairs;
+    let lock = m
+        .hair_locks
+        .get(si)
+        .and_then(Option::as_ref)
+        .filter(|_| locks);
+    let (count, moves) = match lock {
+        Some(l) => (l.count(), moves && l.set.follow.len() == l.count()),
+        None => (hairs, moves),
+    };
+    [
+        set.points_per,
+        set.kind as u32,
+        count as u32,
+        if moves { guides as u32 } else { 0 },
+    ]
+}
+
+/// The box strand set `si`'s points (or its locks') are packed in: corner and size.
+fn strand_bounds(m: &CharacterMeshes, si: usize, locks: bool) -> [[f32; 4]; 2] {
+    let lock = m
+        .hair_locks
+        .get(si)
+        .and_then(Option::as_ref)
+        .filter(|_| locks);
+    let unpacked;
+    let packed = match (lock, m.packed_strands.get(si)) {
+        (Some(l), _) => &l.packed,
+        (None, Some(p)) => p,
+        (None, None) => {
+            unpacked = m.strands[si].packed();
+            &unpacked
+        }
+    };
+    [packed.box_min, packed.box_size]
+}
+
+fn strand_params(
+    device: &wgpu::Device,
+    info: [u32; 4],
+    bounds: [[f32; 4]; 2],
+    locks: bool,
+) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("character strand params"),
+        contents: bytemuck::bytes_of(&GpuStrandParams {
+            info,
+            lod: [1.0, 1.0, 1.0, if locks { 1.0 } else { 0.0 }],
+            box_min: bounds[0],
+            box_size: bounds[1],
+        }),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
+/// Strand set `si`'s hairs (or its locks) on the GPU: their points, attributes, roots and
+/// guides, bound beside `params` and the set's guide `motion`.
+fn strand_group(
+    device: &wgpu::Device,
+    l: &Layouts,
+    m: &CharacterMeshes,
+    si: usize,
+    locks: bool,
+    params: &wgpu::Buffer,
+    motion: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    let buffer = |label: &str, data: &[u8]| {
+        // wgpu refuses empty buffers.
+        let fallback = [0u8; 16];
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: if data.is_empty() { &fallback } else { data },
+            usage: wgpu::BufferUsages::STORAGE,
+        })
+    };
+    let set = &m.strands[si];
+    let info = strand_info(m, si, locks);
+    let moves = info[3] > 0;
+    let pack = |b: [u8; 4]| u32::from_le_bytes(b);
+    // The hair rides the skin vertex it grows from: its expressions, then its bones.
+    let root_of = |h: usize, guide: u32| {
+        let v = m
+            .strand_roots
+            .get(si)
+            .and_then(|r| r.get(h))
+            .copied()
+            .unwrap_or(u32::MAX);
+        let at = v as usize;
+        [
+            v,
+            pack(m.skin.bones.get(at).copied().unwrap_or_default()),
+            pack(m.skin.weights.get(at).copied().unwrap_or([255, 0, 0, 0])),
+            guide,
+        ]
+    };
+    // Per hair that moves: its three guides and their weights (bytes, 0..255).
+    let follows = |follow: &[crate::strands::Follow]| -> Vec<[u32; 4]> {
+        follow
+            .iter()
+            .map(|f| {
+                let w = f.weights.map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8);
+                let [a, b, c] = f.guides;
+                [a, b, c, u32::from_le_bytes([w[0], w[1], w[2], 0])]
+            })
+            .collect()
+    };
+    let lock = m
+        .hair_locks
+        .get(si)
+        .and_then(Option::as_ref)
+        .filter(|_| locks);
+    let unpacked;
+    let packed = match (lock, m.packed_strands.get(si)) {
+        (Some(l), _) => &l.packed,
+        (None, Some(p)) => p,
+        (None, None) => {
+            unpacked = set.packed();
+            &unpacked
+        }
+    };
+    let guide = |follow: &[crate::strands::Follow], k: usize| {
+        if moves { follow[k].guides[0] } else { u32::MAX }
+    };
+    let roots: Vec<[u32; 4]> = match lock {
+        Some(l) => l
+            .members
+            .iter()
+            .enumerate()
+            .map(|(k, h)| root_of(*h as usize, guide(&l.set.follow, k)))
+            .collect(),
+        None => (0..info[2] as usize)
+            .map(|h| root_of(h, guide(&set.follow, h)))
+            .collect(),
+    };
+    let follow = match (moves, lock) {
+        (false, _) => Vec::new(),
+        (true, Some(l)) => follows(&l.set.follow),
+        (true, None) => follows(&set.follow),
+    };
+    let shape: &[[u32; 2]] = lock.map_or(&[], |l| &l.shape);
+    let points = buffer(
+        "character strand points",
+        bytemuck::cast_slice(&packed.points),
+    );
+    let attrs = buffer(
+        "character strand attributes",
+        bytemuck::cast_slice(&packed.attrs),
+    );
+    let roots = buffer("character strand roots", bytemuck::cast_slice(&roots));
+    let follow = buffer("character strand follow", bytemuck::cast_slice(&follow));
+    let shape = buffer("character strand lock shape", bytemuck::cast_slice(shape));
+    let entries: Vec<wgpu::BindGroupEntry> =
+        [params, &points, &attrs, &roots, motion, &follow, &shape]
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: b.as_entire_binding(),
+            })
+            .collect();
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(if locks {
+            "character hair locks"
+        } else {
+            "character strands"
+        }),
+        layout: &l.strand_layout,
+        entries: &entries,
+    })
+}
+
 fn upload_off_frame(
     uploads: &mut HashMap<Entity, PendingUpload>,
     entity: Entity,
@@ -1105,97 +1382,6 @@ impl CharacterFeature {
                 },
             ],
         });
-        let pack = |b: [u8; 4]| u32::from_le_bytes(b);
-        let root_of = |si: usize, h: usize, guide: u32| {
-            let v = m
-                .strand_roots
-                .get(si)
-                .and_then(|r| r.get(h))
-                .copied()
-                .unwrap_or(u32::MAX);
-            let at = v as usize;
-            [
-                v,
-                pack(m.skin.bones.get(at).copied().unwrap_or_default()),
-                pack(m.skin.weights.get(at).copied().unwrap_or([255, 0, 0, 0])),
-                guide,
-            ]
-        };
-        // Per hair that moves: its three guides and their weights (bytes, 0..255).
-        let follows = |follow: &[crate::strands::Follow]| -> Vec<[u32; 4]> {
-            follow
-                .iter()
-                .map(|f| {
-                    let w = f.weights.map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8);
-                    let [a, b, c] = f.guides;
-                    [a, b, c, u32::from_le_bytes([w[0], w[1], w[2], 0])]
-                })
-                .collect()
-        };
-        // One strand set's (or its locks') buffers and bind group.
-        let upload = |info: [u32; 4],
-                      packed: &crate::strands::PackedStrands,
-                      roots: &[[u32; 4]],
-                      follow: &[[u32; 4]],
-                      shape: &[[u32; 2]],
-                      motion: &wgpu::Buffer,
-                      locks: bool| {
-            let bounds = [packed.box_min, packed.box_size];
-            let params = buffer(
-                "character strand params",
-                bytemuck::bytes_of(&GpuStrandParams {
-                    info,
-                    lod: [1.0, 1.0, 1.0, if locks { 1.0 } else { 0.0 }],
-                    box_min: bounds[0],
-                    box_size: bounds[1],
-                }),
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            );
-            let points = buffer(
-                "character strand points",
-                bytemuck::cast_slice(&packed.points),
-                wgpu::BufferUsages::STORAGE,
-            );
-            let attrs = buffer(
-                "character strand attributes",
-                bytemuck::cast_slice(&packed.attrs),
-                wgpu::BufferUsages::STORAGE,
-            );
-            let roots = buffer(
-                "character strand roots",
-                bytemuck::cast_slice(roots),
-                wgpu::BufferUsages::STORAGE,
-            );
-            let follow = buffer(
-                "character strand follow",
-                bytemuck::cast_slice(follow),
-                wgpu::BufferUsages::STORAGE,
-            );
-            let shape = buffer(
-                "character strand lock shape",
-                bytemuck::cast_slice(shape),
-                wgpu::BufferUsages::STORAGE,
-            );
-            let entries: Vec<wgpu::BindGroupEntry> =
-                [&params, &points, &attrs, &roots, motion, &follow, &shape]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, b)| wgpu::BindGroupEntry {
-                        binding: i as u32,
-                        resource: b.as_entire_binding(),
-                    })
-                    .collect();
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(if locks {
-                    "character hair locks"
-                } else {
-                    "character strands"
-                }),
-                layout: &p.strand_layout,
-                entries: &entries,
-            });
-            (group, params, bounds)
-        };
         let mut strands = Vec::new();
         for (si, set) in m.strands.iter().enumerate() {
             let hairs = set.strand_count() as u32;
@@ -1204,35 +1390,6 @@ impl CharacterFeature {
             }
             let guides = set.guide_count();
             let moves = guides > 0 && set.follow.len() == hairs as usize;
-            let info: [u32; 4] = [
-                set.points_per,
-                set.kind as u32,
-                hairs,
-                if moves { guides as u32 } else { 0 },
-            ];
-            let unpacked;
-            let packed = match m.packed_strands.get(si) {
-                Some(p) => p,
-                None => {
-                    unpacked = set.packed();
-                    &unpacked
-                }
-            };
-            let roots: Vec<[u32; 4]> = (0..hairs as usize)
-                .map(|h| {
-                    let guide = if moves {
-                        set.follow[h].guides[0]
-                    } else {
-                        u32::MAX
-                    };
-                    root_of(si, h, guide)
-                })
-                .collect();
-            let follow = if moves {
-                follows(&set.follow)
-            } else {
-                Vec::new()
-            };
             // Every guide point's displacement, this frame's then last frame's (none yet).
             let guide_points = guides * set.points_per as usize;
             let motion = moves.then(|| GuideMotion {
@@ -1248,11 +1405,21 @@ impl CharacterFeature {
                 |m| m.buffer.clone(),
             );
             let locks = m.hair_locks.get(si).and_then(Option::as_ref);
-            let (group, params, bounds) =
-                upload(info, packed, &roots, &follow, &[], &motion_buffer, false);
+            let info = strand_info(m, si, false);
+            let bounds = strand_bounds(m, si, false);
+            let params = strand_params(device, info, bounds, false);
+            // Hair that hands over to locks comes onto the GPU when the person comes near
+            // (`GpuMeshes::keep_hairs`): from afar only its locks are drawn.
+            let group = locks
+                .is_none()
+                .then(|| strand_group(device, p, m, si, false, &params, &motion_buffer));
             strands.push(GpuStrands {
                 group,
+                pending: None,
+                near_frame: 0,
+                set: si,
                 params,
+                motion_buffer: motion_buffer.clone(),
                 info,
                 bounds,
                 kind: set.kind,
@@ -1263,58 +1430,31 @@ impl CharacterFeature {
                 },
                 hairs,
                 points: set.points_per,
-                drawn: hairs,
+                drawn: 0,
                 vertices: lod::strand_vertices(set.points_per, 1),
-                lod: (hairs, 1, 1.0),
+                lod: (u32::MAX, 0, 0.0),
                 motion,
             });
             // Its locks, drawn from afar, move with the same guides.
             let Some(locks) = locks else {
                 continue;
             };
-            let count = locks.count() as u32;
-            let lock_moves = moves && locks.set.follow.len() == count as usize;
-            let info = [
-                set.points_per,
-                set.kind as u32,
-                count,
-                if lock_moves { guides as u32 } else { 0 },
-            ];
-            let roots: Vec<[u32; 4]> = locks
-                .members
-                .iter()
-                .enumerate()
-                .map(|(l, h)| {
-                    let guide = if lock_moves {
-                        locks.set.follow[l].guides[0]
-                    } else {
-                        u32::MAX
-                    };
-                    root_of(si, *h as usize, guide)
-                })
-                .collect();
-            let follow = if lock_moves {
-                follows(&locks.set.follow)
-            } else {
-                Vec::new()
-            };
-            let (group, params, bounds) = upload(
-                info,
-                &locks.packed,
-                &roots,
-                &follow,
-                &locks.shape,
-                &motion_buffer,
-                true,
-            );
+            let info = strand_info(m, si, true);
+            let bounds = strand_bounds(m, si, true);
+            let params = strand_params(device, info, bounds, true);
+            let group = strand_group(device, p, m, si, true, &params, &motion_buffer);
             strands.push(GpuStrands {
-                group,
+                group: Some(group),
+                pending: None,
+                near_frame: 0,
+                set: si,
                 params,
+                motion_buffer,
                 info,
                 bounds,
                 kind: set.kind,
                 role: StrandRole::Locks,
-                hairs: count,
+                hairs: locks.count() as u32,
                 points: set.points_per,
                 drawn: 0,
                 vertices: lod::strand_vertices(set.points_per, 1),
@@ -1422,7 +1562,10 @@ impl CharacterFeature {
                 }
             }
             for s in c.strands.iter().filter(|s| s.drawn > 0) {
-                pass.set_bind_group(2, &s.group, &[]);
+                let Some(group) = &s.group else {
+                    continue;
+                };
+                pass.set_bind_group(2, group, &[]);
                 pass.draw(0..s.vertices, 0..s.drawn);
             }
         }
@@ -1728,8 +1871,24 @@ impl RenderFeature for CharacterFeature {
                 write_motion(gpu, c, guides, posed, skeleton, &mut self.motion);
                 pose_ms += pose_start.elapsed().as_secs_f32() * 1000.0;
             }
-            let distance = rel.length() * lod_scale;
-            c.choose_detail(gpu, if lod_scale > 0.0 { distance } else { 0.0 });
+            let distance = if lod_scale > 0.0 {
+                rel.length() * lod_scale
+            } else {
+                0.0
+            };
+            let full = uploaded && started.elapsed().as_secs_f64() * 1000.0 >= upload_budget;
+            let hair_start = std::time::Instant::now();
+            if c.keep_hairs(
+                p,
+                gpu,
+                &built.meshes,
+                distance,
+                (view.frame_index, off_frame, !full),
+            ) {
+                uploaded = true;
+                upload_ms += hair_start.elapsed().as_secs_f32() * 1000.0;
+            }
+            c.choose_detail(gpu, distance);
             self.stats.instances += 1;
             self.stats.triangles += c.triangles();
             self.stats.draw_calls += 2 + c.strands.iter().filter(|s| s.drawn > 0).count() as u32;
