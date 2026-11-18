@@ -9,7 +9,9 @@
 //! ([`PRONE_CRAWL_SPEED`] × half a cycle each pull).
 
 use super::*;
-use crate::build::weapons::{GRIP, RIFLE_AXIS, RIFLE_BUTT, RIFLE_FORE, RIFLE_SHOT_AT, RIFLE_UP};
+use crate::build::weapons::{
+    GRIP, RIFLE_AXIS, RIFLE_BUTT, RIFLE_FORE, RIFLE_MAG, RIFLE_SHOT_AT, RIFLE_UP,
+};
 
 /// The graph parameter the body lies down by (0 standing or crouched, 0.5 on hands and knees,
 /// 1 flat on the floor). The module ramps it toward the contract-style `prone` (0 or 1)
@@ -32,6 +34,9 @@ pub const PRONE_KNEEL: &str = "prone_kneel";
 /// event as it goes off, like [`RIFLE_FIRE`]'s).
 pub const PRONE_RIFLE_AIM: &str = "prone_rifle_aim";
 pub const PRONE_RIFLE_FIRE: &str = "prone_rifle_fire";
+/// A magazine change lying down (the `mag_out` and `mag_in` events and the `mag_in_hand`
+/// curve, like [`RIFLE_RELOAD`]'s).
+pub const PRONE_RIFLE_RELOAD: &str = "prone_rifle_reload";
 /// A rifleman lying still, not aiming: the gun in the shoulder, the muzzle down, looking
 /// over the sights.
 pub const PRONE_RIFLE_READY: &str = "prone_rifle_ready";
@@ -261,6 +266,58 @@ fn kneel_key() -> Key {
 /// shoulders rocked back; `breath` (−1..1) lifts the chest a few millimetres; `ready` (0..1)
 /// lowers the muzzle and lifts the head off the stock to look over the sights.
 fn aim_pose(s: &Skeleton, kick: f32, breath: f32, ready: f32) -> Vec<(&'static str, Xf)> {
+    gun_pose(
+        s,
+        Gun {
+            kick,
+            breath,
+            ready,
+            ..Gun::AIMED
+        },
+    )
+}
+
+/// How the gun is held lying in the firing position, for [`gun_pose`].
+#[derive(Clone, Copy, Debug)]
+struct Gun {
+    kick: f32,
+    breath: f32,
+    ready: f32,
+    /// Turned over on its axis, top to the right, degrees (to bring the magazine round to the
+    /// left hand).
+    cant: f32,
+    /// Where the left fist is, by `left_on` (0 on the fore grip, 1 at `left`).
+    left_on: f32,
+    left: Left,
+}
+
+/// Where the left fist goes off the fore grip.
+#[derive(Clone, Copy, Debug)]
+enum Left {
+    /// On the magazine, this far down out of its well, m.
+    Mag(f32),
+    /// At the pouch on the left of the chest.
+    Pouch,
+}
+
+impl Gun {
+    const AIMED: Gun = Gun {
+        kick: 0.0,
+        breath: 0.0,
+        ready: 0.0,
+        cant: 0.0,
+        left_on: 0.0,
+        left: Left::Mag(0.0),
+    };
+}
+
+fn gun_pose(s: &Skeleton, g: Gun) -> Vec<(&'static str, Xf)> {
+    let Gun {
+        kick,
+        breath,
+        ready,
+        ..
+    } = g;
     let legs = [AIM_LEG; 2];
     let mut key = lying(0.0, [FOREARM; 2], legs);
     key.spine = AIM_SPINE;
@@ -278,10 +335,16 @@ fn aim_pose(s: &Skeleton, kick: f32, breath: f32, ready: f32) -> Vec<(&'static s
     let across = Quat::from_rotation_y(AIM_ANGLE.to_radians());
     let dir = across * Vec3::new(0.0, climb.sin(), -climb.cos());
     let up = across * Vec3::new(0.0, climb.cos(), climb.sin());
+    let up = Quat::from_axis_angle(dir, -g.cant.to_radians()) * up;
     let butt = shoulder + AIM_POCKET - dir * 0.022 * kick;
     let fist = butt + dir * RIFLE_BUTT;
     let held = rifle_frame(dir, up);
-    let fore = fist + dir * RIFLE_FORE;
+    let on_fore = fist + dir * RIFLE_FORE;
+    let off = match g.left {
+        Left::Mag(down) => fist + dir * RIFLE_MAG - up * (0.05 + down),
+        Left::Pouch => shoulder + POUCH,
+    };
+    let fore = on_fore.lerp(off, g.left_on);
     let turn = across.inverse();
     let ankle = |side: usize| mirror(AIM_FEET, side);
     let targets = [
@@ -312,6 +375,87 @@ fn aim_pose(s: &Skeleton, kick: f32, breath: f32, ready: f32) -> Vec<(&'static s
     }
     pose
 }
+
+/// The magazine pouch on the left of the chest, from the right shoulder joint (body frame,
+/// lying): the left hand reaches back under the chest for it.
+const POUCH: Vec3 = Vec3::new(-0.3, -0.16, 0.12);
+
+/// A magazine change lying in the firing position, s.
+const RELOAD_SECS: f32 = 2.6;
+
+/// A magazine change lying down at `t` s: the gun canted over to bring the magazine to the
+/// left hand, the old one out and away, a fresh one from the pouch in and slapped home, the
+/// hand back on the fore grip and the gun upright on the target again.
+fn reload_pose(s: &Skeleton, t: f32) -> Vec<(&'static str, Xf)> {
+    let [grab, out, stowed, back, home, slapped, regrip] = RELOAD_KEYS;
+    let cant = keyed(
+        t,
+        &[
+            (0.0, 0.0),
+            (grab, 50.0),
+            (regrip, 50.0),
+            (RELOAD_SECS - 0.2, 0.0),
+        ],
+    );
+    let ready = keyed(
+        t,
+        &[
+            (0.0, 0.0),
+            (grab, 0.7),
+            (regrip, 0.7),
+            (RELOAD_SECS - 0.2, 0.0),
+        ],
+    );
+    // The left fist: along the magazine (down out of its well, m), or at the pouch.
+    let keys: [(f32, Option<f32>); 9] = [
+        (0.0, None),
+        (grab, Some(0.0)),
+        (out, Some(0.16)),
+        (stowed, None),
+        (back, Some(0.1)),
+        (home, Some(0.0)),
+        (slapped, Some(-0.012)),
+        (regrip, Some(0.0)),
+        (RELOAD_SECS, None),
+    ];
+    let i = keys
+        .iter()
+        .rposition(|k| k.0 <= t)
+        .unwrap_or(0)
+        .min(keys.len() - 2);
+    let (a, b) = (keys[i], keys[i + 1]);
+    let u = smooth01(((t - a.0) / (b.0 - a.0)).clamp(0.0, 1.0));
+    // Each end of the move as (off the fore grip, where): the first and last keys are on the
+    // fore grip, the stowed one at the pouch.
+    let at = |k: usize, key: (f32, Option<f32>)| match key.1 {
+        Some(d) => (1.0, Left::Mag(d)),
+        None if k == 0 || k == keys.len() - 1 => (0.0, Left::Mag(0.0)),
+        None => (1.0, Left::Pouch),
+    };
+    let ((on_a, left_a), (on_b, left_b)) = (at(i, a), at(i + 1, b));
+    let pose_at = |on: f32, left: Left| {
+        gun_pose(
+            s,
+            Gun {
+                ready,
+                cant,
+                left_on: on,
+                left,
+                ..Gun::AIMED
+            },
+        )
+    };
+    // The two ends' arms blended (their bodies and gun are the same).
+    let from = pose_at(on_a, left_a);
+    let to = pose_at(on_b, left_b);
+    from.into_iter()
+        .zip(to)
+        .map(|((name, x), (_, y))| (name, x.lerp(&y, u)))
+        .collect()
+}
+
+/// Grab, out, stowed, back, home, slapped, regrip, s.
+const RELOAD_KEYS: [f32; 7] = [0.4, 0.58, 0.98, 1.4, 1.6, 1.72, 2.0];
 
 /// The rotation that turns a long gun held in the right fist (its barrel along
 /// [`RIFLE_AXIS`], top along [`RIFLE_UP`] in the hand's frame) to point `dir`, top `up`.
@@ -383,6 +527,40 @@ pub(super) fn clips(s: &Skeleton) -> Vec<AnimationClip> {
             aim_pose(s, 0.0, (std::f32::consts::TAU * ph).sin(), 1.0)
         })
         .with_curve("grip", 2, |_| 1.0),
+        {
+            let [grab, .., home, _, regrip] = RELOAD_KEYS;
+            let secs = RELOAD_SECS;
+            AnimationClip::from_fn(
+                PRONE_RIFLE_RELOAD,
+                secs,
+                (secs * 30.0) as usize + 1,
+                false,
+                move |ph| reload_pose(s, ph * secs),
+            )
+            .with_curve("floor", 2, |_| 1.0)
+            .with_curve("effort", 8, |_| 0.4)
+            // The left hand on the fore grip only at the ends.
+            .with_curve("grip", (secs * 30.0) as usize, move |ph| {
+                keyed(
+                    ph * secs,
+                    &[
+                        (0.1, 1.0),
+                        (grab - 0.1, 0.0),
+                        (regrip, 0.0),
+                        (regrip + 0.12, 1.0),
+                    ],
+                )
+            })
+            .with_curve("mag_in_hand", (secs * 60.0) as usize, move |ph| {
+                if (grab + 0.04..home).contains(&(ph * secs)) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .with_event((grab + 0.04) / secs, "mag_out", Some("hand_l"))
+            .with_event(home / secs, "mag_in", Some("hand_l"))
+        },
         {
             let secs = FIRE_SECS;
             let kick = move |ph: f32| {
@@ -531,24 +709,36 @@ pub(super) fn upright_only(t: TransitionDef) -> TransitionDef {
 
 /// The prone shot's state, beside `move`.
 pub(super) fn states() -> Vec<StateDef> {
-    vec![StateDef {
-        name: PRONE_RIFLE_FIRE.into(),
-        node: NodeDef::one_shot(PRONE_RIFLE_FIRE),
-        speed: 1.0,
-        speed_param: None,
-    }]
+    [PRONE_RIFLE_FIRE, PRONE_RIFLE_RELOAD]
+        .map(|name| StateDef {
+            name: name.into(),
+            node: NodeDef::one_shot(name),
+            speed: 1.0,
+            speed_param: None,
+        })
+        .into()
 }
 
 /// Lying down with a long gun, `fire` shoots from the firing position (taken up in the
 /// shot's first frames when it wasn't aimed), back to lying as before when it's done.
 pub(super) fn transitions() -> Vec<TransitionDef> {
-    let lying = Condition::All(vec![
-        Condition::param(RIFLE_CARRY, Cmp::Gt, 0.5),
-        Condition::param(PRONED, Cmp::Gt, 0.75),
-        Condition::trigger("fire"),
-    ]);
+    let lying = |trigger: &str| {
+        Condition::All(vec![
+            Condition::param(RIFLE_CARRY, Cmp::Gt, 0.5),
+            Condition::param(PRONED, Cmp::Gt, 0.75),
+            Condition::trigger(trigger),
+        ])
+    };
     vec![
-        TransitionDef::new("move", PRONE_RIFLE_FIRE, lying, 0.06),
+        TransitionDef::new("move", PRONE_RIFLE_FIRE, lying("fire"), 0.06),
+        TransitionDef::new("move", PRONE_RIFLE_RELOAD, lying("reload"), 0.2),
+        TransitionDef::new(
+            PRONE_RIFLE_FIRE,
+            PRONE_RIFLE_RELOAD,
+            Condition::trigger("reload"),
+            0.15,
+        ),
         TransitionDef::new(PRONE_RIFLE_FIRE, "move", Condition::Finished, 0.12),
+        TransitionDef::new(PRONE_RIFLE_RELOAD, "move", Condition::Finished, 0.2),
     ]
 }

@@ -313,6 +313,16 @@ fn main() {
             s.set(e, "aim", 0.0);
             s.run(1.2);
             views(&mut s, "5_lowered");
+            // A magazine change lying down.
+            s.set(e, "aim", 1.0);
+            s.run(1.0);
+            s.cue(e, "reload");
+            let mut t = 0.0;
+            for (name, at) in [("6_mag_out", 0.62), ("7_pouch", 1.0), ("8_mag_in", 1.62)] {
+                s.run(at - t);
+                t = at;
+                views(&mut s, name);
+            }
         }
         "rifle_film" => {
             let e = s.person(DVec3::ZERO, 23);

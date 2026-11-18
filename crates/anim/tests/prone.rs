@@ -285,3 +285,56 @@ fn a_rifleman_crawls_with_the_gun_on_its_side_in_his_right_fist() {
     assert!(floor > -0.03, "a bone {floor} under the floor");
     assert!(bone(&app, e, "head").y < 0.6, "head up crawling");
 }
+
+#[test]
+fn lying_down_a_rifleman_changes_his_magazine_and_goes_back_on_aim() {
+    use engine_world::combat::{ItemClass, Loadout};
+    let mut app = app();
+    app.world.init_resource::<Said>();
+    app.add_systems(Last, listen);
+    let e = person(&mut app);
+    app.world.entity_mut(e).insert(Loadout {
+        main: ItemClass::Firearm,
+        off: ItemClass::None,
+        two_handed: true,
+    });
+    run(&mut app, 0.5);
+    prone(&mut app, e, true);
+    run(&mut app, PRONE_SECS as f64 + 0.5);
+    app.world
+        .get_mut::<AnimationParams>(e)
+        .unwrap()
+        .set("aim", 1.0);
+    run(&mut app, 1.0);
+    app.world
+        .write_message(engine_world::animation::AnimationTrigger {
+            entity: e,
+            name: "reload".into(),
+        });
+    let mut floor = f32::MAX;
+    let mut off_grip: f32 = 0.0;
+    for _ in 0..(3.0 / STEP) as usize {
+        app.update();
+        floor = floor.min(lowest(&app, e));
+        off_grip = off_grip.max(gun(&app, e).1);
+        assert!(
+            bone(&app, e, "head").y < 0.6,
+            "the reload stood the body up"
+        );
+    }
+    let said = &app.world.resource::<Said>().0;
+    assert!(
+        said.iter().any(|s| s == "mag_out") && said.iter().any(|s| s == "mag_in"),
+        "said {said:?}"
+    );
+    assert!(
+        off_grip > 0.15,
+        "the left hand never left the fore grip ({off_grip} m)"
+    );
+    assert!(floor > -0.03, "a bone {floor} under the floor reloading");
+    let (muzzle, off) = gun(&app, e);
+    assert!(
+        muzzle.dot(Vec3::NEG_Z) > 0.995 && off < 0.06,
+        "back on aim: muzzle {muzzle}, left fist {off} m off the fore grip"
+    );
+}
