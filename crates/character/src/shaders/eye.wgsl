@@ -85,22 +85,62 @@ fn socket_light(h: vec3<f32>, sun: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(sky, 1.0 - 0.85 * shade);
 }
 
-// How much of the room's light reaches a point `h` of the eye (head frame, unit radius) past
-// the lids: the upper lid with its lashes shades a broad band below its edge, the lower lid a
-// narrow one, and the corners, where both meet, lie deep in shade. Without this the white of
-// the eye is lit as brightly as the open cheek and glows.
-fn lid_shade(h: vec3<f32>, side: f32) -> f32 {
+// How far a point `h` of the eye (head frame, unit radius) lies below the upper lid's edge (x)
+// and above the lower lid's (y), in eye radii; (1, 1) without lids.
+fn lid_gap(h: vec3<f32>, side: f32) -> vec2<f32> {
     let i = select(2u, 0u, side > 0.0);
     let up = character.lids[i];
     let lo = character.lids[i + 1u];
     if (up.x == 0.0 && lo.x == 0.0) {
-        return 1.0;
+        return vec2<f32>(1.0);
     }
     let x = h.x;
-    let below_upper = up.x + up.y * x + up.z * x * x - h.y;
-    let above_lower = h.y - (lo.x + lo.y * x + lo.z * x * x);
-    return mix(0.3, 1.0, smoothstep(-0.02, 0.38, below_upper))
-        * mix(0.55, 1.0, smoothstep(-0.02, 0.16, above_lower));
+    return vec2<f32>(up.x + up.y * x + up.z * x * x - h.y, h.y - (lo.x + lo.y * x + lo.z * x * x));
+}
+
+// How much of the room's light reaches a point `h` of the eye past the lids: the upper lid
+// with its lashes shades a broad band below its edge, the lower lid a narrow one, and the
+// corners, where both meet, lie deep in shade (what the "eye occlusion" shell of film and game
+// heads paints: MetaHuman, Reallusion's digital human shader). Without this the white of the
+// eye is lit as brightly as the open cheek and looks pasted on.
+fn lid_shade(h: vec3<f32>, side: f32) -> f32 {
+    let gap = lid_gap(h, side);
+    let corners = mix(0.55, 1.0, 1.0 - smoothstep(0.5, 0.9, abs(h.x)));
+    return mix(0.2, 1.0, smoothstep(-0.02, 0.45, gap.x))
+        * mix(0.5, 1.0, smoothstep(-0.02, 0.16, gap.y))
+        * corners;
+}
+
+// The tear meniscus: the strip of tear fluid along each lid's edge, about 0.25 mm high along the
+// lower lid (clinical tear meniscus height) and thinner along the upper. Its surface curves from
+// the eye up onto the lid, so it catches lights above as a fine bright line that reads as a wet
+// eye from across a room. Returns how much of the meniscus is here (0..1) and which way its
+// surface leans (+1 up, toward the lower lid's edge; -1 down).
+fn tear_meniscus(gap: vec2<f32>) -> vec2<f32> {
+    // Eye radii: about 12 mm.
+    // (Drawn a little higher than the 0.25-0.3 mm it measures, as film heads' tear lines are,
+    // so that it still shows at a few pixels' size.)
+    let lower = (1.0 - smoothstep(0.0, 0.05, gap.y)) * step(-0.004, gap.y);
+    let upper = (1.0 - smoothstep(0.0, 0.025, gap.x)) * step(-0.004, gap.x) * 0.6;
+    return select(vec2<f32>(upper, -1.0), vec2<f32>(lower, 1.0), lower >= upper);
+}
+
+// The caruncle (the pink mound in the eye's inner corner) and the plica beside it, painted onto
+// the eye where it meets the inner corner. `inner`: how far toward the nose (eye radii).
+fn caruncle(albedo: vec3<f32>, inner: f32, gap: vec2<f32>, seed: f32, local: vec3<f32>) -> vec4<f32> {
+    let open = smoothstep(-0.02, 0.05, min(gap.x, gap.y));
+    // The lids' opening narrows to the inner corner; the caruncle fills its last 3-4 mm, the
+    // plica the 1-2 mm before.
+    let height = gap.x + gap.y;
+    let near = step(0.3, inner);
+    let mound = smoothstep(0.4, 0.15, height) * open * near;
+    let plica = exp(-sq((height - 0.38) / 0.08)) * open * near * 0.5;
+    let melanin = smoothstep(0.35, 0.9, character.skin.x);
+    let bumps = 0.85 + 0.3 * value_noise2(local.xy * 90.0 + seed);
+    var flesh = vec3<f32>(0.62, 0.3, 0.28) * bumps * mix(1.0, 0.55, melanin);
+    let fold = albedo * vec3<f32>(1.0, 0.78, 0.74);
+    let c = mix(mix(albedo, fold, plica), flesh, mound);
+    return vec4<f32>(c, mound);
 }
 
 @vertex
@@ -239,25 +279,34 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
             dot(sun, head_axis(vec3<f32>(0.0, 0.0, 1.0))),
         ),
     );
+    let gap = lid_gap(h, in.side);
+    // Toward the nose: the base mesh's left eye (+X) has it on -X.
+    let car = caruncle(albedo, -h.x * in.side, gap, seed, local);
+    albedo = car.rgb;
     var s = default_surface();
     s.albedo = albedo;
     s.normal = under_n;
     s.roughness = 0.35;
     s.reflectance = 0.0;
-    s.occlusion = socket.x;
-    s.subsurface = 0.25;
-    let lids = lid_shade(h, in.side);
+    // The caruncle stands forward out of the corner's shade.
+    s.occlusion = mix(socket.x, 0.6, car.a);
+    s.subsurface = mix(0.25, 0.6, car.a);
+    let lids = mix(lid_shade(h, in.side), 0.75, car.a);
     var color = shade_surface_shadowed(s, in.rel, socket.y) * lids;
     // The cornea and the tear film: a smooth coat over everything.
     var coat = default_surface();
     coat.albedo = vec3<f32>(0.0);
-    coat.normal = n;
-    coat.roughness = mix(0.16, 0.05, in_cornea);
+    let meniscus = tear_meniscus(gap);
+    let up = head_axis(vec3<f32>(0.0, 1.0, 0.0));
+    coat.normal = normalize(n + up * (meniscus.y * 1.6 * meniscus.x));
+    coat.roughness = mix(mix(mix(0.16, 0.05, in_cornea), 0.03, meniscus.x), 0.2, car.a);
     // F0 of the tear film over the sclera (water, 2%) and of the cornea (index 1.376, 2.5%):
     // any stronger and a bright sky veils the iris grey outdoors.
-    coat.reflectance = mix(0.35, 0.4, in_cornea);
+    coat.reflectance = mix(mix(0.35, 0.4, in_cornea), 0.5, meniscus.x);
     coat.occlusion = socket.x;
-    color += shade_surface_shadowed(coat, in.rel, socket.y) * mix(0.4, 1.0, lids);
+    // The meniscus stands out of the lids' shade into the light.
+    let coat_lit = max(mix(0.4, 1.0, lids), meniscus.x * 0.9);
+    color += shade_surface_shadowed(coat, in.rel, socket.y) * coat_lit;
     return vec4<f32>(apply_fog(color, in.rel), 1.0);
 }
 
