@@ -543,6 +543,8 @@ pub struct ItemDef {
 pub enum Icon {
     Good(Good),
     Kind(Kind),
+    /// Its own picture, by icon key (ship gear).
+    Art(&'static str),
 }
 
 impl ItemDef {
@@ -554,6 +556,7 @@ impl ItemDef {
     pub fn icon_key(&self) -> &'static str {
         match self.icon {
             Icon::Good(g) => g.icon(),
+            Icon::Art(key) => key,
             Icon::Kind(Kind::Harbour | Kind::HarbourOffice) => "isle_anchor",
             Icon::Kind(Kind::House | Kind::TownHall) => "isle_house",
             Icon::Kind(Kind::Chapel) => "isle_chapel",

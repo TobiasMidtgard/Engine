@@ -427,15 +427,16 @@ fn views() -> Vec<View> {
         // Round 8 build: the Ship chandler, and the Town Hall's fireworks at night.
         View {
             clean: true,
-            pitch_deg: Some(26.0),
-            ..v("chandler", Aim::Front(K::Chandler, 0), 0.5, 36.0)
+            pitch_deg: Some(46.0),
+            ..v("chandler", Aim::Front(K::Chandler, 0), 0.5, 52.0)
         },
         View {
             clean: true,
-            pitch_deg: Some(14.0),
+            pitch_deg: Some(9.0),
+            fog: false,
             hour: Some(20.6),
             show: true,
-            ..v("fireworks", Aim::Front(K::TownHall, 0), 0.45, 150.0)
+            ..v("fireworks", Aim::Front(K::TownHall, 0), 0.45, 190.0)
         },
         View {
             card: true,
