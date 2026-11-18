@@ -5,6 +5,7 @@
 //! cargo run -p archipelago --release                          # play
 //! cargo run -p archipelago --release -- --headless --tour     # writes screenshots/archipelago/*.png
 //! cargo run -p archipelago --release -- --headless --tour town,harbour
+//! cargo run -p archipelago --release -- --headless --play 240     # a scripted player, see playtest.rs
 //! ```
 //!
 //! Keys: WASD or arrows pan (Shift faster), Q/E turn, wheel zooms, right-drag pans, middle-drag
@@ -35,6 +36,7 @@ mod items;
 mod logistics;
 mod looks;
 mod orders;
+mod playtest;
 mod regional;
 mod sea;
 mod sim;
@@ -63,6 +65,26 @@ fn main() {
         app.insert_resource(world::WoodsDensity(d));
     }
     add_game(&mut app);
+    // `--play <game minutes> [--play-speed 4] [--play-shots town,harbour]`: a scripted player.
+    if let Some(i) = args.iter().position(|a| a == "--play") {
+        let minutes = args
+            .get(i + 1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120.0);
+        let speed = args
+            .iter()
+            .position(|a| a == "--play-speed")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4.0);
+        let shots = args
+            .iter()
+            .position(|a| a == "--play-shots")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        playtest::run(app, minutes, speed, shots.as_deref());
+        return;
+    }
     match tour {
         Some(only) => tour::run(app, only.as_deref()),
         None => {

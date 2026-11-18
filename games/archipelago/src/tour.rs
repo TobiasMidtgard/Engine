@@ -694,6 +694,11 @@ pub fn run(mut app: App, only: Option<&str>) {
             serde_json::to_string_pretty(&items).unwrap_or_default(),
         );
     }
+    shoot(&mut app, only, out);
+}
+
+/// Take the tour's pictures (all, or the views named in `only`) into `out`.
+pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
     let keys: Option<Vec<&str>> = only.map(|s| s.split(',').collect());
     for view in views() {
         if keys.as_ref().is_some_and(|k| !k.contains(&view.key)) {
@@ -759,7 +764,7 @@ pub fn run(mut app: App, only: Option<&str>) {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(240.0);
-        settle(&mut app, cap);
+        settle(app, cap);
         // Exposure and the environment, following a moving craft.
         for _ in 0..8 {
             if matches!(view.aim, Aim::Craft(_) | Aim::Pedlar | Aim::Review)
