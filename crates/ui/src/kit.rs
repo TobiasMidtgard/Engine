@@ -620,6 +620,213 @@ pub mod brass {
         }
     }
 
+    /// What an item in a socket is doing, drawn over the socket by [`socket_with`]: a dark
+    /// sweep for the wait until it can be pressed again (as on an action bar), an arc filling
+    /// around the rim toward a charge, a bright arc that drains while it acts, pips for the
+    /// uses left, and a slow pulse when it is ready to press.
+    #[derive(
+        bevy_ecs::component::Component,
+        Clone,
+        Debug,
+        Default,
+        PartialEq,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[serde(default)]
+    pub struct SocketState {
+        /// 0..1 of the wait still to go (0: none).
+        pub cooldown: f32,
+        /// 0..1 toward a full charge, shown as an arc around the rim.
+        pub fill: Option<f32>,
+        /// 0..1 of its acting time still to go.
+        pub acting: Option<f32>,
+        /// Uses left, of at most `pips_max` (dots along the bottom of the rim).
+        pub pips: u32,
+        pub pips_max: u32,
+        /// Ready to press: the rim pulses.
+        pub ready: bool,
+        /// Not working yet (a later round, a locked rule): the badge greys out.
+        pub inert: bool,
+        /// The arcs' colour (the item's rank colour reads best).
+        pub color: Color,
+        /// A short label over the badge: seconds of wait, or uses left.
+        pub label: String,
+    }
+
+    /// How much wider than its socket a state overlay is.
+    const SOCKET_OVERLAY: f32 = 1.8;
+
+    /// [`socket`] with an item's state drawn over it ([`SocketState`]). `state_id` (or "")
+    /// names the overlay, so a game can update its `SocketState` in place every frame
+    /// without rebuilding the socket.
+    pub fn socket_with(
+        item: Option<(&str, Rank)>,
+        size: f32,
+        action: &str,
+        state: &SocketState,
+        state_id: &str,
+    ) -> El {
+        let inert = state.inert;
+        let overlay = El::new()
+            .paint("brass_socket_state")
+            .attach("SocketState", state)
+            .with_style(move |s| {
+                // Wider than the socket: painters clip to their own box, and the glows and
+                // the outer arcs reach past the rim.
+                let pad = size * (SOCKET_OVERLAY - 1.0) * 0.5;
+                s.position(crate::style::Position::Absolute)
+                    .left(-pad)
+                    .top(-pad)
+                    .size(size * SOCKET_OVERLAY, size * SOCKET_OVERLAY)
+                    .pick(Pick::Ignore)
+            });
+        let overlay = if state_id.is_empty() {
+            overlay
+        } else {
+            overlay.id(state_id)
+        };
+        let base = socket(item, size, action);
+        let base = if inert {
+            base.with_style(|s| s.opacity(0.55))
+        } else {
+            base
+        };
+        El::new()
+            .with_style(move |s| s.size(size, size))
+            .child(base)
+            .child(overlay)
+    }
+
+    pub(crate) fn paint_socket_state(
+        world: &mut bevy_ecs::world::World,
+        e: bevy_ecs::entity::Entity,
+        ctx: &mut crate::draw::DrawCtx,
+    ) {
+        use engine_core::math::Vec2;
+        let Some(st) = world.get::<SocketState>(e).cloned() else {
+            return;
+        };
+        let tau = std::f32::consts::TAU;
+        let rect = ctx.rect;
+        let c = rect.center();
+        let r = rect.w.min(rect.h) * 0.5 / SOCKET_OVERLAY;
+        let col = if st.color.a > 0.0 {
+            st.color
+        } else {
+            Colors::brass_light()
+        };
+        // The wait: a dark pie over the part still to go, its leading edge lit.
+        if st.cooldown > 0.001 {
+            let cd = st.cooldown.clamp(0.0, 1.0);
+            let start = tau * (1.0 - cd);
+            let pr = r * 0.84;
+            ctx.ring(
+                c,
+                Vec2::splat(pr * 0.5),
+                pr,
+                Color::hexa(0x050302d8),
+                start,
+                tau * cd,
+                0.0,
+            );
+            let edge = Vec2::new(start.sin(), -start.cos());
+            ctx.line(c, c + edge * pr, 1.5 * ctx.px, col.with_alpha(0.9), 0.0);
+        }
+        // Toward a charge: a dim track round the rim and the filled part bright.
+        if let Some(f) = st.fill {
+            let f = f.clamp(0.0, 1.0);
+            let rr = Vec2::splat(r - 2.0 * ctx.px);
+            ctx.ring(c, rr, 3.0 * ctx.px, Color::hexa(0x00000080), 0.0, tau, 0.0);
+            ctx.ring(c, rr, 3.0 * ctx.px, col, 0.0, tau * f, 0.0);
+            if f >= 0.999 {
+                ctx.glow(c, r * 1.25, col.with_alpha(0.35), 1.6);
+            }
+        }
+        // Acting: a bright arc draining as its time runs out, and a glow.
+        if let Some(a) = st.acting {
+            let a = a.clamp(0.0, 1.0);
+            let pulse = 0.5 + 0.5 * (ctx.time * 3.0).sin();
+            ctx.glow(c, r * 1.3, col.with_alpha(0.22 + 0.12 * pulse), 1.5);
+            ctx.ring(
+                c,
+                Vec2::splat(r + 1.0 * ctx.px),
+                3.5 * ctx.px,
+                col.lerp(Color::WHITE, 0.35),
+                0.0,
+                tau * a,
+                0.0,
+            );
+        }
+        // Ready to press: the rim breathes.
+        if st.ready {
+            let pulse = 0.5 + 0.5 * (ctx.time * 2.2).sin();
+            ctx.glow(c, r * 1.35, col.with_alpha(0.18 + 0.22 * pulse), 1.4);
+            ctx.ring(
+                c,
+                Vec2::splat(r + 1.0 * ctx.px),
+                2.0 * ctx.px,
+                col.with_alpha(0.55 + 0.45 * pulse),
+                0.0,
+                tau,
+                0.0,
+            );
+        }
+        // The label: seconds of wait or uses left, outlined so it reads over any badge.
+        if !st.label.is_empty() {
+            let size = (r * 0.62 / ctx.px).max(11.0);
+            for d in [
+                Vec2::new(-1.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(0.0, -1.0),
+                Vec2::new(0.0, 1.0),
+                Vec2::new(0.0, 1.5),
+            ] {
+                ctx.text(
+                    &st.label,
+                    size,
+                    800,
+                    Colors::outline(),
+                    c + d * 1.5 * ctx.px,
+                    Vec2::splat(0.5),
+                );
+            }
+            ctx.text(&st.label, size, 800, Colors::cream(), c, Vec2::splat(0.5));
+        }
+        // Uses left: pips along the bottom of the rim.
+        if st.pips_max > 0 {
+            let n = st.pips_max.min(12);
+            let spread = (0.36 * (n - 1) as f32).min(2.6);
+            let pip = (r * 0.15).max(3.0 * ctx.px);
+            for i in 0..n {
+                let t = if n == 1 {
+                    0.5
+                } else {
+                    i as f32 / (n - 1) as f32
+                };
+                let a = std::f32::consts::PI + spread * (t - 0.5);
+                let p = c + Vec2::new(a.sin(), -a.cos()) * (r + pip * 0.7);
+                let on = i < st.pips;
+                let box_ = crate::node::Rect::new(p.x - pip, p.y - pip, pip * 2.0, pip * 2.0);
+                ctx.rect(
+                    box_,
+                    if on {
+                        Colors::brass_light()
+                    } else {
+                        Color::hexa(0x0a0806e0)
+                    },
+                    pip,
+                    1.5 * ctx.px,
+                    if on {
+                        Colors::outline()
+                    } else {
+                        Colors::brass_dark()
+                    },
+                );
+            }
+        }
+    }
+
     /// A progress bar `width` px wide, `frac` full.
     pub fn meter(width: f32, frac: f32) -> El {
         El::new()

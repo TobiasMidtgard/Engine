@@ -331,10 +331,72 @@ fn sockets() -> El {
                 .class("row")
                 .with_style(|s| s.gap(14.0))
                 .children(items),
+        )
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(14.0))
+                .children(states()),
         );
     El::new()
         .with_style(|s| s.fill_parent().pick(Pick::Ignore))
         .child(p)
+}
+
+/// The item states a socket can show: waiting, filling, acting, uses left, ready, inert.
+fn states() -> Vec<El> {
+    use brass::{Rank, SocketState};
+    let st = |f: &dyn Fn(&mut SocketState)| {
+        let mut s = SocketState::default();
+        f(&mut s);
+        s
+    };
+    [
+        (
+            "Waiting",
+            "coin",
+            Rank::Fine,
+            st(&|s| {
+                s.cooldown = 0.62;
+                s.label = "48".into();
+            }),
+        ),
+        ("Filling", "herb", Rank::Rare, st(&|s| s.fill = Some(0.4))),
+        (
+            "Acting",
+            "cloak",
+            Rank::Storied,
+            st(&|s| s.acting = Some(0.7)),
+        ),
+        (
+            "Uses left",
+            "herb",
+            Rank::Common,
+            st(&|s| {
+                s.pips = 2;
+                s.pips_max = 3;
+                s.ready = true;
+            }),
+        ),
+        ("Ready", "coin", Rank::Rare, st(&|s| s.ready = true)),
+        ("Later", "cloak", Rank::Fine, st(&|s| s.inert = true)),
+    ]
+    .into_iter()
+    .map(|(name, icon, rank, mut state)| {
+        state.color = rank.color();
+        El::new()
+            .class("col")
+            .with_style(|s| s.gap(6.0).align_items(Align::Center))
+            .child(brass::socket_with(
+                Some((icon, rank)),
+                58.0,
+                "slot",
+                &state,
+                "",
+            ))
+            .child(brass::label(name, false))
+    })
+    .collect()
 }
 
 fn main() {

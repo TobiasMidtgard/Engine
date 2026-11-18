@@ -111,6 +111,7 @@ impl Plugin for UiPlugin {
             wheel::add_painters(&mut painters);
             skills::add_painters(&mut painters);
             crafting::add_painters(&mut painters);
+            painters.add("brass_socket_state", kit::brass::paint_socket_state);
             saves::add_painters(&mut painters);
             title::add_painters(&mut painters);
             loading::add_painters(&mut painters);
@@ -328,6 +329,9 @@ fn register_types(app: &mut App) {
         "Round minimap (paint: minimap) of the player's planet around them: span_deg, heading (path).",
     )
     .register_component::<hud::Crosshair>("Crosshair (paint: crosshair): spread 0..1 or bind.")
+    .register_component::<kit::brass::SocketState>(
+        "What an item in a brass socket is doing (paint: brass_socket_state): cooldown, fill, acting, pips, ready, inert, color, label.",
+    )
     .register_component::<hud::TimeGauge>("Ring gauge of the engine's time scale (paint: time_gauge).")
     .register_component::<hud::MarkerDistance>("The distance label inside a world marker.")
     .register_component::<hud::MarkerArrow>("The edge arrow inside a world marker.")

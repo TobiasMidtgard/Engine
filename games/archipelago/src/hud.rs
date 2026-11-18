@@ -25,6 +25,7 @@ use crate::island;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::tools::{Hand, Tool};
 
+mod fleet;
 mod house;
 mod ledger;
 mod map;
@@ -670,6 +671,7 @@ pub fn setup(world: &mut World) {
     ledger::install(world);
     routes::install(world);
     house::install(world);
+    fleet::install(world);
     works::install(world);
     store::install(world);
     shelf::install(world);
@@ -789,7 +791,10 @@ pub fn read_actions(world: &mut World) {
             } else {
                 routes::refresh(world);
             }
-        } else if shelf::action(world, &a) {
+        } else if shelf::action(world, &a) || fleet::action(world, &a) {
+        } else if a.starts_with("isle.gear.") {
+            crate::tools::action(world, &a);
+            fleet::after_gear_action(world, &a);
         } else if a.starts_with("isle.item.") {
             crate::tools::action(world, &a);
             shelf::after_item_action(world, &a);
@@ -833,13 +838,17 @@ fn read_keys(world: &mut World) {
     let Some(keys) = world.get_resource::<ButtonInput<KeyCode>>() else {
         return;
     };
-    let (l, h, t, i, esc) = (
+    let (l, h, t, i, g, esc) = (
         keys.just_pressed(KeyCode::L),
         keys.just_pressed(KeyCode::H),
         keys.just_pressed(KeyCode::T),
         keys.just_pressed(KeyCode::I),
+        keys.just_pressed(KeyCode::G),
         keys.just_pressed(KeyCode::Escape),
     );
+    if g || (esc && world.resource::<fleet::Fleet>().open) {
+        fleet::toggle(world);
+    }
     if i || (esc && world.resource::<shelf::Shelf>().open) {
         shelf::toggle(world);
     }
@@ -1138,6 +1147,7 @@ pub fn update_data(world: &mut World) {
         house::refresh(world);
         works::refresh(world);
         store::refresh(world);
+        fleet::refresh(world);
     }
     demo_step(world, dt);
 }
@@ -1199,6 +1209,12 @@ fn demo_step(world: &mut World, dt: f32) {
                 std::env::args().find_map(|a| a.strip_prefix("--hud-slot=")?.parse::<usize>().ok())
             {
                 shelf::pick_slot(world, k);
+            }
+            // `--hud-fleet=k`: the ships' gear with the first vessel's socket k picked.
+            if let Some(k) =
+                std::env::args().find_map(|a| a.strip_prefix("--hud-fleet=")?.parse::<usize>().ok())
+            {
+                fleet::demo(world, k);
             }
         }
     }

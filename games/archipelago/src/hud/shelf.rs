@@ -7,10 +7,10 @@
 use engine::prelude::*;
 use engine_ui::Color;
 use engine_ui::el::El;
-use engine_ui::kit::brass::{self, Colors, Rank as UiRank};
+use engine_ui::kit::brass::{self, Colors, Rank as UiRank, SocketState};
 use engine_ui::style::{Align, Direction, Enter, Justify, Pick, Position};
 
-use crate::items::{self, ItemView, Rank, Sort};
+use crate::items::{self, ItemView, Rank, Sort, Way};
 use crate::sim::{Building, Economy};
 use crate::tools::Hand;
 
@@ -38,7 +38,7 @@ pub fn install(world: &mut World) {
     world.init_resource::<Shelf>();
 }
 
-fn ui_rank(r: Rank) -> UiRank {
+pub(super) fn ui_rank(r: Rank) -> UiRank {
     match r {
         Rank::Common => UiRank::Common,
         Rank::Fine => UiRank::Fine,
@@ -85,7 +85,7 @@ fn kind_line(iv: &ItemView) -> String {
 }
 
 /// The hover card of an item: what it is, where it goes, what it does and is doing.
-fn tip_text(iv: &ItemView) -> String {
+pub(super) fn tip_text(iv: &ItemView) -> String {
     let mut s = format!("[i]{}[/i]\n", iv.blurb);
     s += &format!(
         "[b]{}[/b] for the {}, on {}",
@@ -108,9 +108,125 @@ fn tip_text(iv: &ItemView) -> String {
     s
 }
 
-/// An item's socket with its hover card.
-fn item_socket(iv: &ItemView, size: f32, action: &str) -> El {
-    brass::socket(Some((iv.icon, ui_rank(iv.rank))), size, action).tooltip(iv.name, tip_text(iv))
+/// Seconds as the socket's label shows them: "48", or "3m" past a minute.
+fn secs(t: f32) -> String {
+    if t >= 60.0 {
+        format!("{:.0}m", (t / 60.0).ceil())
+    } else {
+        format!("{:.0}", t.ceil())
+    }
+}
+
+/// What an item is doing, for its socket's overlay: the wait, the charge filling, the time
+/// it still acts, the uses left, whether it can be pressed.
+pub(super) fn socket_state(iv: &ItemView) -> SocketState {
+    let mut s = SocketState {
+        color: ui_rank(iv.rank).color(),
+        inert: iv.later.is_some(),
+        ..Default::default()
+    };
+    let acting = |lasts: f32| (iv.left_s > 0.0).then(|| iv.left_s / lasts.max(0.1));
+    let wait = |s: &mut SocketState, total: f32| {
+        if iv.left_s <= 0.0 && iv.cool_s > 0.0 {
+            s.cooldown = (iv.cool_s / total.max(0.1)).min(1.0);
+            s.label = secs(iv.cool_s);
+        }
+    };
+    match iv.way {
+        Way::Order {
+            lasts_s,
+            cooldown_s,
+        } => {
+            s.acting = acting(lasts_s);
+            wait(&mut s, cooldown_s);
+            s.ready = iv.ready;
+        }
+        Way::Consumable { charges, lasts_s } => {
+            s.acting = acting(lasts_s);
+            s.pips = iv.charges;
+            s.pips_max = charges;
+            s.ready = iv.ready;
+        }
+        Way::Triggered {
+            lasts_s,
+            recharge_s,
+            ..
+        } => {
+            s.acting = acting(lasts_s);
+            wait(&mut s, recharge_s);
+        }
+        Way::Charged { need, lasts_s, .. } => {
+            s.acting = acting(lasts_s);
+            if s.acting.is_none() {
+                s.fill = Some(iv.fill / need.max(0.01));
+            }
+        }
+        Way::Passive | Way::TwoEdged => {}
+    }
+    if s.acting.is_some() {
+        s.label = secs(iv.left_s);
+    }
+    s
+}
+
+/// How an item acts, in words: "Order · acts 2 min, then 10 min to ready".
+fn way_line(iv: &ItemView) -> Option<String> {
+    let m = |t: f32| {
+        if t >= 60.0 {
+            format!("{:.0} min", t / 60.0)
+        } else {
+            format!("{t:.0} s")
+        }
+    };
+    Some(match iv.way {
+        Way::Passive => return None,
+        Way::Order {
+            lasts_s,
+            cooldown_s,
+        } => format!(
+            "Order · acts {} when given, then {} before the next",
+            m(lasts_s),
+            m(cooldown_s)
+        ),
+        Way::Consumable { charges, lasts_s } => format!(
+            "Consumable · {} of {charges} uses left, each acting {}",
+            iv.charges,
+            m(lasts_s)
+        ),
+        Way::Triggered {
+            lasts_s,
+            recharge_s,
+            ..
+        } => format!(
+            "Triggered · acts {} by itself when called for, then {} to recharge",
+            m(lasts_s),
+            m(recharge_s)
+        ),
+        Way::Charged { need, lasts_s, .. } => format!(
+            "Charged · {:.0} of {need:.0} filled, then acts {}",
+            iv.fill,
+            m(lasts_s)
+        ),
+        Way::TwoEdged => "Two-edged · it costs as well as gives".to_string(),
+    })
+}
+
+/// An item's socket with its state and hover card; `state_id` names the overlay so the card
+/// can move its sweep and arcs every tick without a rebuild.
+fn item_socket(iv: &ItemView, size: f32, action: &str, state_id: &str) -> El {
+    brass::socket_with(
+        Some((iv.icon, ui_rank(iv.rank))),
+        size,
+        action,
+        &socket_state(iv),
+        state_id,
+    )
+    .tooltip(iv.name, tip_text(iv))
+}
+
+/// The overlay id of a card socket.
+fn state_id(building: u32, slot: usize) -> String {
+    format!("isle.sock.{building}.{slot}")
 }
 
 fn ink(text: impl Into<String>, size: f32) -> El {
@@ -122,7 +238,7 @@ fn ink(text: impl Into<String>, size: f32) -> El {
 }
 
 /// The lines under an item's name: kind, rules, what it does now, its climate.
-fn details(iv: &ItemView) -> El {
+pub(super) fn details(iv: &ItemView) -> El {
     let rank = ui_rank(iv.rank).color();
     El::new()
         .class("col")
@@ -145,6 +261,20 @@ fn details(iv: &ItemView) -> El {
                 ),
         )
         .child(brass::label(&kind_line(iv), true))
+        .child_opt(way_line(iv).map(|w| {
+            El::text(w)
+                .class("ink")
+                .text_style(|t| t.size(14.0).bold())
+                .with_style(|s| s.color(Colors::ink_dim()))
+                .pick_ignore()
+        }))
+        .child_opt(iv.later.map(|r| {
+            El::text(format!("Starts working in a later update (round {r})"))
+                .class("ink")
+                .text_style(|t| t.size(13.0).italic())
+                .with_style(|s| s.color(Colors::bad_ink()))
+                .pick_ignore()
+        }))
         .children(iv.effects.iter().map(|e| ink(format!("· {e}"), 14.0)))
         .children(iv.now.iter().map(|n| {
             El::text(format!("Now: {n}"))
@@ -211,6 +341,7 @@ fn card_section(p: &items::Panel, picked: Option<usize>) -> Vec<El> {
                     iv,
                     58.0,
                     &format!("isle.shelf.slot:{}:{}", p.building, sv.slot),
+                    &state_id(p.building, sv.slot),
                 )
                 .selected(picked == Some(sv.slot)),
                 if iv.stars > 0 {
@@ -259,10 +390,30 @@ fn card_section(p: &items::Panel, picked: Option<usize>) -> Vec<El> {
         Some(iv) => {
             let slot = picked.unwrap_or(0);
             out.push(details(iv));
+            let pressable =
+                matches!(iv.way, Way::Order { .. } | Way::Consumable { .. }) && iv.later.is_none();
+            let use_label = if iv.ready {
+                if matches!(iv.way, Way::Order { .. }) {
+                    "Give the order"
+                } else {
+                    "Use one"
+                }
+            } else if iv.acting {
+                "Under way"
+            } else if matches!(iv.way, Way::Consumable { .. }) {
+                "Used up"
+            } else {
+                "Recharging"
+            };
             out.push(
                 El::new()
                     .class("row")
                     .with_style(|s| s.gap(10.0))
+                    .child_opt(pressable.then(|| {
+                        El::button(use_label, format!("isle.item.use:{}:{slot}", p.building))
+                            .class("brass_button")
+                            .disabled(!iv.ready)
+                    }))
                     .child(
                         El::button(
                             "Take out",
@@ -331,17 +482,36 @@ pub fn refresh_card(world: &mut World) {
         // An item just put in: pick it out.
         s.card_slot.map(|(_, i)| i)
     };
+    // The clocks run every tick: they move the sockets' overlays in place, not the section.
+    let mut still = panel.clone();
+    for sv in &mut still.slots {
+        if let Some(iv) = &mut sv.item {
+            iv.left_s = 0.0;
+            iv.cool_s = 0.0;
+            iv.fill = 0.0;
+        }
+    }
     let sig = format!(
         "{}|{picked:?}",
-        serde_json::to_string(&panel).unwrap_or_default()
+        serde_json::to_string(&still).unwrap_or_default()
     );
-    if world.resource::<Shelf>().card_sig == sig {
-        return;
+    if world.resource::<Shelf>().card_sig != sig {
+        let els = card_section(&panel, picked);
+        if let Some(node) = engine_ui::input::find_id(world, CARD_ID) {
+            let _ = engine_ui::el::replace_children(world, node, &els);
+            world.resource_mut::<Shelf>().card_sig = sig;
+        }
     }
-    let els = card_section(&panel, picked);
-    if let Some(node) = engine_ui::input::find_id(world, CARD_ID) {
-        let _ = engine_ui::el::replace_children(world, node, &els);
-        world.resource_mut::<Shelf>().card_sig = sig;
+    for sv in &panel.slots {
+        if let Some(iv) = &sv.item
+            && let Some(e) = engine_ui::input::find_id(world, &state_id(panel.building, sv.slot))
+            && let Some(mut st) = world.get_mut::<SocketState>(e)
+        {
+            let new = socket_state(iv);
+            if *st != new {
+                *st = new;
+            }
+        }
     }
 }
 
@@ -406,7 +576,7 @@ fn body(world: &World) -> Vec<El> {
                         .align_items(Align::Center)
                         .opacity(if fits { 1.0 } else { 0.4 })
                 })
-                .child(item_socket(iv, 52.0, &action).selected(chosen == Some(iv.uid)))
+                .child(item_socket(iv, 52.0, &action, "").selected(chosen == Some(iv.uid)))
                 .child(
                     El::text(iv.name)
                         .class("ink")
@@ -454,7 +624,7 @@ fn body(world: &World) -> Vec<El> {
                 El::new()
                     .class("row")
                     .with_style(|s| s.gap(10.0).align_items(Align::Center))
-                    .child(item_socket(&o.item, 44.0, ""))
+                    .child(item_socket(&o.item, 44.0, "", ""))
                     .child(
                         El::new()
                             .class("col")
@@ -528,6 +698,10 @@ fn el(world: &World) -> El {
                             true,
                         )),
                 )
+                .child(brass::medallion("isle_anchor", 32.0, "isle.fleet").tooltip(
+                    "Ships' gear",
+                    "Captains and gear aboard every vessel [color=#6a5339](G)[/color]",
+                ))
                 .child(
                     brass::medallion("isle_close", 32.0, "isle.shelf")
                         .tooltip("", "Close [color=#6a5339](I)[/color]"),
