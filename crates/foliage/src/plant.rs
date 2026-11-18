@@ -290,12 +290,17 @@ pub enum Brushing {
     /// Cut at the ground: a young tree (crews fell those rather than prune more than half a
     /// tree away), or a shrub too close to keep (it may sprout again from the stump).
     CutDown,
+    /// A grown tree whose high crown clears the corridor but which grew up in the open, its
+    /// branches reaching down the trunk into it: its low limbs are sawn off ("pruned up", as
+    /// crews do along a trail), so it carries a forest tree's high crown from now on.
+    PruneUp,
 }
 
 impl EcologyRegion {
     /// Whether a living plant at `local` (meters from the region's center) reaches into a
     /// trail's corridor or a sight line below [`CLEAR_HEIGHT_M`], and what is done about it.
-    /// Ground plants, and trees whose crowns start above the clearance, are left alone.
+    /// Ground plants, and trees whose crowns start above the clearance, are left alone (unless
+    /// grown in the open, their limbs low: [`Brushing::PruneUp`]).
     pub fn brushing(
         &self,
         species: &crate::species::PlantSpecies,
@@ -304,8 +309,11 @@ impl EcologyRegion {
     ) -> Brushing {
         if species.layer == Layer::Ground
             || (self.corridors.is_empty() && self.sight_lines.is_empty())
-            || plant.height(species) * species.shape.crown_base >= CLEAR_HEIGHT_M
         {
+            return Brushing::Keep;
+        }
+        let high = plant.height(species) * species.shape.crown_base >= CLEAR_HEIGHT_M;
+        if high && !(species.is_tree() && plant.open_grown()) {
             return Brushing::Keep;
         }
         let room = self
@@ -318,6 +326,9 @@ impl EcologyRegion {
         // (A shrub cut back to fit sits right at the edge; rounding leaves it there.)
         if reach <= room + 0.01 {
             return Brushing::Keep;
+        }
+        if high {
+            return Brushing::PruneUp;
         }
         let fits = room / (species.crown_radius_m * plant.genes.crown).max(1e-3);
         if species.is_tree() || fits < 0.15 {
@@ -564,9 +575,14 @@ mod tests {
         assert!((size * hazel.crown_radius_m - 1.0).abs() < 0.05, "{size}");
         let (oak, young) = plant("oak", 0.3);
         assert_eq!(region.brushing(oak, &young, at), Brushing::CutDown);
-        // A grown oak's crown starts well above head height: it may arch over the trail.
-        let (_, grown) = plant("oak", 1.0);
+        // A grown forest oak's crown starts well above head height: it may arch over the trail.
+        let (_, mut grown) = plant("oak", 1.0);
+        grown.low_light = 0.2;
         assert_eq!(region.brushing(oak, &grown, at), Brushing::Keep);
+        // One grown in the open keeps limbs low down its trunk: those are sawn off.
+        grown.low_light = 1.0;
+        assert!(grown.open_grown());
+        assert_eq!(region.brushing(oak, &grown, at), Brushing::PruneUp);
         let (fern, f) = plant("fern", 1.0);
         assert_eq!(
             region.brushing(fern, &f, DVec2::new(1.0, 0.0)),

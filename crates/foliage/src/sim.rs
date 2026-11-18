@@ -1053,6 +1053,9 @@ pub fn brush(ctx: &StepContext, plants: &mut [SimPlant]) {
             Brushing::Keep => continue,
             Brushing::CutBack(size) => p.plant.size = p.plant.size.min(size),
             Brushing::CutDown => p.plant.stage = PlantStage::Stump { years: 0.0 },
+            Brushing::PruneUp => {
+                p.plant.low_light = p.plant.low_light.min(crate::plant::OPEN_GROWN_LIGHT - 0.05)
+            }
         }
         p.changed = true;
     }
