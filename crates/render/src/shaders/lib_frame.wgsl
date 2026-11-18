@@ -639,7 +639,7 @@ fn far_shadow_visibility(rel: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
 //
 // A solid caster is taken to fill a quarter meter (and more far off) behind its front face. A
 // thin sheet (`PREPASS_THIN`: a leaf, a petal) fills nothing behind it: the ray is blocked only
-// where it crosses the sheet's plane, within half a step of a sample. Taken as solid, a leaf
+// where it crosses the sheet, within half a step of a sample. Taken as solid, a leaf
 // 1 mm thick shaded every ray passing up to 25 cm behind it, a dark streak hanging under each
 // leaf on the ground below it on screen (Foliage's garden beds).
 const CONTACT_STEPS: i32 = 10;
@@ -678,13 +678,29 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         var hit = diff > bias && diff < thickness;
         let caster = textureLoad(prepass_normal, clamp(px, vec2<i32>(0), size - 1), 0);
         if (caster.w > PREPASS_THIN - 0.5 && diff < thickness) {
-            // Distance from the sheet's plane: the sheet's point under the sample is the
-            // sample scaled back to the sheet's depth, so their offset is the sample's times
-            // diff / ray.
+            // Where the ray crosses the sheet's plane (through the sheet's point under the
+            // sample: the sample scaled back to the sheet's depth). Blocked only if that is
+            // within half a step of this sample, ahead of the start (a sheet's own lit side
+            // never shades itself), and on the sheet as the camera sees it there (not off its
+            // edge in front of the ground).
             let sheet = oct_decode(caster.xy);
-            let off_plane = abs(dot(q, sheet)) * abs(diff) / max(ray, 1e-4);
-            let half_step = 0.5 * len / f32(steps) * abs(dot(l, sheet));
-            hit = off_plane <= half_step + bias * 0.25;
+            let on_sheet = q * (scene / max(ray, 1e-4));
+            let rate = len * dot(l, sheet);
+            hit = false;
+            if (abs(rate) > 1e-5) {
+                let tc = -dot(start - on_sheet, sheet) / rate;
+                if (tc > 0.0 && abs(tc - t) <= 0.5 / f32(steps)) {
+                    let x = start + l * (len * tc);
+                    let cx = frame.view_proj * vec4<f32>(x, 1.0);
+                    if (cx.w > 0.0) {
+                        let uvx = cx.xy / cx.w * vec2<f32>(0.5, -0.5) + 0.5;
+                        let pxx = clamp(vec2<i32>(uvx * frame.viewport.xy), vec2<i32>(0), size - 1);
+                        let zx = textureLoad(prepass_depth, pxx, 0);
+                        let dx = view_depth(x);
+                        hit = zx > 0.0 && abs(scene_linear_depth(uvx, zx) - dx) <= 0.01 + dx * 0.003;
+                    }
+                }
+            }
         }
         if (hit) {
             // Fade with distance along the ray and toward the 60 m limit.

@@ -169,4 +169,18 @@ fn a_leaf_shades_where_its_shadow_falls_not_the_ground_under_it() {
         s < o * 0.3,
         "no shadow where the leaf's falls: {s:.4} vs {o:.4}"
     );
+    // The leaf's own lit top doesn't shade itself, and the ground just past its shadow (whose
+    // rays cross the leaf's plane in front of its edge) stays lit.
+    let (top, past) = (DVec3::new(0.0, LEAF_Y, 0.0), DVec3::new(0.0, 0.0, 0.3));
+    let (t, p) = (luma_at(&app, &img, top), luma_at(&app, &img, past));
+    let (t0, p0) = (luma_at(&app, &plain, top), luma_at(&app, &plain, past));
+    eprintln!("leaf top {t:.4} ({t0:.4} without), past its shadow {p:.4} ({p0:.4} without)");
+    assert!(
+        t > t0 * 0.95,
+        "the leaf shades its own top: {t:.4} vs {t0:.4}"
+    );
+    assert!(
+        p > p0 * 0.95,
+        "the ground past the shadow is shaded: {p:.4} vs {p0:.4}"
+    );
 }
