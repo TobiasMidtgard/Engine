@@ -24,6 +24,9 @@ pub const PRONE_BACK_SPEED: f32 = 0.25;
 pub const PRONE_IDLE: &str = "prone_idle";
 pub const PRONE_CRAWL: &str = "prone_crawl";
 pub const PRONE_BACK: &str = "prone_back";
+/// Crawling ahead and back carrying a long gun.
+pub const PRONE_RIFLE_CRAWL: &str = "prone_rifle_crawl";
+pub const PRONE_RIFLE_BACK: &str = "prone_rifle_back";
 pub const PRONE_KNEEL: &str = "prone_kneel";
 /// Aiming a long gun lying down (the prone firing position), and a shot from it (the `shot`
 /// event as it goes off, like [`RIFLE_FIRE`]'s).
@@ -113,8 +116,10 @@ fn track(from: Vec3, to: Vec3, phase: f32, lift: f32) -> Vec3 {
 }
 
 /// The crawl at `phase` (0..1): the left forearm and right knee pull through the first
-/// half, the right forearm and left knee the second.
-fn crawl_pose(s: &Skeleton, phase: f32) -> Vec<(&'static str, Xf)> {
+/// half, the right forearm and left knee the second. With a `rifle` the right fist pulls
+/// on its pistol grip instead of a flat hand, the gun on its side beside the forearm (top
+/// in, magazine out), the muzzle up off the ground and the butt dragging.
+fn crawl_pose(s: &Skeleton, phase: f32, rifle: bool) -> Vec<(&'static str, Xf)> {
     let pulled = REACHED + Vec3::new(0.08, 0.0, PULL);
     // Each limb's own phase: arm l and leg r together, then the others.
     let own = [phase, (phase + 0.5).fract()];
@@ -147,14 +152,31 @@ fn crawl_pose(s: &Skeleton, phase: f32) -> Vec<(&'static str, Xf)> {
     let arms = std::array::from_fn(|side| FOREARM.lerp(&REACHING, reach(side)));
     let legs = std::array::from_fn(|side| lerp4(LEG_STRAIGHT, LEG_DRAWN, drawn(side)));
     let key = lying(lift, arms, legs);
-    let targets = [
+    let mut targets = [
         Some(arm_at(0)),
         Some(arm_at(1)),
         Some(leg_at(0)),
         Some(leg_at(1)),
     ];
-    key.reach(s, targets, palms_down(), poles())
+    let mut ends = palms_down();
+    if rifle {
+        let held = carried();
+        let fist = arm_at(1) + CARRY_FIST;
+        targets[1] = Some(fist - held * GRIP);
+        ends[1] = Some(held);
+    }
+    key.reach(s, targets, ends, poles())
 }
+
+/// A long gun carried crawling in the right fist: on its side (top in toward the body,
+/// magazine out), the muzzle a little in and up off the ground.
+fn carried() -> Quat {
+    let turn = Quat::from_rotation_y(0.08) * Quat::from_rotation_x(4f32.to_radians());
+    rifle_frame(turn * Vec3::NEG_Z, turn * Vec3::NEG_X)
+}
+
+/// The fist's middle from where a flat hand's wrist crawls: just ahead of it, at the same height.
+const CARRY_FIST: Vec3 = Vec3::new(0.0, 0.0, -0.06);
 
 /// Hands flat on the floor, palms down, fingers ahead and a little in (the hand's rest frame
 /// hangs with the fingers down and the palm toward the thigh).
@@ -336,9 +358,20 @@ pub(super) fn clips(s: &Skeleton) -> Vec<AnimationClip> {
     let kneel = kneel_key();
     vec![
         lying_clip(PRONE_IDLE, 3.0, 0.1, |ph| idle_pose(s, ph)),
-        lying_clip(PRONE_CRAWL, CRAWL_SECS, 0.6, |ph| crawl_pose(s, ph)),
+        lying_clip(PRONE_CRAWL, CRAWL_SECS, 0.6, |ph| crawl_pose(s, ph, false)),
         // The same pulls the other way round: pushing back on the forearms.
-        lying_clip(PRONE_BACK, CRAWL_SECS, 0.5, |ph| crawl_pose(s, 1.0 - ph)),
+        lying_clip(PRONE_BACK, CRAWL_SECS, 0.5, |ph| {
+            crawl_pose(s, 1.0 - ph, false)
+        }),
+        // The same, carrying a long gun (the left hand off it).
+        lying_clip(PRONE_RIFLE_CRAWL, CRAWL_SECS, 0.65, |ph| {
+            crawl_pose(s, ph, true)
+        })
+        .with_curve("grip", 2, |_| 0.0),
+        lying_clip(PRONE_RIFLE_BACK, CRAWL_SECS, 0.55, |ph| {
+            crawl_pose(s, 1.0 - ph, true)
+        })
+        .with_curve("grip", 2, |_| 0.0),
         lying_clip(PRONE_KNEEL, 1.0, 0.4, move |_| {
             Key::sample(s, &[kneel, Key { at: 1.0, ..kneel }], 0.0).1
         }),
@@ -397,7 +430,22 @@ pub(super) fn graph(standing: NodeDef) -> NodeDef {
     };
     // Still, or crawling at `speed` (a rifleman lying still keeps the gun in the shoulder,
     // ready).
-    let by_speed = |speed: f32, clip: &str| NodeDef::Blend1d {
+    let carrying = |unarmed: &str, armed: &str| NodeDef::Blend1d {
+        param: RIFLE_CARRY.into(),
+        children: vec![
+            Blend1dChild {
+                at: 0.0,
+                node: NodeDef::clip(unarmed),
+            },
+            Blend1dChild {
+                at: 1.0,
+                node: NodeDef::clip(armed),
+            },
+        ],
+        sync: true,
+        match_speed: false,
+    };
+    let by_speed = |speed: f32, (unarmed, armed): (&str, &str)| NodeDef::Blend1d {
         param: "speed".into(),
         children: vec![
             Blend1dChild {
@@ -406,15 +454,15 @@ pub(super) fn graph(standing: NodeDef) -> NodeDef {
             },
             Blend1dChild {
                 at: speed,
-                node: NodeDef::clip(clip),
+                node: carrying(unarmed, armed),
             },
         ],
         sync: true,
         match_speed: true,
     };
     let pi = std::f32::consts::PI;
-    let ahead = || by_speed(PRONE_CRAWL_SPEED, PRONE_CRAWL);
-    let back = || by_speed(PRONE_BACK_SPEED, PRONE_BACK);
+    let ahead = || by_speed(PRONE_CRAWL_SPEED, (PRONE_CRAWL, PRONE_RIFLE_CRAWL));
+    let back = || by_speed(PRONE_BACK_SPEED, (PRONE_BACK, PRONE_RIFLE_BACK));
     // Sideways the body crawls slowly on (a mover turns it to face the way it goes).
     let lying = NodeDef::Blend1d {
         param: "heading".into(),

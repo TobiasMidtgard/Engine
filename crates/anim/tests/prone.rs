@@ -253,3 +253,35 @@ fn lying_down_a_rifleman_aims_on_both_elbows_and_shoots_without_getting_up() {
     let head = bone(&app, e, "head").y;
     assert!(head > 1.5, "head {head}: not up again");
 }
+
+#[test]
+fn a_rifleman_crawls_with_the_gun_on_its_side_in_his_right_fist() {
+    use engine_anim::build::weapons::RIFLE_UP;
+    use engine_world::combat::{ItemClass, Loadout};
+    let mut app = app();
+    let e = person(&mut app);
+    app.world.entity_mut(e).insert(Loadout {
+        main: ItemClass::Firearm,
+        off: ItemClass::None,
+        two_handed: true,
+    });
+    run(&mut app, 0.5);
+    prone(&mut app, e, true);
+    run(&mut app, PRONE_SECS as f64 + 0.5);
+    let mut floor = f32::MAX;
+    for f in 0..200 {
+        app.world.get_mut::<Transform>(e).unwrap().translation.z -= 0.45 * STEP;
+        app.update();
+        if f < 60 {
+            continue;
+        }
+        floor = floor.min(lowest(&app, e));
+        let (muzzle, _) = gun(&app, e);
+        let pose = app.world.get::<SkeletonPose>(e).unwrap();
+        let top = pose.bones[pose.index_of("hand_r").unwrap()].rotation * RIFLE_UP;
+        assert!(muzzle.z < -0.95, "muzzle {muzzle}: not ahead crawling");
+        assert!(top.x < -0.9, "gun top {top}: not on its side, top in");
+    }
+    assert!(floor > -0.03, "a bone {floor} under the floor");
+    assert!(bone(&app, e, "head").y < 0.6, "head up crawling");
+}
