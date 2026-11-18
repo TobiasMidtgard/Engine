@@ -1,6 +1,7 @@
-//! The game's own icons. Goods and buildings are painted SVGs in `assets/icons` (warm dark
-//! outline, three-tone gradients, rim light and a soft contact shadow; regenerate them with
-//! `assets/icons/make_icons.py`); the speed, close and arrow glyphs are drawn here.
+//! The game's own icons. Goods, buildings and ship gear are painted SVGs in `assets/icons`
+//! (warm dark outline, three-tone gradients, rim light and a soft contact shadow; regenerate
+//! them with `assets/icons/make_icons.py` and `make_gear_icons.py`); the speed, close and
+//! arrow glyphs are drawn here.
 
 use engine_ui::icons::IconLibrary;
 
@@ -130,9 +131,132 @@ const PAINTED: &[(&str, &str)] = &[
 ];
 
 /// Every icon as (name, svg).
+/// Ship gear and captains, painted by `assets/icons/make_gear_icons.py`.
+const GEAR: &[(&str, &str)] = &[
+    (
+        "isle_gear_armour",
+        include_str!("../assets/icons/isle_gear_armour.svg"),
+    ),
+    (
+        "isle_gear_bomb",
+        include_str!("../assets/icons/isle_gear_bomb.svg"),
+    ),
+    (
+        "isle_gear_cannon",
+        include_str!("../assets/icons/isle_gear_cannon.svg"),
+    ),
+    (
+        "isle_gear_captain",
+        include_str!("../assets/icons/isle_gear_captain.svg"),
+    ),
+    (
+        "isle_gear_cat",
+        include_str!("../assets/icons/isle_gear_cat.svg"),
+    ),
+    (
+        "isle_gear_chronometer",
+        include_str!("../assets/icons/isle_gear_chronometer.svg"),
+    ),
+    (
+        "isle_gear_coal",
+        include_str!("../assets/icons/isle_gear_coal.svg"),
+    ),
+    (
+        "isle_gear_cutlass",
+        include_str!("../assets/icons/isle_gear_cutlass.svg"),
+    ),
+    (
+        "isle_gear_engine",
+        include_str!("../assets/icons/isle_gear_engine.svg"),
+    ),
+    (
+        "isle_gear_flag",
+        include_str!("../assets/icons/isle_gear_flag.svg"),
+    ),
+    (
+        "isle_gear_flare",
+        include_str!("../assets/icons/isle_gear_flare.svg"),
+    ),
+    (
+        "isle_gear_gas_cell",
+        include_str!("../assets/icons/isle_gear_gas_cell.svg"),
+    ),
+    (
+        "isle_gear_hatch",
+        include_str!("../assets/icons/isle_gear_hatch.svg"),
+    ),
+    (
+        "isle_gear_horseshoe",
+        include_str!("../assets/icons/isle_gear_horseshoe.svg"),
+    ),
+    (
+        "isle_gear_mail",
+        include_str!("../assets/icons/isle_gear_mail.svg"),
+    ),
+    (
+        "isle_gear_mine",
+        include_str!("../assets/icons/isle_gear_mine.svg"),
+    ),
+    (
+        "isle_gear_overboard",
+        include_str!("../assets/icons/isle_gear_overboard.svg"),
+    ),
+    (
+        "isle_gear_propeller",
+        include_str!("../assets/icons/isle_gear_propeller.svg"),
+    ),
+    (
+        "isle_gear_purse",
+        include_str!("../assets/icons/isle_gear_purse.svg"),
+    ),
+    (
+        "isle_gear_radio",
+        include_str!("../assets/icons/isle_gear_radio.svg"),
+    ),
+    (
+        "isle_gear_ram",
+        include_str!("../assets/icons/isle_gear_ram.svg"),
+    ),
+    (
+        "isle_gear_repair",
+        include_str!("../assets/icons/isle_gear_repair.svg"),
+    ),
+    (
+        "isle_gear_sails",
+        include_str!("../assets/icons/isle_gear_sails.svg"),
+    ),
+    (
+        "isle_gear_sheathing",
+        include_str!("../assets/icons/isle_gear_sheathing.svg"),
+    ),
+    (
+        "isle_gear_shot",
+        include_str!("../assets/icons/isle_gear_shot.svg"),
+    ),
+    (
+        "isle_gear_sights",
+        include_str!("../assets/icons/isle_gear_sights.svg"),
+    ),
+    (
+        "isle_gear_smoke",
+        include_str!("../assets/icons/isle_gear_smoke.svg"),
+    ),
+    (
+        "isle_gear_spyglass",
+        include_str!("../assets/icons/isle_gear_spyglass.svg"),
+    ),
+    (
+        "isle_gear_torpedo",
+        include_str!("../assets/icons/isle_gear_torpedo.svg"),
+    ),
+];
+
 pub fn all() -> Vec<(&'static str, String)> {
-    let mut v: Vec<(&'static str, String)> =
-        PAINTED.iter().map(|(n, s)| (*n, s.to_string())).collect();
+    let mut v: Vec<(&'static str, String)> = PAINTED
+        .iter()
+        .chain(GEAR)
+        .map(|(n, s)| (*n, s.to_string()))
+        .collect();
     v.extend(vec![
         // The speed medallions: dark ink glyphs that read on ivory enamel.
         (
