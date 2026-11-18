@@ -240,11 +240,20 @@ pub fn all() -> Vec<(&'static str, String)> {
     v
 }
 
-/// Add every icon to the UI's library.
+/// Add every icon to the UI's library. An item picture not painted yet shows the anchor.
 pub fn install(lib: &mut IconLibrary) {
-    for (name, s) in all() {
-        if let Err(e) = lib.add(name, &s) {
+    let all = all();
+    for (name, s) in &all {
+        if let Err(e) = lib.add(name, s) {
             engine::core::log::warn!("archipelago icon {name}: {e}");
+        }
+    }
+    if let Some((_, anchor)) = all.iter().find(|(n, _)| *n == "isle_anchor") {
+        for d in crate::items::ITEMS.iter() {
+            let key = d.icon_key();
+            if !lib.contains(key) {
+                let _ = lib.add(key, anchor);
+            }
         }
     }
 }
@@ -259,6 +268,12 @@ mod tests {
         }
         for g in crate::defs::Good::ALL {
             assert!(lib.contains(g.icon()), "{}", g.icon());
+        }
+        // Every item has a picture (its own, or the anchor until one is painted).
+        let mut lib = engine_ui::icons::IconLibrary::default();
+        super::install(&mut lib);
+        for d in crate::items::ITEMS.iter() {
+            assert!(lib.contains(d.icon_key()), "{}", d.icon_key());
         }
     }
 }
