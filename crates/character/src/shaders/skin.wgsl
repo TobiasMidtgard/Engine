@@ -384,6 +384,7 @@ struct SkinLight {
     thin: f32,           // ears, nostrils: light shines through from behind
     occlusion: f32,
     inside: f32,         // 1 inside the mouth: the light there has bounced off lips and cheeks
+    enclosed: f32,       // 0 open .. 1 shut in (deep in a closed mouth): the lights reach less
     // Hair shadow: the point before the pose and that space's x and y axes in world space (zero:
     // no hair shadow), and a per-pixel offset for the march.
     bind: vec3<f32>,
@@ -483,7 +484,8 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
         let nl = vec3<f32>(dot(nr, l), dot(ng, l), dot(nb, l));
         // Shadow test from the smooth surface, so pores don't self-shadow at grazing light.
         // The shadow map holds the hair too; the darker of the two counts.
-        var shadow = min(min(skin_shadow(rel, s.n_soft, s.scatter), hair_over_skin(s, l)), caps.x);
+        var shadow = min(min(skin_shadow(rel, s.n_soft, s.scatter), hair_over_skin(s, l)), caps.x)
+            * (1.0 - s.enclosed);
         if (nl.z > 0.0) {
             shadow *= contact_shadow(rel, s.n_soft);
         }
@@ -513,7 +515,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
         let diffuse = albedo * INV_PI * wrap3(nl, wrap);
         let spec = skin_spec(s.n, v, pl, s.roughness, f0) * s.specular * tint;
         // Light diffusing under the skin reddens the hair's shadow edges too.
-        let hair = hair_over_skin(s, pl);
+        let hair = hair_over_skin(s, pl) * (1.0 - s.enclosed);
         let sh = vec3<f32>(pow(hair, mix(1.0, 0.9, imitate)), hair, pow(hair, mix(1.0, 1.05, imitate)));
         var lit = diffuse * sh;
         specular += spec * hair * light.color_radius.rgb * falloff;
@@ -763,7 +765,33 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
         s.specular = 0.5;
         s.scatter = 1.0;
     }
+    // The lips' opening lets light in: the front teeth of a smile catch it, the back teeth and
+    // tongue behind half-closed lips lie in the dark, and a wide-open mouth is lit further in
+    // (the mouth occlusion film and game heads drive from the jaw and lips).
+    let depth = saturate((character.rest_mouth.z - r.z - 0.004) / 0.035);
+    let open = mouth_aperture();
+    let shut = saturate(depth * (1.0 - 0.55 * open) + (1.0 - open) * 0.35);
+    s.occlusion *= 1.0 - 0.8 * shut;
+    s.specular *= 1.0 - 0.7 * shut;
+    s.enclosed = shut;
     return s;
+}
+
+// Expression channels that open the lips (face.rs `CHANNELS` order; a test checks them).
+const CH_JAW_OPEN: u32 = 13u;
+const CH_SMILE_L: u32 = 14u;
+const CH_SMILE_R: u32 = 15u;
+const CH_UPPER_UP_L: u32 = 27u;
+const CH_UPPER_UP_R: u32 = 28u;
+const CH_LOWER_DOWN_L: u32 = 29u;
+const CH_LOWER_DOWN_R: u32 = 30u;
+
+// How far the lips stand open (0 shut .. 1 wide): the jaw, the lips drawn up and down, a smile.
+fn mouth_aperture() -> f32 {
+    let lips = channel_weight(CH_UPPER_UP_L, false) + channel_weight(CH_UPPER_UP_R, false)
+        + channel_weight(CH_LOWER_DOWN_L, false) + channel_weight(CH_LOWER_DOWN_R, false);
+    let smile = channel_weight(CH_SMILE_L, false) + channel_weight(CH_SMILE_R, false);
+    return saturate(channel_weight(CH_JAW_OPEN, false) + 0.25 * lips + 0.15 * smile);
 }
 
 // How bare the scalp is at rest point `r` along the part of long hair (1 on its line).

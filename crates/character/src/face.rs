@@ -395,6 +395,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_shaders_know_which_channels_open_the_lips() {
+        // skin.wgsl's CH_* constants (mouth_aperture).
+        let wgsl = include_str!("shaders/skin.wgsl");
+        for (name, constant) in [
+            ("jaw_open", "CH_JAW_OPEN"),
+            ("smile_l", "CH_SMILE_L"),
+            ("smile_r", "CH_SMILE_R"),
+            ("upper_up_l", "CH_UPPER_UP_L"),
+            ("upper_up_r", "CH_UPPER_UP_R"),
+            ("lower_down_l", "CH_LOWER_DOWN_L"),
+            ("lower_down_r", "CH_LOWER_DOWN_R"),
+        ] {
+            let line = format!("const {constant}: u32 = {}u;", channel(name));
+            assert!(wgsl.contains(&line), "{line}");
+        }
+    }
+
+    #[test]
     fn half_floats_round_trip() {
         for x in [0.0f32, 0.0413, -0.012, 1e-4, -3.5e-5, 0.5, -1.0] {
             let back = f16_value(f16_bits(x));
