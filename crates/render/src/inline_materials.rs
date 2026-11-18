@@ -95,8 +95,9 @@ pub(crate) fn resolved_discarded(mut world: DeferredWorld, ctx: HookContext) {
     }
 }
 
-/// Frees the `mat:` materials no entity has drawn for two runs (so a renderer resolved to one
-/// again this frame, its insert still a command, keeps it), once a batch is due.
+/// Frees the `mat:` materials no entity has drawn for two runs, once a batch is due. Runs
+/// before [`crate::resolve_mesh_renderers`]: a renderer that wants a freed value again finds
+/// its key gone and makes it again, instead of being handed the handle freed after.
 /// Publishes `render.inline_materials` (drawn now) and `render.inline_materials_freed` (so far).
 pub fn release_inline_materials(
     mut users: ResMut<InlineMaterialUsers>,
@@ -150,8 +151,15 @@ mod tests {
         world.insert_resource(Assets::<StandardMaterial>::default());
         world.init_resource::<InlineMaterialUsers>();
         let mut schedule = Schedule::default();
-        schedule.add_systems((resolve_mesh_renderers, release_inline_materials).chain());
+        // As in Extract: release first, resolve after it (no sync point between).
+        schedule.add_systems((release_inline_materials, resolve_mesh_renderers).chain());
         (world, schedule)
+    }
+
+    /// One frame's Extract: release, resolve, and the resolved inserts applied at its end.
+    fn run_frame(schedule: &mut Schedule, world: &mut World) {
+        schedule.run(world);
+        schedule.apply_deferred(world);
     }
 
     fn renderer(red: f32) -> MeshRenderer {
@@ -177,7 +185,7 @@ mod tests {
         for frame in 0..3600 {
             world.get_mut::<MeshRenderer>(tweened).unwrap().material =
                 MaterialRef::Inline(StandardMaterial::color(frame as f32 / 3600.0, 0.5, 0.5));
-            schedule.run(&mut world);
+            run_frame(&mut schedule, &mut world);
             let assets = world.resource::<Assets<StandardMaterial>>();
             for e in [still, tweened] {
                 let r = world.get::<ResolvedMesh>(e).expect("resolved");
@@ -203,6 +211,28 @@ mod tests {
         assert_eq!(users.drawn(), 2);
     }
 
+    /// A renderer going round four values, each back after three frames unused: whenever a
+    /// batch is freed, the value it takes that frame is among them, and it gets it made again.
+    #[test]
+    fn a_value_wanted_again_as_it_is_freed_is_made_again() {
+        let (mut world, mut schedule) = world();
+        let e = world.spawn(renderer(0.0)).id();
+        for frame in 0..(2 * RELEASE_EVERY as usize + 8) {
+            world.get_mut::<MeshRenderer>(e).unwrap().material =
+                MaterialRef::Inline(StandardMaterial::color((frame % 4) as f32 / 4.0, 0.5, 0.5));
+            run_frame(&mut schedule, &mut world);
+            let r = world.get::<ResolvedMesh>(e).expect("resolved");
+            assert!(
+                world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(r.material)
+                    .is_some(),
+                "frame {frame}: drawing a freed material"
+            );
+        }
+        assert!(world.resource::<InlineMaterialUsers>().released() >= 2);
+    }
+
     /// A material two entities share stays while one draws it, and goes once neither does;
     /// one made with `Assets::add` and drawn through its handle is never freed.
     #[test]
@@ -219,13 +249,13 @@ mod tests {
                 ..renderer(0.0)
             })
             .id();
-        schedule.run(&mut world);
+        run_frame(&mut schedule, &mut world);
         let shared = world.get::<ResolvedMesh>(a).unwrap().material;
         assert_eq!(world.get::<ResolvedMesh>(b).unwrap().material, shared);
 
         world.despawn(a);
         for _ in 0..RELEASE_EVERY {
-            schedule.run(&mut world);
+            run_frame(&mut schedule, &mut world);
         }
         let assets = world.resource::<Assets<StandardMaterial>>();
         assert!(assets.get(shared).is_some(), "freed while b draws it");
@@ -233,7 +263,7 @@ mod tests {
         world.despawn(b);
         world.despawn(c);
         for _ in 0..RELEASE_EVERY {
-            schedule.run(&mut world);
+            run_frame(&mut schedule, &mut world);
         }
         let assets = world.resource::<Assets<StandardMaterial>>();
         assert!(assets.get(shared).is_none(), "kept with nothing drawing it");

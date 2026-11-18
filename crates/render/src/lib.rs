@@ -334,10 +334,10 @@ impl Plugin for RenderPlugin {
             .add_systems(Extract, resolve_mesh_renderers)
             .add_systems(
                 Extract,
-                // No sync point for it in Extract (the schedule audit counts them): a material
-                // resolved again with its insert still a command stays two runs before it goes.
-                inline_materials::release_inline_materials
-                    .after_ignore_deferred(resolve_mesh_renderers),
+                // Before resolving, with no sync point (the schedule audit allows none in
+                // Extract): what it frees has left the keys before a renderer looks one up (so
+                // that is made again), and the last frame's inserts have applied.
+                inline_materials::release_inline_materials.before(resolve_mesh_renderers),
             )
             .add_systems(Extract, virtual_texture::poll_virtual_textures)
             .add_systems(Render, renderer::render_system)
