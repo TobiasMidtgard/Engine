@@ -27,7 +27,7 @@ use super::{MeshBuilder, rgb};
 use crate::species::{BarkStyle, LeafStyle, PlantForm, PlantSpecies};
 
 /// The color of dead leaves (sRGB), what `foliage_dead`'s vertex colors are relative to.
-pub const DEAD_LEAF_SRGB: u32 = 0x8a6a3c;
+pub const DEAD_LEAF_SRGB: u32 = 0x6b5640;
 
 /// Meshes for one plant variant. Parts a form doesn't have are `None`.
 #[derive(Default)]

@@ -226,7 +226,16 @@ pub fn desired_parts(
                     pair(&v.base, vis.dead_bark),
                     pair(wood, vis.dead_bark),
                     if years < 1.0 {
-                        pair(&v.foliage, vis.dead_leaves)
+                        // A broadleaf that died in the growing season keeps its leaves brown
+                        // and shrivelled on the twigs for a while, but they curl and fall: a
+                        // thin crown, thinning through the year. A conifer's dead needles
+                        // redden and stay on about a year (no thinned copies: the whole crown).
+                        let crown = if v.foliage_thin.is_empty() {
+                            v.foliage
+                        } else {
+                            leafy(v.foliage, &v.foliage_thin, 0.6 * (1.0 - years))
+                        };
+                        pair(&crown, vis.dead_leaves)
                     } else {
                         None
                     },
@@ -645,6 +654,10 @@ pub fn desired_log_parts(
         .built_from
         .seasons
         .map_or(1.0, |s| s.leafing(day, shift_days(&pose.genes)).amount);
+    // Once browned, the leaves shrivel and drop through the year until the twigs are bare: a
+    // fallen crown thins rather than staying a full ball of brown.
+    let brown = ((years - LOG_GREEN_YEARS) / (LOG_BARE_YEARS - LOG_GREEN_YEARS)).clamp(0.0, 1.0);
+    let amount = amount * (1.0 - 0.8 * brown * brown * (3.0 - 2.0 * brown));
     let (wood, foliage) = if size < 0.22 && v.sapling_wood.is_some() {
         (
             v.sapling_wood,
