@@ -334,7 +334,10 @@ impl Plugin for RenderPlugin {
             .add_systems(Extract, resolve_mesh_renderers)
             .add_systems(
                 Extract,
-                inline_materials::release_inline_materials.after(resolve_mesh_renderers),
+                // No sync point for it in Extract (the schedule audit counts them): a material
+                // resolved again with its insert still a command stays two runs before it goes.
+                inline_materials::release_inline_materials
+                    .after_ignore_deferred(resolve_mesh_renderers),
             )
             .add_systems(Extract, virtual_texture::poll_virtual_textures)
             .add_systems(Render, renderer::render_system)
