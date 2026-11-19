@@ -927,8 +927,9 @@ pub fn build_start(world: &mut World) {
             20,
             true,
         );
-        fill_houses(world, village, 140.0, 48, Tier::Labourers);
-        fill_houses(world, village, 150.0, 4, Tier::Fisherfolk);
+        // (Fisherfolk work the grain and hop farms, Labourers the mills, ovens and brewery.)
+        fill_houses(world, village, 140.0, 36, Tier::Labourers);
+        fill_houses(world, village, 150.0, 18, Tier::Fisherfolk);
         // Farms out on the open land behind the village, where their fields have room.
         let inland = (isles[1].center - village).normalize();
         let out = |a: f64, r: f64| village + DVec2::from_angle(a).rotate(inland) * r;

@@ -41,7 +41,8 @@ pub fn by_id(world: &mut World, id: u32) -> Option<Entity> {
 fn pay(world: &mut World, kind: Kind, isle: usize) -> Result<(), String> {
     let def = kind.def();
     let econ = world.resource::<Economy>();
-    if econ.coins < def.coins as f64 {
+    // (Something free, such as a house, can be built in debt: rent is the way out of it.)
+    if def.coins > 0 && econ.coins < def.coins as f64 {
         return Err(format!(
             "{} costs {} coins; you have {:.0}.",
             def.name, def.coins, econ.coins
@@ -897,6 +898,21 @@ pub fn starting_stock() -> Vec<(Good, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_town_in_debt_can_still_build_houses() {
+        let mut world = World::new();
+        let mut econ = Economy {
+            coins: -500.0,
+            ..Default::default()
+        };
+        econ.islands[0].stock[Good::Planks.index()] = 10.0;
+        world.insert_resource(econ);
+        // A house costs a plank and no coins: rent is how the town gets out of debt.
+        assert_eq!(pay(&mut world, Kind::House, 0), Ok(()));
+        // A works with a price does wait for the money.
+        assert!(pay(&mut world, Kind::Sawmill, 0).is_err());
+    }
 
     #[test]
     fn paving_carries_a_market_further_along_the_street() {

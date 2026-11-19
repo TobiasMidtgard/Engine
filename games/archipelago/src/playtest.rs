@@ -42,6 +42,8 @@ struct Log {
     incidents_seen: usize,
     /// The run's seed: houses go up two or three at a time by it.
     seed: u64,
+    /// Houses that lacked a service when one was last built for them, per (island, kind).
+    lacking: HashMap<(usize, Kind), usize>,
 }
 
 impl Log {
@@ -261,6 +263,15 @@ fn services(world: &mut World, log: &mut Log, now: f64, i: usize) {
             }
         }
         if lacking.len() < 4 {
+            log.lacking.remove(&(i, kind));
+            continue;
+        }
+        // The last one did not reach them (a cliff, the coast): do not pile up more.
+        if log
+            .lacking
+            .get(&(i, kind))
+            .is_some_and(|n| lacking.len() >= *n)
+        {
             continue;
         }
         let d = kind.def();
@@ -285,14 +296,17 @@ fn services(world: &mut World, log: &mut Log, now: f64, i: usize) {
             .copied()
             .min_by(|a, b| (*a - mid).length().total_cmp(&(*b - mid).length()))
             .unwrap_or(mid);
-        build_near(
+        let n = lacking.len();
+        if build_near(
             world,
             log,
             now,
             kind,
             at,
-            &format!("{} houses without one", lacking.len()),
-        );
+            &format!("{n} houses without one"),
+        ) {
+            log.lacking.insert((i, kind), n);
+        }
         // One a turn: let the reach settle before the next.
         return;
     }
@@ -702,6 +716,92 @@ fn makers(g: Good, i: usize) -> Vec<Kind> {
     makers_within(g, i, 4)
 }
 
+/// Like [`makers`], but an input may also come by ship from one of the islands in `from`
+/// (a farm on a fertile island feeding the works at home).
+fn makers_via(g: Good, i: usize, from: &[usize]) -> Vec<Kind> {
+    makers_via_within(g, i, from, 4)
+}
+
+fn makers_via_within(g: Good, i: usize, from: &[usize], depth: u32) -> Vec<Kind> {
+    if depth == 0 {
+        return Vec::new();
+    }
+    DEFS.iter()
+        .filter(|d| d.output == Some(g) && d.category != Category::Public)
+        .filter(|d| !d.needs_fertility || islands()[i].fertility.allows(d.kind))
+        // (Built from what the island can make: no bricks there, no bakery.)
+        .filter(|d| d.cost.iter().all(|(c, _)| !makers(*c, i).is_empty()))
+        .filter(|d| {
+            d.input.into_iter().chain(d.input2).all(|x| {
+                !makers_via_within(x, i, from, depth - 1).is_empty()
+                    || from.iter().any(|&j| j != i && !makers(x, j).is_empty())
+            })
+        })
+        .map(|d| d.kind)
+        .collect()
+}
+
+/// The islands settled so far, whose goods a route can bring.
+fn settled_islands(world: &mut World) -> Vec<usize> {
+    (0..islands().len())
+        .filter(|&i| crate::settle::claimed(world, i))
+        .collect()
+}
+
+/// Builds `k` on island `i` and, where none stands yet for it, one maker of each input: on
+/// `i` when its ground allows, else on the first island of `from` that can make it.
+#[allow(clippy::too_many_arguments)]
+fn build_chain(
+    world: &mut World,
+    log: &mut Log,
+    now: f64,
+    k: Kind,
+    i: usize,
+    from: &[usize],
+    why: &str,
+    depth: u32,
+) -> bool {
+    let Some(at) = heart(world, i) else {
+        return false;
+    };
+    if !build_for(world, log, now, k, i, at, why) {
+        return false;
+    }
+    if depth == 0 {
+        return true;
+    }
+    let count = |world: &mut World, kk: Kind, isle: usize| {
+        world
+            .query::<&Building>()
+            .iter(world)
+            .filter(|b| b.island == isle && b.kind == kk)
+            .count()
+    };
+    for input in [k.def().input, k.def().input2].into_iter().flatten() {
+        let here = makers_via(input, i, from);
+        let (m, j) = match here.first() {
+            Some(&m) => (m, i),
+            None => match from
+                .iter()
+                .filter(|&&j| j != i)
+                .find_map(|&j| makers(input, j).first().map(|&m| (m, j)))
+            {
+                Some(x) => x,
+                None => continue,
+            },
+        };
+        if count(world, m, j) < count(world, k, i) {
+            let why = if j == i {
+                format!("input {} for it", input.name())
+            } else {
+                format!("{} to ship to {}", input.name(), islands()[i].name)
+            };
+            build_chain(world, log, now, m, j, from, &why, depth - 1);
+        }
+    }
+    true
+}
+
 fn makers_within(g: Good, i: usize, depth: u32) -> Vec<Kind> {
     if depth == 0 {
         return Vec::new();
@@ -722,11 +822,17 @@ fn makers_within(g: Good, i: usize, depth: u32) -> Vec<Kind> {
 /// Timber to build with: a woodcutter at work and a sawmill whenever planks run low.
 fn materials(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
     let planks = world.resource::<Economy>().islands[i].get(Good::Planks);
-    if planks > 15.0
+    // Houses ready to move up but short of the building goods want more timber too.
+    let waiting = world
+        .query::<(&Building, &House)>()
+        .iter(world)
+        .filter(|(b, h)| b.island == i && h.wait == crate::sim::Wait::NoMaterials)
+        .count();
+    if (planks > 40.0 || planks > 15.0 && waiting < 3)
         || log
             .last
             .get(&(i + 3000, None))
-            .is_some_and(|t| now - t < 240.0)
+            .is_some_and(|t| now - t < 180.0)
     {
         return;
     }
@@ -745,15 +851,24 @@ fn materials(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
             })
             .count()
     };
-    // Short of hands: more works would stand idle; houses come first.
-    if works.iter().any(|(_, st)| *st == Status::NoWorkers) {
+    // Short of hands: the timber works are staffed first (every other works waits on them),
+    // and new ones only when there are hands to spare.
+    for (b, mut p) in world.query::<(&Building, &mut Producer)>().iter_mut(world) {
+        if b.island == i && matches!(b.kind, Kind::Woodcutter | Kind::Sawmill) {
+            p.first = true;
+        }
+    }
+    let books = world.resource::<Economy>().islands[i].clone();
+    let ff = Tier::Fisherfolk.index();
+    if books.population[ff] - books.jobs[ff] < 10.0 {
         return;
     }
+    // One woodcutter feeds one sawmill: add whichever is behind, or a pair.
     let (cutters, mills) = (working(Kind::Woodcutter), working(Kind::Sawmill));
     if cutters <= mills {
         build_for(world, log, now, Kind::Woodcutter, i, at, "planks run low");
     }
-    if mills == 0 || cutters > mills + 1 {
+    if mills <= cutters {
         build_for(world, log, now, Kind::Sawmill, i, at, "planks run low");
     }
 }
@@ -804,11 +919,12 @@ fn supply(world: &mut World, log: &mut Log, now: f64, i: usize) {
     materials(world, log, now, i, at);
     bricks_and_chapel(world, log, now, i, at);
     let books = world.resource::<Economy>().islands[i].clone();
+    let from = settled_islands(world);
     let mut builds = 0;
     for g in Good::ALL {
         let gi = g.index();
-        let short =
-            books.used_per_min[gi] > books.made_per_min[gi] * 1.05 + 0.2 && books.stock[gi] < 25.0;
+        let short = books.wanted_per_min[gi] > books.made_per_min[gi] * 1.05 + 0.2
+            && books.stock[gi] < 25.0;
         if !short || builds >= 2 {
             continue;
         }
@@ -830,8 +946,20 @@ fn supply(world: &mut World, log: &mut Log, now: f64, i: usize) {
         if routed && books.stock[gi] > 0.5 {
             continue;
         }
+        // A works of it that stands waiting for its goods or hands needs those, not a twin.
+        let stalled = world
+            .query::<(&Building, &Producer)>()
+            .iter(world)
+            .any(|(b, p)| {
+                b.island == i
+                    && b.kind.def().output == Some(g)
+                    && (matches!(p.status, Status::NoInput | Status::NoWorkers) || p.crew < 0.99)
+            });
+        if stalled {
+            continue;
+        }
         log.last.insert((i, Some(g)), now);
-        let ks = makers(g, i);
+        let ks = makers_via(g, i, &from);
         let Some(&k) = ks.first() else {
             // Made elsewhere: a route has to bring it.
             continue;
@@ -843,53 +971,29 @@ fn supply(world: &mut World, log: &mut Log, now: f64, i: usize) {
                 islands()[i].name,
                 g.name(),
                 books.made_per_min[gi],
-                books.used_per_min[gi],
+                books.wanted_per_min[gi],
                 books.stock[gi]
             ),
         );
-        if build_for(
+        // And what it needs: one maker of each input to each works that uses it, on a
+        // fertile island where the ground here will not grow it.
+        if build_chain(
             world,
             log,
             now,
             k,
             i,
-            at,
+            &from,
             &format!("{} short of {}", islands()[i].name, g.name()),
+            3,
         ) {
             builds += 1;
-            // And what it needs: one maker of each input to each works that uses it.
-            for input in [k.def().input, k.def().input2].into_iter().flatten() {
-                let Some(&m) = makers(input, i).first() else {
-                    continue;
-                };
-                let count = |world: &mut World, kk: Kind| {
-                    world
-                        .query::<&Building>()
-                        .iter(world)
-                        .filter(|b| b.island == i && b.kind == kk)
-                        .count()
-                };
-                if count(world, m) < count(world, k) {
-                    build_for(
-                        world,
-                        log,
-                        now,
-                        m,
-                        i,
-                        at,
-                        &format!("input {} for it", input.name()),
-                    );
-                }
-            }
         }
     }
 }
 
 fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
-    let (coins, books) = {
-        let e = world.resource::<Economy>();
-        (e.coins, e.islands[i].clone())
-    };
+    let books = world.resource::<Economy>().islands[i].clone();
     // Basic needs of the first tier met, and money in the bank: more houses.
     let fed = Tier::Fisherfolk.wants().iter().all(|w| match w.need {
         crate::defs::Need::Good(g) if w.people > 0.0 => books.supply[g.index()] > 0.9,
@@ -913,8 +1017,8 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
     if log.last.get(&(i, None)).is_some_and(|t| now - t < 120.0) {
         return;
     }
-    // (Houses cost timber, not coins: more people are how a short purse fills again.)
-    if coins > 200.0 && (fed || short_hands) {
+    // (Houses cost no coins: a town in debt builds them too, since rent is how it gets out.)
+    if fed || short_hands {
         log.last.insert((i, None), now);
         let Some(at) = heart(world, i) else { return };
         for _ in 0..(2 + log.seed % 2) {
@@ -943,6 +1047,25 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
     }
     let econ = world.resource::<Economy>().clone();
     let routes = world.resource::<crate::fleet::Routes>().0.clone();
+    let settled = settled_islands(world);
+    let standing: std::collections::HashSet<(usize, Kind)> = world
+        .query::<&Building>()
+        .iter(world)
+        .map(|b| (b.island, b.kind))
+        .collect();
+    let starved: std::collections::HashSet<(usize, Good)> = world
+        .query::<(&Building, &Producer)>()
+        .iter(world)
+        .filter(|(_, p)| p.status == Status::NoInput)
+        .flat_map(|(b, _)| {
+            let d = b.kind.def();
+            [d.input, d.input2]
+                .into_iter()
+                .flatten()
+                .map(move |g| (b.island, g))
+        })
+        .filter(|(i, g)| econ.islands[*i].stock[g.index()] < 1.0)
+        .collect();
     let carried = |g: Good| {
         routes.iter().any(|r| {
             r.stops
@@ -956,7 +1079,11 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
         }
         for g in Good::ALL {
             let gi = g.index();
-            if b.supply[gi] > 0.8 || b.used_per_min[gi] < 0.2 || !makers(g, to).is_empty() {
+            // Wanted by its houses, or by a works there that stands waiting for it.
+            let houses_want = b.supply[gi] <= 0.8 && b.wanted_per_min[gi] >= 0.2;
+            if !(houses_want || starved.contains(&(to, g)))
+                || !makers_via(g, to, &settled).is_empty()
+            {
                 continue;
             }
             let from = econ
@@ -980,32 +1107,19 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                     .islands
                     .iter()
                     .enumerate()
-                    .filter(|(j, x)| *j != to && x.population.iter().sum::<f32>() >= 50.0)
-                    .find_map(|(j, _)| makers(g, j).first().map(|k| (j, *k)));
+                    .filter(|(j, x)| *j != to && x.population.iter().sum::<f32>() >= 1.0)
+                    .find_map(|(j, _)| makers_via(g, j, &[]).first().map(|k| (j, *k)))
+                    // (One already there and still starting up: give it time.)
+                    .filter(|(j, k)| !standing.contains(&(*j, *k)));
                 if let Some((j, k)) = maker
                     && log
                         .last
                         .get(&(j + 8000, Some(g)))
                         .is_none_or(|t| now - t > 900.0)
-                    && let Some(at) = heart(world, j)
                 {
                     log.last.insert((j + 8000, Some(g)), now);
                     let why = format!("{} to ship to {}", g.name(), islands()[to].name);
-                    if build_for(world, log, now, k, j, at, &why) {
-                        for input in [k.def().input, k.def().input2].into_iter().flatten() {
-                            if let Some(&m) = makers(input, j).first() {
-                                build_for(
-                                    world,
-                                    log,
-                                    now,
-                                    m,
-                                    j,
-                                    at,
-                                    &format!("input {} for it", input.name()),
-                                );
-                            }
-                        }
-                    }
+                    build_chain(world, log, now, k, j, &[j], &why, 3);
                 }
                 continue;
             };
@@ -1242,17 +1356,37 @@ fn colonise(world: &mut World, log: &mut Log, now: f64) {
     let need_people = (150.0 + 150.0 * (settled - 1) as f32).min(900.0);
     if home.population.iter().sum::<f32>() < need_people
         || coins < 3_000.0
-        || home.get(Good::Planks) < 60.0
+        || home.get(Good::Planks) < 40.0
         || free_ships(world).is_empty()
     {
         return;
     }
-    // The nearest island of the home region not yet settled, then the far regions in turn.
+    // The home region first, the island whose ground grows the most of what the settled
+    // ones cannot (grain and hops for bread and ale) first, then the nearest; then the far
+    // regions in turn.
+    let grows = |i: usize| {
+        let f = &islands()[i].fertility;
+        [
+            f.wool, f.grain, f.hops, f.clay, f.cane, f.dates, f.salt, f.furs, f.oil,
+        ]
+    };
+    let mut have = [false; 9];
+    for i in (0..n).filter(|&i| claimed[i]) {
+        for (h, g) in have.iter_mut().zip(grows(i)) {
+            *h |= g;
+        }
+    }
     let target = (0..n).filter(|&i| !claimed[i]).min_by(|&a, &b| {
         let key = |i: usize| {
             let isle = &islands()[i];
+            let new = grows(i)
+                .iter()
+                .zip(have)
+                .filter(|(g, h)| **g && !*h)
+                .count();
             (
                 isle.region(),
+                std::cmp::Reverse(new),
                 (isle.center - islands()[0].center).length() as i64,
             )
         };
@@ -1492,7 +1626,7 @@ fn row(world: &mut World, frames: &[f32]) -> Value {
         .map(|(i, b)| {
             let short: Vec<&str> = Good::ALL
                 .iter()
-                .filter(|g| b.used_per_min[g.index()] > 0.1 && b.supply[g.index()] < 0.8)
+                .filter(|g| b.wanted_per_min[g.index()] > 0.1 && b.supply[g.index()] < 0.8)
                 .map(|g| g.name())
                 .collect();
             json!({

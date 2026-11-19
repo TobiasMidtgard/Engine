@@ -335,6 +335,8 @@ pub struct IslandBooks {
     /// Goods made and used per minute lately (smoothed).
     pub made_per_min: [f32; Good::COUNT],
     pub used_per_min: [f32; Good::COUNT],
+    /// Goods per minute the houses ask for lately, met or not (smoothed).
+    pub wanted_per_min: [f32; Good::COUNT],
     pub harbours: u32,
     /// Warehouse room that items add (see `items::apply`).
     #[serde(default)]
@@ -586,6 +588,8 @@ pub fn step(
         }
         for g in Good::ALL {
             let d = (demand[g.index()] - spared[i][g.index()]).max(0.0);
+            let w = &mut b.wanted_per_min[g.index()];
+            *w += (d as f32 / dt * 60.0 - *w) * k;
             let have = b.stock[g.index()];
             // Nothing asked: the supply reads what the warehouse could hand out.
             let ratio = if d <= 0.0 {

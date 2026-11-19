@@ -170,11 +170,13 @@ impl Craft {
     }
 
     pub fn from_name(s: &str) -> Option<Craft> {
+        // (The id, such as "barque", or the name on the card, such as "Trader's barque".)
         Craft::ALL.into_iter().find(|c| {
             serde_json::to_value(c)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string))
                 == Some(s.to_ascii_lowercase())
+                || c.name().eq_ignore_ascii_case(s)
         })
     }
 }

@@ -632,7 +632,8 @@ pub fn drains_text(econ: &Economy) -> String {
 fn plural(name: &str, n: u32) -> String {
     let name = low(name);
     match name.strip_suffix('y') {
-        _ if n == 1 => name,
+        // (Names that end in s already, such as oil works or brickworks, stay as they are.)
+        _ if n == 1 || name.ends_with('s') => name,
         Some(stem) if !stem.ends_with(['a', 'e', 'o', 'u']) => format!("{stem}ies"),
         _ => format!("{name}s"),
     }
