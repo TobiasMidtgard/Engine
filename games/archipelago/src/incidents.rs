@@ -126,6 +126,8 @@ pub const QUIET_BELOW: f32 = 150.0;
 pub const COVERED: f32 = 0.25;
 /// Most incidents at once on an island.
 const MOST: usize = 24;
+/// Most incidents of one kind on an island that still spread to neighbours.
+const SPREAD_MOST: usize = 6;
 /// Crews each answering building sends out at once.
 pub const CREWS: u32 = 2;
 /// Crew speed, m/s of game time (half again on paving).
@@ -730,10 +732,19 @@ fn grow(world: &mut World, dt: f32) {
         // One neighbour at a time: left alone a fire takes three or four houses with it,
         // a riot or a sickness a street.
         let chance = match t {
-            Trouble::Fire => 0.12,
-            Trouble::Riot => 0.08,
-            Trouble::Sickness => 0.06,
+            Trouble::Fire => 0.10,
+            Trouble::Riot => 0.04,
+            Trouble::Sickness => 0.05,
         };
+        // A street at most: past SPREAD_MOST of one kind on an island it stops spreading.
+        let same = world
+            .query::<(&Building, &Incident)>()
+            .iter(world)
+            .filter(|(n, i)| n.island == b.island && i.what == t)
+            .count();
+        if same >= SPREAD_MOST {
+            continue;
+        }
         let (roll, pick) = {
             let mut inc = world.resource_mut::<Incidents>();
             (inc.unit(), inc.unit())

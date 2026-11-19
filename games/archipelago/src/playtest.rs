@@ -246,11 +246,11 @@ fn safety(world: &mut World, log: &mut Log, now: f64, i: usize) {
     let coins = world.resource::<Economy>().coins;
     for (kind, from, why) in [
         (Kind::FireWatch, crate::incidents::QUIET_BELOW, "fires"),
-        (Kind::WatchHouse, 350.0, "riots"),
+        (Kind::WatchHouse, 250.0, "riots"),
         (Kind::Infirmary, 500.0, "sickness"),
     ] {
         let d = kind.def();
-        let can = coins > d.coins as f64 + 1500.0
+        let can = coins > d.coins as f64 + 400.0
             && d.cost.iter().all(|(g, n)| books.get(*g) >= *n as f64 + 4.0);
         if can && count(world, kind) < want(from) {
             build_for(world, log, now, kind, i, at, why);
@@ -259,7 +259,7 @@ fn safety(world: &mut World, log: &mut Log, now: f64, i: usize) {
     }
     // Ruins: rebuilt when there is money.
     for (id, kind, isle, _) in crate::incidents::ruins(world) {
-        if isle != i || world.resource::<Economy>().coins < 2500.0 {
+        if isle != i || world.resource::<Economy>().coins < 1200.0 {
             continue;
         }
         match crate::incidents::rebuild(world, id) {
