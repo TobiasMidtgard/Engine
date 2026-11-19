@@ -353,7 +353,14 @@ fn stat(label: &str, value: String, base: f32, now: f32, more_is_good: bool) -> 
 
 /// The designer for `p` with `fit` so far: its slots, the fittings to choose from, what it
 /// adds up to against the bare hull, the price and Order.
-fn designer(p: &Plan, fit: &Fit, why: Option<String>, coins: f64, books: &IslandBooks) -> El {
+fn designer(
+    p: &Plan,
+    fit: &Fit,
+    why: Option<String>,
+    coins: f64,
+    books: &IslandBooks,
+    saved: &[(usize, String, Fit)],
+) -> El {
     let c = p.craft;
     let slots = fittings::slots(c);
     let taken: Vec<Fitting> = fit.iter().collect();
@@ -519,6 +526,37 @@ fn designer(p: &Plan, fit: &Fit, why: Option<String>, coins: f64, books: &Island
                 .with_style(|s| s.gap(4.0).wrap(true))
                 .children(figures),
         )
+        .child_opt((!saved.is_empty()).then(|| {
+            // Designs saved for this craft: click one to load it.
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(5.0).wrap(true).align_items(Align::Center))
+                .child(brass::label("Saved", true))
+                .children(saved.iter().map(|(i, name, f)| {
+                    let same = f == fit;
+                    El::new()
+                        .class(if same {
+                            "button brass_button"
+                        } else {
+                            "button brass_button_dark"
+                        })
+                        .on_click(format!("isle.yard.load:{i}"))
+                        .with_style(|s| s.padding([3.0, 8.0]).gap(3.0))
+                        .tooltip(
+                            name.clone(),
+                            format!("{}\n[i]Click to load it.[/i]", f.names().join(", ")),
+                        )
+                        .child(
+                            El::text(name.clone())
+                                .text_style(|t| t.size(12.5).bold().nowrap())
+                                .pick_ignore(),
+                        )
+                        .children(f.iter().map(|x| {
+                            El::icon(fitting_icon(x))
+                                .with_style(|s| s.size(16.0, 16.0).pick(Pick::Ignore))
+                        }))
+                }))
+        }))
         .child(
             El::new()
                 .class("row")
@@ -538,6 +576,17 @@ fn designer(p: &Plan, fit: &Fit, why: Option<String>, coins: f64, books: &Island
                         .children(
                             cost.iter()
                                 .map(|(g, n)| chip(g.icon(), *n, books.get(*g) + 1e-6 < *n as f64)),
+                        ),
+                )
+                .child(
+                    El::button("Save", "isle.yard.save")
+                        .class("brass_button_dark")
+                        .text_style(|t| t.nowrap())
+                        .with_style(|s| s.shrink(0.0).padding([6.0, 10.0]))
+                        .disabled(saved.iter().any(|(_, _, f)| f == fit))
+                        .tooltip(
+                            "Save this design",
+                            "Keep it under a name, to load and order again.",
                         ),
                 )
                 .child(
@@ -661,6 +710,7 @@ fn section(
     yard: &Yard,
     plans: &[&Plan],
     design: Option<(Craft, Fit)>,
+    saved: &[(usize, String, Fit)],
     coins: f64,
     books: &IslandBooks,
     isle: &str,
@@ -683,6 +733,7 @@ fn section(
             why_not(p, &fit, yard.queue.len(), coins, books, isle),
             coins,
             books,
+            saved,
         ));
         return out;
     }
@@ -755,8 +806,19 @@ pub fn refresh(world: &mut World) {
         .flat_map(|p| total(p, &fit_of(p)).1)
         .map(|(g, n)| format!("{}", (books.get(g) + 1e-6 >= n as f64) as u8))
         .collect();
+    let saved: Vec<(usize, String, Fit)> = design
+        .and_then(|(c, _)| {
+            world.get_resource::<fittings::Designs>().map(|d| {
+                d.0.iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.craft == c)
+                    .map(|(i, x)| (i, x.name.clone(), x.fit))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
     let sig = format!(
-        "{e:?}|{:?}|{can:?}|{}|{}|{design:?}",
+        "{e:?}|{:?}|{can:?}|{}|{}|{design:?}|{saved:?}",
         yard.queue,
         short.join(""),
         plans
@@ -766,7 +828,7 @@ pub fn refresh(world: &mut World) {
             .collect::<String>()
     );
     if world.resource::<YardCard>().sig != sig {
-        let els = section(&yard, &plans, design, coins, &books, isle);
+        let els = section(&yard, &plans, design, &saved, coins, &books, isle);
         if let Some(node) = engine_ui::input::find_id(world, CARD_ID) {
             let _ = engine_ui::el::replace_children(world, node, &els);
             world.resource_mut::<YardCard>().sig = sig;
@@ -828,6 +890,32 @@ pub fn action(world: &mut World, a: &str) -> bool {
         refresh(world);
         return true;
     }
+    if a == "isle.yard.save" {
+        if let Some((c, fit)) = world.resource::<YardCard>().design {
+            let n = world
+                .get_resource::<fittings::Designs>()
+                .map_or(0, |d| d.0.iter().filter(|x| x.craft == c).count());
+            let name = format!("{} {}", c.name(), n + 1);
+            if let Err(e) = fittings::save(world, &name, c, fit) {
+                super::complain(world, "Shipyard", &e);
+            }
+        }
+        refresh(world);
+        return true;
+    }
+    if let Some(i) = a
+        .strip_prefix("isle.yard.load:")
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        let d = world
+            .get_resource::<fittings::Designs>()
+            .and_then(|d| d.0.get(i).map(|x| (x.craft, x.fit)));
+        if let Some(d) = d {
+            world.resource_mut::<YardCard>().design = Some(d);
+        }
+        refresh(world);
+        return true;
+    }
     let mut card = world.resource_mut::<YardCard>();
     if let Some(k) = a.strip_prefix("isle.yard.design:") {
         let c = Craft::from_name(k);
@@ -882,5 +970,10 @@ pub fn demo(world: &mut World, spec: &str) {
         fittings::parse_list(c, list).unwrap_or_else(|_| fittings::usual(c))
     };
     world.resource_mut::<YardCard>().design = Some((c, fit));
+    // `--hud-design-save`: save it, and the usual fit as a second design.
+    if std::env::args().any(|a| a == "--hud-design-save") {
+        let _ = fittings::save(world, &format!("{} 1", c.name()), c, fittings::usual(c));
+        let _ = fittings::save(world, &format!("{} 2", c.name()), c, fit);
+    }
     refresh(world);
 }
