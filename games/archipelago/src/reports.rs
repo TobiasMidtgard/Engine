@@ -223,7 +223,7 @@ pub fn house(world: &mut World, e: Entity) -> Result<Value, String> {
     for c in Cat::BASIC {
         let th = tier.threshold(c);
         let p = a.points[c.index()];
-        if a.asked[c.index()] && p < th {
+        if a.asked[c.index()] && p < th * 0.995 {
             pulls.push(
                 json!({"why": format!("{} short", c.name()), "points": -sim::SHORT_GLOOM * (1.0 - p / th)}),
             );
@@ -574,12 +574,21 @@ pub fn drains_text(econ: &Economy) -> String {
         .join("; ")
 }
 
+/// "bakery" -> "bakeries", "windmill" -> "windmills".
+fn plural(name: &str, n: u32) -> String {
+    let name = low(name);
+    match name.strip_suffix('y') {
+        _ if n == 1 => name,
+        Some(stem) if !stem.ends_with(['a', 'e', 'o', 'u']) => format!("{stem}ies"),
+        _ => format!("{name}s"),
+    }
+}
+
 fn drain_line(d: &sim::Drain) -> String {
     format!(
-        "{} {}{} {} on {}: {:.0} a minute",
+        "{} {} {} on {}: {:.0} a minute",
         d.count,
-        low(d.kind.def().name),
-        if d.count == 1 { "" } else { "s" },
+        plural(d.kind.def().name, d.count),
         if d.idle { "idle" } else { "running" },
         islands()[d.island].name,
         d.per_min
@@ -752,6 +761,38 @@ mod tests {
             );
             assert!(!v["wait_text"].as_str().unwrap().is_empty());
         }
+    }
+
+    /// Writes a few house cards and the island book as JSON, for the picture page.
+    #[test]
+    #[ignore]
+    fn dump_cards() {
+        let mut w = bare_world();
+        crate::town::build_start(&mut w);
+        crate::town::prewarm(&mut w, 600.0);
+        let mut picked: Vec<Entity> = Vec::new();
+        for t in Tier::ALL {
+            let mut hs: Vec<(Entity, f32, bool)> = w
+                .query::<(Entity, &House)>()
+                .iter(&w)
+                .filter(|(_, h)| h.tier == t)
+                .map(|(e, h)| (e, h.happiness, h.ready))
+                .collect();
+            hs.sort_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some(x) = hs.last() {
+                picked.push(x.0);
+            }
+            if let Some(x) = hs.iter().find(|x| !x.2) {
+                picked.push(x.0);
+            }
+        }
+        let cards: Vec<Value> = picked
+            .into_iter()
+            .map(|e| house(&mut w, e).unwrap())
+            .collect();
+        let out = json!({"houses": cards, "island": island(&mut w, 0), "ledger": ledger(&mut w)});
+        let path = std::env::var("CARDS_OUT").unwrap_or("cards.json".into());
+        std::fs::write(path, serde_json::to_string_pretty(&out).unwrap()).unwrap();
     }
 
     /// Moving a house down and up again through the calls.

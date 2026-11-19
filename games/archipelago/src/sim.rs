@@ -1035,7 +1035,8 @@ pub fn appraise(h: &House, books: &IslandBooks, boost: Option<&Boost>) -> Apprai
         if !asked || p < th - 1e-4 {
             a.short = a.short.or(Some(c));
         }
-        if asked && p < th {
+        // (Within half a percent counts as met, so a full supply never shows a sliver.)
+        if asked && p < th * 0.995 {
             a.shortage += SHORT_GLOOM * (1.0 - p / th);
         }
         if !asked || p < th * SLIP_SHARE {
