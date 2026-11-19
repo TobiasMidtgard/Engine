@@ -403,6 +403,7 @@ pub fn place(
     plant_garden(world, entity);
     crate::fields::claim(world, entity);
     crate::effects::add_plumes(world, entity);
+    crate::incidents::touch(world);
     if matches!(kind, Kind::Market | Kind::Harbour | Kind::Chapel) {
         crate::streets::mark_all(world);
     }
@@ -559,6 +560,7 @@ pub fn demolish(world: &mut World, e: Entity) {
     crate::fields::release_all(world, e);
     crate::items::vacate(world, e);
     crate::shipyard::forget(world, e);
+    crate::incidents::forget(world, e);
     if matches!(b.kind, Kind::Market | Kind::Harbour | Kind::Chapel) {
         crate::streets::mark_all(world);
     }
@@ -787,7 +789,9 @@ pub fn refresh(world: &mut World) {
     let paved = world.resource::<Grid>().paved.clone();
     let services: Vec<(Kind, usize, DVec2, f64)> = all
         .iter()
-        .filter(|(_, b)| SERVICES.contains(&b.kind))
+        .filter(|(e, b)| {
+            SERVICES.contains(&b.kind) && world.get::<crate::incidents::Ruin>(*e).is_none()
+        })
         .map(|(_, b)| {
             (
                 b.kind,
@@ -798,7 +802,9 @@ pub fn refresh(world: &mut World) {
         })
         .collect();
     let mut by_road: [HashSet<IVec2>; MAX_SERVICES] = Default::default();
-    for (_, b) in all.iter().filter(|(_, b)| SERVICES.contains(&b.kind)) {
+    for (_, b) in all.iter().filter(|(e, b)| {
+        SERVICES.contains(&b.kind) && world.get::<crate::incidents::Ruin>(*e).is_none()
+    }) {
         let i = SERVICES.iter().position(|k| *k == b.kind).unwrap_or(0);
         street_reach(b, &roads, &paved, &mut by_road[i]);
     }

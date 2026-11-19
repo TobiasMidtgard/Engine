@@ -828,6 +828,14 @@ pub fn build_start(world: &mut World) {
         25,
         true,
     );
+    // The three that answer fires, riots and sickness.
+    for (kind, off) in [
+        (Kind::FireWatch, DVec2::new(84.0, 30.0)),
+        (Kind::WatchHouse, DVec2::new(-92.0, -8.0)),
+        (Kind::Infirmary, DVec2::new(10.0, 96.0)),
+    ] {
+        place_near(world, kind, town + off, 30, true);
+    }
     let core = fill_houses(world, town, 75.0, 8, Tier::Burghers);
     let inner = fill_houses(world, town, 100.0, 16, Tier::Labourers);
     let outer = fill_houses(world, town, 190.0, 44, Tier::Fisherfolk);
@@ -1576,10 +1584,19 @@ fn fleet_review(world: &mut World, hb: &Building) {
         (Craft::Seaplane, 370.0, 0.0),
         (Craft::Biplane, 120.0, 46.0),
         (Craft::Airship, 215.0, 78.0),
+        // The second line, further out: the round 8 craft.
+        (Craft::Cutter, 10.0, 0.0),
+        (Craft::Brig, 60.0, 0.0),
+        (Craft::Gunboat, 122.0, 0.0),
+        (Craft::Frigate, 190.0, 0.0),
+        (Craft::Liner, 292.0, 0.0),
+        (Craft::FlyingBoat, 180.0, 60.0),
     ];
     for (i, (craft, d, y)) in line.into_iter().enumerate() {
         let lift = if craft == Craft::Airship || craft == Craft::Biplane {
             -out * 40.0
+        } else if i >= 9 {
+            out * 110.0
         } else {
             DVec2::ZERO
         };
@@ -1618,6 +1635,7 @@ pub mod tests {
         w.init_resource::<crate::fleet::SeaChart>();
         w.init_resource::<Routes>();
         w.init_resource::<crate::items::Items>();
+        w.init_resource::<crate::incidents::Incidents>();
         w.init_resource::<engine::world::SurfaceMaterials>();
         w.init_resource::<bevy_ecs::message::Messages<engine::world::terrain::TerrainEdit>>();
         w

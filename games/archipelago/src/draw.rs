@@ -24,6 +24,8 @@ pub struct Art {
     pub mats: Mats,
     pub models: HashMap<ModelKey, Model>,
     pub crafts: HashMap<Craft, Model>,
+    /// Fittings that show on a hull, per craft ([`crate::fittings::visual`]).
+    pub fitted: HashMap<(Craft, crate::fittings::Fitting), Model>,
     pub sails: Model,
     pub props: Model,
     pub paddles: Model,
@@ -62,6 +64,14 @@ pub fn make_art(world: &mut World) -> Art {
         triangles.insert(format!("{c:?}"), parts.triangles());
         craft_models.insert(*c, upload(world, parts));
     }
+    let mut fitted = HashMap::new();
+    for c in Craft::ALL {
+        for d in crate::fittings::FITTINGS {
+            if let Some(parts) = crate::fittings::visual(c, d.fitting) {
+                fitted.insert((c, d.fitting), upload(world, parts));
+            }
+        }
+    }
     let sails = upload(world, mill_sails());
     let props = upload(world, airship_props());
     let paddles = upload(world, crate::vessels::paddle_wheel());
@@ -75,6 +85,7 @@ pub fn make_art(world: &mut World) -> Art {
         mats,
         models,
         crafts: craft_models,
+        fitted,
         sails,
         props,
         paddles,

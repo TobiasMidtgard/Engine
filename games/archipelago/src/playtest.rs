@@ -39,6 +39,7 @@ struct Log {
     last: HashMap<(usize, Option<Good>), f64>,
     settled_seen: usize,
     launched_seen: usize,
+    incidents_seen: usize,
 }
 
 impl Log {
@@ -192,9 +193,90 @@ fn turn(world: &mut World, log: &mut Log) {
             continue;
         }
         supply(world, log, now, i);
+        safety(world, log, now, i);
         grow(world, log, now, i);
     }
     trade(world, log, now);
+    incidents_seen(world, log);
+}
+
+/// Copy new fires, riots and sicknesses into the log.
+fn incidents_seen(world: &mut World, log: &mut Log) {
+    let Some(inc) = world.get_resource::<crate::incidents::Incidents>() else {
+        return;
+    };
+    let new: Vec<(f64, String)> = inc.log[log.incidents_seen.min(inc.log.len())..]
+        .iter()
+        .map(|(t, _, s)| (*t, s.clone()))
+        .collect();
+    log.incidents_seen = inc.log.len();
+    for (t, s) in new {
+        log.line(t, format!("INCIDENT {s}"));
+    }
+}
+
+/// A careful player puts up a Fire Watch once the town is big enough to burn, a Watch House
+/// and an Infirmary as it grows, one more of each for every 500 people, and rebuilds ruins.
+fn safety(world: &mut World, log: &mut Log, now: f64, i: usize) {
+    if log
+        .last
+        .get(&(i + 5000, None))
+        .is_some_and(|t| now - t < 240.0)
+    {
+        return;
+    }
+    log.last.insert((i + 5000, None), now);
+    let Some(at) = heart(world, i) else { return };
+    let books = world.resource::<Economy>().islands[i].clone();
+    let pop: f32 = books.population.iter().sum();
+    let count = |world: &mut World, k: Kind| {
+        world
+            .query::<&Building>()
+            .iter(world)
+            .filter(|b| b.island == i && b.kind == k)
+            .count()
+    };
+    let want = |from: f32| {
+        if pop < from {
+            0
+        } else {
+            1 + ((pop - from) / 500.0) as usize
+        }
+    };
+    let coins = world.resource::<Economy>().coins;
+    for (kind, from, why) in [
+        (Kind::FireWatch, crate::incidents::QUIET_BELOW, "fires"),
+        (Kind::WatchHouse, 350.0, "riots"),
+        (Kind::Infirmary, 500.0, "sickness"),
+    ] {
+        let d = kind.def();
+        let can = coins > d.coins as f64 + 1500.0
+            && d.cost.iter().all(|(g, n)| books.get(*g) >= *n as f64 + 4.0);
+        if can && count(world, kind) < want(from) {
+            build_for(world, log, now, kind, i, at, why);
+            break;
+        }
+    }
+    // Ruins: rebuilt when there is money.
+    for (id, kind, isle, _) in crate::incidents::ruins(world) {
+        if isle != i || world.resource::<Economy>().coins < 2500.0 {
+            continue;
+        }
+        match crate::incidents::rebuild(world, id) {
+            Ok(()) => {
+                log.act("rebuild a ruin");
+                log.line(
+                    now,
+                    format!(
+                        "rebuilt a burnt {} on {}",
+                        kind.def().name,
+                        islands()[i].name
+                    ),
+                );
+            }
+            Err(e) => log.refuse(now, "rebuild", &e),
+        }
+    }
 }
 
 fn press_orders(world: &mut World, log: &mut Log, now: f64) {
@@ -1150,6 +1232,10 @@ fn row(world: &mut World, frames: &[f32]) -> Value {
     let max = tail.iter().cloned().fold(0.0, f32::max);
     let carts = world.query::<&crate::logistics::Cart>().iter(world).count();
     let vessels = world.query::<&Vessel>().iter(world).count();
+    let burning = world
+        .query::<&crate::incidents::Incident>()
+        .iter(world)
+        .count();
     let items = world.resource::<Items>();
     let isles: Vec<Value> = econ
         .islands
@@ -1183,6 +1269,8 @@ fn row(world: &mut World, frames: &[f32]) -> Value {
         "settled": world.resource::<crate::settle::Settled>().0.len(),
         "launched": world.resource::<crate::shipyard::Launched>().0.len(),
         "fleet_upkeep": econ.fleet_upkeep,
+        "incidents": world.get_resource::<crate::incidents::Incidents>().map(|i| serde_json::to_value(&i.tally).unwrap_or_default()),
+        "burning": burning,
         "shelf": items.shelf.len(),
         "update_ms_avg": avg, "update_ms_max": max,
         "islands": isles,

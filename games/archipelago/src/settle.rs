@@ -263,6 +263,7 @@ pub fn provision(world: &mut World, e: Entity, isle: usize) -> u32 {
         return 0;
     };
     let (slots, per) = v.craft.hold();
+    let per = crate::fittings::per_hold(per, slots + v.kit.hold, v.kit.room);
     let slots = (slots + v.kit.hold) as usize;
     let mut cargo = v.cargo.clone();
     {

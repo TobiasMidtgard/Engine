@@ -468,7 +468,7 @@ pub static MORE: &[ItemDef] = &[
         "Stamped for the fair: works in reach make twice as much for three minutes.",
     ),
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Fire buckets",
             Union,
@@ -482,7 +482,7 @@ pub static MORE: &[ItemDef] = &[
         )
     },
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Strike breaker",
             Union,
@@ -820,7 +820,7 @@ pub static MORE: &[ItemDef] = &[
         )
     },
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Curfew",
             Hall,
@@ -836,7 +836,7 @@ pub static MORE: &[ItemDef] = &[
         )
     },
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Quarantine notice",
             Hall,
@@ -852,7 +852,7 @@ pub static MORE: &[ItemDef] = &[
         )
     },
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Night watch",
             Hall,
@@ -866,7 +866,7 @@ pub static MORE: &[ItemDef] = &[
         )
     },
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Water carriers",
             Hall,
@@ -880,7 +880,7 @@ pub static MORE: &[ItemDef] = &[
         )
     },
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Herb woman",
             Hall,
@@ -1113,7 +1113,7 @@ pub static MORE: &[ItemDef] = &[
         )
     },
     ItemDef {
-        later: 8,
+        later: 0,
         ..row(
             "Port health officer",
             Office,

@@ -81,6 +81,10 @@ fn status_look(s: &Shown) -> (Color, &'static str) {
         Status::NoWilds => (red, "isle_furs"),
         Status::NoFields => (red, "isle_farm"),
         Status::Paused => (Color::hex(0x6a5f4c), "isle_workshop"),
+        Status::Burning => (red, "isle_alert_fire"),
+        Status::Striking => (red, "isle_alert_riot"),
+        Status::Sick => (amber, "isle_alert_sick"),
+        Status::Burnt => (red, "isle_ruin"),
     }
 }
 

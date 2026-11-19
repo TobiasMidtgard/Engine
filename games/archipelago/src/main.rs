@@ -24,6 +24,7 @@ mod defs;
 mod draw;
 mod effects;
 mod fields;
+mod fittings;
 mod fleet;
 mod fog;
 mod gear;
@@ -32,6 +33,7 @@ mod grid;
 mod halls;
 mod hud;
 mod icons;
+mod incidents;
 mod island;
 mod items;
 mod logistics;
@@ -127,6 +129,8 @@ pub fn add_game(app: &mut App) {
         .init_resource::<settle::StartMode>()
         .init_resource::<settle::Settled>()
         .init_resource::<shipyard::Launched>()
+        .init_resource::<incidents::Incidents>()
+        .init_resource::<fittings::Designs>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, sim::economy_system)
         .add_systems(
@@ -142,7 +146,7 @@ pub fn add_game(app: &mut App) {
                 hud::read_actions,
                 tools::input,
                 town::upgrade_looks,
-                items::tick,
+                (items::tick, incidents::tick).chain(),
                 build::refresh,
                 draw::redraw_buildings,
                 streets::redraw_streets,
@@ -169,6 +173,8 @@ pub fn add_game(app: &mut App) {
     globe::add(app);
     api::register(app);
     settle::register(app);
+    incidents::register(app);
+    fittings::register(app);
 }
 
 /// Build the art, the islands, the start and the view.

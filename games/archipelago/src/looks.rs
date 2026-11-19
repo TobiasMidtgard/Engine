@@ -111,6 +111,15 @@ pub const MODELS: &[ModelKey] = &[
     "chandler",
     "shipyard",
     "hull_in_frame",
+    "fire_watch",
+    "watch_house",
+    "infirmary",
+    "pump_cart",
+    "constables",
+    "doctor_gig",
+    "rioters",
+    "sick_flag",
+    "rubble",
     "walker_0_0",
     "walker_0_1",
     "walker_0_2",
@@ -230,6 +239,9 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
             crate::halls::look(kind, seed, &mut out);
         }
         Kind::Shipyard => crate::shipyard::look(seed, &mut out),
+        Kind::FireWatch | Kind::WatchHouse | Kind::Infirmary => {
+            crate::incidents::look(kind, &mut out)
+        }
         Kind::House if biome != Biome::Temperate => {
             crate::regional::house_look(biome, tier, seed, &mut out);
         }
@@ -2836,6 +2848,7 @@ pub fn build_model(key: ModelKey) -> Parts {
             .or_else(|| crate::burgher::build(key))
             .or_else(|| crate::halls::build(key))
             .or_else(|| crate::shipyard::build(key))
+            .or_else(|| crate::incidents::build(key))
             .or_else(|| crate::walkers::build(key))
             .unwrap_or_default(),
     }
@@ -2888,6 +2901,7 @@ mod tests {
             .chain(crate::burgher::MODELS)
             .chain(crate::halls::MODELS)
             .chain(crate::shipyard::MODELS)
+            .chain(crate::incidents::MODELS)
         {
             assert!(MODELS.contains(key), "{key} is not listed");
         }

@@ -77,6 +77,9 @@ pub(super) fn kind_icon(k: Kind) -> &'static str {
         Kind::AirshipMast => "isle_airship",
         Kind::Shipyard => "isle_shipyard",
         Kind::Chandler => "isle_chandler",
+        Kind::FireWatch => "isle_fire_watch",
+        Kind::WatchHouse => "isle_watch_house",
+        Kind::Infirmary => "isle_infirmary",
         _ => k.def().output.map_or("isle_workshop", Good::icon),
     }
 }

@@ -425,6 +425,10 @@ pub enum Kind {
     Chandler,
     /// Builds ships on its slipway (see `shipyard`).
     Shipyard,
+    // The three that answer fires, riots and sickness (see `incidents`).
+    FireWatch,
+    WatchHouse,
+    Infirmary,
 }
 
 /// Where a building may stand.
@@ -887,6 +891,33 @@ pub const DEFS: &[Def] = &[
         upkeep: 20.0,
         site: Site::Coast,
         ..def(Kind::Shipyard, "Shipyard", Category::Harbour, (9, 6))
+    },
+    Def {
+        blurb: "A hand pump cart and its crew. Fires are a quarter as likely in reach, and the \
+                pump sets out down the streets as soon as one starts.",
+        coins: 300,
+        cost: &[(Good::Planks, 8)],
+        upkeep: 8.0,
+        reach: 22,
+        ..def(Kind::FireWatch, "Fire Watch", Category::Public, (4, 5))
+    },
+    Def {
+        blurb: "Constables keep the peace: riots are a quarter as likely in reach, and the \
+                watch walks out to break one up.",
+        coins: 500,
+        cost: &[(Good::Planks, 6), (Good::Bricks, 6)],
+        upkeep: 15.0,
+        reach: 26,
+        ..def(Kind::WatchHouse, "Watch House", Category::Public, (4, 4))
+    },
+    Def {
+        blurb: "A doctor and her gig: sickness is a quarter as likely in reach, and she drives \
+                out to every sick house.",
+        coins: 600,
+        cost: &[(Good::Planks, 8), (Good::Bricks, 8)],
+        upkeep: 20.0,
+        reach: 30,
+        ..def(Kind::Infirmary, "Infirmary", Category::Public, (5, 5))
     },
 ];
 

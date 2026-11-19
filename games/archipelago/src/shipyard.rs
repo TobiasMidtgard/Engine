@@ -15,6 +15,7 @@ use engine::prelude::*;
 use crate::art::{Mat, Parts, hexc, shade, v3};
 use crate::defs::{Good, Kind, Tier};
 use crate::draw::{Art, spawn_model};
+use crate::fittings::Fit;
 use crate::fleet::{Doing, Roam, Vessel, mast_point, spawn_vessel};
 use crate::globe::Frame;
 use crate::grid;
@@ -120,6 +121,66 @@ pub const PLANS: &[Plan] = &[
         upkeep: 22.0,
         blurb: "Two holds of 25, straight over land and sea between masts.",
     },
+    Plan {
+        craft: Craft::Cutter,
+        at: Kind::Shipyard,
+        coins: 900,
+        cost: &[(Good::Planks, 16), (Good::Clothes, 6)],
+        build_s: 130.0,
+        tier: Tier::Fisherfolk,
+        upkeep: 5.0,
+        blurb: "Quick and handy, one hold of 25: a scout, a dispatch boat, a guard for a lane.",
+    },
+    Plan {
+        craft: Craft::Brig,
+        at: Kind::Shipyard,
+        coins: 1_800,
+        cost: &[(Good::Planks, 36), (Good::Clothes, 14)],
+        build_s: 200.0,
+        tier: Tier::Labourers,
+        upkeep: 9.0,
+        blurb: "Three holds of 35 and three fitting slots: the trader that can carry guns.",
+    },
+    Plan {
+        craft: Craft::Gunboat,
+        at: Kind::Shipyard,
+        coins: 2_800,
+        cost: &[(Good::Planks, 20), (Good::Bricks, 30)],
+        build_s: 240.0,
+        tier: Tier::Labourers,
+        upkeep: 16.0,
+        blurb: "Low, grey and steam-driven, one hold: a heavy gun and a ram for the home waters.",
+    },
+    Plan {
+        craft: Craft::Frigate,
+        at: Kind::Shipyard,
+        coins: 5_200,
+        cost: &[(Good::Planks, 70), (Good::Clothes, 30), (Good::Bricks, 20)],
+        build_s: 360.0,
+        tier: Tier::Burghers,
+        upkeep: 26.0,
+        blurb: "Four fitting slots and the strongest hull afloat: the escort and the warship.",
+    },
+    Plan {
+        craft: Craft::Liner,
+        at: Kind::Shipyard,
+        coins: 6_500,
+        cost: &[(Good::Planks, 40), (Good::Bricks, 40), (Good::Glass, 12)],
+        build_s: 400.0,
+        tier: Tier::Burghers,
+        upkeep: 30.0,
+        blurb: "Three holds of 40, four fitting slots and the fastest crossings of the ocean.",
+    },
+    Plan {
+        craft: Craft::FlyingBoat,
+        at: Kind::AirshipMast,
+        coins: 2_600,
+        cost: &[(Good::Planks, 14), (Good::Clothes, 10), (Good::Oil, 10)],
+        build_s: 220.0,
+        tier: Tier::Burghers,
+        upkeep: 16.0,
+        blurb: "One hold of 20 and a long reach: lands on any water, sees far over the ocean.",
+    },
 ];
 
 pub fn plan(craft: Craft) -> Option<&'static Plan> {
@@ -137,6 +198,8 @@ pub fn upkeep_of(craft: Craft) -> f32 {
 pub struct Yard {
     /// What is on the slip first, then what waits.
     pub queue: Vec<Craft>,
+    /// The fittings of each craft in `queue`, in the same order.
+    pub fits: Vec<Fit>,
     /// Game seconds the first has been building.
     pub progress_s: f32,
     /// The hull on the slip (its drawn parts).
@@ -157,8 +220,13 @@ impl Yard {
 /// The most a yard takes on at once.
 pub const MAX_QUEUE: usize = 4;
 
-/// Order `craft` at yard `e`: pay now, build when the slip is free.
+/// Order `craft` at yard `e` with its usual fittings: pay now, build when the slip is free.
 pub fn order(world: &mut World, e: Entity, craft: Craft) -> Result<(), String> {
+    order_fitted(world, e, craft, crate::fittings::usual(craft))
+}
+
+/// Order `craft` at yard `e` built with `fit`: the hull and its fittings are paid for now.
+pub fn order_fitted(world: &mut World, e: Entity, craft: Craft, fit: Fit) -> Result<(), String> {
     let b = world
         .get::<Building>(e)
         .cloned()
@@ -172,6 +240,16 @@ pub fn order(world: &mut World, e: Entity, craft: Craft) -> Result<(), String> {
             b.kind.def().name
         ));
     }
+    crate::fittings::check(craft, &fit)?;
+    let (fit_coins, fit_cost) = crate::fittings::price(&fit);
+    let mut cost: Vec<(Good, u32)> = p.cost.to_vec();
+    for (g, n) in fit_cost {
+        match cost.iter_mut().find(|x| x.0 == g) {
+            Some(x) => x.1 += n,
+            None => cost.push((g, n)),
+        }
+    }
+    let coins = p.coins + fit_coins;
     let queued = world.get::<Yard>(e).map_or(0, |y| y.queue.len());
     if queued >= MAX_QUEUE {
         return Err(format!("The yard has {MAX_QUEUE} on its list already."));
@@ -186,15 +264,15 @@ pub fn order(world: &mut World, e: Entity, craft: Craft) -> Result<(), String> {
             crate::island::islands()[b.island].name
         ));
     }
-    if econ.coins < p.coins as f64 {
+    if econ.coins < coins as f64 {
         return Err(format!(
             "A {} costs {} coins; you have {:.0}.",
             craft.name(),
-            p.coins,
+            coins,
             econ.coins
         ));
     }
-    for (g, n) in p.cost {
+    for (g, n) in &cost {
         if books.get(*g) + 1e-6 < *n as f64 {
             return Err(format!(
                 "A {} needs {n} {} on {}; the warehouse has {:.0}.",
@@ -207,8 +285,8 @@ pub fn order(world: &mut World, e: Entity, craft: Craft) -> Result<(), String> {
     }
     {
         let mut econ = world.resource_mut::<Economy>();
-        econ.coins -= p.coins as f64;
-        for (g, n) in p.cost {
+        econ.coins -= coins as f64;
+        for (g, n) in &cost {
             econ.islands[b.island].take(*g, *n as f64);
         }
     }
@@ -218,7 +296,10 @@ pub fn order(world: &mut World, e: Entity, craft: Craft) -> Result<(), String> {
     let first = {
         let mut y = world.get_mut::<Yard>(e).unwrap();
         y.queue.push(craft);
-        y.queue.len() == 1
+        let n = y.queue.len();
+        y.fits.resize(n - 1, Fit::default());
+        y.fits.push(fit);
+        n == 1
     };
     if first {
         lay_down(world, e);
@@ -233,21 +314,27 @@ pub fn cancel(world: &mut World, e: Entity) -> Result<Craft, String> {
         .get::<Building>(e)
         .cloned()
         .ok_or("no such building")?;
-    let (craft, on_slip) = {
+    let (craft, fit, on_slip) = {
         let mut y = world.get_mut::<Yard>(e).ok_or("nothing on order")?;
         let craft = y.queue.pop().ok_or("nothing on order")?;
+        let fit = if y.fits.len() > y.queue.len() {
+            y.fits.pop().unwrap_or_default()
+        } else {
+            Fit::default()
+        };
         let on_slip = y.queue.is_empty();
         if on_slip {
             y.progress_s = 0.0;
         }
-        (craft, on_slip)
+        (craft, fit, on_slip)
     };
     let k = if on_slip { 0.5 } else { 1.0 };
     if let Some(p) = plan(craft) {
+        let (fc, fg) = crate::fittings::price(&fit);
         let mut econ = world.resource_mut::<Economy>();
-        econ.coins += p.coins as f64 * k;
-        for (g, n) in p.cost {
-            econ.islands[b.island].add(*g, (*n as f64 * k).floor());
+        econ.coins += (p.coins + fc) as f64 * k;
+        for (g, n) in p.cost.iter().copied().chain(fg) {
+            econ.islands[b.island].add(g, (n as f64 * k).floor());
         }
     }
     if on_slip {
@@ -346,7 +433,7 @@ pub fn tick(world: &mut World) {
         let mut q = world.query::<&Vessel>();
         q.iter(world)
             .filter(|v| v.owned())
-            .map(|v| upkeep_of(v.craft))
+            .map(|v| upkeep_of(v.craft) + crate::fittings::upkeep(&v.fit))
             .sum()
     };
     world.resource_mut::<Economy>().fleet_upkeep = fleet;
@@ -376,7 +463,7 @@ pub fn launch(world: &mut World, e: Entity) {
     let Some(b) = world.get::<Building>(e).cloned() else {
         return;
     };
-    let (craft, n) = {
+    let (craft, fit, n) = {
         let Some(mut y) = world.get_mut::<Yard>(e) else {
             return;
         };
@@ -384,9 +471,14 @@ pub fn launch(world: &mut World, e: Entity) {
             return;
         }
         let craft = y.queue.remove(0);
+        let fit = if y.fits.is_empty() {
+            Fit::default()
+        } else {
+            y.fits.remove(0)
+        };
         y.progress_s = 0.0;
         y.launched += 1;
-        (craft, y.launched)
+        (craft, fit, y.launched)
     };
     clear_slip(world, e);
     let name = {
@@ -431,7 +523,11 @@ pub fn launch(world: &mut World, e: Entity) {
     );
     if let Some(mut vv) = world.get_mut::<Vessel>(v) {
         vv.doing = Doing::Moored(20.0);
+        vv.fit = fit;
     }
+    // Its fittings go into its kit, and those that show go on the hull.
+    world.resource_mut::<crate::build::Changed>().any = true;
+    crate::fittings::dress(world, v);
     if world.get::<Yard>(e).is_some_and(|y| !y.queue.is_empty()) {
         lay_down(world, e);
     }

@@ -32,10 +32,22 @@ pub enum Craft {
     PaddleSteamer,
     /// Floatplane, 13 m span: lands on the water at any harbour.
     Seaplane,
+    /// Single-masted revenue cutter, 20 m: quick and handy, one hold.
+    Cutter,
+    /// Two-masted square-rigged brig, 34 m: the traders' ship.
+    Brig,
+    /// Three-masted frigate, 52 m: two gun decks' worth of ports.
+    Frigate,
+    /// Steam gunboat, 30 m: one big gun forward, low and grey.
+    Gunboat,
+    /// Three-funnelled passenger liner, 80 m: the fastest crossings.
+    Liner,
+    /// Four-engined flying boat, 32 m span: a hull for a fuselage, lands on any water.
+    FlyingBoat,
 }
 
 impl Craft {
-    pub const ALL: [Craft; 9] = [
+    pub const ALL: [Craft; 15] = [
         Craft::Schooner,
         Craft::Steamer,
         Craft::Smack,
@@ -45,6 +57,12 @@ impl Craft {
         Craft::Clipper,
         Craft::PaddleSteamer,
         Craft::Seaplane,
+        Craft::Cutter,
+        Craft::Brig,
+        Craft::Frigate,
+        Craft::Gunboat,
+        Craft::Liner,
+        Craft::FlyingBoat,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,6 +76,12 @@ impl Craft {
             Craft::Clipper => "Clipper",
             Craft::PaddleSteamer => "Paddle steamer",
             Craft::Seaplane => "Seaplane",
+            Craft::Cutter => "Cutter",
+            Craft::Brig => "Brig",
+            Craft::Frigate => "Frigate",
+            Craft::Gunboat => "Steam gunboat",
+            Craft::Liner => "Ocean liner",
+            Craft::FlyingBoat => "Flying boat",
         }
     }
 
@@ -73,6 +97,12 @@ impl Craft {
             Craft::Clipper => 19.0,
             Craft::PaddleSteamer => 12.0,
             Craft::Seaplane => 45.0,
+            Craft::Cutter => 16.0,
+            Craft::Brig => 13.0,
+            Craft::Frigate => 15.0,
+            Craft::Gunboat => 15.0,
+            Craft::Liner => 21.0,
+            Craft::FlyingBoat => 40.0,
         }
     }
 
@@ -88,6 +118,12 @@ impl Craft {
             Craft::Clipper => (3, 45),
             Craft::PaddleSteamer => (2, 25),
             Craft::Seaplane => (0, 0),
+            Craft::Cutter => (1, 25),
+            Craft::Brig => (3, 35),
+            Craft::Frigate => (2, 30),
+            Craft::Gunboat => (1, 20),
+            Craft::Liner => (3, 40),
+            Craft::FlyingBoat => (1, 20),
         }
     }
 
@@ -103,18 +139,33 @@ impl Craft {
             Craft::Clipper => 31.0,
             Craft::PaddleSteamer => 21.0,
             Craft::Seaplane => 5.0,
+            Craft::Cutter => 10.0,
+            Craft::Brig => 17.0,
+            Craft::Frigate => 26.0,
+            Craft::Gunboat => 15.0,
+            Craft::Liner => 40.0,
+            Craft::FlyingBoat => 12.0,
         }
     }
 
     pub fn flies(self) -> bool {
-        matches!(self, Craft::Airship | Craft::Biplane | Craft::Seaplane)
+        matches!(
+            self,
+            Craft::Airship | Craft::Biplane | Craft::Seaplane | Craft::FlyingBoat
+        )
     }
 
     /// Carries canvas (heels to the wind).
     pub fn sails(self) -> bool {
         matches!(
             self,
-            Craft::Schooner | Craft::Barque | Craft::Smack | Craft::Clipper
+            Craft::Schooner
+                | Craft::Barque
+                | Craft::Smack
+                | Craft::Clipper
+                | Craft::Cutter
+                | Craft::Brig
+                | Craft::Frigate
         )
     }
 
@@ -952,6 +1003,12 @@ pub fn craft_model(c: Craft) -> Parts {
         Craft::Clipper => clipper(),
         Craft::PaddleSteamer => paddle_steamer(),
         Craft::Seaplane => seaplane(),
+        Craft::Cutter => cutter(),
+        Craft::Brig => brig(),
+        Craft::Frigate => frigate(),
+        Craft::Gunboat => gunboat(),
+        Craft::Liner => liner(),
+        Craft::FlyingBoat => flying_boat(),
     }
 }
 
@@ -1366,6 +1423,634 @@ pub fn seaplane() -> Parts {
         v3(-5.2, 2.0, 0.0),
         blue,
     );
+    p.finish()
+}
+
+/// A row of gun ports along both sides, from `x0` to `x1` at height `y`, with a gun muzzle
+/// out of each.
+fn gun_ports(p: &mut Parts, x0: f32, x1: f32, n: u32, y: f32, half_beam: f32, band: Vec4) {
+    p.cuboid(
+        Mat::Paint,
+        v3(x0 - 1.0, y - 0.45, -half_beam - 0.03),
+        v3(x1 + 1.0, y + 0.45, half_beam + 0.03),
+        band,
+        false,
+    );
+    for i in 0..n {
+        let x = x0 + (x1 - x0) * i as f32 / (n.max(2) - 1) as f32;
+        for z in [-1.0f32, 1.0] {
+            p.cuboid(
+                Mat::Paint,
+                v3(x - 0.35, y - 0.3, z * (half_beam + 0.05) - 0.02),
+                v3(x + 0.35, y + 0.3, z * (half_beam + 0.05) + 0.02),
+                hexc(0x101010),
+                false,
+            );
+            p.rod(
+                Mat::Iron,
+                v3(x, y, z * (half_beam - 0.2)),
+                v3(x, y, z * (half_beam + 0.9)),
+                0.13,
+                6,
+                hexc(0x1a1a1a),
+            );
+        }
+    }
+}
+
+/// A revenue cutter: one tall raked mast, a long boom, a big gaff main, two headsails on a
+/// long bowsprit, black topsides with a white band.
+pub fn cutter() -> Parts {
+    let mut p = Parts::default();
+    let (len, beam) = (20.0, 5.6);
+    hull(
+        &mut p,
+        Mat::Paint,
+        len,
+        beam,
+        2.4,
+        1.3,
+        2.4,
+        hexc(0x141414),
+        hexc(0x7a2a1a),
+        0.25,
+    );
+    p.cuboid(
+        Mat::Paint,
+        v3(-9.0, 1.1, -0.02),
+        v3(9.0, 1.35, 0.02),
+        hexc(0xf0ece0),
+        false,
+    );
+    let deck = 1.3;
+    p.rod(
+        Mat::Timber,
+        v3(9.0, 1.8, 0.0),
+        v3(18.0, 2.4, 0.0),
+        0.16,
+        8,
+        Vec4::ONE,
+    );
+    mast(&mut p, 1.5, deck, 22.0, 0.3);
+    shrouds(&mut p, 1.5, deck, 22.0, beam);
+    gaff_sail(&mut p, Mat::Canvas, 1.3, deck + 1.6, deck + 18.0, 11.0, 1.3);
+    jib(
+        &mut p,
+        Mat::Canvas,
+        v3(17.5, 2.4, 0.0),
+        v3(1.6, deck + 20.0, 0.0),
+        v3(5.5, deck + 2.0, 0.5),
+    );
+    jib(
+        &mut p,
+        Mat::Canvas,
+        v3(9.5, 1.9, 0.0),
+        v3(1.6, deck + 14.0, 0.0),
+        v3(4.0, deck + 1.8, 0.4),
+    );
+    // Two swivels on the rails and a skylight.
+    for z in [-2.4f32, 2.4] {
+        p.rod(
+            Mat::Iron,
+            v3(6.0, deck + 0.9, z),
+            v3(7.2, deck + 1.0, z * 1.05),
+            0.08,
+            6,
+            hexc(0x1a1a1a),
+        );
+    }
+    p.cuboid(
+        Mat::Planks,
+        v3(-6.0, deck - 0.2, -1.0),
+        v3(-3.5, deck + 0.8, 1.0),
+        hexc(0xd8d0b8),
+        false,
+    );
+    p.ground_occlusion(1.0, 1.0);
+    p.finish()
+}
+
+/// A brig: two masts, both square-rigged with three sails each, a gaff spanker on the main,
+/// green topsides with a yellow band.
+pub fn brig() -> Parts {
+    let mut p = Parts::default();
+    let (len, beam) = (34.0, 8.0);
+    hull(
+        &mut p,
+        Mat::Paint,
+        len,
+        beam,
+        3.0,
+        1.9,
+        2.3,
+        hexc(0x1f3c2c),
+        hexc(0x5a2014),
+        0.3,
+    );
+    p.cuboid(
+        Mat::Paint,
+        v3(-15.0, 1.3, -0.02),
+        v3(15.0, 1.7, 0.02),
+        hexc(0xd8b040),
+        false,
+    );
+    let deck = 1.8;
+    p.rod(
+        Mat::Timber,
+        v3(15.0, 2.5, 0.0),
+        v3(25.0, 4.0, 0.0),
+        0.22,
+        8,
+        Vec4::ONE,
+    );
+    for (x, h) in [(7.0, 27.0), (-5.0, 29.0)] {
+        mast(&mut p, x, deck, h, 0.38);
+        shrouds(&mut p, x, deck, h, beam);
+        square_sail(&mut p, x, deck + h * 0.42, 12.0, 6.5);
+        square_sail(&mut p, x, deck + h * 0.66, 10.0, 5.5);
+        square_sail(&mut p, x, deck + h * 0.86, 7.5, 4.2);
+    }
+    gaff_sail(&mut p, Mat::Canvas, -5.3, deck + 2.5, deck + 14.0, 9.0, 0.9);
+    jib(
+        &mut p,
+        Mat::Canvas,
+        v3(24.5, 3.9, 0.0),
+        v3(7.2, deck + 25.0, 0.0),
+        v3(12.5, deck + 3.0, 0.6),
+    );
+    p.cuboid(
+        Mat::Timber,
+        v3(-1.5, deck - 0.2, -2.0),
+        v3(2.5, deck + 0.7, 2.0),
+        hexc(0x6a5a40),
+        true,
+    );
+    p.cuboid(
+        Mat::Planks,
+        v3(-15.0, deck - 0.2, -2.4),
+        v3(-10.5, deck + 1.9, 2.4),
+        hexc(0xd8c8a0),
+        false,
+    );
+    p.ground_occlusion(1.0, 1.0);
+    p.finish()
+}
+
+/// A frigate: long and high-sided, black and ochre with a row of gun ports, three masts with
+/// square sails, a spanker, a flag at the mizzen.
+pub fn frigate() -> Parts {
+    let mut p = Parts::default();
+    let (len, beam) = (52.0, 12.0);
+    hull(
+        &mut p,
+        Mat::Paint,
+        len,
+        beam,
+        4.2,
+        3.6,
+        2.2,
+        hexc(0x1a1612),
+        hexc(0x5a2a14),
+        0.3,
+    );
+    // Two bands of ochre with the gun deck ports.
+    gun_ports(&mut p, -18.0, 18.0, 13, 1.9, 5.4, hexc(0xc89a3a));
+    p.cuboid(
+        Mat::Paint,
+        v3(-20.0, 3.3, -0.02),
+        v3(20.0, 3.6, 0.02),
+        hexc(0xc89a3a),
+        false,
+    );
+    let deck = 3.4;
+    p.rod(
+        Mat::Timber,
+        v3(23.0, 4.4, 0.0),
+        v3(36.0, 7.0, 0.0),
+        0.32,
+        8,
+        Vec4::ONE,
+    );
+    for (x, h) in [(13.0, 38.0), (0.0, 42.0), (-13.0, 32.0)] {
+        mast(&mut p, x, deck, h, 0.55);
+        shrouds(&mut p, x, deck, h, beam);
+        let w = if x < -10.0 { 0.8 } else { 1.0 };
+        square_sail(&mut p, x, deck + h * 0.40, 18.0 * w, 8.0);
+        square_sail(&mut p, x, deck + h * 0.63, 15.0 * w, 7.0);
+        square_sail(&mut p, x, deck + h * 0.83, 11.0 * w, 5.5);
+    }
+    gaff_sail(
+        &mut p,
+        Mat::Canvas,
+        -13.4,
+        deck + 3.0,
+        deck + 18.0,
+        10.0,
+        1.0,
+    );
+    jib(
+        &mut p,
+        Mat::Canvas,
+        v3(35.0, 6.9, 0.0),
+        v3(13.2, deck + 35.0, 0.0),
+        v3(20.0, deck + 4.0, 0.7),
+    );
+    jib(
+        &mut p,
+        Mat::Canvas,
+        v3(28.0, 5.5, 0.0),
+        v3(13.2, deck + 27.0, 0.0),
+        v3(18.0, deck + 3.5, 0.6),
+    );
+    // The quarterdeck and its stern windows.
+    p.cuboid(
+        Mat::Paint,
+        v3(-26.0, deck - 0.2, -5.0),
+        v3(-17.0, deck + 2.0, 5.0),
+        hexc(0x1a1612),
+        false,
+    );
+    p.windows(
+        v3(-26.05, deck + 1.0, 0.0),
+        -Vec3::X,
+        5,
+        0.9,
+        1.0,
+        0.7,
+        hexc(0xc89a3a),
+    );
+    // The company's ensign.
+    p.rod(
+        Mat::Timber,
+        v3(-24.0, deck + 2.0, 0.0),
+        v3(-27.0, deck + 9.0, 0.0),
+        0.08,
+        6,
+        Vec4::ONE,
+    );
+    p.cuboid(
+        Mat::Canvas,
+        v3(-30.0, deck + 7.0, -0.03),
+        v3(-26.8, deck + 9.0, 0.03),
+        hexc(0x2a3a8a),
+        false,
+    );
+    p.ground_occlusion(1.0, 1.0);
+    p.finish()
+}
+
+/// A steam gunboat: low grey hull, a ram bow, one heavy gun in a shield forward, a stubby
+/// funnel and a signal mast.
+pub fn gunboat() -> Parts {
+    let mut p = Parts::default();
+    let (len, beam) = (30.0, 7.0);
+    let grey = hexc(0x6a7078);
+    hull(
+        &mut p,
+        Mat::Paint,
+        len,
+        beam,
+        2.6,
+        1.5,
+        3.2,
+        grey,
+        hexc(0x6a2418),
+        0.3,
+    );
+    let deck = 1.4;
+    // Ram at the bow.
+    p.rod(
+        Mat::Iron,
+        v3(13.0, 0.2, 0.0),
+        v3(16.5, -0.3, 0.0),
+        0.35,
+        8,
+        hexc(0x3a3a3a),
+    );
+    // The heavy gun in its shield.
+    p.cylinder(
+        Mat::Iron,
+        v3(8.0, deck, 0.0),
+        1.6,
+        1.6,
+        0.6,
+        14,
+        hexc(0x4a5058),
+        true,
+    );
+    p.cuboid(
+        Mat::Iron,
+        v3(8.2, deck + 0.6, -1.5),
+        v3(9.0, deck + 2.4, 1.5),
+        hexc(0x4a5058),
+        false,
+    );
+    p.rod(
+        Mat::Iron,
+        v3(8.0, deck + 1.4, 0.0),
+        v3(13.0, deck + 1.6, 0.0),
+        0.28,
+        10,
+        hexc(0x1e1e22),
+    );
+    // Wheelhouse, funnel and mast.
+    p.cuboid(
+        Mat::Paint,
+        v3(-1.0, deck, -2.0),
+        v3(3.0, deck + 2.6, 2.0),
+        hexc(0xb8bcc0),
+        false,
+    );
+    p.windows(
+        v3(3.02, deck + 1.8, 0.0),
+        Vec3::X,
+        3,
+        0.7,
+        0.6,
+        0.4,
+        hexc(0x5a5a5a),
+    );
+    p.cylinder(
+        Mat::Paint,
+        v3(-3.5, deck, 0.0),
+        0.95,
+        0.9,
+        5.5,
+        14,
+        hexc(0x2a2a2a),
+        false,
+    );
+    p.cylinder(
+        Mat::Paint,
+        v3(-3.5, deck + 4.2, 0.0),
+        0.93,
+        0.92,
+        0.6,
+        14,
+        hexc(0xa03020),
+        false,
+    );
+    p.cylinder(
+        Mat::Iron,
+        v3(1.0, deck + 2.6, 0.0),
+        0.15,
+        0.1,
+        9.0,
+        8,
+        hexc(0xb8a888),
+        true,
+    );
+    p.rod(
+        Mat::Iron,
+        v3(1.0, deck + 9.0, -2.0),
+        v3(1.0, deck + 9.0, 2.0),
+        0.06,
+        4,
+        hexc(0xb8a888),
+    );
+    // A swivel aft.
+    p.rod(
+        Mat::Iron,
+        v3(-11.0, deck + 0.9, 0.0),
+        v3(-12.5, deck + 1.1, 0.0),
+        0.1,
+        6,
+        hexc(0x1a1a1a),
+    );
+    p.ground_occlusion(1.0, 1.0);
+    p.finish()
+}
+
+/// An ocean liner: a long black hull with a white superstructure in three tiers, three
+/// buff funnels with black tops, two masts, rows of lit windows and lifeboats.
+pub fn liner() -> Parts {
+    let mut p = Parts::default();
+    let (len, beam) = (80.0, 12.0);
+    hull(
+        &mut p,
+        Mat::Paint,
+        len,
+        beam,
+        4.6,
+        4.0,
+        3.4,
+        hexc(0x121416),
+        hexc(0x8a2418),
+        0.5,
+    );
+    let deck = 3.8;
+    p.cuboid(
+        Mat::Paint,
+        v3(-38.0, 3.4, -0.02),
+        v3(38.0, 3.7, 0.02),
+        hexc(0xe8e4d8),
+        false,
+    );
+    // Portholes along the hull.
+    for (n, z) in [(Vec3::Z, 5.7f32), (-Vec3::Z, -5.7)] {
+        p.windows(v3(0.0, 2.4, z), n, 22, 0.5, 0.5, 2.6, hexc(0x2a2a2a));
+    }
+    // Superstructure, three tiers.
+    let white = hexc(0xf0ece2);
+    for (i, (x0, x1, w)) in [
+        (-24.0f32, 22.0f32, 5.0f32),
+        (-20.0, 18.0, 4.4),
+        (-10.0, 12.0, 3.6),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let y = deck + i as f32 * 2.6;
+        p.cuboid(Mat::Paint, v3(x0, y, -w), v3(x1, y + 2.6, w), white, false);
+        p.cuboid(
+            Mat::Timber,
+            v3(x0 - 0.3, y + 2.6, -w - 0.3),
+            v3(x1 + 0.3, y + 2.8, w + 0.3),
+            hexc(0xb8a888),
+            true,
+        );
+        for (n, z) in [(Vec3::Z, w + 0.01), (-Vec3::Z, -w - 0.01)] {
+            let k = ((x1 - x0) / 2.2) as u32;
+            p.windows(
+                v3((x0 + x1) * 0.5, y + 1.4, z),
+                n,
+                k,
+                0.9,
+                1.0,
+                1.3,
+                hexc(0x8a6a4a),
+            );
+        }
+    }
+    // Bridge at the front of the top tier.
+    p.windows(
+        v3(12.02, deck + 6.6, 0.0),
+        Vec3::X,
+        6,
+        0.8,
+        0.9,
+        0.4,
+        hexc(0x8a6a4a),
+    );
+    // Three funnels.
+    for x in [8.0f32, -3.0, -14.0] {
+        let y = deck + 7.8;
+        p.cylinder(
+            Mat::Paint,
+            v3(x, y, 0.0),
+            1.9,
+            1.8,
+            9.0,
+            16,
+            hexc(0xc8a060),
+            false,
+        );
+        p.cylinder(
+            Mat::Paint,
+            v3(x, y + 9.0, 0.0),
+            1.82,
+            1.8,
+            2.2,
+            16,
+            hexc(0x0e0e0e),
+            false,
+        );
+    }
+    // Masts.
+    for x in [30.0f32, -32.0] {
+        p.cylinder(
+            Mat::Iron,
+            v3(x, deck, 0.0),
+            0.35,
+            0.2,
+            22.0,
+            10,
+            hexc(0xb8a888),
+            true,
+        );
+    }
+    p.rod(
+        Mat::Iron,
+        v3(30.0, deck + 21.0, 0.0),
+        v3(-32.0, deck + 21.0, 0.0),
+        0.04,
+        3,
+        hexc(0x2a2420),
+    );
+    // Lifeboats in davits along the top deck.
+    for x in [-18.0f32, -10.0, -2.0, 6.0, 14.0] {
+        for z in [-4.8f32, 4.8] {
+            p.add_parts(
+                &crate::looks::small_boat(),
+                Mat4::from_translation(v3(x, deck + 5.4, z)),
+            );
+        }
+    }
+    p.ground_occlusion(1.0, 1.0);
+    p.finish()
+}
+
+/// A flying boat: a boat hull for a fuselage, a high gull wing with four engines, wing-tip
+/// floats and a twin tail.
+pub fn flying_boat() -> Parts {
+    let mut p = Parts::default();
+    let white = hexc(0xe8e8e4);
+    let blue = hexc(0x1e3a6a);
+    p.lathe_x(
+        Mat::Paint,
+        &[
+            (-12.0, 0.05),
+            (-10.0, 0.6),
+            (-4.0, 1.5),
+            (4.0, 1.7),
+            (9.0, 1.5),
+            (11.0, 0.9),
+            (11.8, 0.1),
+        ],
+        14,
+        |_, y| if y < -0.6 { blue } else { white },
+    );
+    // A planing step under the hull.
+    p.cuboid(
+        Mat::Paint,
+        v3(-2.0, -1.75, -1.0),
+        v3(4.0, -1.3, 1.0),
+        blue,
+        true,
+    );
+    // Cockpit windows.
+    p.windows(v3(9.3, 0.7, 0.0), Vec3::X, 3, 0.5, 0.5, 0.2, hexc(0x3a3a3a));
+    // The wing, high on a pylon.
+    p.cuboid(
+        Mat::Paint,
+        v3(-0.5, 2.6, -16.0),
+        v3(3.2, 2.95, 16.0),
+        white,
+        true,
+    );
+    p.cuboid(
+        Mat::Paint,
+        v3(-0.2, 1.4, -1.0),
+        v3(2.8, 2.6, 1.0),
+        white,
+        false,
+    );
+    for z in [-9.5f32, -4.0, 4.0, 9.5] {
+        let mut n = Parts::default();
+        n.lathe_x(
+            Mat::Paint,
+            &[(-1.5, 0.1), (-0.5, 0.55), (1.6, 0.6), (2.2, 0.3)],
+            10,
+            |_, _| white,
+        );
+        p.add_parts(&n, Mat4::from_translation(v3(2.4, 2.6, z)));
+        p.cylinder(
+            Mat::Iron,
+            v3(4.65, 2.6, z),
+            1.4,
+            1.4,
+            0.01,
+            12,
+            hexc(0x2a2a2a),
+            true,
+        );
+    }
+    // Wing-tip floats.
+    for z in [-14.5f32, 14.5] {
+        let mut f = Parts::default();
+        f.lathe_x(
+            Mat::Paint,
+            &[(-1.4, 0.05), (-0.6, 0.35), (1.0, 0.4), (1.6, 0.1)],
+            8,
+            |_, _| white,
+        );
+        p.add_parts(&f, Mat4::from_translation(v3(1.2, 0.2, z)));
+        p.beam(
+            Mat::Iron,
+            v3(1.2, 0.5, z),
+            v3(1.2, 2.6, z),
+            0.08,
+            hexc(0x3a3a3a),
+        );
+    }
+    // Twin tail on a tailplane.
+    p.cuboid(
+        Mat::Paint,
+        v3(-12.0, 1.0, -4.5),
+        v3(-9.8, 1.2, 4.5),
+        white,
+        true,
+    );
+    for z in [-4.3f32, 4.3] {
+        p.quad(
+            Mat::Paint,
+            v3(-12.0, 1.1, z),
+            v3(-9.8, 1.1, z),
+            v3(-10.6, 4.0, z),
+            v3(-12.2, 4.2, z),
+            blue,
+        );
+    }
     p.finish()
 }
 

@@ -383,8 +383,10 @@ pub struct Vessel {
     pub altitude: f32,
     /// How much faster than its craft it sails this leg (the last quay's pilots).
     pub haste: f32,
-    /// What the gear aboard adds up to ([`crate::gear`]).
+    /// What the gear aboard adds up to ([`crate::gear`]), fittings included.
     pub kit: crate::gear::Kit,
+    /// What the hull was built with ([`crate::fittings`]).
+    pub fit: crate::fittings::Fit,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -476,6 +478,7 @@ pub fn spawn_vessel(
         Craft::Airship => 170.0 + (seed % 5) as f32 * 12.0,
         Craft::Biplane => 260.0 + (seed % 7) as f32 * 20.0,
         Craft::Seaplane => 140.0 + (seed % 5) as f32 * 15.0,
+        Craft::FlyingBoat => 190.0 + (seed % 5) as f32 * 15.0,
         _ => 0.0,
     };
     let v = Vessel {
@@ -498,6 +501,7 @@ pub fn spawn_vessel(
         altitude,
         haste: 0.0,
         kit: crate::gear::Kit::default(),
+        fit: crate::fittings::Fit::default(),
     };
     let mut e = world.spawn((
         Name::new(format!("{}: {name}", craft.name())),
@@ -513,6 +517,11 @@ pub fn spawn_vessel(
             Craft::Schooner => 3.5,
             Craft::Clipper => 5.2,
             Craft::PaddleSteamer => 6.6,
+            Craft::Cutter => 2.8,
+            Craft::Brig => 4.0,
+            Craft::Frigate => 6.0,
+            Craft::Gunboat => 3.5,
+            Craft::Liner => 6.0,
             _ => 1.8,
         };
         e.insert(engine_water::WaterInteractor::new(beam).with_length(craft.half_length()));
@@ -592,7 +601,10 @@ fn arrive(world: &mut World, v: &mut Vessel) {
             };
             let stop = &route.stops[v.next_stop % route.stops.len()];
             let mut boost = Boost::default();
-            if let Some(b) = building_by_id(world, stop.at) {
+            // Under the yellow flag nothing is loaded or landed.
+            let flag = building_by_id(world, stop.at)
+                .is_some_and(|b| crate::incidents::flagged(world, b.island));
+            if let Some(b) = building_by_id(world, stop.at).filter(|_| !flag) {
                 let landed = trade(world, v, &b, stop);
                 {
                     let mut items = world.resource_mut::<crate::items::Items>();
@@ -688,6 +700,7 @@ fn arrive(world: &mut World, v: &mut Vessel) {
 fn trade(world: &mut World, v: &mut Vessel, b: &Building, stop: &Stop) -> u32 {
     let (slots, per) = v.craft.hold();
     let slots = slots + v.kit.hold;
+    let per = crate::fittings::per_hold(per, slots, v.kit.room);
     let mut econ = world.resource_mut::<Economy>();
     exchange(
         &mut econ.islands[b.island],

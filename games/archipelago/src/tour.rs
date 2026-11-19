@@ -58,6 +58,13 @@ struct View {
     hour: Option<f32>,
     /// Light the Fireworks over the building the view aims at.
     show: bool,
+    /// Start this incident at the nearest house to the aim (a fire: the nearest building
+    /// that is not a fire watch), as bad as `.1` (0..1).
+    trouble: Option<(crate::incidents::Trouble, f32)>,
+    /// Burn the aimed building out first.
+    ruin: bool,
+    /// Game seconds to run (not drawn) after starting the incident: crews on their way.
+    wait_s: f32,
 }
 
 const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
@@ -73,6 +80,9 @@ const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
         card: false,
         hour: None,
         show: false,
+        trouble: None,
+        ruin: false,
+        wait_s: 0.0,
     }
 }
 
@@ -541,7 +551,160 @@ fn views() -> Vec<View> {
             fog: false,
             ..v("fleet", Aim::Review, 2.95, 300.0)
         },
+        View {
+            pitch_deg: Some(10.0),
+            clean: true,
+            fog: false,
+            ..v("fleet_new", Aim::Craft(Craft::Frigate), 0.1, 360.0)
+        },
+        View {
+            pitch_deg: Some(16.0),
+            clean: true,
+            fog: false,
+            ..v("frigate", Aim::Craft(Craft::Frigate), 2.3, 150.0)
+        },
+        View {
+            pitch_deg: Some(18.0),
+            clean: true,
+            fog: false,
+            ..v("liner", Aim::Craft(Craft::Liner), 2.2, 190.0)
+        },
+        View {
+            pitch_deg: Some(18.0),
+            clean: true,
+            fog: false,
+            ..v("gunboat", Aim::Craft(Craft::Gunboat), 0.6, 80.0)
+        },
+        View {
+            pitch_deg: Some(16.0),
+            clean: true,
+            fog: false,
+            ..v("brig", Aim::Craft(Craft::Brig), 2.3, 110.0)
+        },
+        View {
+            pitch_deg: Some(16.0),
+            clean: true,
+            fog: false,
+            ..v("cutter", Aim::Craft(Craft::Cutter), 2.2, 70.0)
+        },
+        View {
+            pitch_deg: Some(14.0),
+            clean: true,
+            fog: false,
+            ..v("flying_boat", Aim::Craft(Craft::FlyingBoat), 2.2, 80.0)
+        },
+        // The three that answer incidents, then incidents (these leave fires and ruins
+        // behind, so they come last).
+        View {
+            pitch_deg: Some(26.0),
+            ..v("fire_watch", Aim::Front(K::FireWatch, 0), 0.5, 50.0)
+        },
+        View {
+            pitch_deg: Some(26.0),
+            ..v("watch_house", Aim::Front(K::WatchHouse, 0), 0.5, 46.0)
+        },
+        View {
+            pitch_deg: Some(26.0),
+            ..v("infirmary", Aim::Front(K::Infirmary, 0), 0.5, 56.0)
+        },
+        View {
+            pitch_deg: Some(30.0),
+            trouble: Some((crate::incidents::Trouble::Fire, 0.9)),
+            ..v("fire", Aim::Home(T::Labourers, 0), 0.7, 90.0)
+        },
+        View {
+            pitch_deg: Some(34.0),
+            trouble: Some((crate::incidents::Trouble::Fire, 0.6)),
+            wait_s: 9.0,
+            ..v("fire_pump", Aim::Front(K::FireWatch, 0), 0.3, 120.0)
+        },
+        View {
+            pitch_deg: Some(28.0),
+            trouble: Some((crate::incidents::Trouble::Riot, 0.9)),
+            ..v("riot", Aim::Home(T::Fisherfolk, 0), 0.6, 60.0)
+        },
+        View {
+            pitch_deg: Some(34.0),
+            trouble: Some((crate::incidents::Trouble::Riot, 0.6)),
+            wait_s: 10.0,
+            ..v("constables", Aim::Front(K::WatchHouse, 0), 0.3, 110.0)
+        },
+        View {
+            pitch_deg: Some(28.0),
+            trouble: Some((crate::incidents::Trouble::Sickness, 0.9)),
+            ..v("sickness", Aim::Home(T::Burghers, 0), 0.5, 55.0)
+        },
+        View {
+            pitch_deg: Some(34.0),
+            trouble: Some((crate::incidents::Trouble::Sickness, 0.6)),
+            wait_s: 10.0,
+            ..v("doctor", Aim::Front(K::Infirmary, 0), 0.3, 110.0)
+        },
+        View {
+            pitch_deg: Some(30.0),
+            ruin: true,
+            ..v("ruin", Aim::Front(K::Weaver, 0), 0.6, 50.0)
+        },
     ]
+}
+
+/// Start a view's incident near `at`: at the nearest house (riots, sickness) or the nearest
+/// building that is not one of the three that answer incidents (fire).
+fn stage_incident(app: &mut App, view: &View, at: DVec3) {
+    use crate::incidents::{self, Incident, Trouble};
+    if view.ruin
+        && let Some(b) = aimed_building(&mut app.world, &view.aim)
+    {
+        let mut q = app.world.query::<(Entity, &Building)>();
+        if let Some(e) = q.iter(&app.world).find(|(_, x)| x.id == b.id).map(|x| x.0) {
+            incidents::burn_now(&mut app.world, e);
+        }
+    }
+    let Some((t, level)) = view.trouble else {
+        return;
+    };
+    let here = DVec2::new(at.x, at.z);
+    let target = {
+        let mut q = app.world.query_filtered::<
+            (Entity, &Building, Option<&crate::sim::House>),
+            (Without<Incident>, Without<incidents::Ruin>),
+        >();
+        q.iter(&app.world)
+            .filter(|(_, b, h)| {
+                b.island == 0
+                    && (h.is_some() || t == Trouble::Fire)
+                    && !matches!(
+                        b.kind,
+                        crate::defs::Kind::FireWatch
+                            | crate::defs::Kind::WatchHouse
+                            | crate::defs::Kind::Infirmary
+                            | crate::defs::Kind::Road
+                            | crate::defs::Kind::PavedRoad
+                    )
+            })
+            .min_by_key(|(_, b, _)| {
+                let c = crate::grid::footprint_center(b.kind, b.origin, b.rot);
+                ((c - here).length() * 10.0) as i64
+            })
+            .map(|(e, b, _)| (e, b.clone()))
+    };
+    let Some((e, b)) = target else { return };
+    incidents::start(&mut app.world, e, &b, t, false);
+    if let Some(mut i) = app.world.get_mut::<Incident>(e) {
+        i.level = level;
+    }
+    if view.wait_s > 0.0 {
+        app.world.insert_resource(RenderPaused);
+        let speed = app.world.resource::<crate::sim::Economy>().speed;
+        app.world.resource_mut::<crate::sim::Economy>().speed = 2.0;
+        let frames = (view.wait_s * 30.0 / 2.0).ceil() as usize;
+        app.update_n(frames);
+        app.world.resource_mut::<crate::sim::Economy>().speed = speed;
+        app.world.remove_resource::<RenderPaused>();
+        if let Some(mut i) = app.world.get_mut::<Incident>(e) {
+            i.level = i.level.max(level);
+        }
+    }
 }
 
 fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
@@ -690,6 +853,10 @@ pub fn run(mut app: App, only: Option<&str>) {
     let out = "screenshots/archipelago";
     let _ = std::fs::create_dir_all(out);
     app.world.resource_mut::<EngineConfig>().headless = true;
+    // The same pictures each time: no incidents but the ones a view starts.
+    if let Some(mut i) = app.world.get_resource_mut::<crate::incidents::Incidents>() {
+        i.rolls = false;
+    }
     app.world
         .resource_mut::<Time>()
         .set_source(engine::core::time::TimeSource::Manual {
@@ -798,6 +965,7 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
         } else {
             None
         };
+        stage_incident(app, &view, p);
         let t0 = std::time::Instant::now();
         // (A software renderer at 1440p needs longer: ARCH_TOUR_SETTLE_S.)
         let cap = std::env::var("ARCH_TOUR_SETTLE_S")

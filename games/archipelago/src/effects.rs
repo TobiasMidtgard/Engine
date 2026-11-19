@@ -207,6 +207,180 @@ fn shells(lasts: f32) -> EmitterDesc {
     }
 }
 
+/// A building on fire: flames over the roof, a column of black smoke seen across the island,
+/// embers riding the draft.
+fn blaze() -> EffectDesc {
+    EffectDesc {
+        name: "isle.blaze".into(),
+        description: "A house or workshop on fire: tall flames out of the roof, thick dark \
+                      smoke rising in a column, sparks and embers in the draft."
+            .into(),
+        prewarm: 4.0,
+        emitters: vec![
+            EmitterDesc {
+                name: "blaze".into(),
+                rate: 26.0,
+                offset: [0.0, 3.5, 0.0],
+                shape: EmitShape::Cone {
+                    angle_deg: 6.0,
+                    radius: 3.2,
+                },
+                speed: [1.0, 2.4],
+                acceleration: [0.0, 3.0, 0.0],
+                drag: 1.2,
+                turbulence: 1.5,
+                turbulence_scale: 2.0,
+                wind: 0.4,
+                lifetime: [0.9, 1.5],
+                size: [2.4, 3.6],
+                size_over_life: Curve::new(&[(0.0, 0.6), (0.3, 1.0), (1.0, 0.3)]),
+                rotation_deg: [-10.0, 10.0],
+                sprite: Sprite::Flame,
+                color: Gradient::new(&[
+                    (0.0, [1.0, 0.72, 0.32, 0.0]),
+                    (0.1, [1.0, 0.66, 0.26, 0.95]),
+                    (0.5, [1.0, 0.5, 0.15, 0.6]),
+                    (1.0, [0.9, 0.3, 0.08, 0.0]),
+                ]),
+                emissive: 12_000.0,
+                additive: 0.8,
+                soft: 0.3,
+                ..Default::default()
+            },
+            EmitterDesc {
+                name: "billows".into(),
+                rate: 6.0,
+                offset: [0.0, 5.0, 0.0],
+                shape: EmitShape::Cone {
+                    angle_deg: 10.0,
+                    radius: 2.5,
+                },
+                speed: [1.5, 3.0],
+                acceleration: [0.0, 1.5, 0.0],
+                drag: 0.8,
+                wind: 0.6,
+                lifetime: [1.4, 2.2],
+                size: [3.0, 4.5],
+                size_over_life: Curve::new(&[(0.0, 0.5), (1.0, 1.6)]),
+                rotation_deg: [0.0, 360.0],
+                spin_deg: [-30.0, 30.0],
+                sprite: Sprite::Billow,
+                color: Gradient::new(&[
+                    (0.0, [1.0, 0.55, 0.2, 0.0]),
+                    (0.1, [1.0, 0.5, 0.18, 0.9]),
+                    (1.0, [0.18, 0.16, 0.15, 0.0]),
+                ]),
+                emissive: 4_000.0,
+                additive: 0.15,
+                soft: 0.5,
+                ..Default::default()
+            },
+            EmitterDesc {
+                offset: [0.0, 7.0, 0.0],
+                ..smoke_layer("column", 0.16, 0.75, 7.0, [12.0, 18.0], [4.0, 6.0], 5.0)
+            },
+            EmitterDesc {
+                name: "embers".into(),
+                rate: 14.0,
+                offset: [0.0, 4.0, 0.0],
+                shape: EmitShape::Cone {
+                    angle_deg: 25.0,
+                    radius: 3.0,
+                },
+                speed: [2.0, 5.0],
+                acceleration: [0.0, 1.5, 0.0],
+                drag: 0.6,
+                turbulence: 3.0,
+                turbulence_scale: 1.5,
+                wind: 0.8,
+                lifetime: [1.5, 3.0],
+                size: [0.12, 0.2],
+                sprite: Sprite::Glow,
+                color: Gradient::new(&[(0.0, [1.0, 0.8, 0.4, 1.0]), (1.0, [1.0, 0.3, 0.05, 0.0])]),
+                emissive: 20_000.0,
+                additive: 1.0,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+/// A burnt-out shell: embers glowing in the rubble and a thin grey smoke.
+fn embers() -> EffectDesc {
+    EffectDesc {
+        name: "isle.embers".into(),
+        description: "A burnt-out ruin: a few embers glowing in the ash and a thin grey smoke."
+            .into(),
+        prewarm: 8.0,
+        emitters: vec![
+            EmitterDesc {
+                offset: [0.0, 1.0, 0.0],
+                ..smoke_layer("ash smoke", 0.45, 0.35, 1.5, [8.0, 12.0], [2.0, 3.0], 3.5)
+            },
+            EmitterDesc {
+                name: "glow".into(),
+                rate: 3.0,
+                offset: [0.0, 0.3, 0.0],
+                shape: EmitShape::Disc { radius: 3.0 },
+                speed: [0.0, 0.2],
+                lifetime: [1.5, 3.0],
+                size: [0.3, 0.6],
+                sprite: Sprite::Glow,
+                color: Gradient::new(&[
+                    (0.0, [1.0, 0.35, 0.08, 0.0]),
+                    (0.3, [1.0, 0.35, 0.08, 0.8]),
+                    (1.0, [0.8, 0.15, 0.02, 0.0]),
+                ]),
+                emissive: 6_000.0,
+                additive: 1.0,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+/// Torches in a crowd of rioters: a ring of small flames at head height.
+fn torches() -> EffectDesc {
+    EffectDesc {
+        name: "isle.torches".into(),
+        description: "Torches held up in a crowd: small flames bobbing at head height and a \
+                      little smoke."
+            .into(),
+        prewarm: 2.0,
+        emitters: vec![
+            EmitterDesc {
+                name: "torches".into(),
+                rate: 30.0,
+                offset: [0.0, 2.4, 0.0],
+                shape: EmitShape::Disc { radius: 5.0 },
+                speed: [0.2, 0.5],
+                acceleration: [0.0, 2.0, 0.0],
+                drag: 1.5,
+                turbulence: 2.0,
+                turbulence_scale: 0.4,
+                lifetime: [0.3, 0.5],
+                size: [0.3, 0.45],
+                sprite: Sprite::Flame,
+                color: Gradient::new(&[
+                    (0.0, [1.0, 0.7, 0.3, 0.0]),
+                    (0.15, [1.0, 0.62, 0.24, 0.9]),
+                    (1.0, [0.9, 0.3, 0.08, 0.0]),
+                ]),
+                emissive: 9_000.0,
+                additive: 0.9,
+                ..Default::default()
+            },
+            EmitterDesc {
+                offset: [0.0, 3.0, 0.0],
+                ..smoke_layer("torch smoke", 0.3, 0.25, 4.0, [3.0, 5.0], [0.5, 0.9], 3.0)
+            },
+        ],
+        ..Default::default()
+    }
+}
+
 /// How long the Fireworks item burns.
 pub const SHOW_S: f32 = 90.0;
 
@@ -247,7 +421,7 @@ pub fn register(world: &mut World) {
     let Some(mut lib) = world.get_resource_mut::<EffectLibrary>() else {
         return;
     };
-    for e in effects() {
+    for e in effects().into_iter().chain([blaze(), embers(), torches()]) {
         if let Err(err) = lib.insert(e) {
             engine::core::log::warn!("archipelago effect: {err}");
         }
@@ -410,7 +584,17 @@ pub fn riders(craft: Craft) -> Vec<(Vec3, &'static str)> {
             (Vec3::new(5.0, 14.2, 0.0), "isle.funnel"),
             (Vec3::new(stern, 0.15, 0.0), "isle.wake"),
         ],
-        Craft::Airship | Craft::Biplane | Craft::Seaplane => vec![],
+        Craft::Gunboat => vec![
+            (Vec3::new(-3.5, 7.4, 0.0), "isle.funnel"),
+            (Vec3::new(stern, 0.15, 0.0), "isle.wake"),
+        ],
+        Craft::Liner => vec![
+            (Vec3::new(8.0, 24.0, 0.0), "isle.funnel"),
+            (Vec3::new(-3.0, 24.0, 0.0), "isle.funnel"),
+            (Vec3::new(-14.0, 24.0, 0.0), "isle.funnel"),
+            (Vec3::new(stern, 0.15, 0.0), "isle.wake"),
+        ],
+        Craft::Airship | Craft::Biplane | Craft::Seaplane | Craft::FlyingBoat => vec![],
         _ => vec![(Vec3::new(stern, 0.15, 0.0), "isle.wake")],
     }
 }

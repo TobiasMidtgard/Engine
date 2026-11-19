@@ -53,6 +53,12 @@ pub fn craft_icon(c: Craft) -> &'static str {
         Craft::Clipper => "isle_craft_clipper",
         Craft::PaddleSteamer => "isle_craft_paddle_steamer",
         Craft::Seaplane => "isle_craft_seaplane",
+        Craft::Cutter => "isle_craft_cutter",
+        Craft::Brig => "isle_craft_brig",
+        Craft::Frigate => "isle_craft_frigate",
+        Craft::Gunboat => "isle_craft_gunboat",
+        Craft::Liner => "isle_craft_liner",
+        Craft::FlyingBoat => "isle_craft_flying_boat",
     }
 }
 

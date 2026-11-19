@@ -41,6 +41,14 @@ pub enum Status {
     NoWilds,
     NoFields,
     Paused,
+    /// On fire (see `incidents`).
+    Burning,
+    /// Its workers are out with a riot nearby.
+    Striking,
+    /// Its workers are sick.
+    Sick,
+    /// Burnt down: rebuild or clear it.
+    Burnt,
 }
 
 impl Status {
@@ -55,8 +63,25 @@ impl Status {
             Status::NoWilds => "No wild country in reach",
             Status::NoFields => "No room for fields",
             Status::Paused => "Paused",
+            Status::Burning => "On fire",
+            Status::Striking => "On strike: a riot nearby",
+            Status::Sick => "Workers sick",
+            Status::Burnt => "Burnt down: rebuild or clear it",
         }
     }
+}
+
+/// What an incident is doing to a building (see `incidents`); the economy reads only this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Hit {
+    #[default]
+    Clear,
+    Fire,
+    Riot,
+    Sick,
+    /// Burnt down.
+    Ruin,
 }
 
 /// A building that makes goods.
@@ -78,6 +103,8 @@ pub struct Producer {
     pub made: u32,
     /// Share of a batch's goods an item has saved so far (a whole one makes a batch free).
     pub saved: f32,
+    /// A fire, riot or sickness here (or a riot next door).
+    pub hit: Hit,
 }
 
 /// A house and its people.
@@ -93,6 +120,8 @@ pub struct House {
     pub income: f32,
     /// Its door is on a paved road.
     pub paved: bool,
+    /// A fire, riot or sickness here.
+    pub hit: Hit,
 }
 
 impl House {
@@ -104,6 +133,7 @@ impl House {
             services: [false; MAX_SERVICES],
             income: 0.0,
             paved: false,
+            hit: Hit::Clear,
         }
     }
 }
@@ -333,14 +363,28 @@ pub fn step(
         let lodgers = boost.map_or(0.0, |x| x.lodgers);
         let cap = base + lodgers;
         coins += boost.map_or(0.0, |x| x.flat_pay() + x.tier_pay(h.tier));
-        let target = (people + lodgers * share).max(0.2 * base);
-        let rate = 0.4 * dt;
+        let mut target = (people + lodgers * share).max(0.2 * base);
+        // A fire or riot pays nothing; the sick pay a little, and some leave or die.
+        match h.hit {
+            Hit::Clear => {}
+            Hit::Fire | Hit::Ruin => {
+                coins = 0.0;
+                target = 0.0;
+            }
+            Hit::Riot => coins = 0.0,
+            Hit::Sick => {
+                coins *= 0.35;
+                target *= 0.55;
+            }
+        }
+        let rate = if h.hit == Hit::Clear { 0.4 } else { 1.2 } * dt;
         h.residents += (target - h.residents).clamp(-rate, rate);
         // A house that is not full pays for the people it has.
         h.income = coins * (h.residents / base).min(cap / base);
         taxes += (h.income / 60.0 * dt) as f64;
         let happy = if lux > 0.0 { lux_met / lux } else { 1.0 };
-        let content = h.residents >= cap - 0.25 && share > 0.95 && happy > 0.8;
+        let content =
+            h.hit == Hit::Clear && h.residents >= cap - 0.25 && share > 0.95 && happy > 0.8;
         h.content_s = if content { h.content_s + dt } else { 0.0 };
     }
     // Upgrades take materials from the house's island.
@@ -381,12 +425,25 @@ pub fn step(
     for (e, b, mut p, link, boost) in producers.iter_mut() {
         let def = b.kind.def();
         let boost = boost.unwrap_or(&plain);
+        if p.hit != Hit::Clear {
+            p.status = match p.hit {
+                Hit::Fire => Status::Burning,
+                Hit::Riot => Status::Striking,
+                Hit::Sick => Status::Sick,
+                _ => Status::Burnt,
+            };
+            p.efficiency = 0.0;
+            // A ruin costs nothing to run.
+            if p.hit == Hit::Ruin {
+                continue;
+            }
+        }
         upkeep +=
             ((def.upkeep * (1.0 - boost.upkeep_cut) - boost.thrift).max(0.0) / 60.0 * dt) as f64;
         // (The Ship chandler makes items, not goods: see `items::tick`.)
         let chandler = b.kind == Kind::Chandler;
         let out = def.output;
-        if out.is_none() && !chandler {
+        if (out.is_none() && !chandler) || p.hit != Hit::Clear {
             continue;
         }
         let books = &mut econ.islands[b.island];

@@ -129,6 +129,21 @@ pub fn action(world: &mut World, a: &str) {
     {
         build::demolish(world, e);
         select(world, None);
+    } else if let Some((c, fit)) = a
+        .strip_prefix("isle.yard.fitted:")
+        .and_then(|r| r.split_once(':'))
+        .and_then(|(c, f)| crate::vessels::Craft::from_name(c).map(|c| (c, f.to_string())))
+    {
+        // Order a craft with chosen fittings ("isle.yard.fitted:brig:swivels,hold").
+        let Some(e) = world.resource::<Hand>().selected else {
+            return;
+        };
+        let r = crate::fittings::parse_list(c, &fit)
+            .and_then(|fit| crate::shipyard::order_fitted(world, e, c, fit));
+        match r {
+            Ok(()) => crate::hud::show_card(world),
+            Err(msg) => toast(world, "Shipyard", &msg),
+        }
     } else if let Some(c) = a
         .strip_prefix("isle.yard.order:")
         .and_then(crate::vessels::Craft::from_name)
@@ -148,6 +163,19 @@ pub fn action(world: &mut World, a: &str) {
         match crate::shipyard::cancel(world, e) {
             Ok(_) => crate::hud::show_card(world),
             Err(msg) => toast(world, "Shipyard", &msg),
+        }
+    } else if a == "isle.ruin.rebuild" {
+        // Rebuild the selected ruin for half its price.
+        let Some(id) = world
+            .resource::<Hand>()
+            .selected
+            .and_then(|e| world.get::<crate::sim::Building>(e).map(|b| b.id))
+        else {
+            return;
+        };
+        match crate::incidents::rebuild(world, id) {
+            Ok(()) => crate::hud::show_card(world),
+            Err(msg) => toast(world, "Rebuild", &msg),
         }
     } else if let Some(rest) = a.strip_prefix("isle.route.") {
         if let Err(msg) = route_action(world, rest) {

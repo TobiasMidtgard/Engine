@@ -1669,6 +1669,53 @@ fn seats(world: &mut World) -> Vec<(Entity, Seat)> {
     out.into_iter().map(|(e, _, s)| (e, s)).collect()
 }
 
+/// An item in reach of `b` that answers `cue` at once (fire buckets, the night watch, the
+/// herb woman, the port health officer): it is spent, goes on its recharge, and its name
+/// is returned.
+pub fn answer(world: &mut World, cue: Cue, b: &Building) -> Option<&'static str> {
+    let seats = seats(world);
+    for (e, seat) in &seats {
+        let near = b.island == seat.island && (centre(b) - seat.at).length() <= seat.reach;
+        // The port health officer looks after the streets by the quay, not only the quay.
+        let acts = seat.host.acts_on(b.kind) || (cue == Cue::Sickness && seat.host == Host::Office);
+        if !near || !acts {
+            continue;
+        }
+        let Some(inst) = world.get::<Institution>(*e) else {
+            continue;
+        };
+        let open = open_slots(world.resource::<Economy>(), seat.island);
+        let slot = inst.slots.iter().take(open).position(|h| {
+            h.as_ref().is_some_and(|h| {
+                let d = h.def();
+                d.later == 0
+                    && h.cool_s <= 0.0
+                    && matches!(d.way, Way::Triggered { on, .. } if on == cue)
+                    && (seat.host != Host::Hall || b.kind == Kind::House || cue != Cue::Riot)
+            })
+        });
+        if let Some(i) = slot {
+            let name = inst.slots[i].as_ref().map(|h| h.def().name)?;
+            start(world, *e, i);
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Orders acting now: (item name, island, centre, reach in meters).
+pub fn acting_orders(world: &mut World) -> Vec<(&'static str, usize, DVec2, f64)> {
+    let mut out = Vec::new();
+    for (_, seat) in seats(world) {
+        for h in &seat.held {
+            if matches!(h.def().way, Way::Order { .. }) && h.left_s > 0.0 {
+                out.push((h.def().name, seat.island, seat.at, seat.reach));
+            }
+        }
+    }
+    out
+}
+
 /// Work out every building's [`Boost`] from the items in reach, and each island's extra
 /// warehouse room. Runs after anything is built, pulled down or moved between slots.
 pub fn apply(world: &mut World) {
@@ -2777,13 +2824,23 @@ mod tests {
                 }
                 assert!(!e.line(1.0).is_empty());
             }
-            // Items for a later round say so, and nothing draws them yet.
-            assert_eq!(
-                d.later > 0,
-                !d.effects.is_empty() && d.effects.iter().all(|e| matches!(e, Effect::Note(_))),
-                "{}",
-                d.name
-            );
+            // Items for a later round say so, and nothing draws them yet. (Those that answer
+            // fires, riots and sickness act through `incidents` and only carry a note.)
+            let incident = matches!(
+                d.way,
+                Way::Triggered {
+                    on: Cue::Fire | Cue::Riot | Cue::Sickness,
+                    ..
+                }
+            ) || matches!(d.name, "Curfew" | "Quarantine notice" | "Strike breaker");
+            if !incident {
+                assert_eq!(
+                    d.later > 0,
+                    !d.effects.is_empty() && d.effects.iter().all(|e| matches!(e, Effect::Note(_))),
+                    "{}",
+                    d.name
+                );
+            }
             match d.way {
                 Way::Order {
                     lasts_s,

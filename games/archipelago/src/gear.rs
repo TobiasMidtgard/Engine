@@ -21,9 +21,10 @@ pub const MAX_GEAR: usize = 4;
 /// Gear slots a craft has besides the captain's.
 pub fn gear_slots(c: Craft) -> usize {
     match c {
-        Craft::Smack | Craft::Biplane | Craft::Seaplane => 1,
-        Craft::Schooner | Craft::Barque | Craft::PaddleSteamer => 2,
-        Craft::Clipper | Craft::Steamer | Craft::Airship => 3,
+        Craft::Smack | Craft::Biplane | Craft::Seaplane | Craft::Cutter | Craft::Gunboat => 1,
+        Craft::Schooner | Craft::Barque | Craft::PaddleSteamer | Craft::Brig => 2,
+        Craft::FlyingBoat => 2,
+        Craft::Clipper | Craft::Steamer | Craft::Airship | Craft::Frigate | Craft::Liner => 3,
     }
 }
 
@@ -46,6 +47,8 @@ pub struct Kit {
     pub postage: f32,
     pub longer: f32,
     pub recharge: f32,
+    /// Share of every hold the fittings take (see `fittings`).
+    pub room: f32,
 }
 
 impl Kit {
@@ -107,6 +110,7 @@ pub fn apply(world: &mut World) {
                 kit.add(*e, k);
             }
         }
+        crate::fittings::add_to_kit(&v.fit, &mut kit);
         if v.kit != kit {
             v.kit = kit;
         }
