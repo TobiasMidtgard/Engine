@@ -298,6 +298,16 @@ pub fn refresh(world: &mut World) {
     let Some(output) = d.output else {
         return;
     };
+    // A ruin makes nothing: the trouble section (hud/trouble.rs) says so and offers Rebuild.
+    if world.get::<crate::incidents::Ruin>(e).is_some() {
+        if world.resource::<WorksCard>().sig != "ruin"
+            && let Some(node) = engine_ui::input::find_id(world, CARD_ID)
+        {
+            let _ = engine_ui::el::replace_children(world, node, &[]);
+            world.resource_mut::<WorksCard>().sig = "ruin".into();
+        }
+        return;
+    }
     let isle = b.island;
     let boost = world.get::<Boost>(e).cloned().unwrap_or_default();
     let Some(books) = world.resource::<Economy>().islands.get(isle).cloned() else {

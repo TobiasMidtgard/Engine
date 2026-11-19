@@ -33,6 +33,7 @@ mod map;
 mod routes;
 mod shelf;
 mod store;
+mod trouble;
 mod works;
 mod yard;
 
@@ -595,6 +596,7 @@ fn info_card(kind: Kind) -> El {
                 ),
         )
         .child(brass::divider(316.0))
+        .child(trouble::card_placeholder())
         .child_opt(d.output.map(|_| works::card_placeholder()))
         .child_opt((kind == Kind::Harbour).then(store::card_placeholder))
         .child_opt(yard::builds_craft(kind).then(yard::card_placeholder))
@@ -684,6 +686,7 @@ pub fn setup(world: &mut World) {
     store::install(world);
     yard::install(world);
     alerts::install(world);
+    trouble::install(world);
     shelf::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
@@ -736,6 +739,7 @@ pub fn show_card(world: &mut World) {
         works::card_opened(world);
         store::card_opened(world);
         yard::card_opened(world);
+        trouble::card_opened(world);
     }
 }
 
@@ -1168,6 +1172,7 @@ pub fn update_data(world: &mut World) {
         yard::refresh(world);
         fleet::refresh(world);
         alerts::refresh(world);
+        trouble::refresh(world);
     }
     demo_step(world, dt);
 }
@@ -1303,6 +1308,20 @@ fn demo_step(world: &mut World, dt: f32) {
                 std::env::args().find_map(|a| a.strip_prefix("--hud-fleet=")?.parse::<usize>().ok())
             {
                 fleet::demo(world, k);
+            }
+            // `--hud-burn=Kind`: burn the first building of that kind down (ruin shots).
+            if let Some(want) =
+                std::env::args().find_map(|a| a.strip_prefix("--hud-burn=").map(String::from))
+            {
+                let e = {
+                    let mut q = world.query::<(Entity, &Building)>();
+                    q.iter(world)
+                        .find(|(_, b)| format!("{:?}", b.kind) == want)
+                        .map(|(e, _)| e)
+                };
+                if let Some(e) = e {
+                    crate::incidents::burn_now(world, e);
+                }
             }
             // `--hud-alerts`: start a fire, a riot and a sickness or two (shots of the alerts).
             if std::env::args().any(|a| a == "--hud-alerts") {
