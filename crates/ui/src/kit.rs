@@ -1073,6 +1073,62 @@ pub mod brass {
                     .with_style(|s| s.width(crate::style::pct(frac.clamp(0.0, 1.0) * 100.0))),
             )
     }
+
+    /// An on/off switch with `text` beside it (in ink on parchment, in cream on lacquer): a
+    /// sunken track that turns green when on, and a brass knob at its left (off) or right
+    /// (on). Clicking the switch or its words sends `action`; the game flips its state and
+    /// rebuilds it.
+    pub fn switch(on: bool, text: &str, action: &str, on_paper: bool) -> El {
+        let (top, bottom) = if on {
+            (Color::hex(0x2c6a24), Color::hex(0x6ab84a))
+        } else {
+            (Color::hex(0x24180c), Color::hex(0x5a4228))
+        };
+        let glow = if on {
+            Shadow::new(Colors::good().with_alpha(0.55), 8.0, 0.0)
+        } else {
+            Shadow::new(Color::hexa(0x00000000), 0.0, 0.0)
+        };
+        El::new()
+            .class("row")
+            .on_click(action)
+            .with_style(|s| s.gap(9.0).align_items(Align::Center))
+            .child(
+                El::new()
+                    .with_style(move |s| {
+                        s.size(44.0, 24.0)
+                            .radius(12.0)
+                            .padding(2.5)
+                            .direction(Direction::Row)
+                            .align_items(Align::Center)
+                            .justify(if on { Justify::End } else { Justify::Start })
+                            .background(Fill::vertical(top, bottom))
+                            .border(1.5, Colors::brass_dark())
+                            .shadow(glow)
+                            .pick(Pick::Ignore)
+                    })
+                    .child(El::new().with_style(|s| {
+                        s.size(19.0, 19.0)
+                            .radius(9.5)
+                            .background(Fill::vertical(Colors::brass_light(), Colors::brass_dark()))
+                            .border(1.0, Colors::outline())
+                            .shadow(Shadow::new(Color::hexa(0x00000080), 3.0, 1.0))
+                            .pick(Pick::Ignore)
+                    })),
+            )
+            .child(
+                El::text(text)
+                    .text_style(|t| t.nowrap().bold().size(14.0))
+                    .with_style(move |s| {
+                        s.color(if on_paper {
+                            Colors::ink()
+                        } else {
+                            Colors::cream()
+                        })
+                    })
+                    .pick_ignore(),
+            )
+    }
 }
 
 /// Smoked holographic glass: chamfered plates with scanlines and a cool glare, neon cyan

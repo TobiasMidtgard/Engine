@@ -820,6 +820,9 @@ pub fn read_actions(world: &mut World) {
         } else if shelf::action(world, &a)
             || fleet::action(world, &a)
             || alerts::action(world, &a)
+            || house::action(world, &a)
+            || ledger::action(world, &a)
+            || works::action(world, &a)
             || yard::action(world, &a)
         {
         } else if a.starts_with("isle.gear.") {
@@ -995,29 +998,7 @@ fn update_data_now(world: &mut World) {
                 h.tier.name(),
                 island::islands()[b.island].name
             );
-            // Residents, needs, services and income: the badges and meters (hud/house.rs).
-            rows[4] = (
-                "Next tier".into(),
-                match h.tier.next() {
-                    Some((next, cost)) => {
-                        let c: Vec<String> = cost
-                            .iter()
-                            .map(|(g, n)| format!("{n} {}", g.name().to_lowercase()))
-                            .collect();
-                        let road = if next.wants_paving() && !h.paved {
-                            ", a paved road"
-                        } else {
-                            ""
-                        };
-                        format!("{}: {}{road}", next.name(), c.join(", "))
-                    }
-                    None => "Top tier for now".into(),
-                },
-            );
-            // Contentment only counts toward the next tier, once the house is full.
-            if h.tier.next().is_some() && h.residents >= h.tier.capacity() - 0.5 {
-                rows[5] = ("Content".into(), format!("for {:.0} s", h.content_s));
-            }
+            // Mood, needs by category, residents, income and moving up: hud/house.rs.
         } else if let Some(p) = world.get::<Producer>(e) {
             paused = p.paused;
             progress = Some(p.progress);

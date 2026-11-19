@@ -55,6 +55,12 @@ struct Shown {
     upkeep: f32,
     faster: f32,
     island: &'static str,
+    /// The player marked it first: its tier staffs it before the rest.
+    first: bool,
+    /// Seconds idle, and the share of its crew back after being let go.
+    idle_s: f32,
+    crew: f32,
+    paused: bool,
 }
 
 /// The ribbon's colour and the picture of what stops it.
@@ -268,6 +274,9 @@ fn section(s: &Shown) -> Vec<El> {
             Color::hex(0x4f8a3c),
         ));
     }
+    if let Some((_, t, _)) = s.staff {
+        out.push(staff_row(s, t));
+    }
     let workers = s.staff.map_or(String::new(), |(_, t, n)| {
         format!(" · {n} {}", t.name().to_lowercase())
     });
@@ -283,6 +292,70 @@ fn section(s: &Shown) -> Vec<El> {
         .pick_ignore(),
     );
     out
+}
+
+/// The "staff first" switch, and what idling has done to its crew.
+fn staff_row(s: &Shown, t: crate::defs::Tier) -> El {
+    let tier = t.name().to_lowercase();
+    let state = if s.paused {
+        None
+    } else if s.idle_s >= crate::sim::LET_GO_S {
+        Some(if s.idle_s >= crate::sim::IDLE_CHEAP_S {
+            format!(
+                "Idle {}: its {tier} were let go and it costs half",
+                since(s.idle_s)
+            )
+        } else {
+            format!("Idle {}: its {tier} were let go", since(s.idle_s))
+        })
+    } else if s.crew < 0.99 {
+        Some(format!(
+            "Staffing up again: {:.0}% of its crew back",
+            s.crew * 100.0
+        ))
+    } else {
+        None
+    };
+    El::new()
+        .class("col")
+        .with_style(|st| st.gap(4.0))
+        .child(
+            brass::switch(s.first, "Staff it first", "isle.work.first", true).tooltip(
+                "Staff it first",
+                format!(
+                    "When there are too few {tier} for every works on the island, the ones marked first get their hands before the rest."
+                ),
+            ),
+        )
+        .child_opt(state.map(|text| {
+            El::text(text)
+                .class("ink")
+                .text_style(|t| t.size(12.5))
+                .with_style(|st| st.color(Color::hex(0x8a5a12)))
+                .pick_ignore()
+        }))
+}
+
+fn since(s: f32) -> String {
+    if s < 90.0 {
+        format!("{s:.0} s")
+    } else {
+        format!("{:.0} min", s / 60.0)
+    }
+}
+
+/// `isle.work.first` on the selected works. Returns false for anything else.
+pub fn action(world: &mut World, a: &str) -> bool {
+    if a != "isle.work.first" {
+        return false;
+    }
+    if let Some(e) = world.get_resource::<Hand>().and_then(|h| h.selected)
+        && let Some(mut p) = world.get_mut::<Producer>(e)
+    {
+        p.first = !p.first;
+    }
+    refresh(world);
+    true
 }
 
 /// Fill or update the section for the selected works.
@@ -322,9 +395,20 @@ pub fn refresh(world: &mut World) {
             (g, books.get(g))
         })
         .collect();
-    let staff = d
-        .workers
-        .map(|(t, n)| (books.workforce[t.index()].clamp(0.0, 1.0), t, n));
+    // Its own share: works marked first are staffed before the rest, and a crew let go
+    // comes back over a few seconds.
+    let staff = d.workers.map(|(t, n)| {
+        let t = boost.workers.unwrap_or(t);
+        let k = t.index();
+        let share = if !p.asks_workers() {
+            0.0
+        } else if p.first {
+            books.staff_first[k]
+        } else {
+            books.staff_rest[k]
+        };
+        ((share * p.crew).clamp(0.0, 1.0), t, n)
+    });
     let shown = Shown {
         kind,
         status: p.status,
@@ -339,9 +423,13 @@ pub fn refresh(world: &mut World) {
         upkeep: (d.upkeep - boost.thrift).max(0.0),
         faster: boost.faster,
         island: crate::island::islands()[isle].name,
+        first: p.first,
+        idle_s: p.idle_s,
+        crew: p.crew,
+        paused: p.paused,
     };
     let sig = format!(
-        "{e:?}|{:?}|{:.2}|{}|{}|{:?}|{:.2}|{:.1}",
+        "{e:?}|{:?}|{:.2}|{}|{}|{:?}|{:.2}|{:.1}|{}|{}|{}|{}",
         shown.status,
         shown.efficiency,
         shown.made,
@@ -354,6 +442,10 @@ pub fn refresh(world: &mut World) {
         shown.staff.map(|s| (s.0 * 100.0).round()),
         shown.site,
         shown.upkeep,
+        shown.first,
+        shown.paused,
+        (shown.idle_s / 10.0).floor(),
+        (shown.crew * 20.0).round(),
     );
     if world.resource::<WorksCard>().sig == sig {
         return;

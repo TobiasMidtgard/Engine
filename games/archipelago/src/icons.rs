@@ -348,11 +348,62 @@ const GEAR: &[(&str, &str)] = &[
     ),
 ];
 
+/// The house card's moods, categories, moving up and down and the hold, painted by
+/// `assets/icons/make_mood_icons.py`.
+const MOOD: &[(&str, &str)] = &[
+    (
+        "isle_mood_angry",
+        include_str!("../assets/icons/isle_mood_angry.svg"),
+    ),
+    (
+        "isle_mood_unhappy",
+        include_str!("../assets/icons/isle_mood_unhappy.svg"),
+    ),
+    (
+        "isle_mood_content",
+        include_str!("../assets/icons/isle_mood_content.svg"),
+    ),
+    (
+        "isle_mood_happy",
+        include_str!("../assets/icons/isle_mood_happy.svg"),
+    ),
+    (
+        "isle_mood_euphoric",
+        include_str!("../assets/icons/isle_mood_euphoric.svg"),
+    ),
+    (
+        "isle_cat_food",
+        include_str!("../assets/icons/isle_cat_food.svg"),
+    ),
+    (
+        "isle_cat_clothing",
+        include_str!("../assets/icons/isle_cat_clothing.svg"),
+    ),
+    (
+        "isle_cat_square",
+        include_str!("../assets/icons/isle_cat_square.svg"),
+    ),
+    (
+        "isle_cat_luxury",
+        include_str!("../assets/icons/isle_cat_luxury.svg"),
+    ),
+    (
+        "isle_move_up",
+        include_str!("../assets/icons/isle_move_up.svg"),
+    ),
+    (
+        "isle_move_down",
+        include_str!("../assets/icons/isle_move_down.svg"),
+    ),
+    ("isle_hold", include_str!("../assets/icons/isle_hold.svg")),
+];
+
 pub fn all() -> Vec<(&'static str, String)> {
     let mut v: Vec<(&'static str, String)> = PAINTED
         .iter()
         .chain(GEAR)
         .chain(CRAFT)
+        .chain(MOOD)
         .map(|(n, s)| (*n, s.to_string()))
         .collect();
     v.extend(vec![

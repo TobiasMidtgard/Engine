@@ -27,6 +27,9 @@ const COINS_PAINTER: &str = "isle_led_coins";
 const PEOPLE_PAINTER: &str = "isle_led_people";
 /// Game seconds between samples, and how many are kept (an hour of game time).
 const SAMPLE_S: f64 = 10.0;
+/// The biggest costs under the coin chart, and moving up under the people.
+const DRAINS_ID: &str = "isle.led.drains";
+const MOVING_ID: &str = "isle.led.moving";
 const KEEP: usize = 360;
 
 #[derive(Clone, Debug)]
@@ -44,6 +47,9 @@ pub struct Ledger {
     /// The island shown.
     pub island: usize,
     samples: VecDeque<Sample>,
+    /// What the costs and the moving-up blocks last showed (rebuilt when it changes).
+    drains_sig: String,
+    moving_sig: String,
 }
 
 impl Ledger {
@@ -356,7 +362,13 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
                         .child(El::text("{isle.led.flow}").class("ink").pick_ignore()),
                 ),
         )
-        .child(chart(COINS_PAINTER, 150.0))
+        .child(chart(COINS_PAINTER, 130.0))
+        .child(
+            El::new()
+                .class("col")
+                .id(DRAINS_ID)
+                .with_style(|s| s.gap(4.0)),
+        )
         .child(
             El::new()
                 .class("row")
@@ -381,7 +393,13 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
         )
         .child(workforce(Tier::Fisherfolk))
         .child(workforce(Tier::Labourers))
-        .child(workforce(Tier::Burghers));
+        .child(workforce(Tier::Burghers))
+        .child(
+            El::new()
+                .class("col")
+                .id(MOVING_ID)
+                .with_style(|s| s.gap(6.0).margin([6.0, 0.0, 0.0, 0.0])),
+        );
     let book = brass::plate()
         .with_style(|s| {
             s.direction(Direction::Column)
@@ -567,6 +585,300 @@ pub fn update(world: &mut World) {
         };
         set_width(world, &format!("isle.led.work{k}"), w);
     }
+    let sig = drains_sig(&econ);
+    if world.resource::<Ledger>().drains_sig != sig
+        && let Some(n) = engine_ui::input::find_id(world, DRAINS_ID)
+    {
+        let _ = engine_ui::el::replace_children(world, n, &drains(&econ));
+        world.resource_mut::<Ledger>().drains_sig = sig;
+    }
+    let sig = format!("{shown}|{:?}|{}", books.ready, books.auto_up);
+    if world.resource::<Ledger>().moving_sig != sig
+        && let Some(n) = engine_ui::input::find_id(world, MOVING_ID)
+    {
+        let _ = engine_ui::el::replace_children(world, n, &moving(&books, name));
+        world.resource_mut::<Ledger>().moving_sig = sig;
+    }
+}
+
+/// "bakery" -> "bakeries", "weaver" -> "weavers".
+fn plural(name: &str, n: u32) -> String {
+    let name = name.to_lowercase();
+    match name.strip_suffix('y') {
+        _ if n == 1 || name.ends_with('s') => name,
+        Some(stem) if !stem.ends_with(['a', 'e', 'o', 'u']) => format!("{stem}ies"),
+        _ => format!("{name}s"),
+    }
+}
+
+fn drains_sig(econ: &Economy) -> String {
+    let d: Vec<String> = econ
+        .drains
+        .iter()
+        .map(|d| {
+            format!(
+                "{:?}{}{}{}{:.0}",
+                d.kind, d.island, d.count, d.idle, d.per_min
+            )
+        })
+        .collect();
+    format!(
+        "{}|{}|{}",
+        d.join(","),
+        (econ.debt_s / 60.0).floor(),
+        econ.auto_paused
+    )
+}
+
+/// The three biggest costs: each a building's picture, how many, idle or running, where,
+/// and what they cost a minute; above them a red line while the company is in debt.
+fn drains(econ: &Economy) -> Vec<El> {
+    let mut out = Vec::new();
+    if econ.drains.is_empty() {
+        return out;
+    }
+    out.push(
+        El::new()
+            .class("row")
+            .with_style(|s| s.justify(Justify::SpaceBetween).align_items(Align::End))
+            .child(brass::label("Biggest costs · all islands", true))
+            .child(brass::label("a minute", true)),
+    );
+    if econ.debt_s > 0.0 {
+        let soon = if econ.debt_s < crate::sim::DEBT_PAUSE_S {
+            "idle works pause themselves after two minutes"
+        } else {
+            "idle works are pausing themselves"
+        };
+        out.push(
+            El::text(format!(
+                "In debt for {}: {soon}.",
+                if econ.debt_s < 90.0 {
+                    format!("{:.0} s", econ.debt_s)
+                } else {
+                    format!("{:.0} min", econ.debt_s / 60.0)
+                }
+            ))
+            .class("ink")
+            .text_style(|t| t.size(13.0).bold())
+            .with_style(|s| s.color(Colors::bad_ink()))
+            .pick_ignore(),
+        );
+    } else if econ.auto_paused > 0 {
+        out.push(
+            El::text(format!(
+                "{} idle works paused themselves while in debt: resume them from their cards.",
+                econ.auto_paused
+            ))
+            .class("ink")
+            .text_style(|t| t.size(12.5))
+            .with_style(|s| s.color(Colors::ink_dim()))
+            .pick_ignore(),
+        );
+    }
+    let top = econ.drains.iter().map(|d| d.per_min).fold(1.0f32, f32::max);
+    for d in &econ.drains {
+        let name = d.kind.def().name;
+        let isle = island::islands()[d.island].name;
+        let tip = if d.idle {
+            format!(
+                "{} {} on {isle} stand idle. Idle works cost half after a minute: pause them (a quarter) or find them goods and roads.",
+                d.count,
+                plural(name, d.count)
+            )
+        } else {
+            format!(
+                "{} {} on {isle}, running at full upkeep.",
+                d.count,
+                plural(name, d.count)
+            )
+        };
+        let frac = d.per_min / top;
+        let idle = d.idle;
+        out.push(
+            El::new()
+                .class("row")
+                .tooltip(name, tip)
+                .with_style(|s| s.gap(8.0).align_items(Align::Center))
+                .child(brass::badge(super::kind_icon(d.kind), 28.0))
+                .child(
+                    El::new()
+                        .class("col")
+                        .with_style(|s| s.gap(2.0).grow(1.0).shrink(1.0).basis(0.0))
+                        .child(
+                            El::new()
+                                .class("row")
+                                .with_style(|s| s.gap(6.0).align_items(Align::Center))
+                                .child(
+                                    El::text(format!("{} {}", d.count, plural(name, d.count)))
+                                        .class("ink")
+                                        .text_style(|t| t.size(14.0).bold().nowrap())
+                                        .pick_ignore(),
+                                )
+                                .child_opt(idle.then(|| {
+                                    El::text("idle")
+                                        .text_style(|t| t.size(11.5).bold().nowrap())
+                                        .with_style(|s| {
+                                            s.color(Color::hex(0xfff4d8))
+                                                .padding([1.0, 6.0])
+                                                .radius(4.0)
+                                                .background(Fill::Solid(Color::hex(0xc07a1a)))
+                                        })
+                                        .pick_ignore()
+                                }))
+                                .child(
+                                    El::text(format!("on {isle}"))
+                                        .class("ink")
+                                        .text_style(|t| t.size(12.5).nowrap())
+                                        .with_style(|s| s.color(Colors::ink_dim()))
+                                        .pick_ignore(),
+                                ),
+                        )
+                        .child(
+                            El::new()
+                                .class("brass_track")
+                                .with_style(|s| s.width(pct(100.0)).height(9.0))
+                                .child(El::new().with_style(move |s| {
+                                    let c = if idle {
+                                        Color::hex(0xc07a1a)
+                                    } else {
+                                        Color::hex(0x9a2f1c)
+                                    };
+                                    s.width(pct(frac.clamp(0.0, 1.0) * 100.0))
+                                        .height(pct(100.0))
+                                        .radius(3.0)
+                                        .background(Fill::Solid(c))
+                                        .pick(Pick::Ignore)
+                                })),
+                        ),
+                )
+                .child(
+                    El::text(format!("−{:.0}", d.per_min))
+                        .class("ink")
+                        .text_style(|t| t.size(15.0).bold().tabular().nowrap())
+                        .with_style(|s| s.color(Colors::bad_ink()).width(44.0))
+                        .pick_ignore(),
+                ),
+        );
+    }
+    out
+}
+
+/// Moving up on this island: how many houses are ready, by tier, a button that moves them
+/// all (those whose tier can spare the people), and the switch that lets them move on their
+/// own.
+fn moving(books: &crate::sim::IslandBooks, name: &str) -> Vec<El> {
+    let total: u32 = books.ready.iter().sum();
+    let by_tier: Vec<String> = Tier::ALL
+        .iter()
+        .filter(|t| books.ready[t.index()] > 0)
+        .map(|t| format!("{} {}", books.ready[t.index()], t.name().to_lowercase()))
+        .collect();
+    let words = if total == 0 {
+        "No house is ready to move up".to_string()
+    } else {
+        format!(
+            "{total} {} ready to move up: {}",
+            if total == 1 { "house" } else { "houses" },
+            by_tier.join(", ")
+        )
+    };
+    vec![
+        El::new()
+            .class("row")
+            .with_style(|s| s.gap(10.0).align_items(Align::Center))
+            .child(El::icon("isle_move_up").with_style(move |s| {
+                s.size(34.0, 34.0)
+                    .opacity(if total > 0 { 1.0 } else { 0.45 })
+                    .pick(Pick::Ignore)
+            }))
+            .child(
+                El::text(words)
+                    .class("ink")
+                    .text_style(|t| t.size(14.0).bold())
+                    .with_style(|s| s.grow(1.0).shrink(1.0).basis(0.0))
+                    .pick_ignore(),
+            )
+            .child(
+                El::button(
+                    if total > 0 {
+                        format!("Move up all ready ({total})")
+                    } else {
+                        "Move up all ready".into()
+                    },
+                    "isle.led.up_all",
+                )
+                .class("brass_button")
+                .text_style(|t| t.nowrap())
+                .disabled(total == 0)
+                .tooltip(
+                    "Move up all ready",
+                    "Moves every ready house up, the longest ready first, skipping those whose works would lose the people.",
+                ),
+            ),
+        brass::switch(
+            books.auto_up,
+            &format!("Houses on {name} move up on their own"),
+            "isle.led.auto_up",
+            true,
+        )
+        .tooltip(
+            "Move up on their own",
+            "Off: a ready house waits for your order, so no works lose their hands by surprise. On: ready houses move up by themselves, one at a time, when their tier can spare them.",
+        ),
+    ]
+}
+
+/// `isle.led.up_all` and `isle.led.auto_up` on the island shown. Returns false for anything
+/// else.
+pub fn action(world: &mut World, a: &str) -> bool {
+    let i = world.resource::<Ledger>().island;
+    match a {
+        "isle.led.up_all" => {
+            let (moved, waiting) = crate::reports::move_up_all(world, i);
+            let left: u32 = waiting.values().sum();
+            let why: Vec<String> = waiting
+                .iter()
+                .map(|(k, n)| {
+                    let w = match k.as_str() {
+                        "would_empty_works" => "their works need the people",
+                        "no_materials" => "the warehouse is short of building goods",
+                        "needs_paving" => "they want a paved street",
+                        _ => "they are not ready",
+                    };
+                    format!("{n}: {w}")
+                })
+                .collect();
+            let text = match (moved, left) {
+                (m, 0) => format!("{m} {} moved up.", if m == 1 { "house" } else { "houses" }),
+                (0, _) => format!("None could go ({}).", why.join("; ")),
+                (m, l) => format!(
+                    "{m} moved up; {l} still {} ({}).",
+                    if l == 1 { "waits" } else { "wait" },
+                    why.join("; ")
+                ),
+            };
+            engine_ui::toast::notify(
+                world,
+                if moved > 0 {
+                    engine_ui::toast::ToastKind::Good
+                } else {
+                    engine_ui::toast::ToastKind::Warn
+                },
+                "isle_move_up",
+                "Moving up",
+                &text,
+                5.0,
+            );
+        }
+        "isle.led.auto_up" => {
+            let on = world.resource::<Economy>().islands[i].auto_up;
+            crate::reports::auto_up(world, i, !on);
+        }
+        _ => return false,
+    }
+    update(world);
+    true
 }
 
 /// The goods worth a row for island `i`: kept, made or used there (every good when fewer than
