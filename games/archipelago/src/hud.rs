@@ -33,6 +33,7 @@ mod routes;
 mod shelf;
 mod store;
 mod works;
+mod yard;
 
 /// The bars' own state between frames.
 #[derive(Resource, Default)]
@@ -74,6 +75,8 @@ pub(super) fn kind_icon(k: Kind) -> &'static str {
         Kind::Market => "isle_market",
         Kind::Chapel => "isle_chapel",
         Kind::AirshipMast => "isle_airship",
+        Kind::Shipyard => "isle_shipyard",
+        Kind::Chandler => "isle_chandler",
         _ => k.def().output.map_or("isle_workshop", Good::icon),
     }
 }
@@ -590,6 +593,7 @@ fn info_card(kind: Kind) -> El {
         .child(brass::divider(316.0))
         .child_opt(d.output.map(|_| works::card_placeholder()))
         .child_opt((kind == Kind::Harbour).then(store::card_placeholder))
+        .child_opt(yard::builds_craft(kind).then(yard::card_placeholder))
         .child_opt((kind == Kind::House).then(house::card_placeholder))
         .children((0..6).map(card_row))
         .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
@@ -674,6 +678,7 @@ pub fn setup(world: &mut World) {
     fleet::install(world);
     works::install(world);
     store::install(world);
+    yard::install(world);
     shelf::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
@@ -725,6 +730,7 @@ pub fn show_card(world: &mut World) {
         house::card_opened(world);
         works::card_opened(world);
         store::card_opened(world);
+        yard::card_opened(world);
     }
 }
 
@@ -995,7 +1001,10 @@ fn update_data_now(world: &mut World) {
         } else {
             // (The three item holders show their sockets instead: the card stays short.)
             // (The harbour shows its warehouse instead: hud/store.rs.)
-            if crate::items::Host::of(b.kind).is_none() && b.kind != Kind::Harbour {
+            if crate::items::Host::of(b.kind).is_none()
+                && b.kind != Kind::Harbour
+                && !yard::builds_craft(b.kind)
+            {
                 rows[0] = ("About".into(), d.blurb.to_string());
             }
         }
@@ -1147,6 +1156,7 @@ pub fn update_data(world: &mut World) {
         house::refresh(world);
         works::refresh(world);
         store::refresh(world);
+        yard::refresh(world);
         fleet::refresh(world);
     }
     demo_step(world, dt);
@@ -1209,6 +1219,14 @@ fn demo_step(world: &mut World, dt: f32) {
                 std::env::args().find_map(|a| a.strip_prefix("--hud-slot=")?.parse::<usize>().ok())
             {
                 shelf::pick_slot(world, k);
+            }
+            // `--hud-yard=airship,biplane`: order those at the yard whose card is open.
+            if let Some(list) =
+                std::env::args().find_map(|a| a.strip_prefix("--hud-yard=").map(String::from))
+            {
+                for c in list.split(',') {
+                    crate::tools::action(world, &format!("isle.yard.order:{c}"));
+                }
             }
             // `--hud-fleet=k`: the ships' gear with the first vessel's socket k picked.
             if let Some(k) =

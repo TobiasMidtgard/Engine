@@ -61,10 +61,12 @@ fn kit_line(k: &Kit) -> String {
     v.join(" · ")
 }
 
-fn flies(craft: &str) -> bool {
+/// The craft's picture, by the name the panel gives.
+fn craft_icon(craft: &str) -> &'static str {
     crate::vessels::Craft::ALL
-        .iter()
-        .any(|c| c.name() == craft && c.flies())
+        .into_iter()
+        .find(|c| c.name() == craft)
+        .map_or("isle_anchor", super::yard::craft_icon)
 }
 
 fn state_id(vessel: u32, slot: usize) -> String {
@@ -130,14 +132,7 @@ fn row(p: &GearPanel, picked: Option<usize>, shelf: &[ItemView]) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(10.0).align_items(Align::Center))
-                .child(brass::badge(
-                    if flies(p.craft) {
-                        "isle_airship"
-                    } else {
-                        "isle_anchor"
-                    },
-                    34.0,
-                ))
+                .child(brass::badge(craft_icon(p.craft), 38.0))
                 .child(
                     El::new()
                         .class("col")

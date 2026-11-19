@@ -131,6 +131,50 @@ const PAINTED: &[(&str, &str)] = &[
 ];
 
 /// Every icon as (name, svg).
+/// Every craft, the shipyard and the chandler, painted by `assets/icons/make_craft_icons.py`.
+const CRAFT: &[(&str, &str)] = &[
+    (
+        "isle_craft_schooner",
+        include_str!("../assets/icons/isle_craft_schooner.svg"),
+    ),
+    (
+        "isle_craft_barque",
+        include_str!("../assets/icons/isle_craft_barque.svg"),
+    ),
+    (
+        "isle_craft_clipper",
+        include_str!("../assets/icons/isle_craft_clipper.svg"),
+    ),
+    (
+        "isle_craft_smack",
+        include_str!("../assets/icons/isle_craft_smack.svg"),
+    ),
+    (
+        "isle_craft_paddle_steamer",
+        include_str!("../assets/icons/isle_craft_paddle_steamer.svg"),
+    ),
+    (
+        "isle_craft_steamer",
+        include_str!("../assets/icons/isle_craft_steamer.svg"),
+    ),
+    (
+        "isle_craft_biplane",
+        include_str!("../assets/icons/isle_craft_biplane.svg"),
+    ),
+    (
+        "isle_craft_seaplane",
+        include_str!("../assets/icons/isle_craft_seaplane.svg"),
+    ),
+    (
+        "isle_shipyard",
+        include_str!("../assets/icons/isle_shipyard.svg"),
+    ),
+    (
+        "isle_chandler",
+        include_str!("../assets/icons/isle_chandler.svg"),
+    ),
+];
+
 /// Ship gear and captains, painted by `assets/icons/make_gear_icons.py`.
 const GEAR: &[(&str, &str)] = &[
     (
@@ -255,6 +299,7 @@ pub fn all() -> Vec<(&'static str, String)> {
     let mut v: Vec<(&'static str, String)> = PAINTED
         .iter()
         .chain(GEAR)
+        .chain(CRAFT)
         .map(|(n, s)| (*n, s.to_string()))
         .collect();
     v.extend(vec![
