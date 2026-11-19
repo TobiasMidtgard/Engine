@@ -1234,6 +1234,15 @@ fn demo_step(world: &mut World, dt: f32) {
             {
                 fleet::demo(world, k);
             }
+            // `--hud-reveal=i`: lift the fog off island `i`, as if a ship had looked round it
+            // (shots of an unsettled island on the chart).
+            if let Some(i) = std::env::args()
+                .find_map(|a| a.strip_prefix("--hud-reveal=")?.parse::<usize>().ok())
+                && let Some(isle) = island::islands().get(i)
+                && let Some(mut fog) = world.get_resource_mut::<crate::fog::FogOfWar>()
+            {
+                fog.reveal_map(isle.center.x, isle.center.y, isle.radius * 1.8);
+            }
         }
     }
     if t > 2.5

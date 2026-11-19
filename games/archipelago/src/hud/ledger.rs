@@ -492,10 +492,20 @@ pub fn update(world: &mut World) {
         d.set("isle.led.since", format!("since {}", clock(since)));
         d.set(
             "isle.led.flow",
-            format!(
-                "taxes [color=#2f6e28]+{:.0}[/color] · upkeep [color=#9a2f1c]−{:.0}[/color] a minute",
-                econ.taxes_per_min, econ.upkeep_per_min
-            ),
+            {
+                // The fleet's wages and stores apart from the buildings' upkeep.
+                let fleet = econ.fleet_upkeep as f64;
+                let ashore = (econ.upkeep_per_min - fleet).max(0.0);
+                let fleet_part = if fleet >= 0.5 {
+                    format!(" · fleet [color=#9a2f1c]−{fleet:.0}[/color]")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "taxes [color=#2f6e28]+{:.0}[/color] · buildings [color=#9a2f1c]−{ashore:.0}[/color]{fleet_part} a minute",
+                    econ.taxes_per_min
+                )
+            },
         );
         for g in Good::ALL {
             let i = g.index();

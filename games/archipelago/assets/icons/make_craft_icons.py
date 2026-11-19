@@ -1,5 +1,5 @@
 # Painted-style icons for every craft, the shipyard and the ship chandler (isle_craft_*,
-# isle_shipyard, isle_chandler), in the same hand as make_icons.py.
+# isle_shipyard, isle_chandler, isle_compass), in the same hand as make_icons.py.
 # Usage: python3 make_craft_icons.py <out dir>
 import os, sys
 O = 'stroke="#2a1708" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"'
@@ -133,6 +133,34 @@ I['isle_chandler'] = svg(DEFS + lg('rf', (0, '#4a6a8a'), (1, '#1a2a3a')) + lg('r
     '<g stroke="#2a1708" stroke-width="2.6" fill="none" stroke-linecap="round"><path d="M28 18 L28 30 M24 21 L32 21 M23 27 C25 31 31 31 33 27"/></g>'
     '<g stroke="#f0c85a" stroke-width="1.2" fill="none" stroke-linecap="round"><path d="M28 18 L28 30 M24 21 L32 21 M23 27 C25 31 31 31 33 27"/></g>'
     '<path d="M6 31 L26 18" stroke="#8ab0d8" stroke-width="1.6" opacity=".8"/>')
+
+# A brass compass rose: the "sail to" control.
+def rose():
+    import math
+    pts = []
+    for k in range(8):
+        a = k * math.pi / 4
+        r = 27 if k % 2 == 0 else 17
+        b1, b2 = a - math.pi / 8, a + math.pi / 8
+        tip = (32 + r * math.sin(a), 32 - r * math.cos(a))
+        l = (32 + 6 * math.sin(b1), 32 - 6 * math.cos(b1))
+        rr = (32 + 6 * math.sin(b2), 32 - 6 * math.cos(b2))
+        light = '#fff0c0' if k % 2 == 0 else '#e8c880'
+        dark = '#b0782a' if k % 2 == 0 else '#8a5a20'
+        pts.append((k, tip, l, rr, light, dark))
+    out = ''
+    for k, tip, l, rr, light, dark in sorted(pts, key=lambda t: t[0] % 2 == 0):
+        out += (f'<path d="M32 32 L{l[0]:.1f} {l[1]:.1f} L{tip[0]:.1f} {tip[1]:.1f} Z" fill="{light}" {o(1.0)}/>'
+                f'<path d="M32 32 L{rr[0]:.1f} {rr[1]:.1f} L{tip[0]:.1f} {tip[1]:.1f} Z" fill="{dark}" {o(1.0)}/>')
+    return out
+I['isle_compass'] = svg(DEFS + lg('ring', (0, '#f0d090'), (.5, '#c08a3a'), (1, '#6a4416')),
+    f'<g {o(2.4)}><circle cx="32" cy="32" r="22" fill="#f4e8c8"/><circle cx="32" cy="32" r="22" fill="none" stroke="url(#ring)" stroke-width="4"/></g>'
+    '<circle cx="32" cy="32" r="24.2" fill="none" stroke="#2a1708" stroke-width="1.4"/>'
+    '<circle cx="32" cy="32" r="19.6" fill="none" stroke="#2a1708" stroke-width="1"/>' +
+    rose() +
+    '<path d="M32 5 L32 32" stroke="#b03a24" stroke-width="0"/>'
+    f'<path d="M32 32 L28.6 27 L32 5 Z" fill="#e0583a" {o(1.6)}/><path d="M32 32 L35.4 27 L32 5 Z" fill="#9a2a18" {o(1.6)}/>'
+    f'<g {o(1.6)}><circle cx="32" cy="32" r="3.4" fill="url(#ring)"/></g>')
 
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)

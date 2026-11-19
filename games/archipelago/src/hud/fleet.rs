@@ -8,8 +8,11 @@ use engine_ui::el::El;
 use engine_ui::kit::brass::{self, Colors, SocketState};
 use engine_ui::style::{Align, Direction, Enter, Pick, Position};
 
+use crate::fleet::{Roam, Routes, Vessel};
 use crate::gear::{GearPanel, Kit};
+use crate::island;
 use crate::items::{self, ItemView, Way};
+use crate::sim::Building;
 
 use super::shelf::{details, socket_state, tip_text, ui_rank};
 
@@ -22,6 +25,8 @@ pub struct Fleet {
     pub open: bool,
     /// The socket picked out (vessel, slot): its item's details, or the items that fit it.
     picked: Option<(u32, usize)>,
+    /// The vessel whose "sail to" list is open (the chart's next click sends her there too).
+    pub voyage: Option<u32>,
     /// What the list last showed (rebuilt only when it changes).
     sig: String,
 }
@@ -73,10 +78,190 @@ fn state_id(vessel: u32, slot: usize) -> String {
     format!("isle.gsock.{vessel}.{slot}")
 }
 
+fn status_id(vessel: u32) -> String {
+    format!("isle.fstat.{vessel}")
+}
+
+/// The company's vessel whose entity index is `vessel` (as the gear panel gives it).
+fn vessel_entity(world: &mut World, vessel: u32) -> Option<Entity> {
+    let mut q = world.query::<(Entity, &Vessel)>();
+    q.iter(world)
+        .find(|(e, _)| e.index_u32() == vessel)
+        .map(|(e, _)| e)
+}
+
+/// The island a point at sea is off, if it is near one; else open water.
+fn waters(p: DVec2) -> String {
+    let i = island::nearest_island(p.x, p.y);
+    let isle = &island::islands()[i];
+    if (p - isle.center).length() < isle.radius * 1.9 {
+        isle.name.to_string()
+    } else {
+        "open water".into()
+    }
+}
+
+/// What a vessel is doing, in words: `(kind, text)`. The kind leaves the distance out, so the
+/// list is rebuilt only when what she does changes; the text moves in place.
+fn status(world: &World, v: &Vessel) -> (String, String) {
+    let here = DVec2::new(v.at.x, v.at.z);
+    if let Some(r) = v.route {
+        let name = world
+            .get_resource::<Routes>()
+            .and_then(|rs| rs.0.get(r).map(|r| r.name.clone()))
+            .unwrap_or_else(|| "a trade".into());
+        let t = format!("On the {name} route");
+        return (t.clone(), t);
+    }
+    match &v.roam {
+        Roam::Found { isle, .. } => {
+            let t = format!("Bound to settle {}", island::islands()[*isle].name);
+            (t.clone(), t)
+        }
+        Roam::Fishing { .. } => ("Fishing".into(), "Fishing for her quay".into()),
+        Roam::Circling { .. } => ("Circling".into(), "Circling her mast".into()),
+        Roam::Idle { at } => {
+            let to = DVec2::new(at.x, at.z);
+            let d = (to - here).length();
+            if d > 120.0 {
+                let w = waters(to);
+                let k = format!("Sailing for {w}");
+                (k.clone(), format!("{k} · {:.1} km to go", d / 1000.0))
+            } else {
+                let t = format!("Lying off {}", waters(here));
+                (t.clone(), t)
+            }
+        }
+        _ => (String::new(), String::new()),
+    }
+}
+
+/// Where "sail to" island `i` takes a ship: off the company's harbour there if it has one,
+/// else to the landfall a settler would make.
+fn landfall(world: &mut World, i: usize) -> DVec2 {
+    let mut q = world.query::<&Building>();
+    if let Some(b) = q
+        .iter(world)
+        .find(|b| b.island == i && b.kind == crate::defs::Kind::Harbour)
+    {
+        return crate::fleet::mooring(b).0;
+    }
+    let isle = &island::islands()[i];
+    island::settle_coast(isle).unwrap_or(isle.center)
+}
+
+/// Why a vessel can't be sent anywhere now, if it can't.
+fn why_stays(v: &Vessel) -> Option<String> {
+    if crate::settle::free(v) {
+        return None;
+    }
+    Some(if v.craft.flies() {
+        format!("{} flies her own rounds from the mast.", v.name)
+    } else if v.route.is_some() {
+        format!("{} is on a trade route: take her off it first.", v.name)
+    } else if matches!(v.roam, Roam::Found { .. }) {
+        format!("{} is bound to settle an island.", v.name)
+    } else {
+        format!("{} is busy with her own work.", v.name)
+    })
+}
+
+/// The "sail to" list under a vessel: the islands of her waters, nearest first, settled ones
+/// marked, and a hint that the chart takes a click too.
+fn voyage(world: &mut World, vessel: u32) -> El {
+    let col = El::new()
+        .class("col")
+        .with_style(|s| s.gap(6.0).padding([4.0, 8.0, 4.0, 44.0]));
+    let Some(e) = vessel_entity(world, vessel) else {
+        return col;
+    };
+    let Some(v) = world.get::<Vessel>(e).cloned() else {
+        return col;
+    };
+    if let Some(why) = why_stays(&v) {
+        return col.child(
+            El::text(why)
+                .class("ink")
+                .text_style(|t| t.size(13.0).italic())
+                .with_style(|s| s.color(Colors::ink_dim()))
+                .pick_ignore(),
+        );
+    }
+    let here = DVec2::new(v.at.x, v.at.z);
+    let region = crate::globe::region_of(here.x, here.y);
+    let mut isles: Vec<(usize, f64, bool)> = island::islands()
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.region() == region)
+        .map(|(n, i)| {
+            (
+                n,
+                (i.center - here).length(),
+                crate::settle::claimed(world, n),
+            )
+        })
+        .collect();
+    isles.sort_by(|a, b| a.1.total_cmp(&b.1));
+    col.child(brass::label(
+        "Sail to · or click anywhere on the chart",
+        true,
+    ))
+    .child(
+        El::new()
+            .class("row")
+            .with_style(|s| s.gap(6.0).wrap(true))
+            .children(isles.into_iter().map(|(n, d, settled)| {
+                let isle = &island::islands()[n];
+                El::new()
+                    .class("button brass_button")
+                    .on_click(format!("isle.fleet.goto:{vessel}:{n}"))
+                    .with_style(|s| {
+                        s.direction(Direction::Column)
+                            .gap(0.0)
+                            .padding([4.0, 10.0])
+                            .align_items(Align::Center)
+                    })
+                    .tooltip(
+                        isle.name,
+                        if settled {
+                            "Yours: she'll lie off your harbour there."
+                        } else {
+                            "Not settled yet: she'll stand off its best landfall, to look \
+                             round. Build a harbour on its coast to settle it."
+                        },
+                    )
+                    .child(
+                        El::text(isle.name)
+                            .text_style(|t| t.size(14.0).bold().nowrap())
+                            .pick_ignore(),
+                    )
+                    .child(
+                        El::text(format!(
+                            "{} · {:.1} km",
+                            if settled { "yours" } else { "unsettled" },
+                            d / 1000.0
+                        ))
+                        .text_style(|t| t.size(11.0).nowrap())
+                        .with_style(|s| s.opacity(0.8))
+                        .pick_ignore(),
+                    )
+            })),
+    )
+}
+
 /// One vessel: its picture, name and what its gear adds, then the captain's socket and the
 /// gear sockets; under it, when one of its sockets is picked, the item or the items that fit.
-fn row(p: &GearPanel, picked: Option<usize>, shelf: &[ItemView]) -> El {
+fn row(
+    p: &GearPanel,
+    picked: Option<usize>,
+    shelf: &[ItemView],
+    status: &str,
+    sailing: Option<El>,
+    stays: Option<String>,
+) -> El {
     let kit = kit_line(&p.kit);
+    let open = sailing.is_some();
+    let dim = stays.is_some();
     let sockets = p.slots.iter().map(|gs| {
         let captain = gs.kind == "captain";
         let size = if captain { 50.0 } else { 42.0 };
@@ -136,7 +321,7 @@ fn row(p: &GearPanel, picked: Option<usize>, shelf: &[ItemView]) -> El {
                 .child(
                     El::new()
                         .class("col")
-                        .with_style(|s| s.gap(0.0).width(200.0).shrink(0.0))
+                        .with_style(|s| s.gap(0.0).width(178.0).shrink(0.0))
                         .child(
                             El::text(p.name.clone())
                                 .class("ink")
@@ -144,6 +329,14 @@ fn row(p: &GearPanel, picked: Option<usize>, shelf: &[ItemView]) -> El {
                                 .pick_ignore(),
                         )
                         .child(brass::label(p.craft, true))
+                        .child_opt((!status.is_empty()).then(|| {
+                            El::text(status)
+                                .class("ink")
+                                .id(status_id(p.vessel))
+                                .text_style(|t| t.size(13.0).italic())
+                                .with_style(|s| s.color(Colors::ink_dim()))
+                                .pick_ignore()
+                        }))
                         .child_opt((!kit.is_empty()).then(|| {
                             El::text(kit)
                                 .class("ink")
@@ -157,8 +350,22 @@ fn row(p: &GearPanel, picked: Option<usize>, shelf: &[ItemView]) -> El {
                         .class("row")
                         .with_style(|s| s.gap(4.0).align_items(Align::Start).shrink(0.0))
                         .children(sockets),
+                )
+                .child(El::new().with_style(|s| s.grow(1.0)))
+                .child(
+                    brass::medallion("isle_compass", 32.0, &format!("isle.fleet.voyage:{}", p.vessel))
+                        .with_style(move |s| s.opacity(if dim { 0.45 } else { 1.0 }))
+                        .tooltip(
+                            if open { "Close the list" } else { "Sail to…" },
+                            stays.unwrap_or_else(|| {
+                                "Send her to an island, or to any point you click on the chart, to look round under the fog.".into()
+                            }),
+                        ),
                 ),
         );
+    if let Some(list) = sailing {
+        col = col.child(list);
+    }
     if let Some(slot) = picked {
         let item = p.slots.get(slot).and_then(|g| g.item.as_ref());
         col = col.child(match item {
@@ -279,13 +486,18 @@ fn body(world: &mut World) -> Vec<El> {
                 .pick_ignore(),
         ];
     }
+    let open = world.resource::<Fleet>().voyage;
     let mut out = Vec::new();
     for (i, p) in list.iter().enumerate() {
         if i > 0 {
             out.push(rule());
         }
         let mine = picked.filter(|(v, _)| *v == p.vessel).map(|(_, s)| s);
-        out.push(row(p, mine, &shelf));
+        let v = vessel_entity(world, p.vessel).and_then(|e| world.get::<Vessel>(e).cloned());
+        let status = v.as_ref().map(|v| status(world, v).1).unwrap_or_default();
+        let stays = v.as_ref().and_then(why_stays);
+        let sailing = (open == Some(p.vessel)).then(|| voyage(world, p.vessel));
+        out.push(row(p, mine, &shelf, &status, sailing, stays));
     }
     out
 }
@@ -302,10 +514,35 @@ fn sig(world: &mut World) -> String {
             }
         }
     }
+    let open = world.resource::<Fleet>().voyage;
+    let doing: Vec<String> = {
+        let mut q = world.query::<&Vessel>();
+        let vs: Vec<Vessel> = q.iter(world).cloned().collect();
+        vs.iter()
+            .map(|v| {
+                format!(
+                    "{}:{}:{}",
+                    v.name,
+                    status(world, v).0,
+                    crate::settle::free(v)
+                )
+            })
+            .collect()
+    };
+    let claims: String = (0..island::islands().len())
+        .map(|i| {
+            if crate::settle::claimed(world, i) {
+                '1'
+            } else {
+                '0'
+            }
+        })
+        .collect();
     format!(
-        "{}|{}|{picked:?}",
+        "{}|{}|{picked:?}|{open:?}|{}|{claims}",
         serde_json::to_string(&list).unwrap_or_default(),
-        serde_json::to_string(&items::shelf_view(world)).unwrap_or_default()
+        serde_json::to_string(&items::shelf_view(world)).unwrap_or_default(),
+        doing.join(",")
     )
 }
 
@@ -369,6 +606,7 @@ pub fn toggle(world: &mut World) {
         let mut f = world.resource_mut::<Fleet>();
         f.open = false;
         f.picked = None;
+        f.voyage = None;
         return;
     }
     let screen = engine_ui::node::Screen {
@@ -401,6 +639,17 @@ pub fn refresh(world: &mut World) {
         }
     }
     for p in crate::gear::fleet(world) {
+        if let Some(e) = vessel_entity(world, p.vessel)
+            && let Some(v) = world.get::<Vessel>(e).cloned()
+        {
+            let text = status(world, &v).1;
+            if let Some(n) = engine_ui::input::find_id(world, &status_id(p.vessel))
+                && let Some(mut t) = world.get_mut::<engine_ui::node::Text>(n)
+                && t.text != text
+            {
+                t.text = text;
+            }
+        }
         for g in &p.slots {
             if let Some(iv) = &g.item
                 && let Some(e) = engine_ui::input::find_id(world, &state_id(p.vessel, g.slot))
@@ -427,9 +676,73 @@ pub fn action(world: &mut World, a: &str) -> bool {
             f.picked = if f.picked == pick { None } else { pick };
         }
         refresh(world);
+    } else if let Some(rest) = a.strip_prefix("isle.fleet.voyage:") {
+        if let Ok(v) = rest.parse::<u32>() {
+            let mut f = world.resource_mut::<Fleet>();
+            f.voyage = if f.voyage == Some(v) { None } else { Some(v) };
+        }
+        refresh(world);
+    } else if let Some(rest) = a.strip_prefix("isle.fleet.goto:") {
+        let n: Vec<u32> = rest.split(':').filter_map(|s| s.parse().ok()).collect();
+        if let [v, i] = n[..]
+            && (i as usize) < island::islands().len()
+        {
+            let to = landfall(world, i as usize);
+            send(world, v, to, island::islands()[i as usize].name);
+        }
     } else {
         return false;
     }
+    true
+}
+
+/// Send vessel `v` to `to`, and say so (or why not).
+fn send(world: &mut World, v: u32, to: DVec2, place: &str) {
+    let Some(e) = vessel_entity(world, v) else {
+        return;
+    };
+    let name = world
+        .get::<Vessel>(e)
+        .map(|v| v.name.clone())
+        .unwrap_or_default();
+    let (kind, title, text) = match crate::settle::sail_to(world, e, to) {
+        Ok(()) => (
+            engine_ui::toast::ToastKind::Info,
+            format!("{name} sails"),
+            format!("Bound for {place}."),
+        ),
+        Err(why) => (
+            engine_ui::toast::ToastKind::Warn,
+            "She stays".to_string(),
+            why,
+        ),
+    };
+    if world.get_resource::<engine_ui::theme::Theme>().is_some() {
+        engine_ui::toast::notify(world, kind, "isle_compass", &title, &text, 5.0);
+    }
+    world.resource_mut::<Fleet>().voyage = None;
+    refresh(world);
+}
+
+/// The chart was clicked at `at`: if a "sail to" list is open, send that vessel there and
+/// return true (the view stays where it is).
+pub fn chart_clicked(world: &mut World, at: DVec2) -> bool {
+    let Some(v) = world
+        .get_resource::<Fleet>()
+        .filter(|f| f.open)
+        .and_then(|f| f.voyage)
+    else {
+        return false;
+    };
+    // A click on land means that island: she stands off it instead of running ashore.
+    let (to, place) = match island::island_at(at.x, at.y) {
+        Some(i) => (landfall(world, i), island::islands()[i].name.to_string()),
+        None => match waters(at).as_str() {
+            "open water" => (at, "open water".to_string()),
+            w => (at, format!("the waters off {w}")),
+        },
+    };
+    send(world, v, to, &place);
     true
 }
 
@@ -464,6 +777,46 @@ pub fn demo(world: &mut World, k: usize) {
         if std::env::args().any(|a| a == "--hud-fleet-use") {
             crate::tools::action(world, &format!("isle.gear.use:{}:{k}", p.vessel));
         }
+    }
+    let free = |world: &mut World| -> Vec<u32> {
+        panels(world)
+            .iter()
+            .map(|p| p.vessel)
+            .filter(|v| {
+                vessel_entity(world, *v)
+                    .and_then(|e| world.get::<Vessel>(e))
+                    .is_some_and(crate::settle::free)
+            })
+            .collect()
+    };
+    // The tour's ships are all on routes: stand down the first two ships for the shots.
+    let wants = std::env::args().any(|a| a == "--hud-voyage" || a.starts_with("--hud-voyage-go="));
+    while wants && free(world).len() < 2 {
+        let busy = {
+            let mut q = world.query::<(Entity, &Vessel)>();
+            q.iter(world)
+                .find(|(_, v)| v.route.is_some() && !v.craft.flies())
+                .map(|(e, _)| e)
+        };
+        let Some(e) = busy else {
+            break;
+        };
+        if crate::orders::unassign(world, e).is_err() {
+            break;
+        }
+    }
+    // `--hud-voyage-go=i`: send the first free vessel to island `i`.
+    if let Some(i) =
+        std::env::args().find_map(|a| a.strip_prefix("--hud-voyage-go=")?.parse::<u32>().ok())
+        && let Some(v) = free(world).first().copied()
+    {
+        action(world, &format!("isle.fleet.goto:{v}:{i}"));
+    }
+    // `--hud-voyage`: open the "sail to" list of the first free vessel.
+    if std::env::args().any(|a| a == "--hud-voyage")
+        && let Some(v) = free(world).first().copied()
+    {
+        world.resource_mut::<Fleet>().voyage = Some(v);
     }
     refresh(world);
 }

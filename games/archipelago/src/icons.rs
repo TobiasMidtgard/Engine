@@ -173,6 +173,10 @@ const CRAFT: &[(&str, &str)] = &[
         "isle_chandler",
         include_str!("../assets/icons/isle_chandler.svg"),
     ),
+    (
+        "isle_compass",
+        include_str!("../assets/icons/isle_compass.svg"),
+    ),
 ];
 
 /// Ship gear and captains, painted by `assets/icons/make_gear_icons.py`.

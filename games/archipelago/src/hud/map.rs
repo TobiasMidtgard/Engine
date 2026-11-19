@@ -130,7 +130,11 @@ pub struct MapTable {
     /// and region last laid into the chart picture.
     fog: Vec<f32>,
     fog_age: f32,
-    laid: Option<(usize, Vec<f32>)>,
+    /// Each region's chart pixels by island: its index + 1 on land, 0 at sea.
+    owner: Vec<Vec<u8>>,
+    /// What was last laid into the chart picture: the region, its fog and which islands
+    /// were the company's.
+    laid: Option<(usize, Vec<f32>, Vec<bool>)>,
 }
 
 const FOG: usize = 72;
@@ -319,6 +323,7 @@ pub fn install(world: &mut World) {
     world.insert_resource(MapTable {
         painted: vec![false; globe::regions().len()],
         base: vec![Vec::new(); globe::regions().len()],
+        owner: vec![Vec::new(); globe::regions().len()],
         ..Default::default()
     });
     ensure_painted(world, 0);
@@ -337,12 +342,23 @@ pub(super) fn ensure_painted(world: &mut World, k: usize) {
     }
     let started = std::time::Instant::now();
     let pixels = paint_chart(k);
+    let owner: Vec<u8> = sample(k, |x, z| {
+        if island::height(x, z) > -0.5 {
+            (island::nearest_island(x, z) + 1).min(255) as f32
+        } else {
+            0.0
+        }
+    })
+    .into_iter()
+    .map(|v| v as u8)
+    .collect();
     if let Some(mut lib) = world.get_resource_mut::<engine_ui::icons::IconLibrary>() {
         lib.add_picture_rgba(&picture(k), PW as u32, PH as u32, pixels.clone());
     }
     let mut m = world.resource_mut::<MapTable>();
     m.painted[k] = true;
     m.base[k] = pixels;
+    m.owner[k] = owner;
     if m.laid.as_ref().is_some_and(|l| l.0 == k) {
         m.laid = None;
     }
@@ -462,25 +478,67 @@ pub(super) fn fogged(base: &[u8], fog: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Lay the current fog into region `k`'s chart picture, when it moved since last time.
+/// The chart `base` with every island the company has not settled washed to a cool,
+/// faded grey and finely hatched, like land on a chart that nobody has surveyed: the
+/// settled islands keep their colour and stand out.
+pub(super) fn unsettled(base: &[u8], owner: &[u8], claimed: &[bool]) -> Vec<u8> {
+    let mut out = base.to_vec();
+    if owner.len() != PW * PH || base.len() != PW * PH * 4 {
+        return out;
+    }
+    let paper = rgb(0xe8dcc0);
+    let hatch = rgb(0x7d6e5a);
+    for y in 0..PH {
+        for x in 0..PW {
+            let i = y * PW + x;
+            let o = owner[i] as usize;
+            if o == 0 || claimed.get(o - 1).copied().unwrap_or(true) {
+                continue;
+            }
+            let c = [
+                base[i * 4] as f32 / 255.0,
+                base[i * 4 + 1] as f32 / 255.0,
+                base[i * 4 + 2] as f32 / 255.0,
+            ];
+            let l = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
+            let grey = [l * 1.0, l * 0.97, l * 0.9];
+            let mut c = mix(c, grey, 0.85);
+            c = mix(c, paper, 0.22);
+            if (x + 2 * y) % 7 == 0 {
+                c = mix(c, hatch, 0.32);
+            }
+            for (n, v) in c.iter().enumerate() {
+                out[i * 4 + n] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Lay the current fog and claims into region `k`'s chart picture, when either moved since
+/// last time.
 fn lay_fog(world: &mut World, k: usize) {
+    let claims: Vec<bool> = (0..island::islands().len())
+        .map(|i| crate::settle::claimed(world, i))
+        .collect();
     let pixels = {
         let m = world.resource::<MapTable>();
-        let same = m.laid.as_ref().is_some_and(|(r, f)| {
+        let same = m.laid.as_ref().is_some_and(|(r, f, c)| {
             *r == k
+                && *c == claims
                 && f.len() == m.fog.len()
                 && f.iter().zip(&m.fog).all(|(a, b)| (a - b).abs() < 0.01)
         });
         if same || m.base[k].is_empty() {
             return;
         }
-        fogged(&m.base[k], &m.fog)
+        fogged(&unsettled(&m.base[k], &m.owner[k], &claims), &m.fog)
     };
     if let Some(mut lib) = world.get_resource_mut::<engine_ui::icons::IconLibrary>() {
         lib.add_picture_rgba(&picture(k), PW as u32, PH as u32, pixels);
     }
     let mut m = world.resource_mut::<MapTable>();
-    m.laid = Some((k, m.fog.clone()));
+    m.laid = Some((k, m.fog.clone(), claims));
 }
 
 /// How much of the chart at `(x, z)` is still unseen, 0..1 (0 without a fog of war).
@@ -635,6 +693,7 @@ pub fn clicked(world: &mut World, e: Option<Entity>) {
     let pointer = world.resource::<engine::input::Mouse>().position;
     if let (Some(e), Some(p)) = (e, pointer)
         && let Some(at) = world_under(world, e, p)
+        && !super::fleet::chart_clicked(world, at)
     {
         look_at(world, at);
     }
@@ -737,19 +796,26 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         );
     }
     // Island names in the display serif.
-    let named: Vec<&island::Island> = island::islands()
+    // (Unsettled ones in a faded italic, with "unsettled" under the name.)
+    let named: Vec<(&island::Island, bool)> = island::islands()
         .iter()
-        .filter(|i| i.region() == k && unseen(world, i.center.x, i.center.y) < 0.5)
+        .enumerate()
+        .filter(|(_, i)| i.region() == k && unseen(world, i.center.x, i.center.y) < 0.5)
+        .map(|(n, i)| (i, crate::settle::claimed(world, n)))
         .collect();
     let known = !named.is_empty();
-    for isle in named {
+    for (isle, ours) in named {
         let mut p = at(isle.center.x, isle.center.y + isle.radius * 1.05);
         let spec = TextSpec {
             text: isle.name.to_string(),
             size: 12.5 * px,
             weight: 700,
-            italic: false,
-            color: Color::hexa(0x2a1a0ae0),
+            italic: !ours,
+            color: if ours {
+                Color::hexa(0x2a1a0ae0)
+            } else {
+                Color::hexa(0x4a3e30b8)
+            },
             family: Some(DISPLAY_FONT.into()),
             wrap: false,
             ..Default::default()
@@ -758,6 +824,18 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         let half = ctx.measure(&spec).x * 0.5 + 4.0 * px;
         p.x = p.x.clamp(r.x + half, r.x + r.w - half);
         ctx.text_spec(&spec, p, Vec2::new(0.5, 0.0));
+        if !ours {
+            let note = TextSpec {
+                text: "unsettled".into(),
+                size: 9.5 * px,
+                weight: 600,
+                italic: true,
+                color: Color::hexa(0x5a4a38a8),
+                wrap: false,
+                ..Default::default()
+            };
+            ctx.text_spec(&note, p + Vec2::new(0.0, 14.0 * px), Vec2::new(0.5, 0.0));
+        }
     }
     // Ships and airships.
     let mut q = world.query::<&Vessel>();
@@ -874,5 +952,21 @@ mod tests {
                 assert!((from_uv(k, uv) - p).length() < 0.01);
             }
         }
+    }
+
+    #[test]
+    fn only_unsettled_land_is_washed() {
+        let base: Vec<u8> = (0..PW * PH).flat_map(|_| [200u8, 150, 60, 255]).collect();
+        let mut owner = vec![0u8; PW * PH];
+        owner[10] = 1; // island 0: settled
+        owner[20] = 2; // island 1: not
+        let out = unsettled(&base, &owner, &[true, false]);
+        assert_eq!(out[..4], base[..4], "the sea keeps its colour");
+        assert_eq!(out[40..44], base[40..44], "settled land keeps its colour");
+        let (r, g, b) = (out[80] as i32, out[81] as i32, out[82] as i32);
+        assert!(
+            (r - b).abs() < 140 - 60,
+            "unsettled land is greyed: {r} {g} {b}"
+        );
     }
 }
