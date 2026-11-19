@@ -507,6 +507,15 @@ fn main() {
     spawn(&mut app, "kit_card", 1, &card());
     spawn(&mut app, "kit_sockets", 1, &sockets());
     spawn(&mut app, "kit_alerts", 1, &alerts());
+    // The engine's own toasts, restyled by the kit.
+    engine_ui::toast::notify(
+        &mut app.world,
+        engine_ui::toast::ToastKind::Warn,
+        "",
+        "Shipyard",
+        "A Mail biplane needs 6 Clothes on Haverholm; the warehouse has 2.",
+        60.0,
+    );
     app.update_n(60);
     // Hover the third tile for its lift and tooltip.
     let e = engine_ui::input::find_id(&mut app.world, "tile:3");

@@ -283,6 +283,32 @@ pub mod brass {
                 ..Default::default()
             },
         );
+        // The engine's toasts as the same lacquer strips.
+        let (near, far) = depth(5.0, 22.0);
+        add(
+            "toast",
+            ClassStyle::base(
+                s().row()
+                    .align_items(Align::Center)
+                    .gap(12.0)
+                    .padding([10.0, 16.0, 10.0, 16.0])
+                    .min_width(300.0)
+                    .max_width(440.0)
+                    .background(lacquer)
+                    .material(Material::new(MaterialKind::Lacquer).seed(11.0))
+                    .radius(Corners::all(8.0))
+                    .border(1.0, Colors::outline())
+                    .bevel(Bevel::raised(1.5, 0.12, 0.5).with_line(
+                        Colors::brass().with_alpha(0.5),
+                        1.0,
+                        8.0,
+                    ))
+                    .shadow(near)
+                    .shadow2(far)
+                    .color(Colors::cream())
+                    .transition(0.2),
+            ),
+        );
         // A brass push button with chamfered corners.
         add(
             "brass_button",
