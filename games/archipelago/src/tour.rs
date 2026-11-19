@@ -609,48 +609,52 @@ fn views() -> Vec<View> {
         },
         View {
             pitch_deg: Some(30.0),
+            clean: true,
             trouble: Some((crate::incidents::Trouble::Fire, 0.9)),
-            ..v("fire", Aim::Home(T::Labourers, 0), 0.7, 90.0)
+            ..v("fire", Aim::Home(T::Labourers, 0), 0.7, 48.0)
         },
         View {
             pitch_deg: Some(34.0),
             trouble: Some((crate::incidents::Trouble::Fire, 0.6)),
             wait_s: 9.0,
-            ..v("fire_pump", Aim::Front(K::FireWatch, 0), 0.3, 120.0)
+            ..v("fire_pump", Aim::Front(K::FireWatch, 0), 0.3, 85.0)
         },
         View {
-            pitch_deg: Some(28.0),
+            pitch_deg: Some(26.0),
+            clean: true,
             trouble: Some((crate::incidents::Trouble::Riot, 0.9)),
-            ..v("riot", Aim::Home(T::Fisherfolk, 0), 0.6, 60.0)
+            ..v("riot", Aim::Home(T::Fisherfolk, 0), 0.6, 30.0)
         },
         View {
             pitch_deg: Some(34.0),
             trouble: Some((crate::incidents::Trouble::Riot, 0.6)),
             wait_s: 10.0,
-            ..v("constables", Aim::Front(K::WatchHouse, 0), 0.3, 110.0)
+            ..v("constables", Aim::Front(K::WatchHouse, 0), 0.3, 80.0)
         },
         View {
-            pitch_deg: Some(28.0),
+            pitch_deg: Some(40.0),
+            clean: true,
             trouble: Some((crate::incidents::Trouble::Sickness, 0.9)),
-            ..v("sickness", Aim::Home(T::Burghers, 0), 0.5, 55.0)
+            ..v("sickness", Aim::Home(T::Burghers, 0), 3.8, 46.0)
         },
         View {
             pitch_deg: Some(34.0),
             trouble: Some((crate::incidents::Trouble::Sickness, 0.6)),
             wait_s: 10.0,
-            ..v("doctor", Aim::Front(K::Infirmary, 0), 0.3, 110.0)
+            ..v("doctor", Aim::Front(K::Infirmary, 0), 0.3, 80.0)
         },
         View {
             pitch_deg: Some(30.0),
+            clean: true,
             ruin: true,
-            ..v("ruin", Aim::Front(K::Weaver, 0), 0.6, 50.0)
+            ..v("ruin", Aim::Front(K::Weaver, 0), 0.6, 36.0)
         },
     ]
 }
 
 /// Start a view's incident near `at`: at the nearest house (riots, sickness) or the nearest
 /// building that is not one of the three that answer incidents (fire).
-fn stage_incident(app: &mut App, view: &View, at: DVec3) {
+fn stage_incident(app: &mut App, view: &View, at: DVec3) -> Option<DVec2> {
     use crate::incidents::{self, Incident, Trouble};
     if view.ruin
         && let Some(b) = aimed_building(&mut app.world, &view.aim)
@@ -660,9 +664,7 @@ fn stage_incident(app: &mut App, view: &View, at: DVec3) {
             incidents::burn_now(&mut app.world, e);
         }
     }
-    let Some((t, level)) = view.trouble else {
-        return;
-    };
+    let (t, level) = view.trouble?;
     let here = DVec2::new(at.x, at.z);
     let target = {
         let mut q = app.world.query_filtered::<
@@ -688,7 +690,7 @@ fn stage_incident(app: &mut App, view: &View, at: DVec3) {
             })
             .map(|(e, b, _)| (e, b.clone()))
     };
-    let Some((e, b)) = target else { return };
+    let (e, b) = target?;
     incidents::start(&mut app.world, e, &b, t, false);
     if let Some(mut i) = app.world.get_mut::<Incident>(e) {
         i.level = level;
@@ -705,6 +707,7 @@ fn stage_incident(app: &mut App, view: &View, at: DVec3) {
             i.level = i.level.max(level);
         }
     }
+    Some(crate::grid::footprint_center(b.kind, b.origin, b.rot))
 }
 
 fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
@@ -965,7 +968,16 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
         } else {
             None
         };
-        stage_incident(app, &view, p);
+        // A close view of an incident looks at the building it started at.
+        if let Some(c) = stage_incident(app, &view, p)
+            && view.wait_s == 0.0
+        {
+            let mut q = app.world.query::<&mut StrategyCam>();
+            if let Some(mut cam) = q.iter_mut(&mut app.world).next() {
+                cam.goal_focus = DVec3::new(c.x + view.shift.0, p.y, c.y + view.shift.1);
+                cam.snap();
+            }
+        }
         let t0 = std::time::Instant::now();
         // (A software renderer at 1440p needs longer: ARCH_TOUR_SETTLE_S.)
         let cap = std::env::var("ARCH_TOUR_SETTLE_S")

@@ -120,6 +120,7 @@ pub const MODELS: &[ModelKey] = &[
     "rioters",
     "sick_flag",
     "rubble",
+    "ruin_shell",
     "walker_0_0",
     "walker_0_1",
     "walker_0_2",

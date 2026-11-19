@@ -607,6 +607,26 @@ pub fn start(world: &mut World, e: Entity, b: &Building, what: Trouble, spread: 
                 what.word()
             ),
         ));
+        if world.get_resource::<Art>().is_some() {
+            let icon = match what {
+                Trouble::Fire => "isle_alert_fire",
+                Trouble::Riot => "isle_alert_riot",
+                Trouble::Sickness => "isle_alert_sick",
+            };
+            let text = format!(
+                "{item} dealt with a {} at a {} on {isle_name}.",
+                low(what.word()),
+                low(kind_name)
+            );
+            engine_ui::toast::notify(
+                world,
+                engine_ui::toast::ToastKind::Good,
+                icon,
+                what.word(),
+                &text,
+                5.0,
+            );
+        }
         return false;
     }
     let alert = {
@@ -628,7 +648,7 @@ pub fn start(world: &mut World, e: Entity, b: &Building, what: Trouble, spread: 
         ));
         id
     };
-    let props = show(world, b, what);
+    let props = show(world, e, b, what);
     world.entity_mut(e).insert(Incident {
         what,
         level: 0.1,
@@ -652,7 +672,12 @@ pub fn start(world: &mut World, e: Entity, b: &Building, what: Trouble, spread: 
             _ => engine_ui::toast::ToastKind::Warn,
         };
         if world.get_resource::<Art>().is_some() {
-            engine_ui::toast::notify(world, kind, "", what.word(), &text, 6.0);
+            let icon = match what {
+                Trouble::Fire => "isle_alert_fire",
+                Trouble::Riot => "isle_alert_riot",
+                Trouble::Sickness => "isle_alert_sick",
+            };
+            engine_ui::toast::notify(world, kind, icon, what.word(), &text, 6.0);
         }
     }
     true
@@ -816,7 +841,7 @@ fn end(world: &mut World, e: Entity, fought: bool) {
             engine_ui::toast::notify(
                 world,
                 engine_ui::toast::ToastKind::Bad,
-                "",
+                "isle_ruin",
                 "Burnt down",
                 &format!(
                     "A {} on {name} is a ruin. Rebuild it or clear it.",
@@ -857,11 +882,29 @@ fn burn_out(world: &mut World, e: Entity, b: &Building) {
         .get::<Look>(e)
         .map(|l| l.0.clone())
         .unwrap_or_else(|| Arc::new(Vec::new()));
-    let charred: Vec<Piece> = was
-        .iter()
-        .map(|p| Piece {
-            tint: [p.tint[0] * 0.2, p.tint[1] * 0.18, p.tint[2] * 0.17],
-            ..*p
+    // The roof has fallen in: what stands is a blackened shell of broken walls with the
+    // rubble inside, an 8 m square scaled to the lot (two or three along a long one).
+    let (w, d) = b.kind.def().size;
+    let (long, short, along_x) = if w >= d { (w, d, true) } else { (d, w, false) };
+    let n = ((long as f32 / short as f32).round() as u32).clamp(1, 3);
+    let side = short as f32 * CELL_M as f32;
+    let step = long as f32 * CELL_M as f32 / n as f32;
+    let charred: Vec<Piece> = (0..n)
+        .map(|k| {
+            let off = (k as f32 + 0.5) * step - long as f32 * CELL_M as f32 * 0.5;
+            let at = if along_x {
+                v3(off, 0.0, 0.0)
+            } else {
+                v3(0.0, 0.0, off)
+            };
+            let mut p = Piece::at("ruin_shell", at);
+            p.scale = (side.min(step) * 0.85 / 8.0).clamp(0.4, 2.0);
+            p.yaw = if along_x {
+                0.0
+            } else {
+                std::f32::consts::FRAC_PI_2
+            };
+            p
         })
         .chain(ruin_pieces(b))
         .collect();
@@ -1175,7 +1218,7 @@ fn flags(world: &mut World) {
             engine_ui::toast::notify(
                 world,
                 engine_ui::toast::ToastKind::Warn,
-                "",
+                "isle_alert_sick",
                 "Yellow flag",
                 &format!("So many are sick on {name} that ships will not call there."),
                 6.0,
@@ -1186,11 +1229,14 @@ fn flags(world: &mut World) {
 }
 
 /// Flames, smoke, a crowd with torches or a yellow flag at building `b`.
-fn show(world: &mut World, b: &Building, what: Trouble) -> Vec<Entity> {
+fn show(world: &mut World, e: Entity, b: &Building, what: Trouble) -> Vec<Entity> {
     let mut out = Vec::new();
     match what {
         Trouble::Fire => {
-            out.extend(spawn_effect(world, b, "isle.blaze", 0.0));
+            // The blaze's flames start 3.5 m above where it stands: put them at the roof,
+            // so they lick out of it rather than burn hidden inside the walls.
+            let roof = roof_m(world, e, b);
+            out.extend(spawn_effect(world, b, "isle.blaze", roof - 3.5));
         }
         Trouble::Riot => {
             out.extend(spawn_effect(world, b, "isle.torches", 0.0));
@@ -1198,9 +1244,44 @@ fn show(world: &mut World, b: &Building, what: Trouble) -> Vec<Entity> {
         }
         Trouble::Sickness => {
             out.extend(spawn_props(world, b, "sick_flag", 0.0));
+            // And one flying from the roof, seen from every side.
+            let roof = roof_m(world, e, b) - 1.5;
+            out.extend(spawn_on_roof(world, b, "sick_flag", roof, 1.4));
         }
     }
     out
+}
+
+/// About how high building `e`'s roof stands over its floor, meters.
+fn roof_m(world: &World, e: Entity, b: &Building) -> f64 {
+    match world.get::<House>(e).map(|h| h.tier) {
+        Some(Tier::Fisherfolk) => 6.0,
+        Some(Tier::Labourers) => 9.0,
+        Some(Tier::Burghers) => 11.5,
+        None => {
+            let (w, d) = b.kind.def().size;
+            (6.0 + (w.max(d) as f64) * 0.8).min(11.0)
+        }
+    }
+}
+
+/// A model over the middle of building `b`, `up` meters above its floor, scaled `scale`.
+fn spawn_on_roof(
+    world: &mut World,
+    b: &Building,
+    key: ModelKey,
+    up: f64,
+    scale: f32,
+) -> Option<Entity> {
+    let art = world.get_resource::<Art>()?.clone();
+    let model = art.models.get(key)?.clone();
+    let c = centre(b);
+    let mut stand = world
+        .get_resource::<Frame>()?
+        .stand(DVec3::new(c.x, b.base_y + up, c.y), grid::yaw(b.rot));
+    stand.scale = Vec3::splat(scale);
+    let parts = spawn_model(world, &art, &model, stand, true);
+    Some(world.spawn((Name::new(key), stand, Body { parts })).id())
 }
 
 /// A particle effect over the middle of building `b`, `up` meters above its floor.
@@ -1340,6 +1421,7 @@ pub const MODELS: &[ModelKey] = &[
     "rioters",
     "sick_flag",
     "rubble",
+    "ruin_shell",
 ];
 
 pub fn build(key: ModelKey) -> Option<Parts> {
@@ -1353,6 +1435,7 @@ pub fn build(key: ModelKey) -> Option<Parts> {
         "rioters" => rioters(),
         "sick_flag" => sick_flag(),
         "rubble" => rubble(),
+        "ruin_shell" => ruin_shell(),
         _ => return None,
     })
 }
@@ -2043,6 +2126,79 @@ fn sick_flag() -> Parts {
         0.14,
         hexc(0x8a6a40),
     );
+    p.finish()
+}
+
+/// The burnt-out shell of a building, 8 m square: broken brick walls blackened by smoke,
+/// empty window holes, charred joists fallen across the inside, no roof.
+fn ruin_shell() -> Parts {
+    let mut p = Parts::default();
+    let soot = hexc(0x2c2622);
+    let brick = hexc(0x6a3a2a);
+    let char_wood = hexc(0x16120f);
+    // Each wall: segments of uneven height with gaps for the door and windows.
+    let walls: [(Vec3, Vec3); 4] = [
+        (v3(-4.0, 0.0, 4.0), v3(4.0, 0.0, 4.0)),
+        (v3(4.0, 0.0, 4.0), v3(4.0, 0.0, -4.0)),
+        (v3(4.0, 0.0, -4.0), v3(-4.0, 0.0, -4.0)),
+        (v3(-4.0, 0.0, -4.0), v3(-4.0, 0.0, 4.0)),
+    ];
+    let heights = [
+        [4.6, 3.9, 0.0, 2.8, 5.2, 4.1, 1.6, 3.4],
+        [3.1, 2.2, 4.8, 4.4, 0.9, 3.6, 4.9, 2.4],
+        [1.4, 2.9, 3.3, 0.0, 4.2, 5.0, 3.8, 2.1],
+        [5.1, 4.4, 2.6, 1.2, 3.0, 0.0, 2.7, 4.0],
+    ];
+    for (wi, (a, b)) in walls.iter().enumerate() {
+        let seg = 8;
+        for (k, &h) in heights[wi].iter().enumerate() {
+            if h <= 0.01 {
+                continue;
+            }
+            let t0 = k as f32 / seg as f32;
+            let t1 = (k + 1) as f32 / seg as f32;
+            let lo = a.lerp(*b, t0);
+            let hi = a.lerp(*b, t1);
+            let mid = (lo + hi) * 0.5;
+            let along = hi - lo;
+            let yaw = along.z.atan2(along.x);
+            let half = v3(along.length() * 0.5 + 0.02, h * 0.5, 0.22);
+            // Sooty above, some brick showing low down where the smoke did not reach.
+            let col = if k % 3 == 1 { brick } else { soot };
+            p.box_at(Mat::Brick, mid + v3(0.0, h * 0.5, 0.0), half, -yaw, col);
+            // An empty window hole: a black opening on the taller segments.
+            if h > 3.4 && k % 2 == 0 {
+                p.box_at(
+                    Mat::Stone,
+                    mid + v3(0.0, 2.3, 0.0),
+                    v3(along.length() * 0.28, 0.55, 0.24),
+                    -yaw,
+                    hexc(0x0a0908),
+                );
+            }
+        }
+    }
+    // Joists fallen in across the walls, a rafter or two still leaning.
+    for (a, b) in [
+        (v3(-3.8, 3.6, 3.6), v3(3.2, 0.4, -2.0)),
+        (v3(3.8, 4.1, 2.0), v3(-2.5, 0.3, 1.0)),
+        (v3(-3.6, 0.3, -2.8), v3(2.8, 2.2, -3.8)),
+        (v3(0.5, 0.2, 3.2), v3(-1.0, 3.8, -3.6)),
+    ] {
+        p.beam(Mat::Timber, a, b, 0.26, char_wood);
+    }
+    // Heaps of rubble inside.
+    for k in 0..9 {
+        let a = k as f32 * 2.4;
+        let r = 0.6 + (k % 4) as f32 * 0.8;
+        p.box_at(
+            Mat::Stone,
+            v3(a.cos() * r, 0.3, a.sin() * r),
+            v3(0.7, 0.3 + (k % 3) as f32 * 0.15, 0.55),
+            a,
+            shade(soot, 0.8 + (k % 3) as f32 * 0.12),
+        );
+    }
     p.finish()
 }
 

@@ -219,7 +219,7 @@ fn blaze() -> EffectDesc {
         emitters: vec![
             EmitterDesc {
                 name: "blaze".into(),
-                rate: 26.0,
+                rate: 40.0,
                 offset: [0.0, 3.5, 0.0],
                 shape: EmitShape::Cone {
                     angle_deg: 6.0,
@@ -231,8 +231,8 @@ fn blaze() -> EffectDesc {
                 turbulence: 1.5,
                 turbulence_scale: 2.0,
                 wind: 0.4,
-                lifetime: [0.9, 1.5],
-                size: [2.4, 3.6],
+                lifetime: [1.0, 1.7],
+                size: [3.0, 4.6],
                 size_over_life: Curve::new(&[(0.0, 0.6), (0.3, 1.0), (1.0, 0.3)]),
                 rotation_deg: [-10.0, 10.0],
                 sprite: Sprite::Flame,
