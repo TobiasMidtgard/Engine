@@ -1,5 +1,6 @@
 # Painted-style icons for every craft, the shipyard and the ship chandler (isle_craft_*,
-# isle_shipyard, isle_chandler, isle_compass), in the same hand as make_icons.py.
+# isle_shipyard, isle_chandler, isle_compass), the watch, infirmary and ruin, and the fire,
+# riot and sickness alerts, in the same hand as make_icons.py.
 # Usage: python3 make_craft_icons.py <out dir>
 import os, sys
 O = 'stroke="#2a1708" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"'
@@ -133,6 +134,119 @@ I['isle_chandler'] = svg(DEFS + lg('rf', (0, '#4a6a8a'), (1, '#1a2a3a')) + lg('r
     '<g stroke="#2a1708" stroke-width="2.6" fill="none" stroke-linecap="round"><path d="M28 18 L28 30 M24 21 L32 21 M23 27 C25 31 31 31 33 27"/></g>'
     '<g stroke="#f0c85a" stroke-width="1.2" fill="none" stroke-linecap="round"><path d="M28 18 L28 30 M24 21 L32 21 M23 27 C25 31 31 31 33 27"/></g>'
     '<path d="M6 31 L26 18" stroke="#8ab0d8" stroke-width="1.6" opacity=".8"/>')
+
+# The second fleet: a revenue cutter, a brig, a frigate, an iron gunboat, a liner and a
+# flying boat.
+I['isle_craft_cutter'] = svg(DEFS,
+    sea() + mast(28, 6, 44) +
+    f'<g {o(1.8)}><path d="M29 8 L29 42 L48 42 C46 30 38 16 29 8 Z" fill="url(#cv)"/>'
+    '<path d="M27 10 L10 42 L27 42 Z" fill="url(#cv)"/>'
+    '<path d="M29 9 L40 7 L46 42" fill="none"/></g>' +
+    hull(10, 56, 44, 49, 53, fill='url(#hw)', bow_rake=7) +
+    '<path d="M13 46 L53 45" stroke="#2a4a7a" stroke-width="2.2"/>'
+    '<path d="M28 6 L36 4 L28 9" fill="#2a4a7a" stroke="#2a1708" stroke-width="1.2"/>')
+I['isle_craft_brig'] = svg(DEFS,
+    sea() + mast(22, 6, 42) + mast(40, 8, 42) +
+    square_sails(22, 8, 40, (7, 8, 9, 10)) + square_sails(40, 10, 40, (6, 7, 8, 9)) +
+    f'<g {o(1.6)}><path d="M42 12 L60 40 L50 40 Z" fill="url(#cv)"/></g>' +
+    hull(6, 60, 42, 48, 53, fill='url(#wd)'))
+I['isle_craft_frigate'] = svg(DEFS,
+    sea() + mast(16, 5, 40) + mast(31, 2, 40) + mast(46, 6, 40) +
+    square_sails(16, 6, 36, (6, 7, 8)) + square_sails(31, 3, 36, (6, 7, 8, 9)) + square_sails(46, 7, 36, (5, 6, 7)) +
+    f'<g {o(1.6)}><path d="M46 10 L62 38 L54 38 Z" fill="url(#cv)"/></g>'
+    f'<g {O}><path d="M3 38 L61 36 L55 54 L7 54 Z" fill="url(#hl)"/></g>'
+    '<path d="M5 43 L59 41.5" stroke="#e8c860" stroke-width="3.6"/>'
+    '<g fill="#120c06">' + ''.join(f'<rect x="{x}" y="41.2" width="3" height="2.6"/>' for x in range(10, 56, 6)) + '</g>'
+    '<path d="M7 49 L57 48" stroke="#c0503a" stroke-width="2.2"/>'
+    '<path d="M31 2 L40 0.5 L31 5" fill="#e8e0d0" stroke="#2a1708" stroke-width="1.2"/>')
+I['isle_craft_gunboat'] = svg(DEFS,
+    sea() +
+    f'<g {O}><rect x="28" y="20" width="7" height="16" fill="url(#ir)"/><path d="M27 20 L36 20" stroke-width="3"/></g>'
+    '<g fill="#5a5a58" opacity=".7"><circle cx="28" cy="15" r="3.6"/><circle cx="22" cy="12" r="2.6"/></g>'
+    f'<g {O}><rect x="18" y="34" width="22" height="8" fill="url(#ir)"/>'
+    '<path d="M42 38 C42 32 52 32 52 38 Z" fill="url(#ir)"/></g>'
+    f'<path d="M50 34 L61 31" {o(4.4)}/><path d="M50 34 L61 31" stroke="#8a939c" stroke-width="2"/>' +
+    mast(14, 18, 40, 1.4) +
+    hull(4, 62, 42, 47, 52, fill='url(#ir)', bow_rake=5) +
+    '<path d="M8 44 L58 43" stroke="#2a3238" stroke-width="1.4" opacity=".7"/>')
+I['isle_craft_liner'] = svg(DEFS,
+    sea() +
+    ''.join(f'<g {O}><rect x="{x}" y="12" width="7" height="18" fill="url(#fn)"/></g><rect x="{x}" y="12" width="7" height="4" fill="#120c06"/>' for x in (20, 31, 42)) +
+    f'<g {O}><rect x="12" y="28" width="42" height="7" fill="url(#hw)"/><rect x="8" y="34" width="50" height="6" fill="url(#hw)"/></g>'
+    '<g fill="#3a5a8a">' + ''.join(f'<rect x="{x}" y="30" width="2.4" height="2.4"/>' for x in range(15, 52, 5)) + '</g>' +
+    hull(2, 62, 40, 48, 54, bow_rake=6) +
+    '<g fill="#e8e0d0">' + ''.join(f'<circle cx="{x}" cy="44" r="1"/>' for x in range(8, 56, 4)) + '</g>')
+I['isle_craft_flying_boat'] = svg(DEFS + lg('pl', (0, '#e8eef4'), (.6, '#a8b4c0'), (1, '#5a6470')),
+    sea() +
+    f'<g {O}><path d="M4 16 L60 16 L58 21 L6 21 Z" fill="url(#pl)"/>'
+    '<rect x="16" y="20" width="9" height="6" rx="2" fill="url(#ir)"/><rect x="39" y="20" width="9" height="6" rx="2" fill="url(#ir)"/>'
+    '<path d="M8 34 C8 28 20 26 36 26 C48 26 56 30 58 36 L52 46 L14 46 C10 44 8 40 8 34 Z" fill="url(#pl)"/>'
+    '<path d="M6 26 L12 24 L16 34 L10 34 Z" fill="url(#fn)"/></g>'
+    '<g stroke="#2a1708" stroke-width="1.6"><path d="M22 21 L24 28 M42 21 L40 28"/></g>'
+    '<g stroke="#2a1708" stroke-width="1.4"><path d="M20 26 L20 22 M44 26 L44 22"/></g>'
+    '<g fill="#3a5a8a" stroke="#2a1708" stroke-width="1"><path d="M44 28 L52 30 L53 33 L44 32 Z"/></g>'
+    '<path d="M12 40 L54 40" stroke="#c0503a" stroke-width="2"/>'
+    '<path d="M12 31 C22 28 34 27 48 28" stroke="#fff" stroke-width="1.4" fill="none" opacity=".85"/>'
+    f'<g {o(1.6)}><path d="M3 22 L3 30 L6 30 L6 22 Z M58 22 L58 30 L61 30 L61 22 Z" fill="url(#pl)"/></g>')
+
+# Fire, riots and sickness: the watch, the constables, the infirmary, what a fire leaves, and
+# the three alerts.
+STONE = lg('st', (0, '#e8e0cc'), (1, '#a89a80'))
+FLAME = lg('fl', (0, '#fff0a0'), (.4, '#ffb030'), (1, '#d0401a'))
+I['isle_fire_watch'] = svg(DEFS + FLAME,
+    shadow(32, 60, 20, 3) +
+    f'<g {O}><path d="M20 58 L26 18 L38 18 L44 58 Z" fill="url(#wd)"/></g>'
+    '<g stroke="#2a1708" stroke-width="1.6"><path d="M22 46 L42 46 M24 32 L40 32 M22 46 L40 32 M42 46 L24 32"/></g>'
+    f'<g {O}><path d="M20 18 L44 18 L40 10 L24 10 Z" fill="url(#rl)"/><path d="M18 19 L46 19"/></g>'
+    f'<g {o(1.8)}><path d="M28 18 C28 13 36 13 36 18 Z" fill="#f0c85a"/></g>'
+    '<path d="M32 10 L32 2" stroke="#2a1708" stroke-width="1.8"/>'
+    '<path d="M32 2 L44 5 L32 8 Z" fill="#d0401a" stroke="#2a1708" stroke-width="1.2"/>'
+    f'<g {o(1.4)}><path d="M48 58 C44 52 48 46 50 42 C51 46 54 46 54 50 C56 48 57 46 56 44 C60 48 60 56 56 58 Z" fill="url(#fl)"/></g>'
+    '<g fill="#4a6a8a" stroke="#2a1708" stroke-width="1.4"><path d="M8 50 L16 50 L15 58 L9 58 Z"/></g>'
+    '<path d="M8 50 C8 46 16 46 16 50" stroke="#2a1708" stroke-width="1.4" fill="none"/>')
+I['isle_watch_house'] = svg(DEFS + STONE + lg('bl', (0, '#6a8ab8'), (1, '#1a2a4a')),
+    shadow(32, 60, 26, 3) +
+    f'<g {O}><path d="M8 30 L8 58 L56 58 L56 30 Z" fill="url(#st)"/><path d="M4 32 L32 14 L60 32 Z" fill="url(#bl)"/></g>'
+    f'<g {o(1.8)}><path d="M26 58 L26 40 C26 34 38 34 38 40 L38 58 Z" fill="url(#bl)"/>'
+    '<rect x="12" y="38" width="9" height="9" fill="#ffd27a"/><rect x="43" y="38" width="9" height="9" fill="#ffd27a"/></g>'
+    '<g stroke="#2a1708" stroke-width="1"><path d="M16.5 38 L16.5 47 M12 42.5 L21 42.5 M47.5 38 L47.5 47 M43 42.5 L52 42.5"/></g>'
+    f'<g {o(1.8)}><path d="M28 22 L36 22 L35 30 L29 30 Z" fill="#9ad0ff"/><path d="M27 22 L37 22 L32 18 Z" fill="url(#bl)"/></g>'
+    '<circle cx="32" cy="26" r="6" fill="#9ad0ff" opacity=".35"/>'
+    '<path d="M32 18 L32 14" stroke="#2a1708" stroke-width="1.6"/>')
+I['isle_infirmary'] = svg(DEFS + STONE,
+    shadow(32, 60, 28, 3) +
+    f'<g {O}><path d="M4 28 L4 58 L60 58 L60 28 Z" fill="url(#st)"/><path d="M0 30 L32 12 L64 30 Z" fill="url(#rl)"/></g>'
+    f'<g {o(1.8)}><rect x="9" y="36" width="8" height="10" fill="#ffd27a"/><rect x="47" y="36" width="8" height="10" fill="#ffd27a"/>'
+    '<path d="M27 58 L27 44 L37 44 L37 58 Z" fill="#4a2a14"/></g>'
+    f'<g {o(1.8)}><circle cx="32" cy="32" r="8.5" fill="#f4f0e4"/></g>'
+    f'<path d="M29.6 26.4 L34.4 26.4 L34.4 29.6 L37.6 29.6 L37.6 34.4 L34.4 34.4 L34.4 37.6 L29.6 37.6 L29.6 34.4 L26.4 34.4 L26.4 29.6 L29.6 29.6 Z" fill="#3a8a4a" {o(1.2)}/>')
+I['isle_ruin'] = svg(DEFS + STONE,
+    shadow(32, 60, 28, 3) +
+    f'<g {O}><path d="M6 58 L6 30 L12 26 L16 34 L20 28 L22 58 Z" fill="url(#st)"/>'
+    '<path d="M40 58 L40 36 L46 40 L50 30 L56 34 L58 58 Z" fill="url(#st)"/></g>'
+    '<g fill="#2a1e14" opacity=".55"><path d="M6 40 L22 44 L22 58 L6 58 Z M40 46 L58 42 L58 58 L40 58 Z"/></g>'
+    f'<g {O}><path d="M18 58 L44 46 L46 50 L22 60 Z" fill="#3a2a1a"/><path d="M26 58 L36 40 L39 42 L30 58 Z" fill="#2a1e14"/></g>'
+    '<g fill="#6a6a68" opacity=".55"><circle cx="30" cy="30" r="5"/><circle cx="25" cy="21" r="4"/><circle cx="30" cy="12" r="3"/></g>'
+    '<g fill="#ff8030"><circle cx="31" cy="54" r="1.2"/><circle cx="38" cy="50" r="1"/><circle cx="24" cy="56" r=".9"/></g>')
+I['isle_alert_fire'] = svg(FLAME + lg('fi', (0, '#fff8d0'), (1, '#ffc040')),
+    f'<g {o(2.4)}><path d="M32 4 C36 14 48 18 50 32 C52 46 44 58 32 58 C20 58 12 48 14 36 C15 28 20 24 22 18 C26 24 26 28 30 30 C30 22 28 12 32 4 Z" fill="url(#fl)"/></g>'
+    f'<g {o(1.6)}><path d="M32 30 C36 36 42 40 40 48 C38 54 26 54 24 48 C22 42 28 38 32 30 Z" fill="url(#fi)"/></g>'
+    '<path d="M20 38 C19 30 24 26 26 22" stroke="#fff4c0" stroke-width="1.8" fill="none" opacity=".8" stroke-linecap="round"/>')
+I['isle_alert_riot'] = svg(DEFS + FLAME,
+    f'<path d="M12 58 L46 12" {o(5.4)}/><path d="M12 58 L46 12" stroke="#b08050" stroke-width="2.8" stroke-linecap="round"/>'
+    f'<g {o(2)} fill="none"><path d="M40 6 L48 18 M46 2 L54 14 M52 0 L58 10" stroke-width="4.4"/></g>'
+    '<g stroke="#b8c0c8" stroke-width="2" fill="none" stroke-linecap="round"><path d="M40 6 L48 18 M46 2 L54 14 M52 0 L58 10"/></g>'
+    f'<g {o(2.4)}><path d="M42 18 L54 10 L56 14 L46 22 Z" fill="url(#ir)"/></g>'
+    f'<path d="M52 58 L20 18" {o(5.4)}/><path d="M52 58 L20 18" stroke="#8a5a2a" stroke-width="2.8" stroke-linecap="round"/>'
+    f'<g {o(2)}><path d="M15 20 L25 14 L27 18 L17 24 Z" fill="#4a3018"/></g>'
+    f'<g {o(1.8)}><path d="M20 15 C12 10 14 2 20 0 C20 4 24 4 24 8 C28 6 28 12 26 14 C24 16 22 16 20 15 Z" fill="url(#fl)"/></g>')
+I['isle_alert_sick'] = svg(lg('mi', (0, '#d8f0a0'), (.5, '#8ab850'), (1, '#3a6a2a')) + lg('vl', (0, '#f4eee0'), (1, '#b8ae98')),
+    f'<g {o(2.2)}><path d="M14 44 C6 44 4 34 12 32 C10 24 20 20 24 26 C26 16 40 16 42 26 C48 22 58 28 54 36 C60 40 56 48 50 46 C48 52 38 54 34 48 C28 54 18 52 14 44 Z" fill="url(#mi)"/></g>'
+    '<g fill="#2a1708"><circle cx="24" cy="36" r="2.4"/><circle cx="40" cy="36" r="2.4"/></g>'
+    '<path d="M24 46 C28 42 36 42 40 46" stroke="#2a1708" stroke-width="2.2" fill="none" stroke-linecap="round"/>'
+    '<path d="M16 30 C18 26 22 25 24 27" stroke="#f0ffd0" stroke-width="1.6" fill="none" opacity=".8" stroke-linecap="round"/>'
+    f'<g {o(1.6)}><path d="M48 50 C48 54 52 58 52 60 C52 63 44 63 44 60 C44 58 48 54 48 50 Z" fill="#8ab850"/></g>'
+    f'<g {o(1.6)}><path d="M14 52 C14 55 17 58 17 60 C17 62 11 62 11 60 C11 58 14 55 14 52 Z" fill="#8ab850"/></g>')
 
 # A brass compass rose: the "sail to" control.
 def rose():

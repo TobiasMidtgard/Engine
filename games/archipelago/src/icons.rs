@@ -177,6 +177,55 @@ const CRAFT: &[(&str, &str)] = &[
         "isle_compass",
         include_str!("../assets/icons/isle_compass.svg"),
     ),
+    (
+        "isle_craft_cutter",
+        include_str!("../assets/icons/isle_craft_cutter.svg"),
+    ),
+    (
+        "isle_craft_brig",
+        include_str!("../assets/icons/isle_craft_brig.svg"),
+    ),
+    (
+        "isle_craft_frigate",
+        include_str!("../assets/icons/isle_craft_frigate.svg"),
+    ),
+    (
+        "isle_craft_gunboat",
+        include_str!("../assets/icons/isle_craft_gunboat.svg"),
+    ),
+    (
+        "isle_craft_liner",
+        include_str!("../assets/icons/isle_craft_liner.svg"),
+    ),
+    (
+        "isle_craft_flying_boat",
+        include_str!("../assets/icons/isle_craft_flying_boat.svg"),
+    ),
+    (
+        "isle_fire_watch",
+        include_str!("../assets/icons/isle_fire_watch.svg"),
+    ),
+    (
+        "isle_watch_house",
+        include_str!("../assets/icons/isle_watch_house.svg"),
+    ),
+    (
+        "isle_infirmary",
+        include_str!("../assets/icons/isle_infirmary.svg"),
+    ),
+    ("isle_ruin", include_str!("../assets/icons/isle_ruin.svg")),
+    (
+        "isle_alert_fire",
+        include_str!("../assets/icons/isle_alert_fire.svg"),
+    ),
+    (
+        "isle_alert_riot",
+        include_str!("../assets/icons/isle_alert_riot.svg"),
+    ),
+    (
+        "isle_alert_sick",
+        include_str!("../assets/icons/isle_alert_sick.svg"),
+    ),
 ];
 
 /// Ship gear and captains, painted by `assets/icons/make_gear_icons.py`.
