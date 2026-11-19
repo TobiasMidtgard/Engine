@@ -556,7 +556,7 @@ fn card_row(i: usize) -> El {
         )
 }
 
-fn info_card(kind: Kind) -> El {
+fn info_card(kind: Kind, ruin: bool) -> El {
     let d = kind.def();
     let card = brass::parchment()
         .with_style(|s| {
@@ -607,10 +607,17 @@ fn info_card(kind: Kind) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(10.0).margin([8.0, 0.0, 0.0, 0.0]))
-                .child_opt(d.output.map(|_| {
+                // A ruin makes nothing and pays nothing: no Pause, and Demolish clears it.
+                .child_opt(d.output.filter(|_| !ruin).map(|_| {
                     El::button("{isle.sel.pause}", "isle.sel.pause").class("brass_button")
                 }))
-                .child(El::button("Demolish", "isle.sel.demolish").class("brass_button_dark")),
+                .child(
+                    El::button(
+                        if ruin { "Clear the ruin" } else { "Demolish" },
+                        "isle.sel.demolish",
+                    )
+                    .class("brass_button_dark"),
+                ),
         );
     El::new()
         .with_style(|s| s.fill_parent().pick(Pick::Ignore))
@@ -731,7 +738,11 @@ pub fn show_card(world: &mut World) {
         return;
     };
     update_data_now(world);
-    if screens::spawn_screen(world, hud_screen(INFO, 1), &info_card(kind)).is_ok() {
+    let ruin = world
+        .resource::<Hand>()
+        .selected
+        .is_some_and(|e| world.get::<crate::incidents::Ruin>(e).is_some());
+    if screens::spawn_screen(world, hud_screen(INFO, 1), &info_card(kind, ruin)).is_ok() {
         world.resource_mut::<Hud>().info_open = true;
         update_data_now(world);
         shelf::card_opened(world);

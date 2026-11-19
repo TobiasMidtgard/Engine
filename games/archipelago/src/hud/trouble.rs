@@ -23,6 +23,9 @@ const SINCE_ID: &str = "isle.trouble.since";
 #[derive(Resource, Default)]
 pub struct TroubleCard {
     sig: String,
+    /// The building the card was opened for and whether it was a ruin then (its buttons
+    /// differ, so the card is opened afresh when that changes).
+    built: Option<(Entity, bool)>,
 }
 
 pub fn install(world: &mut World) {
@@ -237,6 +240,13 @@ pub fn refresh(world: &mut World) {
     };
     let inc = world.get::<Incident>(e).cloned();
     let ruin_c = world.get::<Ruin>(e).cloned();
+    if let Some((was, r)) = world.resource::<TroubleCard>().built
+        && was == e
+        && r != ruin_c.is_some()
+    {
+        super::show_card(world);
+        return;
+    }
     let econ = world.resource::<Economy>();
     let clock = econ.clock_s;
     let coins = econ.coins;
@@ -290,6 +300,12 @@ pub fn refresh(world: &mut World) {
 
 /// A new card was opened: fill the section afresh.
 pub fn card_opened(world: &mut World) {
-    world.resource_mut::<TroubleCard>().sig.clear();
+    let built = world
+        .get_resource::<Hand>()
+        .and_then(|h| h.selected)
+        .map(|e| (e, world.get::<Ruin>(e).is_some()));
+    let mut t = world.resource_mut::<TroubleCard>();
+    t.sig.clear();
+    t.built = built;
     refresh(world);
 }
