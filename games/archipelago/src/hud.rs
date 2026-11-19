@@ -802,7 +802,10 @@ pub fn read_actions(world: &mut World) {
             } else {
                 routes::refresh(world);
             }
-        } else if shelf::action(world, &a) || fleet::action(world, &a) || alerts::action(world, &a)
+        } else if shelf::action(world, &a)
+            || fleet::action(world, &a)
+            || alerts::action(world, &a)
+            || yard::action(world, &a)
         {
         } else if a.starts_with("isle.gear.") {
             crate::tools::action(world, &a);
@@ -1177,6 +1180,52 @@ fn demo_tile() -> String {
     format!("isle.build:{k}")
 }
 
+fn demo_place(world: &mut World, want: &str) {
+    let Some(kind) = crate::defs::DEFS
+        .iter()
+        .map(|d| d.kind)
+        .find(|k| format!("{k:?}") == want)
+    else {
+        return;
+    };
+    let harbour = {
+        let mut q = world.query::<&Building>();
+        q.iter(world)
+            .find(|b| b.kind == Kind::Harbour && b.island == 0)
+            .cloned()
+    };
+    let Some(h) = harbour else {
+        return;
+    };
+    let at = crate::fleet::mooring(&h).0;
+    let t = crate::grid::cell_of(at.x, at.y);
+    let (w, d) = kind.def().size;
+    let half = IVec2::new(w / 2, d / 2);
+    for r in 4i32..60 {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dz.abs() != r {
+                    continue;
+                }
+                let origin = t + IVec2::new(dx, dz) - half;
+                for rot in 0..4u8 {
+                    if crate::grid::check(world.resource::<crate::grid::Grid>(), kind, origin, rot)
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    if let Ok(e) = crate::build::place(world, kind, origin, rot, false) {
+                        if crate::town::join_to_roads(world, e) {
+                            return;
+                        }
+                        crate::build::demolish(world, e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// `--hud-demo`: open the first weaver's (or `--hud-card=Kind`'s) card at 2 s and keep the pointer on a build tile.
 fn demo_step(world: &mut World, dt: f32) {
     let Some(t) = world.resource::<Hud>().demo else {
@@ -1184,6 +1233,14 @@ fn demo_step(world: &mut World, dt: f32) {
     };
     let t = t + dt;
     world.resource_mut::<Hud>().demo = Some(t);
+    // `--hud-place=Shipyard`: put one of that kind up by the home harbour first (for card
+    // shots of kinds the tour town lacks).
+    if t - dt <= 0.0
+        && let Some(want) =
+            std::env::args().find_map(|a| a.strip_prefix("--hud-place=").map(String::from))
+    {
+        demo_place(world, &want);
+    }
     if t > 2.0
         && !world.resource::<Hud>().info_open
         && !world.resource::<ledger::Ledger>().open
@@ -1234,6 +1291,12 @@ fn demo_step(world: &mut World, dt: f32) {
                 for c in list.split(',') {
                     crate::tools::action(world, &format!("isle.yard.order:{c}"));
                 }
+            }
+            // `--hud-design=craft[:fittings]`: a craft's designer open on the yard card.
+            if let Some(spec) =
+                std::env::args().find_map(|a| a.strip_prefix("--hud-design=").map(String::from))
+            {
+                yard::demo(world, &spec);
             }
             // `--hud-fleet=k`: the ships' gear with the first vessel's socket k picked.
             if let Some(k) =
