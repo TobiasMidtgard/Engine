@@ -220,10 +220,9 @@ pub enum Wait {
     Angry,
     NeedsPaving,
     NoMaterials,
-    /// The tier it would leave needs its people in the works.
-    KeepsWorkers,
-    /// The player holds the island.
-    Held,
+    /// Ready, but moving up would leave the tier it leaves short of workers (the player's
+    /// "move up all" skips it; a single order still may).
+    WouldEmptyWorks,
 }
 
 /// Happiness the trouble at a house takes off: an incident in the house itself.
@@ -344,8 +343,9 @@ pub struct IslandBooks {
     pub unlocked: [u32; Tier::COUNT],
     /// Goods the player stopped handing out here: nobody uses them and they give nothing.
     pub paused: [bool; Good::COUNT],
-    /// No house here moves up on its own.
-    pub hold: bool,
+    /// Ready houses here move up on their own. Off unless the player turns it on: moving up
+    /// is the player's order, so a town never loses the workers of a tier by surprise.
+    pub auto_up: bool,
     /// Game time the next house here may move up on its own.
     pub next_up_s: f64,
     /// Jobs that idle works let go, per tier.
@@ -700,14 +700,16 @@ pub fn step(
             Wait::Angry
         };
     }
-    // Moving up on its own: at most one house a second per island, the longest ready first,
-    // when the warehouse holds the materials and the tier it leaves can still staff its works.
+    // Ready houses wait for the player's order. Where the player turned moving up on its own
+    // on: at most one house a second per island, the longest ready first, when the warehouse
+    // holds the materials and the tier it leaves can still staff its works.
     let mut best: Vec<Option<(f32, usize)>> = vec![None; n];
     for (i, (b, mut h, boost)) in houses.iter_mut().enumerate() {
         let books = &econ.islands[b.island];
         if h.ready && h.tier.next().is_some() {
             h.wait = up_wait(&h, books, boost.is_some_and(|x| x.rise), false);
             if h.wait == Wait::None
+                && books.auto_up
                 && clock >= books.next_up_s
                 && best[b.island].is_none_or(|(s, _)| h.content_s > s)
             {
@@ -1057,14 +1059,11 @@ pub fn appraise(h: &House, books: &IslandBooks, boost: Option<&Boost>) -> Apprai
 }
 
 /// What stops a ready house moving up now (`Wait::None`: nothing). `now` is the player's
-/// order: it ignores the hold and the job guard.
+/// order for this one house: it ignores the job guard (the caller warns instead).
 pub fn up_wait(h: &House, books: &IslandBooks, free: bool, now: bool) -> Wait {
     let Some((next, cost)) = h.tier.next() else {
         return Wait::Top;
     };
-    if !now && books.hold {
-        return Wait::Held;
-    }
     if next.wants_paving() && !h.paved {
         return Wait::NeedsPaving;
     }
@@ -1073,7 +1072,7 @@ pub fn up_wait(h: &House, books: &IslandBooks, free: bool, now: bool) -> Wait {
     // (Jobs of idle works count too: they want their people back when they can run.)
     let jobs = books.jobs[t] + books.let_go[t];
     if !now && jobs > 0.0 && books.population[t] - h.residents < jobs {
-        return Wait::KeepsWorkers;
+        return Wait::WouldEmptyWorks;
     }
     // (A Founder's portrait in reach: they move up without the building goods.)
     // (On its own a house leaves a reserve of building goods for the builders.)
@@ -1240,10 +1239,6 @@ mod tests {
                 .filter(|h| h.ready && h.tier == Tier::Fisherfolk)
                 .count()
         };
-        // (Held, so none moves up meanwhile.)
-        for b in w.resource_mut::<Economy>().islands.iter_mut() {
-            b.hold = true;
-        }
         let before = ready(&mut w);
         if before == 0 {
             return; // (Nothing to test in a start whose Fisherfolk all moved up.)

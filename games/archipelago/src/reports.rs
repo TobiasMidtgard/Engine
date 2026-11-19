@@ -1,6 +1,7 @@
 //! The town economy explained: every number a house card, an island panel or the money panel
 //! shows, already added up (`isle.house`, `isle.island.economy`, `isle.ledger`, `isle.work`),
-//! and the player's moves on it (pause a need, move a house up or down, hold an island).
+//! and the player's moves on it (pause a need, move houses up or down, let an island's houses
+//! move up on their own).
 //! The interface only draws what these return.
 
 use engine::prelude::*;
@@ -79,7 +80,7 @@ pub fn next_unlock(tier: Tier, books: &IslandBooks) -> Option<(Need, f32)> {
 pub fn wait_text(h: &House, a: &Appraisal, books: &IslandBooks) -> String {
     let tier = h.tier;
     match h.wait {
-        Wait::None => "Ready: moves up next".into(),
+        Wait::None => "Ready to move up".into(),
         Wait::Top => format!("{} are the top tier", tier.name()),
         Wait::Trouble => match h.hit {
             Hit::Fire => "On fire".into(),
@@ -151,12 +152,11 @@ pub fn wait_text(h: &House, a: &Appraisal, books: &IslandBooks) -> String {
                 })
                 .unwrap_or_else(|| "Waiting for building goods".into())
         }
-        Wait::KeepsWorkers => format!(
-            "The {}' works need these {:.0} people",
+        Wait::WouldEmptyWorks => format!(
+            "Ready, but the {}' works need these {:.0} people",
             tier.name(),
             h.residents
         ),
-        Wait::Held => "Moving up is held on this island".into(),
     }
 }
 
@@ -329,7 +329,7 @@ pub fn island(world: &mut World, i: usize) -> Value {
         .collect();
     json!({
         "island": islands()[i].name,
-        "hold": books.hold,
+        "auto_up": books.auto_up,
         "paused_needs": paused,
         "tiers": tiers,
     })
@@ -500,13 +500,15 @@ pub fn pause_need(world: &mut World, i: usize, g: Good, paused: bool) {
 }
 
 /// Hold an island: no house there moves up on its own.
-pub fn hold(world: &mut World, i: usize, on: bool) {
-    world.resource_mut::<Economy>().islands[i].hold = on;
+/// Let ready houses on an island move up on their own (off by default), keeping enough
+/// people for the works of the tier they leave.
+pub fn auto_up(world: &mut World, i: usize, on: bool) {
+    world.resource_mut::<Economy>().islands[i].auto_up = on;
 }
 
-/// The player moves a house up now: it must be ready; pays the materials; ignores the hold
-/// and the job guard.
-pub fn move_up(world: &mut World, e: Entity) -> Result<(), String> {
+/// The player moves a house up now: it must be ready; pays the materials. It may leave the
+/// tier below short of workers: the answer says so (`Ok(Some(warning))`).
+pub fn move_up(world: &mut World, e: Entity) -> Result<Option<String>, String> {
     let (Some(b), Some(h)) = (
         world.get::<Building>(e).cloned(),
         world.get::<House>(e).cloned(),
@@ -537,12 +539,64 @@ pub fn move_up(world: &mut World, e: Entity) -> Result<(), String> {
     }
     let mut econ = world.resource_mut::<Economy>();
     let books = &mut econ.islands[b.island];
+    let left = h.tier;
     let mut h2 = h;
     sim::move_up(&mut h2, books, free);
+    let t = left.index();
+    let (pop, jobs) = (books.population[t], books.jobs[t] + books.let_go[t]);
     if let Some(mut h) = world.get_mut::<House>(e) {
         *h = h2;
     }
-    Ok(())
+    Ok((pop < jobs).then(|| {
+        format!(
+            "{} on {} are now {:.0} short of the {:.0} their works ask for",
+            left.name(),
+            islands()[b.island].name,
+            jobs - pop,
+            jobs
+        )
+    }))
+}
+
+/// The player moves every ready house on an island up, longest ready first, as long as the
+/// tier each leaves keeps the people its works ask for and the warehouse has the materials.
+/// Returns (moved, still waiting with their reasons).
+pub fn move_up_all(world: &mut World, i: usize) -> (u32, std::collections::BTreeMap<String, u32>) {
+    let mut ready: Vec<(Entity, f32)> = world
+        .query::<(Entity, &Building, &House)>()
+        .iter(world)
+        .filter(|(_, b, h)| b.island == i && h.ready && h.tier.next().is_some())
+        .map(|(e, _, h)| (e, h.content_s))
+        .collect();
+    ready.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut moved = 0;
+    let mut waiting: std::collections::BTreeMap<String, u32> = Default::default();
+    for (e, _) in ready {
+        let Some(h) = world.get::<House>(e).cloned() else {
+            continue;
+        };
+        let free = world.get::<Boost>(e).is_some_and(|x| x.rise);
+        let mut econ = world.resource_mut::<Economy>();
+        let books = &mut econ.islands[i];
+        // (The guard and the building reserve, as for houses that move up on their own.)
+        let why = sim::up_wait(&h, books, free, false);
+        if why == Wait::None {
+            let mut h2 = h;
+            sim::move_up(&mut h2, books, free);
+            if let Some(mut h) = world.get_mut::<House>(e) {
+                *h = h2;
+            }
+            moved += 1;
+        } else {
+            let key = match serde_json::to_value(why) {
+                Ok(Value::String(s)) => s,
+                Ok(v) => v.to_string(),
+                Err(_) => String::new(),
+            };
+            *waiting.entry(key).or_default() += 1;
+        }
+    }
+    (moved, waiting)
 }
 
 /// The player moves a house down a tier to get its workers back.
@@ -648,7 +702,7 @@ pub fn register(app: &mut App) {
     )
     .register_api(
         "isle.island.economy",
-        "Per tier on an island: people, houses, happiness by mood, ready houses, waiting reasons counted, the next need to unlock; the hold and paused needs.",
+        "Per tier on an island: people, houses, happiness by mood, ready houses, waiting reasons counted, the next need to unlock; whether houses move up on their own, and paused needs.",
         r#"{"island": 0}"#,
         |world, args| {
             let i = island_arg(&args)?;
@@ -682,23 +736,33 @@ pub fn register(app: &mut App) {
         },
     )
     .register_api(
-        "isle.island.hold",
-        "Hold an island (or with hold: false, release it): no house there moves up on its own.",
-        r#"{"island": 0, "hold": true}"#,
+        "isle.island.auto_up",
+        "Let ready houses on an island move up on their own (off by default), keeping the people the works of the tier they leave ask for.",
+        r#"{"island": 0, "on": true}"#,
         |world, args| {
             let i = island_arg(&args)?;
-            hold(world, i, args["hold"].as_bool().unwrap_or(true));
+            auto_up(world, i, args["on"].as_bool().unwrap_or(true));
             Ok(json!({}))
         },
     )
     .register_api(
+        "isle.island.up_all",
+        "Move every ready house on an island up, longest ready first, while the tier each leaves keeps the people its works ask for. Returns how many moved and why the rest wait.",
+        r#"{"island": 0}"#,
+        |world, args| {
+            let i = island_arg(&args)?;
+            let (moved, waiting) = move_up_all(world, i);
+            Ok(json!({"moved": moved, "waiting": waiting}))
+        },
+    )
+    .register_api(
         "isle.house.up",
-        "Move a ready house up a tier now: pays the materials, ignores the hold and the job guard.",
+        "Move one ready house up a tier now and pay the materials. It may take workers the tier below needs: a warning says so.",
         r#"{"id": 12}"#,
         |world, args| {
             let e = house_arg(world, &args)?;
-            move_up(world, e)?;
-            Ok(json!({}))
+            let warning = move_up(world, e)?;
+            Ok(json!({"warning": warning}))
         },
     )
     .register_api(
@@ -797,7 +861,7 @@ mod tests {
 
     /// Moving a house down and up again through the calls.
     #[test]
-    fn the_player_moves_houses_and_holds_islands() {
+    fn the_player_moves_houses_and_turns_auto_up_on() {
         let mut w = bare_world();
         crate::town::build_start(&mut w);
         crate::town::prewarm(&mut w, 120.0);
@@ -815,9 +879,45 @@ mod tests {
         // Not ready yet: the reason comes back.
         let err = move_up(&mut w, e).unwrap_err();
         assert!(err.starts_with("Not ready"), "{err}");
-        hold(&mut w, 0, true);
-        assert!(w.resource::<Economy>().islands[0].hold);
+        auto_up(&mut w, 0, true);
+        assert!(w.resource::<Economy>().islands[0].auto_up);
         let v = island(&mut w, 0);
-        assert_eq!(v["hold"], json!(true));
+        assert_eq!(v["auto_up"], json!(true));
+    }
+
+    /// Houses never move up unless the player says so; "move up all" keeps the workers of
+    /// the tier below.
+    #[test]
+    fn houses_move_up_only_when_the_player_says_and_keep_the_workers() {
+        let mut w = bare_world();
+        crate::town::build_start(&mut w);
+        crate::town::prewarm(&mut w, 60.0);
+        let tiers = |w: &mut World| {
+            let mut n = [0u32; Tier::COUNT];
+            for h in w.query::<&House>().iter(w) {
+                n[h.tier.index()] += 1;
+            }
+            n
+        };
+        let before = tiers(&mut w);
+        crate::town::prewarm(&mut w, 600.0);
+        assert_eq!(tiers(&mut w), before, "houses moved up on their own");
+        let mut moved = 0;
+        for i in 0..w.resource::<Economy>().islands.len() {
+            let before = w.resource::<Economy>().islands[i].population;
+            moved += move_up_all(&mut w, i).0;
+            let b = &w.resource::<Economy>().islands[i];
+            for (t, was) in before.iter().enumerate() {
+                let jobs = b.jobs[t] + b.let_go[t];
+                // A tier only gives up people it can spare.
+                assert!(
+                    b.population[t] >= was - 1e-3 || b.population[t] >= jobs - 1e-3,
+                    "island {i} tier {t}: {} people left for {jobs} jobs",
+                    b.population[t]
+                );
+            }
+        }
+        assert!(moved > 0, "nothing was ready to move up");
+        assert!(tiers(&mut w) != before);
     }
 }

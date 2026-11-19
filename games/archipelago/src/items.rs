@@ -3173,9 +3173,14 @@ mod tests {
         // The town crier and the baker's round: houses in the hall's reach pay more than
         // their tier's plain sum.
         let mut more = 0;
-        for (h, boost) in w.query::<(&House, &Boost)>().iter(&w) {
+        let econ = w.resource::<Economy>().clone();
+        for (b, h, boost) in w.query::<(&Building, &House, &Boost)>().iter(&w) {
             assert!(boost.flat_pay() > 0.39);
-            if h.income > h.tier.full_income() + 0.3 {
+            // What the same house would pay without the items.
+            let plain = crate::sim::appraise(h, &econ.islands[b.island], None);
+            let base = h.tier.capacity();
+            let without = plain.coins * (h.residents / base).min(1.0) + h.rent + h.goodwill;
+            if h.income > without + 0.3 {
                 more += 1;
             }
         }

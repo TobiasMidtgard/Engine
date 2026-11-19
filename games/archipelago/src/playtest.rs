@@ -201,12 +201,143 @@ fn turn(world: &mut World, log: &mut Log) {
             continue;
         }
         supply(world, log, now, i);
+        services(world, log, now, i);
+        move_up(world, log, now, i);
+        paving(world, log, now, i);
         safety(world, log, now, i);
         grow(world, log, now, i);
     }
     trade(world, log, now);
     restart_paused(world, log, now);
     incidents_seen(world, log);
+}
+
+/// A careful player presses "move up all" each turn: only houses whose tier can spare them
+/// go, so the works keep their hands.
+fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
+    let (moved, waiting) = crate::reports::move_up_all(world, i);
+    if moved > 0 {
+        log.act("moved houses up");
+        let held: u32 = waiting.values().sum();
+        log.line(
+            now,
+            format!(
+                "moved {moved} houses up on {}{}",
+                islands()[i].name,
+                if held > 0 {
+                    format!(" ({held} ready ones wait: {waiting:?})")
+                } else {
+                    String::new()
+                }
+            ),
+        );
+    }
+}
+
+/// Public buildings where houses ask for one and have none in reach: a market, chapel, tavern
+/// or school in the middle of the houses that lack it.
+fn services(world: &mut World, log: &mut Log, now: f64, i: usize) {
+    if log
+        .last
+        .get(&(i + 6000, None))
+        .is_some_and(|t| now - t < 120.0)
+    {
+        return;
+    }
+    log.last.insert((i + 6000, None), now);
+    let books = world.resource::<Economy>().islands[i].clone();
+    let coins = world.resource::<Economy>().coins;
+    for kind in crate::build::SERVICES {
+        let mut lacking: Vec<DVec2> = Vec::new();
+        for (b, h) in world.query::<(&Building, &House)>().iter(world) {
+            if b.island != i || h.has(kind) {
+                continue;
+            }
+            let asked = h.tier.wants().iter().enumerate().any(|(j, w)| {
+                w.need == crate::defs::Need::Service(kind) && books.asks(h.tier, j, w)
+            });
+            if asked {
+                lacking.push(crate::grid::footprint_center(b.kind, b.origin, b.rot));
+            }
+        }
+        if lacking.len() < 4 {
+            continue;
+        }
+        let d = kind.def();
+        if coins < d.coins as f64 + 600.0
+            || !d.cost.iter().all(|(g, n)| books.get(*g) >= *n as f64 + 2.0)
+        {
+            log.line(
+                now,
+                format!(
+                    "{} houses on {} want a {} but it costs more than there is",
+                    lacking.len(),
+                    islands()[i].name,
+                    d.name
+                ),
+            );
+            continue;
+        }
+        let mid = lacking.iter().copied().sum::<DVec2>() / lacking.len() as f64;
+        // The house nearest the middle, so the building lands among them.
+        let at = lacking
+            .iter()
+            .copied()
+            .min_by(|a, b| (*a - mid).length().total_cmp(&(*b - mid).length()))
+            .unwrap_or(mid);
+        build_near(
+            world,
+            log,
+            now,
+            kind,
+            at,
+            &format!("{} houses without one", lacking.len()),
+        );
+        // One a turn: let the reach settle before the next.
+        return;
+    }
+}
+
+/// Burghers want a paved street at the door: pave the road beside a ready house that waits
+/// for it.
+fn paving(world: &mut World, log: &mut Log, now: f64, i: usize) {
+    if log
+        .last
+        .get(&(i + 7000, None))
+        .is_some_and(|t| now - t < 120.0)
+    {
+        return;
+    }
+    log.last.insert((i + 7000, None), now);
+    let roads = world.resource::<crate::grid::Grid>().roads.clone();
+    let paved = world.resource::<crate::grid::Grid>().paved.clone();
+    let doors: Vec<IVec2> = world
+        .query::<(&Building, &House)>()
+        .iter(world)
+        .filter(|(b, h)| b.island == i && h.wait == crate::sim::Wait::NeedsPaving)
+        .filter_map(|(b, _)| {
+            crate::grid::ring(b.kind, b.origin, b.rot)
+                .into_iter()
+                .find(|c| roads.contains(c) && !paved.contains(c))
+        })
+        .take(6)
+        .collect();
+    let mut n = 0;
+    for c in doors {
+        if crate::build::place_road_line(world, c, c, true, true).is_ok() {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        log.act("paved a street");
+        log.line(
+            now,
+            format!(
+                "paved {n} cells for houses that want to be Burghers on {}",
+                islands()[i].name
+            ),
+        );
+    }
 }
 
 /// Works that paused themselves in debt start again once the purse has recovered.
@@ -565,11 +696,25 @@ fn build_for(
     build_near(world, log, now, kind, at, why)
 }
 
-/// Kinds that make `g` and may stand on island `i`.
+/// Kinds that make `g` and may stand on island `i`, with every input made there too (a chain
+/// that cannot run there is no use: the good comes by ship instead).
 fn makers(g: Good, i: usize) -> Vec<Kind> {
+    makers_within(g, i, 4)
+}
+
+fn makers_within(g: Good, i: usize, depth: u32) -> Vec<Kind> {
+    if depth == 0 {
+        return Vec::new();
+    }
     DEFS.iter()
         .filter(|d| d.output == Some(g) && d.category != Category::Public)
         .filter(|d| !d.needs_fertility || islands()[i].fertility.allows(d.kind))
+        .filter(|d| {
+            d.input
+                .into_iter()
+                .chain(d.input2)
+                .all(|x| !makers_within(x, i, depth - 1).is_empty())
+        })
         .map(|d| d.kind)
         .collect()
 }
@@ -751,6 +896,17 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
         _ => true,
     });
     let short_hands = (0..Tier::COUNT).any(|t| books.jobs[t] > 0.0 && books.workforce[t] < 0.9);
+    // Houses that are far from full want goods or a service, not more houses beside them.
+    let (mut held, mut room) = (0.0f32, 0.0f32);
+    for (b, h) in world.query::<(&Building, &House)>().iter(world) {
+        if b.island == i {
+            held += h.residents;
+            room += h.tier.capacity();
+        }
+    }
+    if room > 0.0 && held < room * 0.8 {
+        return;
+    }
     if log.last.get(&(i, None)).is_some_and(|t| now - t < 120.0) {
         return;
     }
@@ -816,6 +972,38 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                         g.name()
                     ),
                 );
+                // Make it for export on a settled island whose ground allows the chain.
+                let maker = econ
+                    .islands
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, x)| *j != to && x.population.iter().sum::<f32>() >= 50.0)
+                    .find_map(|(j, _)| makers(g, j).first().map(|k| (j, *k)));
+                if let Some((j, k)) = maker
+                    && log
+                        .last
+                        .get(&(j + 8000, Some(g)))
+                        .is_none_or(|t| now - t > 900.0)
+                    && let Some(at) = heart(world, j)
+                {
+                    log.last.insert((j + 8000, Some(g)), now);
+                    let why = format!("{} to ship to {}", g.name(), islands()[to].name);
+                    if build_for(world, log, now, k, j, at, &why) {
+                        for input in [k.def().input, k.def().input2].into_iter().flatten() {
+                            if let Some(&m) = makers(input, j).first() {
+                                build_for(
+                                    world,
+                                    log,
+                                    now,
+                                    m,
+                                    j,
+                                    at,
+                                    &format!("input {} for it", input.name()),
+                                );
+                            }
+                        }
+                    }
+                }
                 continue;
             };
             if carried(g) {
