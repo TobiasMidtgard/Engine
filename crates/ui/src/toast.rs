@@ -113,12 +113,17 @@ pub fn notify(
         icon
     };
     let glyph = icon.starts_with("ui_");
+    let themed_badge = world
+        .resource::<Theme>()
+        .classes
+        .contains_key("toast_badge");
     let mut col = El::new()
         .class("col")
         .with_style(|s| s.gap(2.0).grow(1.0).shrink(1.0));
     if !title.is_empty() {
         col = col.child(
             El::text(title)
+                .class("toast_title")
                 .text_style(|t| t.semibold().color(color.lerp(Color::WHITE, 0.35)))
                 .with_style(|s| s.font_size(15.0)),
         );
@@ -139,16 +144,30 @@ pub fn notify(
             El::new()
                 .with_style(|s| {
                     s.width(4.0)
-                        .height(crate::style::pct(100.0))
                         .position(Position::Absolute)
-                        .left(0.0)
-                        .top(0.0)
-                        .radius(crate::style::Corners::left(12.0))
+                        .left(4.0)
+                        .top(7.0)
+                        .bottom(7.0)
+                        .radius(crate::style::Corners::all(2.0))
                         .bg(color)
+                        .shadow(crate::style::Shadow::glow(color.fade(0.6), 10.0))
                 })
                 .pick_ignore(),
         )
-        .child(
+        .child(if themed_badge {
+            // A kit's own badge (brass: an enamel disc), ringed in the toast's colour.
+            El::new()
+                .class("toast_badge")
+                .with_style(|s| s.size(42.0, 42.0).border(2.0, color))
+                .child(
+                    El::icon(icon)
+                        .with_style(|s| {
+                            let k = if glyph { 18.0 } else { 32.0 };
+                            s.size(k, k).color(color.lerp(Color::BLACK, 0.25))
+                        })
+                        .pick_ignore(),
+                )
+        } else {
             El::new()
                 .with_style(|s| {
                     s.size(34.0, 34.0)
@@ -170,8 +189,8 @@ pub fn notify(
                             )
                         })
                         .pick_ignore(),
-                ),
-        )
+                )
+        })
         .child(col);
     if let Ok(sp) = el::spawn(world, Some(parent), &el)
         && let Some(e) = sp.root

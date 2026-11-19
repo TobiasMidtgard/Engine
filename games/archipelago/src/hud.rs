@@ -25,6 +25,7 @@ use crate::island;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::tools::{Hand, Tool};
 
+mod alerts;
 mod fleet;
 mod house;
 mod ledger;
@@ -682,6 +683,7 @@ pub fn setup(world: &mut World) {
     works::install(world);
     store::install(world);
     yard::install(world);
+    alerts::install(world);
     shelf::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
@@ -800,7 +802,8 @@ pub fn read_actions(world: &mut World) {
             } else {
                 routes::refresh(world);
             }
-        } else if shelf::action(world, &a) || fleet::action(world, &a) {
+        } else if shelf::action(world, &a) || fleet::action(world, &a) || alerts::action(world, &a)
+        {
         } else if a.starts_with("isle.gear.") {
             crate::tools::action(world, &a);
             fleet::after_gear_action(world, &a);
@@ -1161,6 +1164,7 @@ pub fn update_data(world: &mut World) {
         store::refresh(world);
         yard::refresh(world);
         fleet::refresh(world);
+        alerts::refresh(world);
     }
     demo_step(world, dt);
 }
@@ -1236,6 +1240,33 @@ fn demo_step(world: &mut World, dt: f32) {
                 std::env::args().find_map(|a| a.strip_prefix("--hud-fleet=")?.parse::<usize>().ok())
             {
                 fleet::demo(world, k);
+            }
+            // `--hud-alerts`: start a fire, a riot and a sickness or two (shots of the alerts).
+            if std::env::args().any(|a| a == "--hud-alerts") {
+                use crate::incidents::{self, Trouble};
+                let picks: Vec<(Entity, Building)> = {
+                    let mut q = world.query::<(Entity, &Building)>();
+                    q.iter(world).map(|(e, b)| (e, b.clone())).collect()
+                };
+                let mut used = Vec::new();
+                for (kind, isle, what) in [
+                    (Kind::Bakery, 0, Trouble::Fire),
+                    (Kind::House, 0, Trouble::Riot),
+                    (Kind::House, 1, Trouble::Sickness),
+                    (Kind::Brewery, 0, Trouble::Fire),
+                    (Kind::House, 0, Trouble::Sickness),
+                ] {
+                    if let Some((e, b)) = picks
+                        .iter()
+                        .find(|(e, b)| b.kind == kind && b.island == isle && !used.contains(e))
+                    {
+                        used.push(*e);
+                        incidents::start(world, *e, b, what, false);
+                    }
+                }
+                if std::env::args().any(|a| a == "--hud-alert-go") {
+                    alerts::demo_go(world);
+                }
             }
             // `--hud-reveal=i`: lift the fog off island `i`, as if a ship had looked round it
             // (shots of an unsettled island on the chart).

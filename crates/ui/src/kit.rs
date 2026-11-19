@@ -309,6 +309,25 @@ pub mod brass {
                     .transition(0.2),
             ),
         );
+        add(
+            "toast_badge",
+            ClassStyle::base(
+                s().background(Fill::Radial {
+                    inner: Color::hex(0xfbf1d6),
+                    outer: Color::hex(0xc9b083),
+                })
+                .radius(Corners::all(999.0))
+                .bevel(Bevel::raised(1.5, 0.5, 0.35))
+                .justify(Justify::Center)
+                .align_items(Align::Center)
+                .shrink(0.0)
+                .pick(Pick::Ignore),
+            ),
+        );
+        add(
+            "toast_title",
+            ClassStyle::base(s().font_family(DISPLAY_FONT).font_size(16.0)),
+        );
         // A brass push button with chamfered corners.
         add(
             "brass_button",
@@ -926,6 +945,10 @@ pub mod brass {
         pub count: u32,
         /// Its width in px (0: 380).
         pub width: f32,
+        /// An id for the age text, so a game can move it in place ("" for none).
+        pub age_id: String,
+        /// Already on screen before this rebuild: no slide-in.
+        pub settled: bool,
     }
 
     /// An alert strip: an urgency stripe down its left edge, the picture in a ringed badge,
@@ -976,8 +999,13 @@ pub mod brass {
                     }))
                     .child(El::new().with_style(|s| s.grow(1.0)))
                     .child_opt((!a.age.is_empty()).then(|| {
-                        El::text(a.age.clone())
-                            .text_style(|t| t.size(12.0).italic().nowrap())
+                        let t = El::text(a.age.clone());
+                        let t = if a.age_id.is_empty() {
+                            t
+                        } else {
+                            t.id(a.age_id.clone())
+                        };
+                        t.text_style(|t| t.size(12.0).italic().nowrap())
                             .with_style(|s| s.color(Colors::cream_dim()))
                             .pick_ignore()
                     })),
@@ -1011,9 +1039,17 @@ pub mod brass {
                     .class("brass_button")
                     .with_style(|s| s.padding([3.0, 10.0]).font_size(13.0))
             }));
+        let settled = a.settled;
         El::new()
             .class("brass_alert")
-            .with_style(move |s| s.width(width))
+            .with_style(move |s| {
+                let s = s.width(width);
+                if settled {
+                    s.enter(Enter::default())
+                } else {
+                    s
+                }
+            })
             .child(stripe)
             .child(socket_with(
                 Some((&a.icon, Rank::Common)),
