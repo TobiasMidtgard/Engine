@@ -318,7 +318,7 @@ fn stand_down(world: &mut World, e: Entity) {
                     DVec3::new(at.x + 320.0 * a.cos(), alt, at.z + 320.0 * a.sin())
                 })
                 .collect();
-            Roam::Loop {
+            Roam::Circling {
                 points: Arc::new(ring),
             }
         }
@@ -408,7 +408,7 @@ mod tests {
         for e in crew0 {
             let v = w.get::<Vessel>(e).unwrap();
             assert_eq!(v.route, None);
-            assert!(matches!(v.roam, Roam::Idle { .. } | Roam::Loop { .. }));
+            assert!(matches!(v.roam, Roam::Idle { .. } | Roam::Circling { .. }));
         }
         assert_eq!(w.get::<Vessel>(ship).unwrap().route, Some(r - 1));
         assert_eq!(w.resource::<Routes>().0[r - 1].name, "Test run");

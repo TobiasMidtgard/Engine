@@ -21,7 +21,9 @@ use crate::defs::{Category, DEFS, Good, Kind, Tier};
 use crate::fleet::{Doing, Vessel};
 use crate::island::islands;
 use crate::items::{Host, ITEMS, Institution, Items};
+use crate::settle::StartMode;
 use crate::sim::{Building, Economy, House, Producer, Status};
+use crate::vessels::Craft;
 
 /// Seconds of game time between the player's turns.
 const TURN_S: f64 = 30.0;
@@ -35,6 +37,8 @@ struct Log {
     actions: HashMap<&'static str, u32>,
     /// When the player last acted on (island, good), or grew island (island, None).
     last: HashMap<(usize, Option<Good>), f64>,
+    settled_seen: usize,
+    launched_seen: usize,
 }
 
 impl Log {
@@ -167,6 +171,10 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>) {
 
 fn turn(world: &mut World, log: &mut Log) {
     let now = clock(world);
+    let fresh = *world.resource::<StartMode>() == StartMode::Fresh;
+    if fresh {
+        colonise(world, log, now);
+    }
     press_orders(world, log, now);
     fill_slots(world, log, now);
     shop(world, log, now);
@@ -178,6 +186,9 @@ fn turn(world: &mut World, log: &mut Log) {
             .sum::<f32>()
             < 1.0
         {
+            if fresh && crate::settle::claimed(world, i) {
+                bootstrap(world, log, now, i);
+            }
             continue;
         }
         supply(world, log, now, i);
@@ -245,7 +256,10 @@ fn fill_slots(world: &mut World, log: &mut Log, now: f64) {
                 }
             }
             if !done {
-                log.refuse(now, "fit gear", &format!("no vessel takes {}", d.name));
+                // (Counted, not written out each turn: it stays true until a fitting craft.)
+                *log.refused
+                    .entry(format!("fit gear: no vessel takes {}", d.name))
+                    .or_default() += 1;
             }
             continue;
         }
@@ -297,6 +311,7 @@ fn shop(world: &mut World, log: &mut Log, now: f64) {
         .filter(|(_, o)| ITEMS[o.item].later == 0)
         .min_by_key(|(_, o)| o.price)
         && coins > o.price as f64 * 4.0
+        && coins > 8_000.0
     {
         match crate::items::buy(world, i) {
             Ok(name) => {
@@ -353,7 +368,12 @@ fn build_near(
                     tried += 1;
                     match crate::build::place(world, kind, origin, rot, true) {
                         Ok(e) => {
-                            if crate::town::join_to_roads(world, e) {
+                            let joined = if kind == Kind::Woodcutter {
+                                crate::town::join_far(world, e)
+                            } else {
+                                crate::town::join_to_roads(world, e)
+                            };
+                            if joined {
                                 *log.built.entry(kind.def().name).or_default() += 1;
                                 log.line(now, format!("built a {} ({why})", kind.def().name));
                                 return true;
@@ -385,6 +405,52 @@ fn build_near(
     false
 }
 
+/// Where to put a woodcutter on island `i`: the nearest thick wood to `at` that no woodcutter
+/// cuts yet.
+fn woods_near(world: &mut World, i: usize, at: DVec2) -> Option<DVec2> {
+    let cutters: Vec<DVec2> = world
+        .query::<&Building>()
+        .iter(world)
+        .filter(|b| b.kind == Kind::Woodcutter)
+        .map(|b| crate::grid::footprint_center(b.kind, b.origin, b.rot))
+        .collect();
+    let mut best: Option<(DVec2, f64)> = None;
+    for j in -40..=40 {
+        for k in -40..=40 {
+            let p = at + DVec2::new(k as f64, j as f64) * 16.0;
+            if crate::island::island_at(p.x, p.y) != Some(i)
+                || crate::island::woods(p.x, p.y) < 0.55
+                || cutters.iter().any(|c| (*c - p).length() < 90.0)
+            {
+                continue;
+            }
+            let d = (p - at).length();
+            if best.is_none_or(|b| d < b.1) {
+                best = Some((p, d));
+            }
+        }
+    }
+    best.map(|b| b.0)
+}
+
+/// Build `kind` for island `i` near `at`, or by the woods for a woodcutter.
+fn build_for(
+    world: &mut World,
+    log: &mut Log,
+    now: f64,
+    kind: Kind,
+    i: usize,
+    at: DVec2,
+    why: &str,
+) -> bool {
+    let at = if kind == Kind::Woodcutter {
+        woods_near(world, i, at).unwrap_or(at)
+    } else {
+        at
+    };
+    build_near(world, log, now, kind, at, why)
+}
+
 /// Kinds that make `g` and may stand on island `i`.
 fn makers(g: Good, i: usize) -> Vec<Kind> {
     DEFS.iter()
@@ -394,9 +460,91 @@ fn makers(g: Good, i: usize) -> Vec<Kind> {
         .collect()
 }
 
-fn supply(world: &mut World, log: &mut Log, now: f64, i: usize) {
+/// Timber to build with: a woodcutter at work and a sawmill whenever planks run low.
+fn materials(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
+    let planks = world.resource::<Economy>().islands[i].get(Good::Planks);
+    if planks > 15.0
+        || log
+            .last
+            .get(&(i + 3000, None))
+            .is_some_and(|t| now - t < 240.0)
+    {
+        return;
+    }
+    log.last.insert((i + 3000, None), now);
+    let works: Vec<(Kind, Status)> = world
+        .query::<(&Building, &Producer)>()
+        .iter(world)
+        .filter(|(b, _)| b.island == i)
+        .map(|(b, p)| (b.kind, p.status))
+        .collect();
+    let working = |k: Kind| {
+        works
+            .iter()
+            .filter(|(kk, st)| {
+                *kk == k && matches!(st, Status::Working | Status::NoInput | Status::Full)
+            })
+            .count()
+    };
+    // Short of hands: more works would stand idle; houses come first.
+    if works.iter().any(|(_, st)| *st == Status::NoWorkers) {
+        return;
+    }
+    let (cutters, mills) = (working(Kind::Woodcutter), working(Kind::Sawmill));
+    if cutters <= mills {
+        build_for(world, log, now, Kind::Woodcutter, i, at, "planks run low");
+    }
+    if mills == 0 || cutters > mills + 1 {
+        build_for(world, log, now, Kind::Sawmill, i, at, "planks run low");
+    }
+}
+
+/// Bricks once there are Labourers to make them (where the ground has clay), and the chapel
+/// Labourers ask for.
+fn bricks_and_chapel(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
     let books = world.resource::<Economy>().islands[i].clone();
+    if books.population[Tier::Labourers.index()] < 40.0
+        || log
+            .last
+            .get(&(i + 4000, None))
+            .is_some_and(|t| now - t < 300.0)
+    {
+        return;
+    }
+    log.last.insert((i + 4000, None), now);
+    let count = |world: &mut World, k: Kind| {
+        world
+            .query::<&Building>()
+            .iter(world)
+            .filter(|b| b.island == i && b.kind == k)
+            .count()
+    };
+    if islands()[i].fertility.clay && books.get(Good::Bricks) < 20.0 {
+        if count(world, Kind::ClayPit) <= count(world, Kind::Brickworks) {
+            build_for(world, log, now, Kind::ClayPit, i, at, "bricks");
+        }
+        if count(world, Kind::Brickworks) < count(world, Kind::ClayPit) {
+            build_for(world, log, now, Kind::Brickworks, i, at, "bricks");
+        }
+    }
+    if count(world, Kind::Chapel) == 0 && books.get(Good::Bricks) >= 6.0 {
+        build_for(
+            world,
+            log,
+            now,
+            Kind::Chapel,
+            i,
+            at,
+            "Labourers want a chapel",
+        );
+    }
+}
+
+fn supply(world: &mut World, log: &mut Log, now: f64, i: usize) {
     let Some(at) = heart(world, i) else { return };
+    materials(world, log, now, i, at);
+    bricks_and_chapel(world, log, now, i, at);
+    let books = world.resource::<Economy>().islands[i].clone();
     let mut builds = 0;
     for g in Good::ALL {
         let gi = g.index();
@@ -440,26 +588,35 @@ fn supply(world: &mut World, log: &mut Log, now: f64, i: usize) {
                 books.stock[gi]
             ),
         );
-        if build_near(
+        if build_for(
             world,
             log,
             now,
             k,
+            i,
             at,
             &format!("{} short of {}", islands()[i].name, g.name()),
         ) {
             builds += 1;
-            // And what it needs, if the island makes none.
+            // And what it needs: one maker of each input to each works that uses it.
             for input in [k.def().input, k.def().input2].into_iter().flatten() {
-                let made = world.resource::<Economy>().islands[i].made_per_min[input.index()];
-                if made < 0.1
-                    && let Some(&m) = makers(input, i).first()
-                {
-                    build_near(
+                let Some(&m) = makers(input, i).first() else {
+                    continue;
+                };
+                let count = |world: &mut World, kk: Kind| {
+                    world
+                        .query::<&Building>()
+                        .iter(world)
+                        .filter(|b| b.island == i && b.kind == kk)
+                        .count()
+                };
+                if count(world, m) < count(world, k) {
+                    build_for(
                         world,
                         log,
                         now,
                         m,
+                        i,
                         at,
                         &format!("input {} for it", input.name()),
                     );
@@ -483,7 +640,8 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
     if log.last.get(&(i, None)).is_some_and(|t| now - t < 120.0) {
         return;
     }
-    if coins > 3000.0 && (fed || short_hands) {
+    // (Houses cost timber, not coins: more people are how a short purse fills again.)
+    if coins > 200.0 && (fed || short_hands) {
         log.last.insert((i, None), now);
         let Some(at) = heart(world, i) else { return };
         for _ in 0..2 {
@@ -569,12 +727,29 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                 log.refuse(now, "open a route", "an island has no harbour");
                 continue;
             };
+            // A new game: the route needs a ship of ours that is off duty.
+            let craft = if *world.resource::<StartMode>() == StartMode::Fresh {
+                let mut q = world.query::<&Vessel>();
+                match q
+                    .iter(world)
+                    .find(|v| crate::settle::free(v))
+                    .map(|v| v.craft)
+                {
+                    Some(c) => c,
+                    None => {
+                        log.refuse(now, "open a route", "no ship of ours is off duty");
+                        return;
+                    }
+                }
+            } else {
+                Craft::Schooner
+            };
             let r = engine::core::registry::call_api(
                 world,
                 "isle.route",
                 json!({
                     "name": format!("{} run", g.name()),
-                    "craft": "schooner",
+                    "craft": craft.name(),
                     "vessel": format!("Playtest {}", g.name()),
                     "stops": [
                         {"at": a, "load": [g.name()], "unload": []},
@@ -588,7 +763,7 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                     log.line(
                         now,
                         format!(
-                            "opened a {} route {} to {} (the API gave a new schooner for free)",
+                            "opened a {} route {} to {}",
                             g.name(),
                             islands()[from].name,
                             islands()[to].name
@@ -599,6 +774,241 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
             }
             return;
         }
+    }
+}
+
+// ------------------------------------------------------------------------------ a new game
+
+/// Free ships of ours (off duty, at sea or in port, not aircraft).
+fn free_ships(world: &mut World) -> Vec<Vessel> {
+    let mut q = world.query::<&Vessel>();
+    q.iter(world)
+        .filter(|v| crate::settle::free(v))
+        .cloned()
+        .collect()
+}
+
+/// The first works of a new settlement, in order: what Fisherfolk need and the timber to
+/// build with.
+const FIRST_WORKS: &[(Kind, usize)] = &[
+    (Kind::Market, 1),
+    (Kind::Woodcutter, 1),
+    (Kind::Sawmill, 1),
+    (Kind::Fishery, 1),
+    (Kind::House, 8),
+    (Kind::SheepFarm, 1),
+    (Kind::Weaver, 1),
+];
+
+/// A settled island with nobody living there yet: lay out its first works and houses.
+fn bootstrap(world: &mut World, log: &mut Log, now: f64, i: usize) {
+    if log.last.get(&(i, None)).is_some_and(|t| now - t < 45.0) {
+        return;
+    }
+    log.last.insert((i, None), now);
+    let Some(at) = heart(world, i) else { return };
+    let have = |world: &mut World, k: Kind| {
+        world
+            .query::<&Building>()
+            .iter(world)
+            .filter(|b| b.island == i && b.kind == k)
+            .count()
+    };
+    let mut built = 0;
+    for &(k, n) in FIRST_WORKS {
+        if built >= 4 {
+            break;
+        }
+        if k.def().needs_fertility && !islands()[i].fertility.allows(k) {
+            continue;
+        }
+        while have(world, k) < n && built < 4 {
+            if !build_for(world, log, now, k, i, at, "a new settlement") {
+                break;
+            }
+            built += 1;
+        }
+    }
+}
+
+/// Where island `i`'s first harbour should go: its settlement's coast, or the shore facing
+/// the home island.
+fn landfall(i: usize) -> DVec2 {
+    let isle = &islands()[i];
+    if let Some(p) = crate::island::settle_coast(isle) {
+        return p;
+    }
+    let home = islands()[0].center;
+    let dir = if isle.region() == 0 {
+        (home - isle.center).normalize_or_zero()
+    } else {
+        DVec2::X
+    };
+    let mut p = isle.center;
+    for _ in 0..800 {
+        if crate::island::height(p.x, p.y) < 0.5 {
+            break;
+        }
+        p += dir * 5.0;
+    }
+    p
+}
+
+/// Send settlers to island `i`: find a harbour site near its landfall and place it (the game
+/// sends the ship). Returns whether one went.
+fn found(world: &mut World, log: &mut Log, now: f64, i: usize) -> bool {
+    let name = islands()[i].name;
+    if log
+        .last
+        .get(&(i + 1000, None))
+        .is_some_and(|t| now - t < 300.0)
+    {
+        return false;
+    }
+    log.last.insert((i + 1000, None), now);
+    let t = crate::grid::cell_of(landfall(i).x, landfall(i).y);
+    for r in 0i32..60 {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dz.abs() != r {
+                    continue;
+                }
+                let origin = t + IVec2::new(dx, dz);
+                for rot in 0..4u8 {
+                    let ok = crate::grid::check(
+                        world.resource::<crate::grid::Grid>(),
+                        Kind::Harbour,
+                        origin,
+                        rot,
+                    );
+                    if ok != Ok(i) {
+                        continue;
+                    }
+                    return match crate::build::place(world, Kind::Harbour, origin, rot, true) {
+                        Ok(_) => {
+                            log.act("settlers sent");
+                            log.line(now, format!("sent settlers to {name}"));
+                            true
+                        }
+                        // A spot with no way inland: the next one.
+                        Err(e) if e.contains("road inland") => continue,
+                        Err(e) => {
+                            log.refuse(now, &format!("settle {name}"), &e);
+                            false
+                        }
+                    };
+                }
+            }
+        }
+    }
+    log.refuse(
+        now,
+        &format!("settle {name}"),
+        "no harbour site near its landfall",
+    );
+    false
+}
+
+/// A new game: settle Haverholm first, then build a shipyard and ships, and settle the next
+/// island whenever a ship is free and home can spare the stores.
+fn colonise(world: &mut World, log: &mut Log, now: f64) {
+    let n = islands().len();
+    let claimed: Vec<bool> = (0..n).map(|i| crate::settle::claimed(world, i)).collect();
+    let under_way = world
+        .query::<&Vessel>()
+        .iter(world)
+        .any(|v| matches!(v.roam, crate::fleet::Roam::Found { .. }));
+    if !claimed[0] {
+        if !under_way {
+            found(world, log, now, 0);
+        }
+        return;
+    }
+    shipbuilding(world, log, now);
+    if under_way {
+        return;
+    }
+    let (coins, home) = {
+        let e = world.resource::<Economy>();
+        (e.coins, e.islands[0].clone())
+    };
+    let settled = claimed.iter().filter(|c| **c).count();
+    // Each new island asks for a bigger home first.
+    let need_people = (150.0 + 150.0 * (settled - 1) as f32).min(900.0);
+    if home.population.iter().sum::<f32>() < need_people
+        || coins < 3_000.0
+        || home.get(Good::Planks) < 60.0
+        || free_ships(world).is_empty()
+    {
+        return;
+    }
+    // The nearest island of the home region not yet settled, then the far regions in turn.
+    let target = (0..n).filter(|&i| !claimed[i]).min_by(|&a, &b| {
+        let key = |i: usize| {
+            let isle = &islands()[i];
+            (
+                isle.region(),
+                (isle.center - islands()[0].center).length() as i64,
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    if let Some(i) = target {
+        found(world, log, now, i);
+    }
+}
+
+/// The yards: a shipyard on the home island once it has people to spare, and a ship ordered
+/// whenever none is free and none is building.
+fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
+    let coins = world.resource::<Economy>().coins;
+    let yards: Vec<(Entity, Building)> = world
+        .query::<(Entity, &Building)>()
+        .iter(world)
+        .filter(|(_, b)| b.kind == Kind::Shipyard)
+        .map(|(e, b)| (e, b.clone()))
+        .collect();
+    if yards.is_empty() {
+        let people: f32 = world.resource::<Economy>().islands[0]
+            .population
+            .iter()
+            .sum();
+        if people >= 120.0
+            && coins > 2_500.0
+            && !log.last.get(&(2000, None)).is_some_and(|t| now - t < 300.0)
+        {
+            log.last.insert((2000, None), now);
+            if let Some(at) = heart(world, 0) {
+                build_near(world, log, now, Kind::Shipyard, at, "ships to settle with");
+            }
+        }
+        return;
+    }
+    let building = yards.iter().any(|(e, _)| {
+        world
+            .get::<crate::shipyard::Yard>(*e)
+            .is_some_and(|y| !y.queue.is_empty())
+    });
+    if building || !free_ships(world).is_empty() || coins < 2_500.0 {
+        return;
+    }
+    if log.last.get(&(2001, None)).is_some_and(|t| now - t < 120.0) {
+        return;
+    }
+    log.last.insert((2001, None), now);
+    let (e, b) = &yards[0];
+    let labourers = world.resource::<Economy>().islands[b.island].population[1] >= 1.0;
+    let craft = if labourers && coins > 6_000.0 {
+        Craft::Barque
+    } else {
+        Craft::Schooner
+    };
+    match crate::shipyard::order(world, *e, craft) {
+        Ok(()) => {
+            log.act("ship ordered");
+            log.line(now, format!("ordered a {} at the shipyard", craft.name()));
+        }
+        Err(e) => log.refuse(now, &format!("order a {}", craft.name()), &e),
     }
 }
 
@@ -689,6 +1099,17 @@ fn watch(
             moored.remove(&v.name);
         }
     }
+    // Islands settled and craft launched since the last look.
+    let settled = world.resource::<crate::settle::Settled>().0.clone();
+    for (i, t) in settled.iter().skip(log.settled_seen) {
+        log.line(*t, format!("SETTLED {}", islands()[*i].name));
+    }
+    log.settled_seen = settled.len();
+    let launched = world.resource::<crate::shipyard::Launched>().0.clone();
+    for (c, n, t) in launched.iter().skip(log.launched_seen) {
+        log.line(*t, format!("LAUNCHED {} {n}", c.name()));
+    }
+    log.launched_seen = launched.len();
     // Tier milestones.
     let mut q = world.query::<&House>();
     let mut tiers = [0usize; Tier::COUNT];
@@ -759,6 +1180,9 @@ fn row(world: &mut World, frames: &[f32]) -> Value {
         "houses": tiers, "content_houses": content,
         "works": status,
         "carts": carts, "vessels": vessels,
+        "settled": world.resource::<crate::settle::Settled>().0.len(),
+        "launched": world.resource::<crate::shipyard::Launched>().0.len(),
+        "fleet_upkeep": econ.fleet_upkeep,
         "shelf": items.shelf.len(),
         "update_ms_avg": avg, "update_ms_max": max,
         "islands": isles,

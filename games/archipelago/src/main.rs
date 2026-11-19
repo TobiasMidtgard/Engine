@@ -2,7 +2,8 @@
 //! many buildings, carts, ships and aircraft at once (see `engine-design/anno-like-game.md`).
 //!
 //! ```sh
-//! cargo run -p archipelago --release                          # play
+//! cargo run -p archipelago --release                          # play a new game
+//! cargo run -p archipelago --release -- --sandbox             # start with a finished town
 //! cargo run -p archipelago --release -- --headless --tour     # writes screenshots/archipelago/*.png
 //! cargo run -p archipelago --release -- --headless --tour town,harbour
 //! cargo run -p archipelago --release -- --headless --play 240     # a scripted player, see playtest.rs
@@ -39,6 +40,8 @@ mod orders;
 mod playtest;
 mod regional;
 mod sea;
+mod settle;
+mod shipyard;
 mod sim;
 mod streets;
 mod tools;
@@ -65,6 +68,10 @@ fn main() {
         app.insert_resource(world::WoodsDensity(d));
     }
     add_game(&mut app);
+    // `--sandbox`: start with the finished town of earlier rounds (the tour always does).
+    if args.iter().any(|a| a == "--sandbox") || tour.is_some() {
+        app.insert_resource(settle::StartMode::Sandbox);
+    }
     // `--play <game minutes> [--play-speed 4] [--play-shots town,harbour]`: a scripted player.
     if let Some(i) = args.iter().position(|a| a == "--play") {
         let minutes = args
@@ -117,6 +124,9 @@ pub fn add_game(app: &mut App) {
         .init_resource::<tools::Tool>()
         .init_resource::<items::Items>()
         .init_resource::<world::Woods>()
+        .init_resource::<settle::StartMode>()
+        .init_resource::<settle::Settled>()
+        .init_resource::<shipyard::Launched>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, sim::economy_system)
         .add_systems(
@@ -143,7 +153,7 @@ pub fn add_game(app: &mut App) {
                     walkers::walk,
                 )
                     .chain(),
-                fleet::launch_smacks,
+                (fleet::launch_smacks, shipyard::tick).chain(),
                 fleet::plan_legs,
                 fleet::sail,
                 fleet::spin_props,
@@ -158,6 +168,7 @@ pub fn add_game(app: &mut App) {
         );
     globe::add(app);
     api::register(app);
+    settle::register(app);
 }
 
 /// Build the art, the islands, the start and the view.
@@ -183,7 +194,10 @@ fn setup(world: &mut World) {
     world.insert_resource(art);
     world::spawn_world(world);
     sea::spawn(world);
-    town::build_start(world);
+    match *world.resource::<settle::StartMode>() {
+        settle::StartMode::Sandbox => town::build_start(world),
+        settle::StartMode::Fresh => settle::fresh(world),
+    }
     fog::start(world);
     build::refresh(world);
     town::prewarm(world, 600.0);

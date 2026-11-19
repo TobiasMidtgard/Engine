@@ -12,7 +12,7 @@ use engine::core::math::noise::fbm2;
 use engine::prelude::*;
 use engine::render::{Mesh, NoMeshLod, NoVirtualGeometry, Vertex};
 
-use crate::fleet::{Roam, Vessel};
+use crate::fleet::Vessel;
 use crate::globe::{self, Frame};
 use crate::grid;
 use crate::island;
@@ -383,9 +383,7 @@ pub fn update(world: &mut World) {
         let mut q = world.query::<&Vessel>();
         for v in q.iter(world) {
             // The player's own: trade ships and aircraft, their smacks, and craft lying idle.
-            let own =
-                v.route.is_some() || matches!(v.roam, Roam::Fishing { .. } | Roam::Idle { .. });
-            if own {
+            if v.owned() {
                 let far =
                     if v.craft.flies() { 1_600.0 } else { 1_000.0 } * (1.0 + v.kit.sight as f64);
                 fog.reveal_map(v.at.x, v.at.z, far);

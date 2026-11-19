@@ -147,6 +147,12 @@ pub fn place_road(world: &mut World, c: IVec2, charge: bool) -> Result<(), Strin
     if !grid::cell_roadable(c) {
         return Err("Roads need dry, fairly flat land.".into());
     }
+    if charge
+        && let Some(i) = crate::island::island_at(grid::cell_center(c).x, grid::cell_center(c).y)
+        && !crate::settle::claimed(world, i)
+    {
+        return Err(crate::settle::unclaimed_text(i));
+    }
     if charge {
         let mut econ = world.resource_mut::<Economy>();
         let cost = Kind::Road.def().coins as f64;
@@ -261,6 +267,14 @@ pub fn place(
     }
     let isle = grid::check(world.resource::<Grid>(), kind, origin, rot)
         .map_err(|b| b.message().to_string())?;
+    // An island nobody has settled: its first harbour comes by ship; nothing else before it.
+    if charge && !crate::settle::claimed(world, isle) {
+        if kind == Kind::Harbour {
+            crate::settle::send_settlers(world, origin, rot, isle)?;
+            return Ok(Entity::PLACEHOLDER);
+        }
+        return Err(crate::settle::unclaimed_text(isle));
+    }
     if charge && crate::items::Host::of(kind).is_some() {
         // The company's renown says how many of each it may keep.
         let allowed = crate::items::allowed(world.resource::<Economy>());
@@ -544,6 +558,7 @@ pub fn demolish(world: &mut World, e: Entity) {
     };
     crate::fields::release_all(world, e);
     crate::items::vacate(world, e);
+    crate::shipyard::forget(world, e);
     if matches!(b.kind, Kind::Market | Kind::Harbour | Kind::Chapel) {
         crate::streets::mark_all(world);
     }

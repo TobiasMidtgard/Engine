@@ -170,6 +170,8 @@ pub struct Economy {
     /// Batches the Ship chandler finished since `items::tick` last looked: each is a
     /// consumable for the shelf.
     pub chandlery: u32,
+    /// Coins a minute the company's ships and aircraft cost to keep (set by `shipyard::tick`).
+    pub fleet_upkeep: f32,
 }
 
 impl Default for Economy {
@@ -184,6 +186,7 @@ impl Default for Economy {
             clock_s: 0.0,
             public_upkeep: 0.0,
             chandlery: 0,
+            fleet_upkeep: 0.0,
         }
     }
 }
@@ -371,7 +374,7 @@ pub fn step(
         }
     }
     // Workshops.
-    let mut upkeep = (econ.public_upkeep / 60.0 * dt) as f64;
+    let mut upkeep = ((econ.public_upkeep + econ.fleet_upkeep) / 60.0 * dt) as f64;
     let mut econ_chandlery = 0;
     let mut made = vec![[0.0f32; Good::COUNT]; n];
     let plain = Boost::default();

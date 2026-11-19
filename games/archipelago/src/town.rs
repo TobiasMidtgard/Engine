@@ -127,6 +127,12 @@ pub fn join_to_roads(world: &mut World, e: Entity) -> bool {
     join_within(world, e, 14_000)
 }
 
+/// [`join_to_roads`] for a works out in the country (a woodcutter in the woods): a track of
+/// up to half a kilometre.
+pub fn join_far(world: &mut World, e: Entity) -> bool {
+    join_within(world, e, 90_000)
+}
+
 /// [`join_to_roads`], giving up once `cap` cells have been looked at.
 fn join_within(world: &mut World, e: Entity, cap: usize) -> bool {
     let Some(b) = world.get::<Building>(e).cloned() else {
@@ -403,7 +409,7 @@ fn harbour_toward(world: &mut World, isle: usize, toward: DVec2) -> Option<Entit
 const OCEAN_ROUTE: &str = "Sarrowmere packet";
 
 /// The street from a harbour's back to `to`.
-fn street_inland(world: &mut World, harbour: Entity, len_cells: i32) -> DVec2 {
+pub(crate) fn street_inland(world: &mut World, harbour: Entity, len_cells: i32) -> DVec2 {
     let b = world.get::<Building>(harbour).cloned().unwrap();
     let back = -grid::front_dir(b.rot);
     let (w, d) = b.kind.footprint(b.rot);
@@ -892,26 +898,7 @@ pub fn build_start(world: &mut World) {
             }
         }
     }
-    {
-        let (m, heading) = mooring(&hb);
-        let out = grid::front_dir(hb.rot).as_dvec2();
-        let side = DVec2::new(out.y, -out.x);
-        let quay = m + out * 46.0 - side * 58.0;
-        let away = quay + out * 1300.0 + side * 500.0;
-        let e = spawn_vessel(
-            world,
-            Craft::Barque,
-            "Pedlar's barque Magpie",
-            DVec3::new(quay.x, 0.0, quay.y),
-            heading,
-            None,
-            Roam::Pedlar { quay, away },
-            7_707,
-        );
-        if let Some(mut v) = world.get_mut::<crate::fleet::Vessel>(e) {
-            v.doing = crate::fleet::Doing::Moored(crate::fleet::PEDLAR_STAYS_S);
-        }
-    }
+    pedlar_calls(world, h_harbour);
     // `ARCH_FLEET_REVIEW=1`: one of every craft lying in a line off the home quay, for the
     // fleet picture (tour view `fleet`). They never sail.
     if std::env::var_os("ARCH_FLEET_REVIEW").is_some() {
@@ -1441,7 +1428,7 @@ pub fn build_start(world: &mut World) {
     let mut items = world.resource_mut::<crate::items::Items>();
     items.restock(&owned);
     items.market_open = true;
-    crate::fleet::spawn_traffic(world);
+    crate::fleet::spawn_traffic(world, true);
     // The company's ships go out with some gear aboard.
     crate::gear::fit_out(
         world,
@@ -1467,6 +1454,32 @@ pub fn build_start(world: &mut World) {
         world.resource::<Grid>().roads.len(),
         started.elapsed().as_secs_f32()
     );
+}
+
+/// The pedlar of items starts calling at `harbour` (the home quay of the sandbox, the first
+/// harbour of a new game).
+pub fn pedlar_calls(world: &mut World, harbour: Entity) {
+    let Some(hb) = world.get::<Building>(harbour).cloned() else {
+        return;
+    };
+    let (m, heading) = mooring(&hb);
+    let out = grid::front_dir(hb.rot).as_dvec2();
+    let side = DVec2::new(out.y, -out.x);
+    let quay = m + out * 46.0 - side * 58.0;
+    let away = quay + out * 1300.0 + side * 500.0;
+    let e = spawn_vessel(
+        world,
+        Craft::Barque,
+        "Pedlar's barque Magpie",
+        DVec3::new(quay.x, 0.0, quay.y),
+        heading,
+        None,
+        Roam::Pedlar { quay, away },
+        7_707,
+    );
+    if let Some(mut v) = world.get_mut::<crate::fleet::Vessel>(e) {
+        v.doing = crate::fleet::Doing::Moored(crate::fleet::PEDLAR_STAYS_S);
+    }
 }
 
 /// Run the economy ahead (no carts, no drawing) so the start has full houses and stock.

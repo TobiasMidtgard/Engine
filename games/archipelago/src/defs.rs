@@ -220,9 +220,9 @@ impl Tier {
         match self {
             Tier::Fisherfolk => {
                 const W: &[Want] = &[
-                    service(Kind::Market, 3.0, 0.4),
-                    good(Good::Fish, 4.0, 0.8),
-                    good(Good::Clothes, 3.0, 0.8),
+                    service(Kind::Market, 3.0, 0.6),
+                    good(Good::Fish, 4.0, 1.2),
+                    good(Good::Clothes, 3.0, 1.0),
                 ];
                 W
             }
@@ -318,7 +318,8 @@ impl Tier {
     pub fn next(self) -> Option<(Tier, &'static [(Good, f32)])> {
         match self {
             Tier::Fisherfolk => {
-                Some((Tier::Labourers, &[(Good::Planks, 2.0), (Good::Bricks, 2.0)]))
+                // Timber only: bricks are made by Labourers, so a new settlement can climb.
+                Some((Tier::Labourers, &[(Good::Planks, 3.0)]))
             }
             Tier::Labourers => Some((
                 Tier::Burghers,
@@ -422,6 +423,8 @@ pub enum Kind {
     HarbourOffice,
     /// Makes consumable items (oil, bunting, coal, ale, spares, fireworks) for the shelf.
     Chandler,
+    /// Builds ships on its slipway (see `shipyard`).
+    Shipyard,
 }
 
 /// Where a building may stand.
@@ -501,7 +504,7 @@ pub const DEFS: &[Def] = &[
         blurb: "Warehouse and quay. Ships load and unload here; every road leads to it.",
         coins: 400,
         cost: &[(Good::Planks, 8)],
-        upkeep: 10.0,
+        upkeep: 6.0,
         site: Site::Coast,
         ..def(Kind::Harbour, "Harbour", Category::Harbour, (6, 4))
     },
@@ -514,7 +517,7 @@ pub const DEFS: &[Def] = &[
         blurb: "Houses within reach count as having a market.",
         coins: 150,
         cost: &[(Good::Planks, 4)],
-        upkeep: 5.0,
+        upkeep: 3.0,
         reach: 16,
         ..def(Kind::Market, "Market square", Category::Public, (5, 5))
     },
@@ -533,7 +536,7 @@ pub const DEFS: &[Def] = &[
         workers: Some((Tier::Fisherfolk, 20)),
         output: Some(Good::Fish),
         cycle_s: 30.0,
-        upkeep: 5.0,
+        upkeep: 3.0,
         site: Site::Coast,
         ..def(Kind::Fishery, "Fishery", Category::Harbour, (3, 3))
     },
@@ -550,12 +553,11 @@ pub const DEFS: &[Def] = &[
     Def {
         blurb: "Saws logs into planks.",
         coins: 100,
-        cost: &[(Good::Logs, 2)],
         workers: Some((Tier::Fisherfolk, 10)),
         input: Some(Good::Logs),
         output: Some(Good::Planks),
         cycle_s: 15.0,
-        upkeep: 5.0,
+        upkeep: 3.0,
         ..def(Kind::Sawmill, "Sawmill", Category::Production, (3, 4))
     },
     Def {
@@ -565,7 +567,7 @@ pub const DEFS: &[Def] = &[
         workers: Some((Tier::Fisherfolk, 10)),
         output: Some(Good::Wool),
         cycle_s: 30.0,
-        upkeep: 5.0,
+        upkeep: 3.0,
         needs_fertility: true,
         ..def(Kind::SheepFarm, "Sheep farm", Category::Farms, (6, 6))
     },
@@ -577,7 +579,7 @@ pub const DEFS: &[Def] = &[
         input: Some(Good::Wool),
         output: Some(Good::Clothes),
         cycle_s: 30.0,
-        upkeep: 10.0,
+        upkeep: 6.0,
         ..def(Kind::Weaver, "Weaver", Category::Production, (3, 4))
     },
     Def {
@@ -875,6 +877,16 @@ pub const DEFS: &[Def] = &[
         cycle_s: 120.0,
         upkeep: 15.0,
         ..def(Kind::Chandler, "Ship chandler", Category::Harbour, (4, 3))
+    },
+    Def {
+        blurb: "A slipway, a sawpit and a sail loft: builds schooners for a start, then barques, \
+                paddle steamers, steamers and clippers as the island's people move up. Each \
+                ship is paid for with coins, planks and sailcloth when it is laid down.",
+        coins: 1_000,
+        cost: &[(Good::Planks, 20)],
+        upkeep: 20.0,
+        site: Site::Coast,
+        ..def(Kind::Shipyard, "Shipyard", Category::Harbour, (9, 6))
     },
 ];
 

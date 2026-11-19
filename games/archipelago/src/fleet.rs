@@ -338,6 +338,21 @@ pub enum Doing {
     Lingering(f32),
 }
 
+impl Vessel {
+    /// One of the company's: on a route, fishing for one of its fisheries, lying idle or on
+    /// an errand of the player's.
+    pub fn owned(&self) -> bool {
+        self.route.is_some()
+            || matches!(
+                self.roam,
+                Roam::Fishing { .. }
+                    | Roam::Idle { .. }
+                    | Roam::Found { .. }
+                    | Roam::Circling { .. }
+            )
+    }
+}
+
 /// A ship or aircraft and its orders.
 #[derive(Component, Clone, Debug)]
 pub struct Vessel {
@@ -382,11 +397,21 @@ pub enum Roam {
     Crossing { a: DVec2, b: DVec2 },
     /// A plane flying a loop through these points.
     Loop { points: Arc<Vec<DVec3>> },
+    /// One of the company's planes off duty, circling its mast.
+    Circling { points: Arc<Vec<DVec3>> },
     /// Off duty: lying at a harbour's mooring or an airship mast until given a route.
     Idle { at: DVec3 },
     /// The pedlar of items: anchors off `quay` with his stock for a while, then stands out
     /// to `away` for more.
     Pedlar { quay: DVec2, away: DVec2 },
+    /// Bound to raise the first harbour of island `isle` at `origin` (see `settle`), calling
+    /// first at the harbour `stores` (a building id) for the settlers' stores if it is set.
+    Found {
+        isle: usize,
+        origin: IVec2,
+        rot: u8,
+        stores: Option<u32>,
+    },
 }
 
 /// Seconds the pedlar lies off the quay with his stock, and stays away.
@@ -649,6 +674,13 @@ fn arrive(world: &mut World, v: &mut Vessel) {
             };
         }
         (Roam::Idle { .. }, None) => v.doing = Doing::Moored(30.0),
+        (
+            Roam::Found {
+                stores: Some(_), ..
+            },
+            None,
+        ) => crate::settle::take_stores(world, v),
+        (Roam::Found { .. }, None) => crate::settle::land(world, v),
         _ => v.doing = Doing::Lingering(if v.craft.flies() { 0.01 } else { 4.0 }),
     }
 }
@@ -757,7 +789,7 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
             let to = if far(a) < far(b) { *b } else { *a };
             Some(DVec3::new(to.x, 0.0, to.y))
         }
-        (Roam::Loop { points }, None) => {
+        (Roam::Loop { points } | Roam::Circling { points }, None) => {
             let i = v.next_stop % points.len().max(1);
             v.next_stop += 1;
             points.get(i).copied()
@@ -778,6 +810,24 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
                 *quay
             };
             Some(DVec3::new(to.x, 0.0, to.y))
+        }
+        (
+            Roam::Found {
+                stores: Some(id), ..
+            },
+            None,
+        ) => building_by_id(world, *id).map(|b| {
+            let (p, _) = mooring(&b);
+            DVec3::new(p.x, 0.0, p.y)
+        }),
+        (
+            Roam::Found {
+                isle, origin, rot, ..
+            },
+            None,
+        ) => {
+            let p = crate::settle::landing(*origin, *rot, *isle);
+            Some(DVec3::new(p.x, 0.0, p.y))
         }
         (Roam::None, None) => None,
     };
@@ -980,8 +1030,8 @@ pub fn launch_smacks(world: &mut World) {
 #[derive(Component)]
 pub struct HasSmack;
 
-/// Free traders and mail planes that come with the map.
-pub fn spawn_traffic(world: &mut World) {
+/// Free traders and (`planes`) the mail planes that come with the map.
+pub fn spawn_traffic(world: &mut World, planes: bool) {
     let crossings = [
         (DVec2::new(-5200.0, 400.0), DVec2::new(5200.0, -300.0)),
         (DVec2::new(600.0, -5200.0), DVec2::new(-400.0, 5200.0)),
@@ -1016,6 +1066,10 @@ pub fn spawn_traffic(world: &mut World) {
             v.doing = Doing::Lingering(0.1);
             v.speed = v.craft.speed();
         }
+    }
+    if !planes {
+        far_traffic(world, false);
+        return;
     }
     // The mail planes and seaplanes fly the home isles.
     let isles: Vec<&island::Island> = island::islands()
@@ -1071,12 +1125,12 @@ pub fn spawn_traffic(world: &mut World) {
             v.speed = v.craft.speed();
         }
     }
-    far_traffic(world);
+    far_traffic(world, true);
 }
 
 /// The far regions' own traffic: free traders working each coast, and a mail plane round
 /// its settlements and islands.
-fn far_traffic(world: &mut World) {
+fn far_traffic(world: &mut World, planes: bool) {
     for k in 1..globe::regions().len() {
         let region = &globe::regions()[k];
         let o = globe::sheet_origin(k);
@@ -1109,6 +1163,9 @@ fn far_traffic(world: &mut World) {
                 v.doing = Doing::Lingering(0.1);
                 v.speed = v.craft.speed();
             }
+        }
+        if !planes {
+            continue;
         }
         // Round the coasts (not over the continents' mountains).
         let pts: Vec<DVec3> = island::islands()

@@ -31,6 +31,8 @@ enum Aim {
     Craft(Craft),
     /// The pedlar's barque.
     Pedlar,
+    /// A vessel by name.
+    Ship(&'static str),
     /// The fleet review line (`ARCH_FLEET_REVIEW=1`), seen from the beam: yaw 0 looks at the
     /// hulls' sides.
     Review,
@@ -464,6 +466,33 @@ fn views() -> Vec<View> {
             ..v("pedlar", Aim::Pedlar, 0.5, 120.0)
         },
         v("harbour", Aim::Kind(K::Harbour, 0), 3.4, 190.0),
+        // A new game (`--play`): the barque off the empty coast, the first harbour and the
+        // shipyard with a hull on its slip, and the first island settled from home.
+        View {
+            pitch_deg: Some(22.0),
+            ..v("new_game", Aim::Ship(crate::settle::FIRST_SHIP), 2.4, 260.0)
+        },
+        View {
+            pitch_deg: Some(40.0),
+            ..v("first_harbour", Aim::Front(K::Harbour, 0), 0.6, 150.0)
+        },
+        View {
+            pitch_deg: Some(34.0),
+            ..v("shipyard", Aim::Front(K::Shipyard, 0), 0.7, 120.0)
+        },
+        View {
+            pitch_deg: Some(24.0),
+            clean: true,
+            ..v("slipway", Aim::Front(K::Shipyard, 0), 0.35, 70.0)
+        },
+        View {
+            pitch_deg: Some(45.0),
+            ..v("new_town", Aim::Town, 0.8, 420.0)
+        },
+        View {
+            pitch_deg: Some(38.0),
+            ..v("outpost", Aim::Front(K::Harbour, 4), 0.6, 200.0)
+        },
         v("market", Aim::Kind(K::Market, 0), 1.2, 90.0),
         View {
             pitch_deg: Some(30.0),
@@ -557,6 +586,10 @@ fn aim_point(world: &mut World, aim: &Aim) -> Option<DVec3> {
                 .find(|v| matches!(v.roam, crate::fleet::Roam::Pedlar { .. }))
                 .map(|v| v.at)?
         }
+        Aim::Ship(name) => {
+            let mut q = world.query::<&Vessel>();
+            q.iter(world).find(|v| v.name == *name).map(|v| v.at)?
+        }
         Aim::At(x, z) => DVec3::new(*x, 0.0, *z),
     })
 }
@@ -612,6 +645,10 @@ fn craft_heading(world: &mut World, aim: &Aim) -> f32 {
         Aim::Pedlar => q
             .iter(world)
             .find(|v| matches!(v.roam, crate::fleet::Roam::Pedlar { .. }))
+            .map_or(0.0, |v| v.heading),
+        Aim::Ship(name) => q
+            .iter(world)
+            .find(|v| v.name == *name)
             .map_or(0.0, |v| v.heading),
         _ => 0.0,
     }
@@ -716,7 +753,10 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
                 cam.goal_yaw = view.yaw + heading;
                 cam.goal_dist = view.dist;
                 cam.pitch_override = view.pitch_deg.map(f32::to_radians);
-                cam.free_height = matches!(view.aim, Aim::Craft(_) | Aim::Pedlar | Aim::Review);
+                cam.free_height = matches!(
+                    view.aim,
+                    Aim::Craft(_) | Aim::Pedlar | Aim::Review | Aim::Ship(_)
+                );
                 cam.snap();
             }
         }
@@ -767,8 +807,10 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
         settle(app, cap);
         // Exposure and the environment, following a moving craft.
         for _ in 0..8 {
-            if matches!(view.aim, Aim::Craft(_) | Aim::Pedlar | Aim::Review)
-                && let Some(p) = aim_point(&mut app.world, &view.aim)
+            if matches!(
+                view.aim,
+                Aim::Craft(_) | Aim::Pedlar | Aim::Review | Aim::Ship(_)
+            ) && let Some(p) = aim_point(&mut app.world, &view.aim)
             {
                 let mut q = app.world.query::<&mut StrategyCam>();
                 if let Some(mut cam) = q.iter_mut(&mut app.world).next() {

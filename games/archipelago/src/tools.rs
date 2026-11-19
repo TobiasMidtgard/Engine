@@ -129,6 +129,26 @@ pub fn action(world: &mut World, a: &str) {
     {
         build::demolish(world, e);
         select(world, None);
+    } else if let Some(c) = a
+        .strip_prefix("isle.yard.order:")
+        .and_then(crate::vessels::Craft::from_name)
+    {
+        // Order a craft at the selected shipyard or airship mast.
+        let Some(e) = world.resource::<Hand>().selected else {
+            return;
+        };
+        match crate::shipyard::order(world, e, c) {
+            Ok(()) => crate::hud::show_card(world),
+            Err(msg) => toast(world, "Shipyard", &msg),
+        }
+    } else if a == "isle.yard.cancel" {
+        let Some(e) = world.resource::<Hand>().selected else {
+            return;
+        };
+        match crate::shipyard::cancel(world, e) {
+            Ok(_) => crate::hud::show_card(world),
+            Err(msg) => toast(world, "Shipyard", &msg),
+        }
     } else if let Some(rest) = a.strip_prefix("isle.route.") {
         if let Err(msg) = route_action(world, rest) {
             toast(world, "Trade route", &msg);

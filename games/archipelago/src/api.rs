@@ -293,6 +293,27 @@ pub fn register(app: &mut App) {
             }
             let first = build::by_id(world, stops[0].at).and_then(|e| world.get::<Building>(e).cloned()).ok_or("no first stop")?;
             let name = args["name"].as_str().unwrap_or("New route").to_string();
+            // A new game: the route takes a craft the company has, off duty (built at a yard).
+            if *world.resource::<crate::settle::StartMode>() == crate::settle::StartMode::Fresh {
+                let named = args["vessel"].as_str().and_then(|n| orders::find_vessel(world, n));
+                let e = match named {
+                    Some(e) => e,
+                    None => {
+                        let mut q = world.query::<(Entity, &Vessel)>();
+                        q.iter(world)
+                            .find(|(_, v)| v.craft == craft && v.route.is_none() && v.owned() && !matches!(v.roam, Roam::Fishing { .. } | Roam::Found { .. }))
+                            .map(|(e, _)| e)
+                            .ok_or(format!("No {} of yours is off duty: build one at a {}.", craft.name().to_lowercase(), if craft.flies() { "airship mast" } else { "shipyard" }))?
+                    }
+                };
+                let r = {
+                    let mut routes = world.resource_mut::<Routes>();
+                    routes.0.push(Route { name, stops, air: craft.flies() });
+                    routes.0.len() - 1
+                };
+                orders::assign(world, e, r)?;
+                return Ok(json!({"route": r, "vessel": e.to_bits()}));
+            }
             let vessel = args["vessel"].as_str().unwrap_or(craft.name()).to_string();
             let r = {
                 let mut routes = world.resource_mut::<Routes>();
