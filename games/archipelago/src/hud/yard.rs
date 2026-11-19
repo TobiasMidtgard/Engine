@@ -532,7 +532,7 @@ fn designer(
                 .class("row")
                 .with_style(|s| s.gap(5.0).wrap(true).align_items(Align::Center))
                 .child(brass::label("Saved", true))
-                .children(saved.iter().map(|(i, name, f)| {
+                .children(saved.iter().map(|(_, name, f)| {
                     let same = f == fit;
                     El::new()
                         .class(if same {
@@ -540,7 +540,7 @@ fn designer(
                         } else {
                             "button brass_button_dark"
                         })
-                        .on_click(format!("isle.yard.load:{i}"))
+                        .on_click(format!("isle.yard.load:{name}"))
                         .with_style(|s| s.padding([3.0, 8.0]).gap(3.0))
                         .tooltip(
                             name.clone(),
@@ -903,13 +903,12 @@ pub fn action(world: &mut World, a: &str) -> bool {
         refresh(world);
         return true;
     }
-    if let Some(i) = a
-        .strip_prefix("isle.yard.load:")
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        let d = world
-            .get_resource::<fittings::Designs>()
-            .and_then(|d| d.0.get(i).map(|x| (x.craft, x.fit)));
+    if let Some(name) = a.strip_prefix("isle.yard.load:") {
+        let d = world.get_resource::<fittings::Designs>().and_then(|d| {
+            d.0.iter()
+                .find(|x| x.name == name)
+                .map(|x| (x.craft, x.fit))
+        });
         if let Some(d) = d {
             world.resource_mut::<YardCard>().design = Some(d);
         }
