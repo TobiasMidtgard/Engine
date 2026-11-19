@@ -164,6 +164,8 @@ pub fn action(world: &mut World, a: &str) {
             Ok(_) => crate::hud::show_card(world),
             Err(msg) => toast(world, "Shipyard", &msg),
         }
+    } else if a == "isle.house.up" || a == "isle.house.down" || a == "isle.island.up_all" {
+        house_order(world, a);
     } else if a == "isle.ruin.rebuild" {
         // Rebuild the selected ruin for half its price.
         let Some(id) = world
@@ -189,6 +191,42 @@ pub fn action(world: &mut World, a: &str) {
         && let Err(msg) = crate::gear::action(world, rest)
     {
         toast(world, "Gear", &msg);
+    }
+}
+
+/// Moving houses up or down a tier, the player's order (see `reports`): the selected house,
+/// or every ready house on the selected building's island (the home island when nothing is
+/// selected).
+fn house_order(world: &mut World, a: &str) {
+    let sel = world.resource::<Hand>().selected;
+    let house = sel.filter(|e| world.get::<crate::sim::House>(*e).is_some());
+    let result = match (a, house) {
+        ("isle.house.up", Some(e)) => crate::reports::move_up(world, e)
+            .map(|w| w.unwrap_or_else(|| "The house moved up a tier.".into())),
+        ("isle.house.down", Some(e)) => crate::reports::move_down(world, e)
+            .map(|()| "The house moved down a tier; people beyond its room moved out.".into()),
+        ("isle.island.up_all", _) => {
+            let i = sel
+                .and_then(|e| world.get::<crate::sim::Building>(e).map(|b| b.island))
+                .unwrap_or(0);
+            let (moved, waiting) = crate::reports::move_up_all(world, i);
+            let held: u32 = waiting.values().sum();
+            Ok(match (moved, held) {
+                (0, 0) => "No house is ready to move up.".into(),
+                (m, 0) => format!("{m} houses moved up a tier."),
+                (m, h) => format!(
+                    "{m} houses moved up a tier; {h} ready ones wait so the works keep their hands."
+                ),
+            })
+        }
+        _ => Err("Select a house first.".into()),
+    };
+    match result {
+        Ok(msg) => {
+            crate::hud::show_card(world);
+            toast(world, "Moving up", &msg);
+        }
+        Err(msg) => toast(world, "Moving up", &msg),
     }
 }
 
@@ -298,6 +336,18 @@ pub fn input(world: &mut World) {
         }
         if keys.just_pressed(KeyCode::Delete) {
             set_tool(world, Tool::Demolish);
+        }
+        // U: move the selected house up a tier; Shift+U: every ready house on its island.
+        if keys.just_pressed(KeyCode::U) {
+            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            action(
+                world,
+                if shift {
+                    "isle.island.up_all"
+                } else {
+                    "isle.house.up"
+                },
+            );
         }
         for (k, v) in [
             (KeyCode::Digit1, 1.0),

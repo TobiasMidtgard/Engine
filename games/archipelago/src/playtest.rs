@@ -896,15 +896,18 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
         _ => true,
     });
     let short_hands = (0..Tier::COUNT).any(|t| books.jobs[t] > 0.0 && books.workforce[t] < 0.9);
-    // Houses that are far from full want goods or a service, not more houses beside them.
-    let (mut held, mut room) = (0.0f32, 0.0f32);
-    for (b, h) in world.query::<(&Building, &House)>().iter(world) {
+    // Houses still filling toward what their needs allow: wait for them before building more.
+    let (mut held, mut toward) = (0.0f32, 0.0f32);
+    for (b, h, boost) in world
+        .query::<(&Building, &House, Option<&crate::items::Boost>)>()
+        .iter(world)
+    {
         if b.island == i {
             held += h.residents;
-            room += h.tier.capacity();
+            toward += crate::sim::appraise(h, &books, boost).residents;
         }
     }
-    if room > 0.0 && held < room * 0.8 {
+    if toward > 0.0 && held < toward * 0.85 {
         return;
     }
     if log.last.get(&(i, None)).is_some_and(|t| now - t < 120.0) {
