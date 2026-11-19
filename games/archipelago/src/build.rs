@@ -814,6 +814,13 @@ pub fn refresh(world: &mut World) {
         .filter(|(_, b)| !b.kind.def().works())
         .map(|(_, b)| b.kind.def().upkeep)
         .sum();
+    // Smoky works, and how far (centre to centre) their smoke spoils a street.
+    let smoky: Vec<(usize, DVec2)> = all
+        .iter()
+        .filter(|(_, b)| b.kind.smoky())
+        .map(|(_, b)| (b.island, grid::footprint_center(b.kind, b.origin, b.rot)))
+        .collect();
+    let smoke_m = (crate::defs::SMOKE_CELLS + 2.0) as f64 * CELL_M;
     let mut q = world.query::<(&Building, &mut House, Option<&crate::items::Boost>)>();
     for (b, mut h, boost) in q.iter_mut(world) {
         let c = grid::footprint_center(b.kind, b.origin, b.rot);
@@ -827,6 +834,10 @@ pub fn refresh(world: &mut World) {
                 || boost.is_some_and(|x| x.serves.contains(&kind));
         }
         h.paved = door.iter().any(|c| paved.contains(c));
+        // Smoke from a works next door spoils the street.
+        h.smoke = smoky
+            .iter()
+            .any(|(isle, p)| *isle == b.island && (*p - c).length() <= smoke_m);
     }
     // Woodcutters: wooded cells in reach that nothing stands on (the trees planted there
     // follow the same woods field).

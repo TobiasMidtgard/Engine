@@ -1962,7 +1962,7 @@ pub fn tick(world: &mut World) {
     }
     let mut content: HashMap<usize, u32> = HashMap::new();
     for (b, h) in world.query::<(&Building, &House)>().iter(world) {
-        if h.tier == Tier::Burghers && h.content_s > 0.0 {
+        if h.tier == Tier::Burghers && h.is_content() {
             *content.entry(b.island).or_default() += 1;
         }
     }
@@ -2117,7 +2117,7 @@ fn run_timers(world: &mut World, dt: f32) {
     let content: Vec<Building> = world
         .query::<(&Building, &House)>()
         .iter(world)
-        .filter(|(_, h)| h.content_s > 0.0)
+        .filter(|(_, h)| h.is_content())
         .map(|(b, _)| b.clone())
         .collect();
     let landed = world.resource::<Items>().landed.clone();
@@ -2454,12 +2454,7 @@ fn doing(world: &mut World, seat: &Seat, h: &Held) -> Vec<String> {
                         Some(Need::Good(g)) if h.tier.needs().0.contains(&g) => {
                             supply[seat.island][g.index()].min(1.0)
                         }
-                        Some(Need::Service(s)) => h
-                            .tier
-                            .services()
-                            .iter()
-                            .position(|k| *k == s)
-                            .map_or(0.0, |i| if h.services[i] { 1.0 } else { 0.0 }),
+                        Some(Need::Service(s)) if h.tier.services().contains(&s) && h.has(s) => 1.0,
                         _ => 0.0,
                     };
                     if met > 0.0 {

@@ -255,6 +255,14 @@ impl Default for Incidents {
 }
 
 impl Incidents {
+    /// Start the dice from `seed` (the playtest's `--seed`).
+    pub fn reseed(&mut self, seed: u64) {
+        self.rng = 0x5eed_f1e5_0000_0001 ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        if self.rng == 0 {
+            self.rng = 1;
+        }
+    }
+
     fn unit(&mut self) -> f32 {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 7;
@@ -298,10 +306,8 @@ fn risk(b: &Building, house: Option<&House>, crowd: u32, paved: bool, ships: f32
             Tier::Labourers => 0.0006,
             Tier::Burghers => 0.0004,
         };
-        // Unmet needs: the more of them, the likelier a riot; fisherfolk grumble less.
-        let base = h.tier.capacity();
-        let short = (1.0 - h.residents / base).clamp(0.0, 1.0);
-        let unhappy = if h.content_s > 0.0 { 0.0 } else { 0.3 + short };
+        // Unhappy houses riot: the further below 40, the likelier; fisherfolk grumble less.
+        let unhappy = ((40.0 - h.happiness) / 20.0).max(0.0);
         riot = 0.0025
             * unhappy
             * match h.tier {

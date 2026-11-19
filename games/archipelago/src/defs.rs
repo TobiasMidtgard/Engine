@@ -158,34 +158,109 @@ pub enum Need {
     Service(Kind),
 }
 
+/// The group a need counts toward. A basic category is met when the points of its needs,
+/// each times how well it is supplied, reach the tier's threshold; luxuries only pay and
+/// please.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Cat {
+    Food,
+    Clothing,
+    Square,
+    Luxury,
+}
+
+impl Cat {
+    /// The categories that bring people and decide moving up.
+    pub const BASIC: [Cat; 3] = [Cat::Food, Cat::Clothing, Cat::Square];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Cat::Food => "Food",
+            Cat::Clothing => "Clothing",
+            Cat::Square => "Square",
+            Cat::Luxury => "Luxury",
+        }
+    }
+}
+
 /// One need of a tier, with what meeting it is worth: plain numbers, never a percentage.
 #[derive(Clone, Copy, Debug)]
 pub struct Want {
     pub need: Need,
-    /// People it brings into a full house (0: a luxury, nobody leaves without it).
+    pub cat: Cat,
+    /// Points toward its category's threshold (0 for a luxury).
+    pub points: f32,
+    /// People it brings into the house (0: a luxury, nobody leaves without it).
     pub people: f32,
-    /// Coins a minute a house pays while it is met.
+    /// Coins a minute a full house pays while it is met.
     pub coins: f32,
+    /// Happiness it adds while met.
+    pub joy: f32,
+    /// People of the tier the island must have before the need is asked for.
+    pub unlock: f32,
 }
 
-const fn good(g: Good, people: f32, coins: f32) -> Want {
-    Want {
-        need: Need::Good(g),
-        people,
-        coins,
+impl Want {
+    pub fn basic(&self) -> bool {
+        self.cat != Cat::Luxury
     }
 }
 
-const fn service(k: Kind, people: f32, coins: f32) -> Want {
+/// A basic need: category, points, people, coins, joy, unlock.
+const fn good(
+    g: Good,
+    cat: Cat,
+    points: f32,
+    people: f32,
+    coins: f32,
+    joy: f32,
+    unlock: f32,
+) -> Want {
     Want {
-        need: Need::Service(k),
+        need: Need::Good(g),
+        cat,
+        points,
         people,
         coins,
+        joy,
+        unlock,
+    }
+}
+
+const fn service(k: Kind, points: f32, people: f32, coins: f32, joy: f32, unlock: f32) -> Want {
+    Want {
+        need: Need::Service(k),
+        cat: Cat::Square,
+        points,
+        people,
+        coins,
+        joy,
+        unlock,
+    }
+}
+
+/// A luxury: coins, joy, unlock.
+const fn luxury(need: Need, coins: f32, joy: f32, unlock: f32) -> Want {
+    Want {
+        need,
+        cat: Cat::Luxury,
+        points: 0.0,
+        people: 0.0,
+        coins,
+        joy,
+        unlock,
     }
 }
 
 /// Who lives in a house and works in the buildings that ask for them.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Default)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Default, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
     #[default]
@@ -196,6 +271,11 @@ pub enum Tier {
 
 /// The most services a tier asks for (the size of [`crate::sim::House::services`]).
 pub const MAX_SERVICES: usize = 4;
+
+/// The most needs a tier has (bits of [`crate::sim::IslandBooks::unlocked`]).
+pub const MAX_WANTS: usize = 16;
+
+use Cat::{Clothing, Food};
 
 impl Tier {
     /// How many tiers there are.
@@ -215,102 +295,146 @@ impl Tier {
         }
     }
 
-    /// Everything the tier wants, with the people and the coins each need is worth.
+    /// Everything the tier wants: basic needs first (in category order), then luxuries.
     pub fn wants(self) -> &'static [Want] {
+        use Good as G;
+        use Kind as K;
         match self {
             Tier::Fisherfolk => {
                 const W: &[Want] = &[
-                    service(Kind::Market, 3.0, 0.6),
-                    good(Good::Fish, 4.0, 1.2),
-                    good(Good::Clothes, 3.0, 1.0),
+                    good(G::Fish, Food, 1.0, 4.0, 1.2, 0.0, 0.0),
+                    good(G::Clothes, Clothing, 1.0, 3.0, 1.0, 0.0, 60.0),
+                    service(K::Market, 1.0, 3.0, 0.6, 5.0, 0.0),
+                    luxury(Need::Service(K::Chapel), 0.4, 15.0, 100.0),
+                    luxury(Need::Good(G::Ale), 1.0, 20.0, 150.0),
                 ];
                 W
             }
             Tier::Labourers => {
                 const W: &[Want] = &[
-                    service(Kind::Market, 3.0, 0.8),
-                    service(Kind::Chapel, 3.0, 0.8),
-                    good(Good::Fish, 4.0, 1.2),
-                    good(Good::Clothes, 4.0, 1.4),
-                    good(Good::Bread, 6.0, 1.8),
-                    good(Good::Ale, 0.0, 3.0),
-                    good(Good::Rum, 0.0, 2.0),
-                    good(Good::Salt, 0.0, 1.0),
-                    good(Good::Dates, 0.0, 1.4),
-                    good(Good::Furs, 0.0, 2.4),
-                    good(Good::Oil, 0.0, 1.8),
+                    good(G::Fish, Food, 1.0, 4.0, 1.2, 0.0, 0.0),
+                    good(G::Bread, Food, 2.0, 6.0, 2.2, 5.0, 0.0),
+                    good(G::SaltFish, Food, 2.0, 5.0, 2.0, 10.0, 300.0),
+                    good(G::Clothes, Clothing, 1.0, 4.0, 1.4, 0.0, 0.0),
+                    good(G::Coats, Clothing, 2.0, 4.0, 2.6, 10.0, 400.0),
+                    service(K::Market, 1.0, 3.0, 0.8, 5.0, 0.0),
+                    service(K::Chapel, 1.0, 3.0, 0.8, 10.0, 50.0),
+                    luxury(Need::Good(G::Ale), 3.0, 20.0, 100.0),
+                    luxury(Need::Good(G::Salt), 1.0, 8.0, 200.0),
+                    luxury(Need::Good(G::Rum), 2.0, 15.0, 300.0),
+                    luxury(Need::Good(G::Dates), 1.4, 10.0, 300.0),
+                    luxury(Need::Good(G::Oil), 1.8, 10.0, 400.0),
+                    luxury(Need::Good(G::Furs), 2.4, 10.0, 500.0),
                 ];
                 W
             }
             Tier::Burghers => {
                 const W: &[Want] = &[
-                    service(Kind::Market, 3.0, 1.0),
-                    service(Kind::Chapel, 3.0, 1.0),
-                    service(Kind::School, 4.0, 1.6),
-                    service(Kind::Tavern, 4.0, 1.6),
-                    good(Good::Bread, 5.0, 2.0),
-                    good(Good::SaltFish, 5.0, 2.6),
-                    good(Good::Coats, 6.0, 3.2),
-                    good(Good::Ale, 0.0, 3.0),
-                    good(Good::Rum, 0.0, 3.0),
-                    good(Good::DateCakes, 0.0, 3.4),
-                    good(Good::Lamps, 0.0, 4.0),
+                    good(G::Bread, Food, 1.0, 5.0, 3.0, 0.0, 0.0),
+                    good(G::SaltFish, Food, 2.0, 5.0, 2.6, 5.0, 0.0),
+                    good(G::DateCakes, Food, 2.0, 5.0, 3.4, 10.0, 200.0),
+                    good(G::Clothes, Clothing, 1.0, 2.0, 1.2, 0.0, 0.0),
+                    good(G::Coats, Clothing, 2.0, 6.0, 3.2, 10.0, 0.0),
+                    service(K::Market, 1.0, 3.0, 1.0, 5.0, 0.0),
+                    service(K::Chapel, 1.0, 3.0, 1.0, 5.0, 0.0),
+                    service(K::School, 1.0, 4.0, 1.6, 5.0, 100.0),
+                    service(K::Tavern, 1.0, 4.0, 1.6, 15.0, 0.0),
+                    luxury(Need::Good(G::Ale), 3.0, 15.0, 0.0),
+                    luxury(Need::Good(G::Rum), 3.0, 15.0, 150.0),
+                    luxury(Need::Good(G::Lamps), 4.0, 20.0, 300.0),
                 ];
                 W
             }
         }
     }
 
-    /// People in a full house of this tier: what its needs bring in, all told.
-    pub fn capacity(self) -> f32 {
-        self.wants().iter().map(|w| w.people).sum()
+    /// Points a basic category needs to count as met (0 for luxuries).
+    pub fn threshold(self, cat: Cat) -> f32 {
+        let t = match self {
+            Tier::Fisherfolk => [1.0, 1.0, 1.0],
+            Tier::Labourers => [2.0, 1.0, 2.0],
+            Tier::Burghers => [3.0, 2.0, 3.0],
+        };
+        if cat == Cat::Luxury {
+            0.0
+        } else {
+            t[cat.index()]
+        }
     }
 
-    /// Coins a minute a full house pays when every need is met.
+    /// People in a full house of this tier.
+    pub fn capacity(self) -> f32 {
+        [10.0, 20.0, 30.0][self.index()]
+    }
+
+    /// Coins a minute every lived-in house pays (none while Angry).
+    pub fn rent(self) -> f32 {
+        [0.3, 0.6, 1.0][self.index()]
+    }
+
+    /// Coins a minute a Happy house adds (twice as much when Euphoric).
+    pub fn goodwill(self) -> f32 {
+        [0.3, 0.8, 1.5][self.index()]
+    }
+
+    /// Coins a minute a full, Euphoric house pays with every need met.
     pub fn full_income(self) -> f32 {
-        self.wants().iter().map(|w| w.coins).sum()
+        self.rent() + 2.0 * self.goodwill() + self.wants().iter().map(|w| w.coins).sum::<f32>()
     }
 
     /// Goods the tier consumes, in the order of [`Tier::wants`]. The first `basic` of them
-    /// bring people into the house; the rest are luxuries that only pay.
+    /// bring people into the house; the rest are luxuries that only pay and please.
     pub fn needs(self) -> (&'static [Good], usize) {
         match self {
-            Tier::Fisherfolk => (&[Good::Fish, Good::Clothes], 2),
+            Tier::Fisherfolk => (&[Good::Fish, Good::Clothes, Good::Ale], 2),
             Tier::Labourers => (
                 &[
                     Good::Fish,
-                    Good::Clothes,
                     Good::Bread,
+                    Good::SaltFish,
+                    Good::Clothes,
+                    Good::Coats,
                     Good::Ale,
-                    Good::Rum,
                     Good::Salt,
+                    Good::Rum,
                     Good::Dates,
-                    Good::Furs,
                     Good::Oil,
+                    Good::Furs,
                 ],
-                3,
+                5,
             ),
             Tier::Burghers => (
                 &[
                     Good::Bread,
                     Good::SaltFish,
+                    Good::DateCakes,
+                    Good::Clothes,
                     Good::Coats,
                     Good::Ale,
                     Good::Rum,
-                    Good::DateCakes,
                     Good::Lamps,
                 ],
-                3,
+                5,
             ),
         }
     }
 
-    /// Buildings that must be in reach of the house, in the order of [`Tier::wants`].
+    /// Buildings that must be in reach of the house, in the order of [`Tier::wants`]. Each
+    /// list is a prefix of `build::SERVICES`, so its positions index `House::services`.
     pub fn services(self) -> &'static [Kind] {
         match self {
-            Tier::Fisherfolk => &[Kind::Market],
+            Tier::Fisherfolk => &[Kind::Market, Kind::Chapel],
             Tier::Labourers => &[Kind::Market, Kind::Chapel],
             Tier::Burghers => &[Kind::Market, Kind::Chapel, Kind::School, Kind::Tavern],
+        }
+    }
+
+    /// The tier below (a house moved down goes back to it).
+    pub fn prev(self) -> Option<Tier> {
+        match self {
+            Tier::Fisherfolk => None,
+            Tier::Labourers => Some(Tier::Fisherfolk),
+            Tier::Burghers => Some(Tier::Labourers),
         }
     }
 
@@ -334,6 +458,9 @@ impl Tier {
         self == Tier::Burghers
     }
 }
+
+/// How far (cells) a smoky works spoils the houses around it.
+pub const SMOKE_CELLS: f32 = 3.0;
 
 /// Goods each person eats or wears per minute of a need (1/240: one fish every four minutes).
 pub const NEED_PER_PERSON_MIN: f32 = 1.0 / 240.0;
@@ -605,7 +732,7 @@ pub const DEFS: &[Def] = &[
         input: Some(Good::Grain),
         output: Some(Good::Flour),
         cycle_s: 30.0,
-        upkeep: 10.0,
+        upkeep: 8.0,
         ..def(Kind::Mill, "Windmill", Category::Production, (3, 3))
     },
     Def {
@@ -888,7 +1015,7 @@ pub const DEFS: &[Def] = &[
                 ship is paid for with coins, planks and sailcloth when it is laid down.",
         coins: 1_000,
         cost: &[(Good::Planks, 20)],
-        upkeep: 20.0,
+        upkeep: 10.0,
         site: Site::Coast,
         ..def(Kind::Shipyard, "Shipyard", Category::Harbour, (9, 6))
     },
@@ -897,7 +1024,7 @@ pub const DEFS: &[Def] = &[
                 pump sets out down the streets as soon as one starts.",
         coins: 300,
         cost: &[(Good::Planks, 8)],
-        upkeep: 8.0,
+        upkeep: 4.0,
         reach: 22,
         ..def(Kind::FireWatch, "Fire Watch", Category::Public, (4, 5))
     },
@@ -906,7 +1033,7 @@ pub const DEFS: &[Def] = &[
                 watch walks out to break one up.",
         coins: 500,
         cost: &[(Good::Planks, 6), (Good::Bricks, 6)],
-        upkeep: 15.0,
+        upkeep: 6.0,
         reach: 26,
         ..def(Kind::WatchHouse, "Watch House", Category::Public, (4, 4))
     },
@@ -915,7 +1042,7 @@ pub const DEFS: &[Def] = &[
                 out to every sick house.",
         coins: 600,
         cost: &[(Good::Planks, 8), (Good::Bricks, 8)],
-        upkeep: 20.0,
+        upkeep: 8.0,
         reach: 30,
         ..def(Kind::Infirmary, "Infirmary", Category::Public, (5, 5))
     },
@@ -929,6 +1056,14 @@ impl Def {
 }
 
 impl Kind {
+    /// Its smoke spoils the street: houses within [`SMOKE_CELLS`] are less happy.
+    pub fn smoky(self) -> bool {
+        matches!(
+            self,
+            Kind::Brickworks | Kind::Glassworks | Kind::OilWorks | Kind::Distillery
+        )
+    }
+
     pub fn def(self) -> &'static Def {
         DEFS.iter()
             .find(|d| d.kind == self)
@@ -1044,13 +1179,58 @@ mod tests {
             assert_eq!(goods, needs);
             assert_eq!(services, t.services());
             assert!(services.len() <= MAX_SERVICES);
+            assert!(wants.len() <= MAX_WANTS);
+            // Each tier's services index `House::services` by their place in `SERVICES`.
+            assert_eq!(services, crate::build::SERVICES[..services.len()]);
             for (i, g) in needs.iter().enumerate() {
                 let w = wants.iter().find(|w| w.need == Need::Good(*g)).unwrap();
-                assert_eq!(w.people > 0.0, i < basic, "{g:?}");
+                assert_eq!(w.basic(), i < basic, "{g:?}");
             }
+            // Basic needs first, in category order; each brings people and points, luxuries
+            // neither.
+            let cats: Vec<Cat> = wants.iter().map(|w| w.cat).collect();
+            assert!(cats.is_sorted(), "{t:?} wants out of category order");
+            for w in wants {
+                assert_eq!(w.basic(), w.people > 0.0, "{:?}", w.need);
+                assert_eq!(w.basic(), w.points > 0.0, "{:?}", w.need);
+                assert!(w.coins > 0.0 && w.joy >= 0.0 && w.unlock >= 0.0);
+            }
+            // Every basic category can be met from what unlocks first, and the people of the
+            // needs asked from the start fill at least half a house.
+            for c in Cat::BASIC {
+                let all: f32 = wants.iter().filter(|w| w.cat == c).map(|w| w.points).sum();
+                assert!(all >= t.threshold(c), "{t:?} can never meet {c:?}");
+            }
+            let first: f32 = wants
+                .iter()
+                .filter(|w| w.unlock == 0.0)
+                .map(|w| w.people)
+                .sum();
+            assert!(first >= 0.5 * t.capacity(), "{t:?}: {first}");
             // Every need pays something, and a full house holds a round number of people.
-            assert!(wants.iter().all(|w| w.coins > 0.0));
             assert_eq!(t.capacity(), [10.0, 20.0, 30.0][t.index()]);
+        }
+        // Labourers meet every basic category from goods made at home (Burghers' homes
+        // are fed from them too, so nobody needs the far continents to reach them).
+        let home = |t: Tier, c: Cat| -> f32 {
+            t.wants()
+                .iter()
+                .filter(|w| w.cat == c)
+                .filter(|w| match w.need {
+                    Need::Good(g) => {
+                        !g.overseas()
+                            && !matches!(g, Good::SaltFish | Good::Coats | Good::DateCakes)
+                    }
+                    Need::Service(_) => true,
+                })
+                .map(|w| w.points)
+                .sum()
+        };
+        for c in Cat::BASIC {
+            assert!(
+                home(Tier::Labourers, c) >= Tier::Labourers.threshold(c),
+                "{c:?}"
+            );
         }
         // Each tier's full house pays more than the one below.
         assert!(Tier::Labourers.full_income() > Tier::Fisherfolk.full_income() * 2.0);

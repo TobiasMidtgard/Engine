@@ -334,6 +334,8 @@ fn fill_houses(
                 if let Some(mut h) = world.get_mut::<House>(e) {
                     h.tier = tier;
                     h.residents = tier.capacity();
+                    // (A town that starts grown starts settled in, too.)
+                    h.happiness = 55.0;
                 }
                 out.push(e);
             }

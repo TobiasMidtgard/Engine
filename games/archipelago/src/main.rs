@@ -37,11 +37,13 @@ mod icons;
 mod incidents;
 mod island;
 mod items;
+mod ledger;
 mod logistics;
 mod looks;
 mod orders;
 mod playtest;
 mod regional;
+mod reports;
 mod sea;
 mod settle;
 mod shipyard;
@@ -94,7 +96,21 @@ fn main() {
             .position(|a| a == "--play-shots")
             .and_then(|i| args.get(i + 1))
             .cloned();
-        playtest::run(app, minutes, speed, shots.as_deref());
+        // `--seed N` varies the incidents and the player's habits; `--play-out DIR` keeps runs
+        // apart (the economy rig runs several seeds).
+        let seed = args
+            .iter()
+            .position(|a| a == "--seed")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let out = args
+            .iter()
+            .position(|a| a == "--play-out")
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+            .unwrap_or_else(|| "screenshots/archipelago/playtest".to_string());
+        playtest::run(app, minutes, speed, shots.as_deref(), seed, &out);
         return;
     }
     if args.iter().any(|a| a == "--title-shots") {
@@ -153,7 +169,7 @@ pub fn add_game(app: &mut App) {
                 hud::read_actions,
                 tools::input,
                 town::upgrade_looks,
-                (items::tick, incidents::tick).chain(),
+                (items::tick, incidents::tick, reports::alerts).chain(),
                 build::refresh,
                 draw::redraw_buildings,
                 streets::redraw_streets,
@@ -179,6 +195,7 @@ pub fn add_game(app: &mut App) {
         );
     globe::add(app);
     api::register(app);
+    reports::register(app);
     settle::register(app);
     incidents::register(app);
     fittings::register(app);

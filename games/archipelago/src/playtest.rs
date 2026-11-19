@@ -40,6 +40,8 @@ struct Log {
     settled_seen: usize,
     launched_seen: usize,
     incidents_seen: usize,
+    /// The run's seed: houses go up two or three at a time by it.
+    seed: u64,
 }
 
 impl Log {
@@ -65,9 +67,11 @@ fn clock(world: &World) -> f64 {
 }
 
 /// Run the scripted game for `minutes` of game time at `speed`.
-pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>) {
-    let out = "screenshots/archipelago/playtest";
+pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u64, out: &str) {
     let _ = std::fs::create_dir_all(out);
+    if let Some(mut inc) = app.world.get_resource_mut::<crate::incidents::Incidents>() {
+        inc.reseed(seed);
+    }
     app.world.resource_mut::<EngineConfig>().headless = true;
     app.world
         .resource_mut::<Time>()
@@ -79,7 +83,10 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>) {
     app.update();
     let startup_s = started.elapsed().as_secs_f64();
     app.world.resource_mut::<Economy>().speed = speed;
-    let mut log = Log::default();
+    let mut log = Log {
+        seed,
+        ..Log::default()
+    };
     let c0 = clock(&app.world);
     log.line(
         c0,
@@ -88,7 +95,8 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>) {
     let mut rows: Vec<Value> = Vec::new();
     let mut frames: Vec<f32> = Vec::new();
     let mut slow: Vec<Value> = Vec::new();
-    let mut next_turn = c0;
+    // Each seed takes its turns at a different second of the half minute.
+    let mut next_turn = c0 + (seed.wrapping_mul(7) % TURN_S as u64) as f64;
     let mut next_row = c0;
     let mut stuck: HashMap<u32, (Status, f64)> = HashMap::new();
     let mut moored: HashMap<String, f64> = HashMap::new();
@@ -197,7 +205,31 @@ fn turn(world: &mut World, log: &mut Log) {
         grow(world, log, now, i);
     }
     trade(world, log, now);
+    restart_paused(world, log, now);
     incidents_seen(world, log);
+}
+
+/// Works that paused themselves in debt start again once the purse has recovered.
+fn restart_paused(world: &mut World, log: &mut Log, now: f64) {
+    let econ = world.resource::<Economy>();
+    if econ.coins < 1500.0 || econ.balance_per_min <= 0.0 {
+        return;
+    }
+    let mut n = 0;
+    for mut p in world.query::<&mut Producer>().iter_mut(world) {
+        if p.auto_paused {
+            p.paused = false;
+            p.auto_paused = false;
+            p.idle_s = 0.0;
+            n += 1;
+        }
+    }
+    if n > 0 {
+        log.line(
+            now,
+            format!("Coins back: restarted {n} works that paused in debt"),
+        );
+    }
 }
 
 /// Copy new fires, riots and sicknesses into the log.
@@ -726,7 +758,7 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
     if coins > 200.0 && (fed || short_hands) {
         log.last.insert((i, None), now);
         let Some(at) = heart(world, i) else { return };
-        for _ in 0..2 {
+        for _ in 0..(2 + log.seed % 2) {
             if !build_near(
                 world,
                 log,
@@ -1221,12 +1253,36 @@ fn row(world: &mut World, frames: &[f32]) -> Value {
     let mut q = world.query::<&House>();
     let mut tiers = [0usize; Tier::COUNT];
     let mut content = 0;
+    let mut happy = 0;
+    let mut stuck = 0;
+    let mut moods = [[0u32; crate::sim::Mood::COUNT]; Tier::COUNT];
+    let mut waits: HashMap<String, u32> = HashMap::new();
+    let mut happiness = 0.0;
     for h in q.iter(world) {
         tiers[h.tier.index()] += 1;
-        if h.content_s > 0.0 {
+        if h.ready {
             content += 1;
+            // Ready, nothing stopping it, yet not moved up in a minute: a lock.
+            if h.wait == crate::sim::Wait::None && h.content_s > 60.0 {
+                stuck += 1;
+            }
         }
+        if h.is_content() {
+            happy += 1;
+        }
+        happiness += h.happiness;
+        moods[h.tier.index()][h.mood().index()] += 1;
+        let w = serde_json::to_value(h.wait)
+            .ok()
+            .map(|v| match v {
+                Value::String(s) => s,
+                v => v.to_string(),
+            })
+            .unwrap_or_default();
+        *waits.entry(w).or_default() += 1;
     }
+    let houses_n: usize = tiers.iter().sum();
+    let happiness = happiness / houses_n.max(1) as f32;
     let tail = &frames[frames.len().saturating_sub(450)..];
     let avg = tail.iter().sum::<f32>() / tail.len().max(1) as f32;
     let max = tail.iter().cloned().fold(0.0, f32::max);
@@ -1257,13 +1313,31 @@ fn row(world: &mut World, frames: &[f32]) -> Value {
             })
         })
         .collect();
+    let people: Vec<f32> = (0..Tier::COUNT)
+        .map(|t| econ.islands.iter().map(|b| b.population[t]).sum())
+        .collect();
+    let jobs: Vec<f32> = (0..Tier::COUNT)
+        .map(|t| econ.islands.iter().map(|b| b.jobs[t]).sum())
+        .collect();
+    let idle = status
+        .iter()
+        .filter(|(k, _)| **k != Status::Working.text() && **k != Status::NoWorkers.text())
+        .map(|(_, n)| *n)
+        .sum::<u32>();
     json!({
         "clock": clock_text(now),
+        "minute": (now / 60.0).round(),
+        "people": people, "jobs": jobs, "idle_works": idle,
+        "public_upkeep": econ.public_upkeep,
         "coins": econ.coins.round(),
         "balance_per_min": econ.balance_per_min.round(),
         "taxes_per_min": econ.taxes_per_min.round(),
         "upkeep_per_min": econ.upkeep_per_min.round(),
-        "houses": tiers, "content_houses": content,
+        "houses": tiers, "content_houses": content, "happy_houses": happy, "waiting_without_reason": stuck,
+        "moods": moods, "waits": waits, "happiness": happiness,
+        "debt_s": econ.debt_s, "auto_paused": econ.auto_paused,
+        "drains": econ.drains,
+        "let_go": (0..Tier::COUNT).map(|t| econ.islands.iter().map(|b| b.let_go[t]).sum::<f32>()).collect::<Vec<_>>(),
         "works": status,
         "carts": carts, "vessels": vessels,
         "settled": world.resource::<crate::settle::Settled>().0.len(),

@@ -99,10 +99,11 @@ pub fn register(app: &mut App) {
                                 crate::defs::Need::Good(g) => ("good", g.name()),
                                 crate::defs::Need::Service(k) => ("service", k.def().name),
                             };
-                            json!({"need": name, "kind": what, "people": w.people, "coins": w.coins})
+                            json!({"need": name, "kind": what, "category": w.cat.name(), "points": w.points, "people": w.people, "coins": w.coins, "joy": w.joy, "unlocks_at": w.unlock})
                         })
                         .collect();
-                    json!({"tier": t.name(), "house": t.capacity(), "full_income": t.full_income(), "wants": wants})
+                    json!({"tier": t.name(), "house": t.capacity(), "rent": t.rent(), "goodwill": t.goodwill(), "full_income": t.full_income(),
+                        "thresholds": crate::defs::Cat::BASIC.map(|c| json!({"category": c.name(), "points": t.threshold(c)})), "wants": wants})
                 })
                 .collect();
             let (roads, paved) = {
