@@ -1,0 +1,72 @@
+Brightsund
+==========
+
+An island city builder and trading game, made with the Engine (Rust and wgpu).
+
+Start
+  Unzip the folder anywhere, open it and double-click Brightsund.exe. Keep the `assets`
+  folder next to it. The game opens borderless fullscreen on the title screen; F11 switches
+  to a window. The start takes a little while as the islands, the sea and the woods are
+  made. A console window shows the log and closes with the game. Needs a graphics card
+  with Vulkan or DirectX 12.
+
+The aim
+  Your company starts with one barque, the Fair Venture, lying off Haverholm with planks,
+  fish and clothes in her hold. Every other island is hidden under fog. Grow Haverholm from a
+  landing into a town, raise its people from Fisherfolk to Labourers to Burghers, settle the
+  other islands by ship, and bring home the goods of the far lands: Sarrowmere, the Amber
+  Reach and Frostholm.
+
+First steps
+  1. Place a Harbour on Haverholm's coast (build bar, Harbour and air). The Fair Venture
+     sails in, lands her planks and raises it.
+  2. Build a Market square, a Woodcutter by the trees and a Sawmill for planks, and a
+     Fishery on the shore. Join everything to the harbour with roads.
+  3. Lay out houses round the market. Fisherfolk move in and pay rent; a house's card says
+     what it is waiting for.
+  4. When the town asks for clothes, add a Sheep farm and a Weaver.
+  5. A full house whose needs are met moves up a tier. Labourers want bread, clothes, a
+     market and a chapel; Burghers want a paved street too.
+  6. Send a ship with planks to settle another island, then tie the islands together with
+     trade routes (T).
+
+Good to know
+  - Idle works still cost their upkeep. Pause or clear the ones you do not need, and watch
+    the balance in the top bar.
+  - Happy towns pay more. Angry ones riot. A Fire Watch, a Watch House and an Infirmary keep
+    fires, riots and sickness in hand.
+  - Each island keeps its own goods in its warehouses, and ships carry them between islands.
+  - The game is not saved yet: a game lasts until you quit.
+
+Camera
+  W A S D           Pan (arrows too; Shift is faster)
+  Right drag        Pan with the ground
+  Q  E              Turn (or middle drag)
+  Wheel             Zoom, from a street to the whole planet
+  H                 Back to the home island
+
+Building
+  Left click        Place, or pick a building
+  Drag              Lay a road with the road tool
+  R                 Turn the building
+  Right click       Put the tool down (Esc too)
+  Delete            Demolish
+
+Company
+  Space             Pause
+  1  2  3           Speed: normal, double, four times
+  L  T              Ledger, trade routes
+  G  I              Fleet, items
+  F1  Esc           This page, the menu
+  F11               Window or fullscreen
+
+Options (Windows: make a shortcut to Brightsund.exe and add them after the path in Target)
+  --quality ultra   low, medium, high (the default) or ultra
+  --windowed        start in a window
+  --size 2560x1440  the window's size
+  --no-title        skip the title screen and start a new game
+  --sandbox         start in the sandbox town: four islands and the far lands at work
+  --profile         time every system; F3 shows the performance panel
+
+THIRD_PARTY_NOTICES.md lists the licences and authors of the scanned ground, bark and leaf
+textures and the smoke flipbooks in `assets`.

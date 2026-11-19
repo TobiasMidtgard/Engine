@@ -1,6 +1,6 @@
 [package]
 name = "archipelago"
-description = "Archipelago: an island city builder and trading game that tests the engine at scale: islands, production chains, a living town, and fleets of ships and aircraft."
+description = "Brightsund: an island city builder and trading game that tests the engine at scale: islands, production chains, a living town, and fleets of ships and aircraft."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

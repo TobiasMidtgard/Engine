@@ -1,5 +1,6 @@
-//! Archipelago: a city-building and trade game on a chain of islands, the engine's test of
-//! many buildings, carts, ships and aircraft at once (see `engine-design/anno-like-game.md`).
+//! Brightsund (working title Archipelago): a city-building and trade game on a chain of
+//! islands, the engine's test of many buildings, carts, ships and aircraft at once (see
+//! `engine-design/anno-like-game.md`). The title screen, menus and how-to-play are in `title.rs`.
 //!
 //! ```sh
 //! cargo run -p archipelago --release                          # play a new game
@@ -46,6 +47,7 @@ mod settle;
 mod shipyard;
 mod sim;
 mod streets;
+mod title;
 mod tools;
 mod tour;
 mod town;
@@ -58,7 +60,7 @@ use engine::prelude::*;
 fn main() {
     let mut app = App::new();
     engine::core::log::init("info,wgpu=warn,naga=warn");
-    app.world.resource_mut::<EngineConfig>().app_name = "Archipelago".into();
+    app.world.resource_mut::<EngineConfig>().app_name = title::NAME.into();
     engine::apply_cli_args(&mut app);
     let args: Vec<String> = std::env::args().collect();
     let tour = args
@@ -70,6 +72,7 @@ fn main() {
         app.insert_resource(world::WoodsDensity(d));
     }
     add_game(&mut app);
+    title::add(&mut app);
     // `--sandbox`: start with the finished town of earlier rounds (the tour always does).
     if args.iter().any(|a| a == "--sandbox") || tour.is_some() {
         app.insert_resource(settle::StartMode::Sandbox);
@@ -92,6 +95,10 @@ fn main() {
             .and_then(|i| args.get(i + 1))
             .cloned();
         playtest::run(app, minutes, speed, shots.as_deref());
+        return;
+    }
+    if args.iter().any(|a| a == "--title-shots") {
+        title::shots(app);
         return;
     }
     match tour {

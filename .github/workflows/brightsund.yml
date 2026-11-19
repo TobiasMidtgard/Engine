@@ -1,0 +1,79 @@
+name: Brightsund build
+
+# Builds Brightsund (the island city builder in games/archipelago) for Windows with the fetched
+# art it reads (terrain, scans and vfx manifests), zipped so it runs with a double-click. Run it
+# by hand: the zip is always a run artifact (7 days), and with `publish` on it also goes up on
+# the release named by `tag`. A pull request that changes this file builds the artifact only.
+on:
+  pull_request:
+    paths: [".github/workflows/brightsund.yml"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the zip on the release (otherwise a run artifact only)
+        type: boolean
+        default: false
+      tag:
+        description: Release to publish to (created if missing)
+        default: brightsund-latest
+
+permissions:
+  contents: write
+
+concurrency:
+  group: brightsund-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+
+jobs:
+  windows:
+    name: Brightsund (windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: brightsund-release
+      - name: Build
+        run: cargo build --release --locked -p archipelago -p fetch-assets
+      - name: Fetch the art the game reads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo run --release --locked -q -p fetch-assets -- terrain scans vfx
+      - name: Package
+        shell: bash
+        run: |
+          dir=Brightsund
+          mkdir -p "$dir/assets"
+          cp target/release/archipelago.exe "$dir/Brightsund.exe"
+          cp -r assets/fetched "$dir/assets/fetched"
+          du -sh "$dir/assets"
+          cp games/archipelago/PLAY.txt "$dir/HOW TO PLAY.txt"
+          cp assets/fetched/THIRD_PARTY_NOTICES.md "$dir/" 2>/dev/null || true
+          cp LICENSE* "$dir/" 2>/dev/null || true
+          7z a -tzip -mx=5 Brightsund-windows.zip "$dir" > /dev/null
+          ls -l Brightsund-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Brightsund-windows
+          path: Brightsund-windows.zip
+          retention-days: 7
+      - name: Publish on the release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          notes="Download Brightsund-windows.zip, unzip it and double-click Brightsund.exe (HOW TO PLAY.txt has the aim and the keys). Built from $GITHUB_SHA on $(date -u +%Y-%m-%d)."
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --prerelease \
+            --target "$GITHUB_SHA" --title "Brightsund (Windows)" --notes "$notes"
+          gh release upload "$TAG" Brightsund-windows.zip --clobber
+          gh release edit "$TAG" --notes "$notes"
