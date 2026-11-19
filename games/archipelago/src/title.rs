@@ -285,8 +285,9 @@ fn title_view(world: &mut World) -> Option<(DVec3, f32, f32)> {
     Some((DVec3::new(f.x, 0.0, f.y), yaw - 0.18, dist))
 }
 
-/// A new game's first view: from the sea over the barque to the coast, high enough to see
-/// both.
+/// A new game's first view: from the sea over the barque to the coast. The barque sits just
+/// above the build bar, which covers the lower third of the screen in the middle, and the
+/// coast near the top.
 fn first_view(world: &mut World) -> Option<(DVec3, f32, f32)> {
     let at = {
         let mut q = world.query::<&crate::fleet::Vessel>();
@@ -296,12 +297,61 @@ fn first_view(world: &mut World) -> Option<(DVec3, f32, f32)> {
     };
     let coast = world.get_resource::<crate::town::TownCentre>()?.0;
     let d = DVec2::new(coast.x - at.x, coast.z - at.z);
-    if d.length() < 1.0 {
+    let len = d.length();
+    if len < 1.0 {
         return None;
     }
-    let yaw = (-d.x).atan2(-d.y) as f32;
-    let mid = DVec2::new(at.x, at.z) + d * 0.45;
-    Some((DVec3::new(mid.x, 0.0, mid.y), yaw, 560.0))
+    let fov = {
+        let mut q = world.query::<&Camera>();
+        match q.iter(world).next().map(|c| c.projection) {
+            Some(engine::render::Projection::Perspective { fov_y_deg, .. }) => {
+                fov_y_deg.to_radians()
+            }
+            _ => 50f32.to_radians(),
+        }
+    };
+    // Turned off the line, the view's depth along it is shorter.
+    let (f, dist) = frame_two(len * (FIRST_TURN as f64).cos(), fov, BARQUE_Y, COAST_Y);
+    engine::core::log::info!("{NAME}: the first view, {len:.0} m to the coast, from {dist:.0} m");
+    let yaw = (-d.x).atan2(-d.y) as f32 + FIRST_TURN;
+    let mid = DVec2::new(at.x, at.z) + d * f;
+    Some((DVec3::new(mid.x, 0.0, mid.y), yaw, dist))
+}
+
+/// How far the first view turns left off the line from the barque to the coast, radians: she
+/// lies bows to the shore, and seen from dead astern she is only a stack of sails.
+const FIRST_TURN: f32 = 0.5;
+
+/// Where the first view puts the barque and the coast on screen, from -1 (bottom) to 1 (top):
+/// as far apart as the bars allow, since a wider view shows the fog of war's edges.
+const BARQUE_Y: f64 = -0.17;
+const COAST_Y: f64 = 0.7;
+
+/// Where a ground point `s` metres ahead of the focus shows on screen, from -1 (bottom) to 1
+/// (top), for a view `dist` away at the zoom's own pitch.
+fn screen_y(s: f64, dist: f32, fov_y: f32) -> f64 {
+    let p = StrategyCam::pitch_for(dist) as f64;
+    let dist = dist as f64;
+    let below = (dist * p.sin()).atan2(dist * p.cos() + s);
+    (p - below).tan() / (fov_y as f64 * 0.5).tan()
+}
+
+/// The focus (as a share of the way from the barque to the coast, `len` metres) and the
+/// distance that put the barque at `barque_y` and the coast at `coast_y` on screen.
+fn frame_two(len: f64, fov_y: f32, barque_y: f64, coast_y: f64) -> (f64, f32) {
+    let mut best = (f64::MAX, 0.45, 560.0);
+    for i in 0..=50 {
+        let f = i as f64 * 0.01;
+        for j in 0..=80 {
+            let dist = 300.0 + j as f32 * 20.0;
+            let e = (screen_y(-f * len, dist, fov_y) - barque_y).powi(2)
+                + (screen_y((1.0 - f) * len, dist, fov_y) - coast_y).powi(2);
+            if e < best.0 {
+                best = (e, f, dist);
+            }
+        }
+    }
+    (best.1, best.2)
 }
 
 /// The title's slow sway round its view.
@@ -735,6 +785,8 @@ fn menu_el() -> El {
                 .width(470.0)
                 .padding([28.0, 30.0, 30.0, 30.0])
                 .gap(6.0)
+                // Up, clear of the build bar.
+                .margin([0.0, 0.0, 220.0, 0.0])
                 .enter(Enter::pop(0.22, 0.96).ease(Ease::Out))
         })
         .child(
@@ -789,7 +841,7 @@ fn menu_el() -> El {
         );
     El::new()
         .class("screen center")
-        .child(El::new().with_style(|_| engine_ui::widgets::scrim(0.72)))
+        .child(El::new().with_style(|_| engine_ui::widgets::scrim(0.9)))
         .child(panel)
 }
 
@@ -876,8 +928,9 @@ pub const STEPS: [&str; 6] = [
     "Lay out houses round the market. Fisherfolk move in and pay rent; a house's card says \
      what it is waiting for.",
     "When the town asks for clothes, add a Sheep farm and a Weaver.",
-    "A full house whose needs are met moves up a tier. Labourers want bread, clothes, a \
-     market and a chapel; Burghers want a paved street too.",
+    "A full house with all it needs reads Ready to move up on its card. You choose when it \
+     moves up a tier, so the works keep their hands. Labourers want bread, clothes, a market \
+     and a chapel; Burghers a school, a tavern and a paved street too.",
     "Send a ship with planks to settle another island, then tie the islands together with \
      trade routes (T).",
 ];
@@ -1249,6 +1302,26 @@ mod tests {
         }
         for l in lines {
             assert!(txt.contains(&l), "PLAY.txt lacks: {l}");
+        }
+    }
+
+    /// The first view keeps the barque above the build bar and the coast in sight, however
+    /// far out she lies.
+    #[test]
+    fn first_view_frames_the_barque_and_the_coast() {
+        let fov = 50f32.to_radians();
+        for len in [420.0, 520.0, 700.0, 900.0, 1200.0] {
+            let (f, dist) = frame_two(len, fov, BARQUE_Y, COAST_Y);
+            let barque = screen_y(-f * len, dist, fov);
+            let coast = screen_y((1.0 - f) * len, dist, fov);
+            assert!(
+                (-0.22..-0.1).contains(&barque),
+                "{len} m out: barque at {barque:.2}"
+            );
+            assert!(
+                (0.6..0.78).contains(&coast),
+                "{len} m out: coast at {coast:.2}"
+            );
         }
     }
 }
