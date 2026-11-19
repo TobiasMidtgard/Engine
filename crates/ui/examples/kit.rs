@@ -343,6 +343,58 @@ fn sockets() -> El {
         .child(p)
 }
 
+/// A stack of alerts: danger, warning and news, the first fresh, the second folding three.
+fn alerts() -> El {
+    use brass::{AlertSpec, Urgency};
+    let list = [
+        AlertSpec {
+            icon: "marker_danger".into(),
+            title: "Fire in the bakery".into(),
+            text: "Haverholm, by the market. The fire watch is on its way.".into(),
+            age: "just now".into(),
+            urgency: Urgency::Danger,
+            go: "go:0".into(),
+            dismiss: "dismiss:0".into(),
+            fresh: true,
+            ..Default::default()
+        },
+        AlertSpec {
+            icon: "coins".into(),
+            title: "Short of bread".into(),
+            text: "Brannsey has none left; its fisherfolk go hungry.".into(),
+            age: "2 min".into(),
+            urgency: Urgency::Warning,
+            go: "go:1".into(),
+            dismiss: "dismiss:1".into(),
+            count: 3,
+            ..Default::default()
+        },
+        AlertSpec {
+            icon: "compass".into(),
+            title: "Kittiwake has landed".into(),
+            text: "Little Tarn is yours.".into(),
+            age: "6 min".into(),
+            urgency: Urgency::Note,
+            go: "go:2".into(),
+            dismiss: "dismiss:2".into(),
+            ..Default::default()
+        },
+    ];
+    El::new()
+        .with_style(|s| s.fill_parent().pick(Pick::Ignore))
+        .child(
+            El::new()
+                .class("col")
+                .with_style(|s| {
+                    s.position(Position::Absolute)
+                        .left(22.0)
+                        .top(480.0)
+                        .gap(8.0)
+                })
+                .children(list.iter().map(brass::alert)),
+        )
+}
+
 /// The item states a socket can show: waiting, filling, acting, uses left, ready, inert.
 fn states() -> Vec<El> {
     use brass::{Rank, SocketState};
@@ -454,6 +506,7 @@ fn main() {
     spawn(&mut app, "kit_bar", 0, &build_bar());
     spawn(&mut app, "kit_card", 1, &card());
     spawn(&mut app, "kit_sockets", 1, &sockets());
+    spawn(&mut app, "kit_alerts", 1, &alerts());
     app.update_n(60);
     // Hover the third tile for its lift and tooltip.
     let e = engine_ui::input::find_id(&mut app.world, "tile:3");

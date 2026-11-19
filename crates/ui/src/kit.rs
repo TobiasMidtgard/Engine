@@ -253,6 +253,36 @@ pub mod brass {
                 ..Default::default()
             },
         );
+        // An alert: a slim lacquer strip with a brass hairline, lifted on hover.
+        let (near, far) = depth(5.0, 22.0);
+        add(
+            "brass_alert",
+            ClassStyle {
+                base: s()
+                    .row()
+                    .gap(12.0)
+                    .align_items(Align::Center)
+                    .padding([10.0, 12.0, 10.0, 16.0])
+                    .background(lacquer)
+                    .material(Material::new(MaterialKind::Lacquer).seed(9.0))
+                    .radius(Corners::all(8.0))
+                    .border(1.0, Colors::outline())
+                    .bevel(Bevel::raised(1.5, 0.12, 0.5).with_line(
+                        Colors::brass().with_alpha(0.5),
+                        1.0,
+                        8.0,
+                    ))
+                    .shadow(near)
+                    .shadow2(far)
+                    .color(Colors::cream())
+                    .pick(Pick::Block)
+                    .transition(0.15)
+                    .ease(Ease::Out)
+                    .enter(Enter::slide(0.35, -60.0)),
+                hover: s().translate([3.0, 0.0]),
+                ..Default::default()
+            },
+        );
         // A brass push button with chamfered corners.
         add(
             "brass_button",
@@ -825,6 +855,149 @@ pub mod brass {
                 );
             }
         }
+    }
+
+    /// How urgent an alert is: its stripe, the ring round its picture and how it pulses.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub enum Urgency {
+        /// News: a ship launched, an island settled.
+        #[default]
+        Note,
+        /// Wants seeing to: a shortage, unrest.
+        Warning,
+        /// Act now: a fire, a riot, sickness.
+        Danger,
+    }
+
+    impl Urgency {
+        pub fn color(self) -> Color {
+            match self {
+                Urgency::Note => Color::hex(0x6fb0e0),
+                Urgency::Warning => Color::hex(0xf0b040),
+                Urgency::Danger => Color::hex(0xf0583a),
+            }
+        }
+    }
+
+    /// One alert for [`alert`].
+    #[derive(Clone, Debug, Default)]
+    pub struct AlertSpec {
+        /// The picture on its badge.
+        pub icon: String,
+        pub title: String,
+        /// A line or two on what and where.
+        pub text: String,
+        /// How long ago, already in words ("just now", "2 min").
+        pub age: String,
+        pub urgency: Urgency,
+        /// The action of its "Go there" button and of its badge ("" for none).
+        pub go: String,
+        /// The action of its close button ("" for none).
+        pub dismiss: String,
+        /// New since the player last looked: the badge's ring breathes.
+        pub fresh: bool,
+        /// How many of the same are folded into it (shown as "×3" when more than one).
+        pub count: u32,
+        /// Its width in px (0: 380).
+        pub width: f32,
+    }
+
+    /// An alert strip: an urgency stripe down its left edge, the picture in a ringed badge,
+    /// the title with how long ago, a line of detail, and "Go there" and close buttons. Stack
+    /// a few in a column at a screen edge.
+    pub fn alert(a: &AlertSpec) -> El {
+        let c = a.urgency.color();
+        let width = if a.width > 0.0 { a.width } else { 380.0 };
+        let state = SocketState {
+            ready: a.fresh,
+            color: c,
+            ..Default::default()
+        };
+        let stripe = El::new().with_style(move |s| {
+            s.position(crate::style::Position::Absolute)
+                .left(4.0)
+                .top(6.0)
+                .bottom(6.0)
+                .width(4.0)
+                .radius(Corners::all(2.0))
+                .background(Fill::vertical(c.lerp(Color::hex(0xffffff), 0.3), c))
+                .shadow(Shadow::glow(c.with_alpha(0.6), 10.0))
+                .pick(Pick::Ignore)
+        });
+        let words = El::new()
+            .class("col")
+            .with_style(|s| s.gap(2.0).grow(1.0).shrink(1.0).min_width(0.0))
+            .child(
+                El::new()
+                    .class("row")
+                    .with_style(|s| s.gap(8.0).align_items(Align::Center))
+                    .child(
+                        El::text(a.title.clone())
+                            .text_style(|t| t.size(16.0).bold().nowrap())
+                            .with_style(|s| s.color(Colors::cream()))
+                            .pick_ignore(),
+                    )
+                    .child_opt((a.count > 1).then(|| {
+                        El::text(format!("×{}", a.count))
+                            .text_style(|t| t.size(12.0).bold().nowrap())
+                            .with_style(move |s| {
+                                s.color(Colors::ink())
+                                    .padding([1.0, 6.0])
+                                    .radius(8.0)
+                                    .background(Fill::Solid(c))
+                            })
+                            .pick_ignore()
+                    }))
+                    .child(El::new().with_style(|s| s.grow(1.0)))
+                    .child_opt((!a.age.is_empty()).then(|| {
+                        El::text(a.age.clone())
+                            .text_style(|t| t.size(12.0).italic().nowrap())
+                            .with_style(|s| s.color(Colors::cream_dim()))
+                            .pick_ignore()
+                    })),
+            )
+            .child_opt((!a.text.is_empty()).then(|| {
+                El::text(a.text.clone())
+                    .text_style(|t| t.size(13.5))
+                    .with_style(|s| s.color(Colors::cream_dim()))
+                    .pick_ignore()
+            }));
+        let buttons = El::new()
+            .class("col")
+            .with_style(|s| s.gap(6.0).align_items(Align::End).shrink(0.0))
+            .child_opt((!a.dismiss.is_empty()).then(|| {
+                El::new()
+                    .class("button")
+                    .on_click(a.dismiss.clone())
+                    .with_style(|s| {
+                        s.size(20.0, 20.0)
+                            .padding(3.0)
+                            .radius(10.0)
+                            .background(Fill::Solid(Color::hexa(0x00000000)))
+                            .opacity(0.7)
+                    })
+                    .child(
+                        El::icon("ui_close").with_style(|s| s.size(14.0, 14.0).pick(Pick::Ignore)),
+                    )
+            }))
+            .child_opt((!a.go.is_empty()).then(|| {
+                El::button("Go there", a.go.clone())
+                    .class("brass_button")
+                    .with_style(|s| s.padding([3.0, 10.0]).font_size(13.0))
+            }));
+        El::new()
+            .class("brass_alert")
+            .with_style(move |s| s.width(width))
+            .child(stripe)
+            .child(socket_with(
+                Some((&a.icon, Rank::Common)),
+                44.0,
+                &a.go,
+                &state,
+                "",
+            ))
+            .child(words)
+            .child(buttons)
     }
 
     /// A progress bar `width` px wide, `frac` full.
