@@ -928,9 +928,9 @@ pub const STEPS: [&str; 6] = [
     "Lay out houses round the market. Fisherfolk move in and pay rent; a house's card says \
      what it is waiting for.",
     "When the town asks for clothes, add a Sheep farm and a Weaver.",
-    "A full house with all it needs reads Ready to move up on its card. You choose when it \
-     moves up a tier, so the works keep their hands. Labourers want bread, clothes, a market \
-     and a chapel; Burghers a school, a tavern and a paved street too.",
+    "A full house with all it needs reads Ready to move up on its card. Pick it and press U \
+     to move it up a tier, or Shift+U for every ready house on the island. Labourers want \
+     bread, clothes, a market and a chapel; Burghers a school, a tavern and a paved street.",
     "Send a ship with planks to settle another island, then tie the islands together with \
      trade routes (T).",
 ];
@@ -963,6 +963,8 @@ pub const CONTROLS: [(&str, &[(&str, &str)]); 3] = [
             ("Left click", "Place, or pick a building"),
             ("Drag", "Lay a road with the road tool"),
             ("R", "Turn the building"),
+            ("U", "Move the picked house up a tier"),
+            ("Shift+U", "Move up every ready house the works can spare"),
             ("Right click", "Put the tool down (Esc too)"),
             ("Delete", "Demolish"),
         ],
