@@ -562,10 +562,21 @@ pub fn move_up(world: &mut World, e: Entity) -> Result<Option<String>, String> {
 /// tier each leaves keeps the people its works ask for and the warehouse has the materials.
 /// Returns (moved, still waiting with their reasons).
 pub fn move_up_all(world: &mut World, i: usize) -> (u32, std::collections::BTreeMap<String, u32>) {
+    move_up_all_of(world, i, &crate::defs::Tier::ALL)
+}
+
+/// [`move_up_all`] for the houses of the tiers in `from` only.
+pub fn move_up_all_of(
+    world: &mut World,
+    i: usize,
+    from: &[crate::defs::Tier],
+) -> (u32, std::collections::BTreeMap<String, u32>) {
     let mut ready: Vec<(Entity, f32)> = world
         .query::<(Entity, &Building, &House)>()
         .iter(world)
-        .filter(|(_, b, h)| b.island == i && h.ready && h.tier.next().is_some())
+        .filter(|(_, b, h)| {
+            b.island == i && h.ready && h.tier.next().is_some() && from.contains(&h.tier)
+        })
         .map(|(e, _, h)| (e, h.content_s))
         .collect();
     ready.sort_by(|a, b| b.1.total_cmp(&a.1));

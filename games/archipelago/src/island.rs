@@ -104,9 +104,11 @@ pub fn islands() -> &'static [Island] {
                 cliff_dir: 4.0,
                 cliff_share: 0.35,
                 seed: 37,
+                // (Its sheltered flats make salt, for the Burghers' salt fish.)
                 fertility: Fertility {
                     hops: true,
                     clay: true,
+                    salt: true,
                     ..Default::default()
                 },
                 woods: 0.5,
@@ -140,7 +142,11 @@ pub fn islands() -> &'static [Island] {
                 cliff_dir: 5.2,
                 cliff_share: 0.6,
                 seed: 53,
-                fertility: Fertility::default(),
+                // (Deep woods with game in them: trappers' furs for the Burghers' coats.)
+                fertility: Fertility {
+                    furs: true,
+                    ..Default::default()
+                },
                 woods: 0.7,
                 settle_toward: None,
                 settle_m: 0.0,

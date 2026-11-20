@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use engine::prelude::*;
-use engine::render::{Mesh, Vertex};
+use engine::render::{Mesh, MeshRef, Vertex};
 
 use crate::art::{Mat, hexc};
 use crate::defs::CELL_M;
@@ -86,6 +86,10 @@ pub fn redraw_streets(world: &mut World) {
             .remove(&chunk)
             .unwrap_or_default();
         for e in old {
+            // The chunk's meshes are its own: free them with it (rebuilt on every road change).
+            if let Some(MeshRef::Handle(h)) = world.get::<MeshRenderer>(e).map(|r| r.mesh.clone()) {
+                world.resource_mut::<Assets<Mesh>>().remove(h);
+            }
             world.despawn(e);
         }
         let mut ents = Vec::new();

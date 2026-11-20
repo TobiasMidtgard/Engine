@@ -606,10 +606,9 @@ pub fn remove_road(world: &mut World, c: IVec2) {
 }
 
 fn spawn_stalls(world: &mut World, owner: Entity, origin: IVec2, rot: u8, base_y: f64) {
-    use engine_ui::demo::art::stall::{Goods, build_stall, place_stall};
-    let Some(mats) = world.get_resource::<StallKit>().map(|k| k.0) else {
+    if world.get_resource::<StallKit>().is_none() {
         return;
-    };
+    }
     let c = grid::footprint_center(Kind::Market, origin, rot);
     let yaw = grid::yaw(rot);
     let mut parts = Vec::new();
@@ -627,12 +626,15 @@ fn spawn_stalls(world: &mut World, owner: Entity, origin: IVec2, rot: u8, base_y
             DVec3::new(c.x + local.x as f64, base_y + 0.08, c.y + local.z as f64),
             yaw + a + std::f32::consts::PI,
         );
-        parts.extend(place_stall(
-            world,
-            &mats,
-            at,
-            build_stall(goods, origin.x as u64 * 31 + k as u64),
-        ));
+        let variant = origin.x.rem_euclid(STALL_VARIANTS as i32) as u64;
+        let stall = stall_model(world, k, goods, variant);
+        for r in &stall.pieces {
+            parts.push(world.spawn((at, r.clone())).id());
+        }
+        if let Some((light, offset)) = stall.light {
+            let p = at.transform_point(offset);
+            parts.push(world.spawn((light, Transform::from_translation(p))).id());
+        }
     }
     world
         .entity_mut(owner)
@@ -641,6 +643,59 @@ fn spawn_stalls(world: &mut World, owner: Entity, origin: IVec2, rot: u8, base_y
         .get_mut()
         .0
         .extend(parts);
+}
+
+use engine_ui::demo::art::stall::Goods;
+
+/// Looks per stall: markets share them (a stall's meshes are tens of thousands of corners, and
+/// a market built and torn down must not leave its own behind).
+const STALL_VARIANTS: u64 = 3;
+
+/// One stall's drawn pieces, built once and shared by every market.
+#[derive(Clone)]
+struct StallModel {
+    pieces: Vec<MeshRenderer>,
+    /// Its lantern's light and where it hangs, in the stall's space.
+    light: Option<(PointLight, DVec3)>,
+}
+
+#[derive(Resource, Default)]
+struct StallModels(HashMap<(usize, u64), StallModel>);
+
+/// The stall at corner `k` of a market in look `variant` (built the first time it is asked for).
+fn stall_model(world: &mut World, k: usize, goods: Goods, variant: u64) -> StallModel {
+    if let Some(m) = world
+        .get_resource::<StallModels>()
+        .and_then(|s| s.0.get(&(k, variant)))
+    {
+        return m.clone();
+    }
+    use engine_ui::demo::art::stall::{build_stall, place_stall};
+    let mats = world.resource::<StallKit>().0;
+    // Build it once at the origin and keep what it spawned as a template.
+    let made = place_stall(
+        world,
+        &mats,
+        Transform::IDENTITY,
+        build_stall(goods, variant * 31 + k as u64),
+    );
+    let mut model = StallModel {
+        pieces: Vec::new(),
+        light: None,
+    };
+    for e in made {
+        if let Some(r) = world.get::<MeshRenderer>(e) {
+            model.pieces.push(r.clone());
+        } else if let (Some(l), Some(t)) = (world.get::<PointLight>(e), world.get::<Transform>(e)) {
+            model.light = Some((*l, t.translation));
+        }
+        world.despawn(e);
+    }
+    world
+        .get_resource_or_init::<StallModels>()
+        .0
+        .insert((k, variant), model.clone());
+    model
 }
 
 /// Materials for market stalls (the UI module's market art).
@@ -912,6 +967,51 @@ mod tests {
         assert_eq!(pay(&mut world, Kind::House, 0), Ok(()));
         // A works with a price does wait for the money.
         assert!(pay(&mut world, Kind::Sawmill, 0).is_err());
+    }
+
+    #[test]
+    fn markets_share_their_stalls_and_leave_no_meshes_behind() {
+        use engine_ui::demo::art::stall::StallMats;
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.insert_resource(Frame::default());
+        world.init_resource::<Assets<StandardMaterial>>();
+        let h = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        world.insert_resource(StallKit(StallMats {
+            wood: h,
+            canvas: h,
+            iron: h,
+            crystal: h,
+            pottery: h,
+            burlap: h,
+            lamp_glass: h,
+            produce: h,
+            cloth: h,
+            wicker: h,
+            steel: h,
+            brass: h,
+        }));
+        let mut market = |x: i32| {
+            let e = world.spawn_empty().id();
+            spawn_stalls(&mut world, e, IVec2::new(x, 0), 0, 0.0);
+            let parts = world.get::<MovingParts>(e).map_or(0, |p| p.0.len());
+            for p in world.get::<MovingParts>(e).cloned().unwrap_or_default().0 {
+                world.despawn(p);
+            }
+            world.despawn(e);
+            (parts, world.resource::<Assets<Mesh>>().len())
+        };
+        let (parts, first) = market(0);
+        assert!(
+            parts >= 8,
+            "four stalls with their lanterns, got {parts} parts"
+        );
+        // The same look again, built and torn down many times: no new meshes.
+        for _ in 0..5 {
+            assert_eq!(market(STALL_VARIANTS as i32 * 7).1, first);
+        }
     }
 
     #[test]
