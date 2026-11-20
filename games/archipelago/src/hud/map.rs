@@ -516,6 +516,9 @@ pub(super) fn fogged(base: &[u8], fog: &[f32]) -> Vec<u8> {
 /// The chart `base` with every island the company has not settled washed to a cool,
 /// faded grey and finely hatched, like land on a chart that nobody has surveyed: the
 /// settled islands keep their colour and stand out.
+/// A rival house that holds an island: its name and colour.
+type Held = Option<(String, u32)>;
+
 pub(super) fn unsettled(base: &[u8], owner: &[u8], claimed: &[bool]) -> Vec<u8> {
     let mut out = base.to_vec();
     if owner.len() != PW * PH || base.len() != PW * PH * 4 {
@@ -860,14 +863,26 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
     }
     // Island names in the display serif.
     // (Unsettled ones in a faded italic, with "unsettled" under the name.)
-    let named: Vec<(&island::Island, bool)> = island::islands()
+    // A rival house's island: its name and colour under the island's.
+    let held = |n: usize| -> Held {
+        let c = world
+            .resource::<crate::sim::Economy>()
+            .owner(n)
+            .filter(|c| *c != crate::sim::acting(world))?;
+        let colour = world
+            .get_resource::<crate::rivals::Rivals>()
+            .and_then(|r| r.0.iter().find(|x| x.id == c as u32))
+            .map_or(0x5a4a38, |r| r.colour);
+        Some((crate::rivals::company_name(world, c), colour))
+    };
+    let named: Vec<(&island::Island, bool, Held)> = island::islands()
         .iter()
         .enumerate()
         .filter(|(_, i)| i.region() == k && unseen(world, i.center.x, i.center.y) < 0.5)
-        .map(|(n, i)| (i, crate::settle::claimed(world, n)))
+        .map(|(n, i)| (i, crate::settle::claimed(world, n), held(n)))
         .collect();
     let known = !named.is_empty();
-    for (isle, ours) in named {
+    for (isle, ours, held) in named {
         let mut p = at(isle.center.x, isle.center.y + isle.radius * 1.05);
         let spec = TextSpec {
             text: isle.name.to_string(),
@@ -889,11 +904,15 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         ctx.text_spec(&spec, p, Vec2::new(0.5, 0.0));
         if !ours {
             let note = TextSpec {
-                text: "unsettled".into(),
+                text: held
+                    .as_ref()
+                    .map_or_else(|| "unsettled".into(), |(n, _)| n.clone()),
                 size: 9.5 * px,
-                weight: 600,
+                weight: if held.is_some() { 700 } else { 600 },
                 italic: true,
-                color: Color::hexa(0x5a4a38a8),
+                color: held
+                    .as_ref()
+                    .map_or(Color::hexa(0x5a4a38a8), |(_, c)| Color::hex(*c)),
                 wrap: false,
                 ..Default::default()
             };
