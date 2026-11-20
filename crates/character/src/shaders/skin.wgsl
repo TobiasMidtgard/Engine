@@ -404,6 +404,15 @@ fn hair_over_skin(s: SkinLight, l: vec3<f32>) -> f32 {
     return exp(-0.6 * hair_shadow_depth(s.bind, dir, s.jitter, 0.0));
 }
 
+// How much of the sky the hair over the skin hides: one march toward the sky the skin faces,
+// leaning up (most of the sky light under a fringe or long hair comes from above). Without it
+// the forehead and neck under the hair stayed fully sky-lit and the hair looked laid on top.
+// The hair itself scatters much of the sky it stops onto the skin (fair hair most), so a
+// curtain of it leaves the neck in soft shade, not dark.
+fn hair_over_skin_sky(s: SkinLight) -> f32 {
+    return mix(hair_over_skin(s, normalize(s.n_soft + vec3<f32>(0.0, 0.8, 0.0))), 1.0, 0.2);
+}
+
 // What reaches the inside of the mouth: as bright, but warmed by the lips and cheeks it bounced
 // off on the way in (sky blue straight on the teeth reads as blue teeth).
 fn mouth_light(c: vec3<f32>, inside: f32) -> vec3<f32> {
@@ -532,7 +541,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
     let sky_r = (sky_ambient_covered(nr, sky_vis) - fill) * sky_vis + fill;
     let sky_b = (sky_ambient_covered(nb, sky_vis) - fill) * sky_vis + fill;
     let irradiance = mouth_light(mix(sky_b, sky_r, vec3<f32>(1.0, 0.5, 0.0)) * PI, s.inside);
-    let visibility = min(s.occlusion, screen_ao(rel)) * caps.y;
+    let visibility = min(s.occlusion, screen_ao(rel)) * caps.y * hair_over_skin_sky(s);
     // Light bounces inside the skin, so occlusion darkens red less.
     let ao = ao_multibounce(visibility, albedo);
     let ao_rgb = mix(ao, sqrt(ao), vec3<f32>(0.5, 0.15, 0.0) * s.scatter);
