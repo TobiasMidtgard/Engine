@@ -110,6 +110,10 @@ fn ribbon(s: &Shown) -> El {
                 format!("Waiting for {}", short.join(" and ").to_lowercase())
             }
         }
+        Status::Full => format!(
+            "Store full: ship or use the {}",
+            s.output.name().to_lowercase()
+        ),
         st => st.text().to_string(),
     };
     El::new()
