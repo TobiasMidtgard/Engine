@@ -1,5 +1,9 @@
 //! [`Theme`]: the palette and the named style classes every screen is built from.
 //!
+//! The engine's own look is [`Theme::plain`]: flat grey boxes and plain text, with every
+//! class laid out but nothing designed. A game brings its design on top
+//! ([`crate::kit::brass::install`], [`crate::kit::glass::install`], or its own classes).
+//!
 //! Change the look of every screen at once by editing the palette
 //! (`ui.theme {"palette": {"accent": "#7fd1ff"}}`) or a class
 //! (`resource.patch Theme {"classes": {"button": {"base": {"radius": 2}}}}`).
@@ -108,9 +112,58 @@ pub struct Theme {
 }
 
 impl Default for Theme {
+    /// [`Theme::plain`]: a game adds its own design.
     fn default() -> Self {
-        Self::from_palette(Palette::default())
+        Self::plain()
     }
+}
+
+impl Palette {
+    /// Neutral greys for [`Theme::plain`]; only good, bad and warn keep a colour.
+    pub fn plain() -> Self {
+        Self {
+            panel_top: Color::hexa(0x1e1e1ef0),
+            panel_bottom: Color::hexa(0x1e1e1ef0),
+            line: Color::hexa(0xffffff2e),
+            surface: Color::hexa(0x2a2a2aee),
+            surface_hover: Color::hexa(0x383838f4),
+            well: Color::hexa(0x111111c0),
+            text: Color::hex(0xeeeeee),
+            text_dim: Color::hex(0xb4b4b4),
+            text_faint: Color::hex(0x7a7a7a),
+            accent: Color::hex(0xd8d8d8),
+            accent_light: Color::hex(0xffffff),
+            accent_dark: Color::hex(0x8a8a8a),
+            info: Color::hex(0xa8b4c0),
+            ..Self::default()
+        }
+    }
+}
+
+/// Take the design out of a patch, keeping its layout, colours and text size: gradients
+/// become their first colour, and corners, shadows, blur, materials, bevels, frames, sheen,
+/// fonts and entrances go.
+fn undesign(p: &mut StylePatch) {
+    p.background = p.background.take().map(|f| match f {
+        Fill::Linear { from, .. } => Fill::Solid(from),
+        Fill::Radial { inner, .. } => Fill::Solid(inner),
+        f => f,
+    });
+    if p.radius.is_some() {
+        p.radius = Some(Corners::all(0.0));
+    }
+    p.shadow = None;
+    p.shadow2 = None;
+    p.inset_shadow = None;
+    p.backdrop_blur = None;
+    p.material = None;
+    p.bevel = None;
+    p.frame = None;
+    p.sheen = None;
+    p.enter = None;
+    p.corner_shape = None;
+    p.font_family = None;
+    p.ease = None;
 }
 
 impl Theme {
@@ -123,7 +176,31 @@ impl Theme {
         self.palette.rarity[tier.min(4)]
     }
 
-    /// The default class table built from `p`.
+    /// The engine's starting look: [`Palette::plain`] and every class undesigned.
+    pub fn plain() -> Self {
+        Self::plain_with(Palette::plain())
+    }
+
+    /// Every class laid out from `p`, with no design (see [`Theme::plain`]).
+    pub fn plain_with(p: Palette) -> Self {
+        let mut t = Self::from_palette(p);
+        for c in t.classes.values_mut() {
+            for patch in [
+                &mut c.base,
+                &mut c.hover,
+                &mut c.pressed,
+                &mut c.focused,
+                &mut c.selected,
+                &mut c.disabled,
+            ] {
+                undesign(patch);
+            }
+        }
+        t
+    }
+
+    /// The full class table from `p`, the base the design kits restyle (brass, glass).
+    /// Games start from [`Theme::plain`] instead.
     pub fn from_palette(p: Palette) -> Self {
         let mut c = BTreeMap::new();
         let s = StylePatch::default;
@@ -737,6 +814,38 @@ mod tests {
         let back: Theme = serde_json::from_value(v).unwrap();
         assert_eq!(back.classes.len(), t.classes.len());
         assert_eq!(back.palette, t.palette);
+    }
+
+    #[test]
+    fn the_default_is_plain() {
+        let t = Theme::default();
+        for (name, c) in &t.classes {
+            for p in [
+                &c.base,
+                &c.hover,
+                &c.pressed,
+                &c.focused,
+                &c.selected,
+                &c.disabled,
+            ] {
+                assert!(
+                    p.shadow.is_none() && p.material.is_none() && p.bevel.is_none(),
+                    "{name} keeps some design"
+                );
+                assert!(
+                    !matches!(
+                        p.background,
+                        Some(Fill::Linear { .. } | Fill::Radial { .. })
+                    ),
+                    "{name} keeps a gradient"
+                );
+                assert!(
+                    p.radius.is_none_or(|r| r == Corners::all(0.0)),
+                    "{name} is rounded"
+                );
+            }
+        }
+        assert!(t.class("button").is_some() && t.class("panel").is_some());
     }
 
     #[test]

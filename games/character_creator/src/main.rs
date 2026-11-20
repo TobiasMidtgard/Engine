@@ -93,6 +93,8 @@ fn main() {
                     .before(studio::orbit_camera),
             )
             .add_systems(Update, joints::update.after(studio::orbit_camera));
+        // The engine's theme is plain: the creator wears the glass design.
+        engine_ui::kit::glass::install(&mut app.world.resource_mut::<engine_ui::Theme>());
     }
     app.run();
 }

@@ -348,7 +348,7 @@ pub fn register(app: &mut App) {
                 let palette: Palette = serde_json::from_value(merged)
                     .map_err(|e| format!("The palette doesn't parse: {e}."))?;
                 let font_size = world.resource::<Theme>().font_size;
-                let mut theme = Theme::from_palette(palette);
+                let mut theme = Theme::plain_with(palette);
                 theme.font_size = font_size;
                 world.insert_resource(theme);
             }
