@@ -691,6 +691,12 @@ pub fn alerts(world: &mut World) {
     }
 }
 
+/// The relations screen's rows: every rival house, where we stand with it, and what can be
+/// done (see [`crate::rivals`]).
+pub fn relations(world: &mut World) -> Vec<crate::rivals::RivalView> {
+    crate::rivals::relations(world)
+}
+
 pub fn register(app: &mut App) {
     app.register_api(
         "isle.house",

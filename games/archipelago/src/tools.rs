@@ -179,6 +179,20 @@ pub fn action(world: &mut World, a: &str) {
             Ok(()) => crate::hud::show_card(world),
             Err(msg) => toast(world, "Rebuild", &msg),
         }
+    } else if a == "isle.view.trade_lines" {
+        crate::tradelines::set(world, None);
+    } else if let Some(rest) = a.strip_prefix("isle.rival.") {
+        match crate::rivals::action(world, rest) {
+            Ok(said) => engine_ui::toast::notify(
+                world,
+                engine_ui::toast::ToastKind::Good,
+                "",
+                "Relations",
+                &said,
+                3.0,
+            ),
+            Err(msg) => toast(world, "Relations", &msg),
+        }
     } else if let Some(rest) = a.strip_prefix("isle.route.") {
         if let Err(msg) = route_action(world, rest) {
             toast(world, "Trade route", &msg);

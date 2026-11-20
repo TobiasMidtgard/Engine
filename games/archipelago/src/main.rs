@@ -44,6 +44,7 @@ mod orders;
 mod playtest;
 mod regional;
 mod reports;
+mod rivals;
 mod sea;
 mod settle;
 mod shipyard;
@@ -53,6 +54,7 @@ mod title;
 mod tools;
 mod tour;
 mod town;
+mod tradelines;
 mod vessels;
 mod walkers;
 mod world;
@@ -187,7 +189,7 @@ pub fn add_game(app: &mut App) {
                 draw::spin_parts,
                 draw::follow_bodies,
                 effects::follow_riders,
-                fog::update,
+                (fog::update, tradelines::update).chain(),
                 tools::ghost,
                 hud::update_data,
             )
@@ -196,6 +198,8 @@ pub fn add_game(app: &mut App) {
     globe::add(app);
     api::register(app);
     reports::register(app);
+    rivals::register(app);
+    tradelines::register(app);
     settle::register(app);
     incidents::register(app);
     fittings::register(app);
