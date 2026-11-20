@@ -264,7 +264,7 @@ pub fn start_rivals(world: &mut World, count: usize, level: Level) {
         let home = start_island(c, level);
         *world.resource_mut::<Economy>().coins_mut(c) = crate::settle::FIRST_COINS;
         let isle = &islands()[home];
-        let coast = island::settle_coast(isle).unwrap_or(isle.center);
+        let coast = island::landing_coast(isle).unwrap_or(isle.center);
         let out = (coast - isle.center).normalize_or(DVec2::X);
         let mut at = coast + out * 420.0;
         let mut n = 0;

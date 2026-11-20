@@ -1954,7 +1954,7 @@ fn bootstrap(world: &mut World, log: &mut Log, now: f64, i: usize) {
 /// the home island.
 fn landfall(i: usize, home: usize) -> DVec2 {
     let isle = &islands()[i];
-    if let Some(p) = crate::island::settle_coast(isle) {
+    if let Some(p) = crate::island::landing_coast(isle) {
         return p;
     }
     let region = globe_region(home);

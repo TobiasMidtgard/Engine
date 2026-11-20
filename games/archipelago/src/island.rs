@@ -397,6 +397,40 @@ pub fn settle_coast(isle: &Island) -> Option<DVec2> {
     Some(p)
 }
 
+/// Where settlers sailing to `isle` best come ashore for its settlement: the nearest shore
+/// reached from the settlement spot over low ground (nothing above 10 m on the way) with
+/// water a ship can lie in beyond it; [`settle_coast`] when no such shore is in reach.
+pub fn landing_coast(isle: &Island) -> Option<DVec2> {
+    let spot = settle_spot(isle)?;
+    let mut best: Option<(f64, DVec2)> = None;
+    for k in 0..72 {
+        let a = k as f64 * std::f64::consts::TAU / 72.0;
+        let d = DVec2::new(a.cos(), a.sin());
+        let mut walked = 0.0;
+        let shore = loop {
+            if walked > 2_500.0 {
+                break None;
+            }
+            let p = spot + d * walked;
+            let h = height(p.x, p.y);
+            if h < 0.5 {
+                let off = p + d * 80.0;
+                break (height(off.x, off.y) < -2.0).then_some(p);
+            }
+            if h > 10.0 {
+                break None;
+            }
+            walked += 10.0;
+        };
+        if let Some(p) = shore
+            && best.is_none_or(|b| walked < b.0)
+        {
+            best = Some((walked, p));
+        }
+    }
+    best.map(|b| b.1).or_else(|| settle_coast(isle))
+}
+
 /// 1 on the calm ground around `isle`'s settlement, 0 beyond `reach` times its calm radius.
 fn calm(isle: &Island, x: f64, z: f64, reach: f64) -> f64 {
     let Some(spot) = settle_spot(isle) else {
@@ -780,6 +814,28 @@ pub fn ground_paint(d: DVec3) -> Option<engine_terrain::OverlayPaint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settlers_land_on_a_shore_with_low_ground_up_to_the_town() {
+        for isle in islands() {
+            let Some(spot) = settle_spot(isle) else {
+                continue;
+            };
+            let land = landing_coast(isle).unwrap();
+            let steps = ((land - spot).length() / 10.0).ceil() as usize;
+            let top = (0..steps)
+                .map(|j| {
+                    let p = spot + (land - spot) * (j as f64 / steps.max(1) as f64);
+                    height(p.x, p.y)
+                })
+                .fold(0.0f64, f64::max);
+            assert!(
+                top <= 10.5,
+                "{}: a rise of {top:.0} m behind the landing",
+                isle.name
+            );
+        }
+    }
 
     #[test]
     fn islands_rise_from_the_sea() {

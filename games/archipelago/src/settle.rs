@@ -670,7 +670,7 @@ pub fn register(app: &mut App) {
             let isles: Vec<Value> = islands()
                 .iter()
                 .enumerate()
-                .map(|(i, isle)| json!({"index": i, "name": isle.name, "region": isle.region(), "claimed": claimed(world, i), "center": [isle.center.x, isle.center.y], "settle_coast": island::settle_coast(isle).map(|p| [p.x, p.y])}))
+                .map(|(i, isle)| json!({"index": i, "name": isle.name, "region": isle.region(), "claimed": claimed(world, i), "center": [isle.center.x, isle.center.y], "settle_coast": island::landing_coast(isle).map(|p| [p.x, p.y])}))
                 .collect();
             let settled: Vec<Value> = world.resource::<Settled>().0.iter().map(|(i, t)| json!({"island": islands()[*i].name, "at_s": t})).collect();
             let launched: Vec<Value> = world.resource::<crate::shipyard::Launched>().0.iter().map(|(c, n, t)| json!({"craft": c.name(), "name": n, "at_s": t})).collect();
