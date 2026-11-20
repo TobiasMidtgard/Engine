@@ -174,6 +174,11 @@ pub fn locks(set: &StrandSet) -> Option<HairLocks> {
             let along = k as f32 / (n - 1) as f32;
             let end = ((along - 0.75) / 0.25).clamp(0.0, 1.0);
             let taper = 1.0 - 0.5 * end * end * (3.0 - 2.0 * end);
+            // ...and thins out over its last few centimetres, fewer hairs reaching each point:
+            // drawn as thick to the end, a lock ended in a square block (shelves of hair
+            // across the shoulders where the single hairs end in wisps).
+            let fade = ((along - 0.6) / 0.4).clamp(0.0, 1.0);
+            let thin = 1.0 - 0.7 * fade * fade * (3.0 - 2.0 * fade);
             let major = (SPREAD * u.dot(apply(u)).max(0.0).sqrt()) * taper + hair_r;
             let minor = ((SPREAD * v.dot(apply(v)).max(0.0).sqrt()) * taper + hair_r).min(major);
             let p = middle[k];
@@ -185,7 +190,7 @@ pub fn locks(set: &StrandSet) -> Option<HairLocks> {
             let o = octahedral(u);
             out.shape.push([
                 snorm(o[0]) | snorm(o[1]) << 16,
-                f16_bits(minor / major) as u32 | (f16_bits(radius / major) as u32) << 16,
+                f16_bits(minor / major) as u32 | (f16_bits(radius * thin / major) as u32) << 16,
             ]);
         }
         if guided {
