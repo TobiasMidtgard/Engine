@@ -85,7 +85,10 @@ fn settled(econ: &Economy) -> Vec<usize> {
     econ.islands
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.population.iter().sum::<f32>() > 0.5)
+        .filter(|(i, b)| {
+            b.population.iter().sum::<f32>() > 0.5
+                && econ.owner(*i).is_none_or(|c| c == crate::sim::PLAYER)
+        })
         .map(|(i, _)| i)
         .collect()
 }

@@ -1288,11 +1288,15 @@ pub fn show(world: &mut World, island: Option<usize>) {
         closable: false,
         ..Default::default()
     };
-    let settled: Vec<bool> = world
-        .resource::<Economy>()
+    let econ = world.resource::<Economy>();
+    let settled: Vec<bool> = econ
         .islands
         .iter()
-        .map(|b| b.harbours > 0 || b.population.iter().sum::<f32>() > 0.0)
+        .enumerate()
+        .map(|(k, b)| {
+            econ.owner(k).is_none_or(|c| c == crate::sim::PLAYER)
+                && (b.harbours > 0 || b.population.iter().sum::<f32>() > 0.0)
+        })
         .collect();
     let goods = island_goods(world.resource::<Economy>(), i);
     if engine_ui::screens::spawn_screen(world, screen, &el(i, &settled, &goods)).is_ok() {

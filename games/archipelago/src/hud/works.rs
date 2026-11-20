@@ -61,6 +61,8 @@ struct Shown {
     idle_s: f32,
     crew: f32,
     paused: bool,
+    /// The acting company's to order about (a rival's works shows no switch).
+    ours: bool,
 }
 
 /// The ribbon's colour and the picture of what stops it.
@@ -323,14 +325,14 @@ fn staff_row(s: &Shown, t: crate::defs::Tier) -> El {
     El::new()
         .class("col")
         .with_style(|st| st.gap(4.0))
-        .child(
+        .child_opt(s.ours.then(|| {
             brass::switch(s.first, "Staff it first", "isle.work.first", true).tooltip(
                 "Staff it first",
                 format!(
                     "When there are too few {tier} for every works on the island, the ones marked first get their hands before the rest."
                 ),
-            ),
-        )
+            )
+        }))
         .child_opt(state.map(|text| {
             El::text(text)
                 .class("ink")
@@ -431,6 +433,7 @@ pub fn refresh(world: &mut World) {
         idle_s: p.idle_s,
         crew: p.crew,
         paused: p.paused,
+        ours: crate::build::ours(world, e),
     };
     let sig = format!(
         "{e:?}|{:?}|{:.2}|{}|{}|{:?}|{:.2}|{:.1}|{}|{}|{}|{}",

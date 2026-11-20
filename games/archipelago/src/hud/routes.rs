@@ -121,6 +121,11 @@ fn trace(world: &mut World) -> Vec<(Vec<DVec2>, Vec<DVec2>, bool)> {
         .unwrap_or_default();
     let mut out = Vec::new();
     for r in routes {
+        // A rival's route keeps its place (indices are the routes'), with nothing to draw.
+        if r.company != crate::sim::PLAYER {
+            out.push((Vec::new(), Vec::new(), r.air));
+            continue;
+        }
         let stops: Vec<DVec2> = r
             .stops
             .iter()
@@ -193,6 +198,9 @@ fn stop_chip(name: &str, load: &[Good], unload: &[Good]) -> El {
 /// One route as a tile: its ink, name, ships, and stops in order.
 fn route_tile(world: &mut World, i: usize, selected: bool, animate: bool) -> Option<El> {
     let r = world.get_resource::<Routes>()?.0.get(i)?.clone();
+    if r.company != crate::sim::PLAYER {
+        return None;
+    }
     let mut crafts: Vec<(&'static str, usize)> = Vec::new();
     let mut cargo: Vec<(Good, u32)> = Vec::new();
     {
@@ -431,10 +439,15 @@ fn editor(world: &mut World, i: usize, r: &crate::fleet::Route) -> El {
     } else {
         crate::defs::Kind::Harbour
     };
+    let econ = world.resource::<crate::sim::Economy>().clone();
     let mut free: Vec<(u32, &'static str)> = {
         let mut q = world.query::<&Building>();
         q.iter(world)
-            .filter(|b| b.kind == want && !r.stops.iter().any(|s| s.at == b.id))
+            .filter(|b| {
+                b.kind == want
+                    && econ.owns(r.company, b.island)
+                    && !r.stops.iter().any(|s| s.at == b.id)
+            })
             .map(|b| (b.id, island::islands()[b.island].name))
             .collect()
     };
@@ -470,6 +483,7 @@ fn editor(world: &mut World, i: usize, r: &crate::fleet::Route) -> El {
             if v.route == Some(i) {
                 mine.push((e.to_bits(), v.name.clone()));
             } else if v.route.is_none()
+                && v.company == r.company
                 && air == r.air
                 && matches!(v.roam, crate::fleet::Roam::Idle { .. })
             {
@@ -551,8 +565,10 @@ pub fn refresh(world: &mut World) {
 
 /// A route was just opened: pick it.
 pub fn pick_last(world: &mut World) {
-    let n = world.get_resource::<Routes>().map_or(0, |r| r.0.len());
-    world.resource_mut::<RouteBook>().selected = n.checked_sub(1);
+    let last = world
+        .get_resource::<Routes>()
+        .and_then(|r| r.0.iter().rposition(|r| r.company == crate::sim::PLAYER));
+    world.resource_mut::<RouteBook>().selected = last;
     refresh(world);
 }
 
@@ -697,6 +713,13 @@ fn chart_pick(world: &mut World, i: usize) -> ChartPick {
             .map(|b| b.id)
             .collect()
     };
+    if !here.is_empty()
+        && !world
+            .resource::<crate::sim::Economy>()
+            .owns(crate::sim::PLAYER, i)
+    {
+        return ChartPick::Nothing("a rival's island");
+    }
     if here.is_empty() {
         return ChartPick::Nothing(if air { "no airship mast" } else { "no harbour" });
     }
@@ -849,7 +872,7 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
     let mut q = world.query::<&Vessel>();
     let ships: Vec<(Vec2, f32, bool, Option<usize>)> = q
         .iter(world)
-        .filter(|v| here(DVec2::new(v.at.x, v.at.z)))
+        .filter(|v| v.company == crate::sim::PLAYER && here(DVec2::new(v.at.x, v.at.z)))
         .map(|v| {
             (
                 at(DVec2::new(v.at.x, v.at.z)),

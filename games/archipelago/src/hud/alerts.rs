@@ -124,11 +124,14 @@ fn shown(world: &mut World) -> (Vec<Alert>, usize) {
         .hidden
         .retain(|id| live.contains(id));
     let hidden = world.resource::<Alerts>().hidden.clone();
+    // A rival's fires and riots are theirs to put out.
+    let econ = world.resource::<crate::sim::Economy>();
     let mut list: Vec<Alert> = all
         .into_iter()
-        .filter(|a| !hidden.contains(&a.id))
+        .filter(|a| {
+            !hidden.contains(&a.id) && econ.owner(a.island).is_none_or(|c| c == crate::sim::PLAYER)
+        })
         .collect();
-    // Worst first, then the newest.
     // Worst first (fires before the rest), then the newest.
     let rank = |a: &Alert| (urgency(a) as u8, (a.what == Trouble::Fire) as u8);
     list.sort_by(|a, b| rank(b).cmp(&rank(a)).then(b.since_s.total_cmp(&a.since_s)));

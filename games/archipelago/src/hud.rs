@@ -558,7 +558,7 @@ fn card_row(i: usize) -> El {
         )
 }
 
-fn info_card(kind: Kind, ruin: bool) -> El {
+fn info_card(kind: Kind, ruin: bool, held: Option<(String, u32)>) -> El {
     let d = kind.def();
     let card = brass::parchment()
         .with_style(|s| {
@@ -605,7 +605,11 @@ fn info_card(kind: Kind, ruin: bool) -> El {
         .child_opt((kind == Kind::House).then(house::card_placeholder))
         .children((0..6).map(card_row))
         .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
-        .child(
+        .child_opt(
+            held.clone()
+                .map(|(name, colour)| held_ribbon(&name, colour)),
+        )
+        .child_opt(held.is_none().then(|| {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(10.0).margin([8.0, 0.0, 0.0, 0.0]))
@@ -619,11 +623,75 @@ fn info_card(kind: Kind, ruin: bool) -> El {
                         "isle.sel.demolish",
                     )
                     .class("brass_button_dark"),
-                ),
-        );
+                )
+        }));
     El::new()
         .with_style(|s| s.fill_parent().pick(Pick::Ignore))
         .child(card)
+}
+
+/// A rival house's building: whose it is, in place of the buttons.
+fn held_ribbon(name: &str, colour: u32) -> El {
+    let c = engine_ui::color::Color::hex(colour);
+    El::new()
+        .class("row")
+        .with_style(move |s| {
+            s.gap(10.0)
+                .align_items(Align::Center)
+                .margin([8.0, 0.0, 0.0, 0.0])
+                .padding([7.0, 12.0])
+                .radius(8.0)
+                .background(c.with_alpha(0.16))
+                .border(1.5, c.with_alpha(0.8))
+        })
+        .child(
+            El::new()
+                .with_style(move |s| s.width(14.0).height(14.0).radius(7.0).background(c))
+                .pick_ignore(),
+        )
+        .child(
+            El::text(format!(
+                "{name}'s. You can look, but only they give orders here."
+            ))
+            .class("ink")
+            .text_style(|t| t.size(13.5))
+            .with_style(|s| s.grow(1.0).shrink(1.0))
+            .pick_ignore(),
+        )
+        .tooltip(
+            name,
+            "A rival house holds this island. Trade with them, or change how they see you, in Relations (P).",
+        )
+}
+
+/// The rival house that holds building `e`, with its colour, when it isn't the player's.
+fn held_by(world: &World, e: Entity) -> Option<(String, u32)> {
+    if crate::build::ours(world, e) {
+        return None;
+    }
+    let b = world.get::<Building>(e)?;
+    let c = world.resource::<crate::sim::Economy>().owner(b.island)?;
+    let colour = world
+        .get_resource::<crate::rivals::Rivals>()
+        .and_then(|r| r.0.iter().find(|x| x.id == c as u32))
+        .map_or(0x8a8a8a, |r| r.colour);
+    Some((crate::rivals::company_name(world, c), colour))
+}
+
+/// Orders to the selected building that only its owner may give.
+fn owner_only(a: &str) -> bool {
+    matches!(
+        a,
+        "isle.sel.pause"
+            | "isle.sel.demolish"
+            | "isle.house.up"
+            | "isle.house.down"
+            | "isle.work.first"
+            | "isle.ruin.rebuild"
+    ) || a.starts_with("isle.yard.order:")
+        || a.starts_with("isle.yard.cancel")
+        || a.starts_with("isle.sock.")
+        || a.starts_with("isle.shelf.slot:")
 }
 
 /// The batch in progress, as a brass bar (its fill is sized in [`update_data_now`]).
@@ -765,7 +833,11 @@ pub fn show_card(world: &mut World) {
         .resource::<Hand>()
         .selected
         .is_some_and(|e| world.get::<crate::incidents::Ruin>(e).is_some());
-    if screens::spawn_screen(world, hud_screen(INFO, 1), &info_card(kind, ruin)).is_ok() {
+    let held = world
+        .resource::<Hand>()
+        .selected
+        .and_then(|e| held_by(world, e));
+    if screens::spawn_screen(world, hud_screen(INFO, 1), &info_card(kind, ruin, held)).is_ok() {
         world.resource_mut::<Hud>().info_open = true;
         update_data_now(world);
         shelf::card_opened(world);
@@ -842,6 +914,17 @@ pub fn read_actions(world: &mut World) {
             } else {
                 routes::refresh(world);
             }
+        } else if owner_only(&a)
+            && let Some((name, _)) = world
+                .resource::<Hand>()
+                .selected
+                .and_then(|e| held_by(world, e))
+        {
+            complain(
+                world,
+                &format!("{name}'s"),
+                "Only its owner gives orders here.",
+            );
         } else if shelf::action(world, &a)
             || fleet::action(world, &a)
             || alerts::action(world, &a)
@@ -1051,16 +1134,29 @@ fn update_data_now(world: &mut World) {
     }
     let (ships, airships) = {
         let mut q = world.query::<&crate::fleet::Vessel>();
-        q.iter(world).fold((0, 0), |(s, a), v| {
-            if v.craft == crate::vessels::Craft::Airship {
-                (s, a + 1)
-            } else {
-                (s + 1, a)
-            }
-        })
+        q.iter(world)
+            .filter(|v| v.company == crate::sim::PLAYER)
+            .fold((0, 0), |(s, a), v| {
+                if v.craft == crate::vessels::Craft::Airship {
+                    (s, a + 1)
+                } else {
+                    (s + 1, a)
+                }
+            })
     };
     let region = map::region_label(world);
-    let total: f32 = econ.islands.iter().map(population).sum();
+    // The player's own islands only: a rival's people are not the company's.
+    let total: f32 = econ
+        .islands
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| econ.owner(*i).is_none_or(|c| c == crate::sim::PLAYER))
+        .map(|(_, b)| population(b))
+        .sum();
+    let rival_here = econ
+        .owner(isle)
+        .filter(|c| *c != crate::sim::PLAYER)
+        .map(|c| crate::rivals::company_name(world, c));
     let books = &econ.islands[isle];
     let category = world.get_resource::<Hud>().map_or(2, |h| h.category);
     {
@@ -1077,7 +1173,13 @@ fn update_data_now(world: &mut World) {
             ),
         );
         data.set("isle.people", fmt_int(total as f64));
-        data.set("isle.island", island::islands()[isle].name);
+        data.set(
+            "isle.island",
+            match &rival_here {
+                Some(n) => format!("{} · {n}'s", island::islands()[isle].name),
+                None => island::islands()[isle].name.to_string(),
+            },
+        );
         data.set("isle.island_people", {
             // Every tier that lives here, lowest first (fisherfolk alone on a new isle).
             let tiers: Vec<String> = Tier::ALL
@@ -1096,7 +1198,11 @@ fn update_data_now(world: &mut World) {
         for g in Good::ALL {
             data.set(
                 &format!("isle.stock.{}", g.index()),
-                format!("{:.0}", books.get(g)),
+                if rival_here.is_some() {
+                    "–".to_string()
+                } else {
+                    format!("{:.0}", books.get(g))
+                },
             );
         }
         data.set(
@@ -1289,7 +1395,35 @@ fn demo_step(world: &mut World, dt: f32) {
             Some((k, t)) => (k.to_string(), Some(t.to_string())),
             None => (want, None),
         };
-        let weaver = {
+        // `--hud-card-rival`: a works on a rival house's island. The tour's sandbox has no
+        // rivals, so for the picture its second settled island is handed to the first house.
+        let rival = std::env::args().any(|a| a == "--hud-card-rival").then(|| {
+            {
+                let mut econ = world.resource_mut::<crate::sim::Economy>();
+                if econ.owner(0) == Some(crate::sim::PLAYER)
+                    && let Some(k) = (1..econ.islands.len()).find(|k| econ.islands[*k].harbours > 0)
+                    && !econ
+                        .islands
+                        .iter()
+                        .any(|b| b.harbours > 0 && b.owner != crate::sim::PLAYER)
+                {
+                    econ.islands[k].owner = 1;
+                }
+            }
+            let es: Vec<Entity> = world
+                .query_filtered::<Entity, With<Building>>()
+                .iter(world)
+                .collect();
+            es.into_iter().find(|e| {
+                !crate::build::ours(world, *e)
+                    && world
+                        .get::<Building>(*e)
+                        .is_some_and(|b| b.kind.def().output.is_some())
+            })
+        });
+        let weaver = if let Some(found) = rival {
+            found
+        } else {
             let mut q = world.query::<(Entity, &Building, Option<&House>)>();
             q.iter(world)
                 .find(|(_, b, h)| {

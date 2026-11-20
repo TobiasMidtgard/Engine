@@ -146,6 +146,8 @@ struct Seen {
     wait_text: String,
     /// The happiness a house starts at, plus each pull ("why", points).
     pulls: Vec<(String, f32)>,
+    /// The acting company's to order about (a rival's house shows no buttons).
+    ours: bool,
 }
 
 fn pulls(h: &House, a: &Appraisal) -> Vec<(String, f32)> {
@@ -705,11 +707,11 @@ fn moving(s: &Seen) -> El {
         Some(_) => format!("Not ready: {}.", s.wait_text),
         None => "The top tier.".into(),
     };
-    let down = h.tier != Tier::Fisherfolk;
+    let down = h.tier != Tier::Fisherfolk && s.ours;
     let buttons = El::new()
         .class("row")
         .with_style(|s| s.gap(8.0))
-        .child_opt(next.map(|_| {
+        .child_opt(next.filter(|_| s.ours).map(|_| {
             El::button("Move up", "isle.house.up")
                 .class("brass_button")
                 .text_style(|t| t.nowrap())
@@ -789,12 +791,14 @@ fn seen(world: &mut World, e: Entity) -> Option<Seen> {
     let a = sim::appraise(&h, &books, boost.as_ref());
     let wait_text = crate::reports::wait_text(&h, &a, &books);
     let pulls = pulls(&h, &a);
+    let ours = crate::build::ours(world, e);
     Some(Seen {
         h,
         a,
         books,
         wait_text,
         pulls,
+        ours,
     })
 }
 

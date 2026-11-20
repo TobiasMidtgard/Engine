@@ -469,6 +469,12 @@ fn rule() -> El {
 /// The vessels, those with anything aboard first.
 fn panels(world: &mut World) -> Vec<GearPanel> {
     let mut v = crate::gear::fleet(world);
+    // Only the player's own: rival houses' ships are not ours to fit out or send.
+    v.retain(|p| {
+        vessel_entity(world, p.vessel)
+            .and_then(|e| world.get::<Vessel>(e))
+            .is_some_and(|v| v.company == crate::sim::PLAYER)
+    });
     v.sort_by_key(|p| !p.slots.iter().any(|g| g.item.is_some()));
     v
 }
@@ -517,7 +523,11 @@ fn sig(world: &mut World) -> String {
     let open = world.resource::<Fleet>().voyage;
     let doing: Vec<String> = {
         let mut q = world.query::<&Vessel>();
-        let vs: Vec<Vessel> = q.iter(world).cloned().collect();
+        let vs: Vec<Vessel> = q
+            .iter(world)
+            .filter(|v| v.company == crate::sim::PLAYER)
+            .cloned()
+            .collect();
         vs.iter()
             .map(|v| {
                 format!(
