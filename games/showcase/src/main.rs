@@ -142,6 +142,8 @@ fn main() {
             planet::ground_near_planets.run_if(resource_exists::<planet::UsePlanet>),
         );
     register_apis(&mut app);
+    // The engine's default UI theme is plain; the showcase's menus wear the glass design.
+    engine_ui::kit::glass::install(&mut app.world.resource_mut::<engine_ui::Theme>());
     // Rapier's step runs beside Extract, Render and Last instead of inside the fixed step
     // (engine_physics `PhysicsSettings::overlap_frame`; ENGINE_PHYSICS_OVERLAP=0 turns it off
     // to compare in one build).
