@@ -336,6 +336,20 @@ fn views() -> Vec<View> {
             ..v("whalers_rock", Aim::Settle(13), 4.48, 300.0)
         },
         v("town", Aim::Town, 0.6, 330.0),
+        // A rival game's houses at home (`--rivals 3 --play-shots gullwick_town,...`):
+        // Northmoor, Frostholm and Sarrowmere.
+        View {
+            fog: false,
+            ..v("gullwick_town", Aim::Kind(K::Market, 3), 2.2, 300.0)
+        },
+        View {
+            fog: false,
+            ..v("ostrava_town", Aim::Kind(K::Market, 12), 1.3, 300.0)
+        },
+        View {
+            fog: false,
+            ..v("harrowgate_town", Aim::Kind(K::Market, 5), 4.1, 300.0)
+        },
         View {
             clean: true,
             pitch_deg: Some(24.0),

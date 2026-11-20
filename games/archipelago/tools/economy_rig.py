@@ -21,10 +21,10 @@ BIN_DEFAULT = os.path.expanduser(
 )
 
 
-def play(binary, seed, minutes, speed, out):
+def play(binary, seed, minutes, speed, out, extra=()):
     os.makedirs(out, exist_ok=True)
     cmd = [binary, "--headless", "--size", "320x180", "--play", str(minutes),
-           "--play-speed", str(speed), "--seed", str(seed), "--play-out", out]
+           "--play-speed", str(speed), "--seed", str(seed), "--play-out", out, *extra]
     with open(os.path.join(out, "run.log"), "w") as log:
         return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
 
@@ -55,10 +55,17 @@ def judge(rows):
         if r["balance_per_min"] > 0 and all(x["balance_per_min"] > 0 for x in rows[i:i + 10]):
             turned = minutes_of(r) - t0
             break
-    lab = first(rows, lambda r: r["houses"][1] > 0)
-    bur = first(rows, lambda r: r["houses"][2] > 0)
     last = rows[-1]
-    people = sum(sum(i["people"]) for i in last["islands"])
+    # A game with rivals: the player's company only (the timeline's totals count everyone).
+    rivals = len(last.get("companies", [])) > 1
+    if rivals:
+        lab = first(rows, lambda r: r["companies"][0]["tiers"][1] > 0)
+        bur = first(rows, lambda r: r["companies"][0]["tiers"][2] > 0)
+        people = last["companies"][0]["people"]
+    else:
+        lab = first(rows, lambda r: r["houses"][1] > 0)
+        bur = first(rows, lambda r: r["houses"][2] > 0)
+        people = sum(sum(i["people"]) for i in last["islands"])
     houses = sum(last["houses"])
     happy = None
     if "happy_houses" in last:
@@ -72,7 +79,9 @@ def judge(rows):
         "first_labourers_at": None if lab is None else lab - t0,
         "first_burghers_at": None if bur is None else bur - t0,
         "people_at_end": round(people),
-        "islands_at_end": last.get("settled", len(last["islands"])),
+        "islands_at_end": last["companies"][0]["islands"] if rivals else last.get("settled", len(last["islands"])),
+        # Where the player's company finished by people (1 = first), in a game with rivals.
+        "rank_at_end": 1 + sum(c["people"] > people for c in last["companies"][1:]) if rivals else None,
         "happy_share_at_end": happy,
         "waiting_without_reason": last.get("waiting_without_reason"),
     }
@@ -87,6 +96,7 @@ TARGETS = [
     ("5b Islands", "islands_at_end", lambda v: v is not None and v >= 4, "4 or more"),
     ("6 Happy towns", "happy_share_at_end", lambda v: v is not None and v >= 0.7, "70 % or more"),
     ("7 No upgrade lock", "waiting_without_reason", lambda v: v == 0, "none"),
+    ("9 Place among the houses", "rank_at_end", lambda v: v is None or v == 1, "first (a third of games against Admirals)"),
 ]
 
 
@@ -140,6 +150,8 @@ def main():
     ap.add_argument("--bin", default=BIN_DEFAULT)
     ap.add_argument("--out", default="rig/latest")
     ap.add_argument("--check", metavar="DIR", help="only check an earlier run")
+    ap.add_argument("--game", default="",
+                    help='more game flags, e.g. "--play-level admiral --rivals 3 --rival-level admiral"')
     a = ap.parse_args()
     if a.check:
         check(a.check)
@@ -150,7 +162,7 @@ def main():
     while seeds or running:
         while seeds and len(running) < a.parallel:
             s = seeds.pop(0)
-            running.append((s, play(a.bin, s, a.minutes, a.speed, os.path.join(a.out, f"seed_{s}"))))
+            running.append((s, play(a.bin, s, a.minutes, a.speed, os.path.join(a.out, f"seed_{s}"), a.game.split())))
         for s, p in list(running):
             if p.poll() is not None:
                 running.remove((s, p))

@@ -34,8 +34,8 @@ fn stop_kind(air: bool) -> Kind {
     }
 }
 
-/// Check that building `at` can be a stop on an `air` (or sea) route: a harbour (or mast) on
-/// an island of the company giving orders.
+/// Check that building `at` can be a stop on an `air` (or sea) route: a harbour (or mast) of
+/// the company giving orders, or another company's it is not at war with.
 pub fn check_stop(world: &mut World, at: u32, air: bool) -> Result<(), String> {
     let b = building_by_id(world, at).ok_or(format!("no building {at}"))?;
     let want = stop_kind(air);
@@ -46,14 +46,11 @@ pub fn check_stop(world: &mut World, at: u32, air: bool) -> Result<(), String> {
             want.def().name
         ));
     }
+    // Another company's quay trades at its prices, unless the two are at war.
     if let Some(c) = world.resource::<crate::sim::Economy>().owner(b.island)
         && c != crate::sim::acting(world)
     {
-        return Err(format!(
-            "That {} is {}'s.",
-            want.def().name.to_lowercase(),
-            crate::rivals::company_name(world, c)
-        ));
+        crate::market::terms(world, crate::sim::acting(world), c)?;
     }
     Ok(())
 }

@@ -339,10 +339,34 @@ pub fn standings(world: &World) -> Vec<serde_json::Value> {
                         .round()
                 })
                 .collect();
+            // (Where the money goes: taxes in, upkeep out, of which ships and public works.)
+            let (taxes, upkeep, fleet, public) = if c == PLAYER {
+                (
+                    econ.taxes_per_min,
+                    econ.upkeep_per_min,
+                    econ.fleet_upkeep,
+                    econ.public_upkeep,
+                )
+            } else {
+                econ.rivals
+                    .get(c as usize - 1)
+                    .map_or((0.0, 0.0, 0.0, 0.0), |p| {
+                        (
+                            p.taxes_per_min,
+                            p.upkeep_per_min,
+                            p.fleet_upkeep,
+                            p.public_upkeep,
+                        )
+                    })
+            };
             serde_json::json!({
                 "company": c,
                 "coins": econ.coins_of(c).round(),
                 "balance": econ.balance_of(c).round(),
+                "taxes": taxes.round(),
+                "upkeep": upkeep.round(),
+                "fleet": fleet.round(),
+                "public": public.round(),
                 "people": people.round(),
                 "tiers": tiers,
                 "islands": isles.len(),

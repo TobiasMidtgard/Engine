@@ -709,6 +709,27 @@ fn trade(world: &mut World, v: &mut Vessel, b: &Building, stop: &Stop) -> u32 {
     let (slots, per) = v.craft.hold();
     let slots = slots + v.kit.hold;
     let per = crate::fittings::per_hold(per, slots, v.kit.room);
+    // Another company's quay: it buys and sells for coins, at its prices.
+    if let Some(owner) = world.resource::<Economy>().owner(b.island)
+        && owner != v.company
+    {
+        let Ok(factor) = crate::market::terms(world, v.company, owner) else {
+            return 0;
+        };
+        let mut econ = world.resource_mut::<Economy>();
+        let d = crate::market::deal(
+            &mut econ,
+            b.island,
+            v.company,
+            &mut v.cargo,
+            &stop.load,
+            &stop.unload,
+            slots,
+            per,
+            factor,
+        );
+        return d.sold;
+    }
     let mut econ = world.resource_mut::<Economy>();
     exchange(
         &mut econ.islands[b.island],

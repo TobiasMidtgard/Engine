@@ -41,6 +41,7 @@ mod items;
 mod ledger;
 mod logistics;
 mod looks;
+mod market;
 mod orders;
 mod playtest;
 mod regional;
