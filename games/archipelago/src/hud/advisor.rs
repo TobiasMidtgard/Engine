@@ -445,6 +445,19 @@ pub fn refresh(world: &mut World) {
     if !world.contains_resource::<Advisor>() {
         return;
     }
+    // Ships picked: their card takes the corner, so the notebook steps aside.
+    let ships_picked = world
+        .get_resource::<crate::helm::Helm>()
+        .is_some_and(|h| !h.selected.is_empty());
+    if ships_picked {
+        if world.resource::<Advisor>().sig != "away"
+            && let Some(node) = engine_ui::input::find_id(world, LIST_ID)
+        {
+            let _ = engine_ui::el::replace_children(world, node, &[]);
+            world.resource_mut::<Advisor>().sig = "away".into();
+        }
+        return;
+    }
     let all = gather(world);
     let hidden = world.resource::<Advisor>().hidden.clone();
     let list: Vec<Advice> = all

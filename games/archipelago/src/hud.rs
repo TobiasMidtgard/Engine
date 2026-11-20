@@ -20,21 +20,24 @@ use engine_ui::screens;
 use engine_ui::style::{Align, Direction, Ease, Enter, Justify, Pick, Position, pct};
 
 use crate::camera;
-use crate::defs::{Category, DEFS, Good, Kind, Tier};
+use crate::defs::{Category, Good, Kind, Tier};
 use crate::island;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::tools::{Hand, Tool};
 
 mod advisor;
 mod alerts;
+mod chains;
 mod fleet;
 mod house;
 mod ledger;
 mod map;
+mod plan;
 mod relations;
 mod routes;
 mod shelf;
 mod store;
+mod topbar;
 mod trouble;
 mod works;
 mod yard;
@@ -48,8 +51,6 @@ pub struct Hud {
     /// The island the top bar shows.
     pub island: usize,
     info_open: bool,
-    /// The goods the top bar shows: those of the island in view.
-    goods: Vec<Good>,
     /// `--hud-demo`: after a moment, open a workshop's card and hover a build tile, so a
     /// headless tour's screenshots show the whole HUD at work.
     demo: Option<f32>,
@@ -63,10 +64,66 @@ const MAP: &str = "isle_map";
 /// Game speeds the medallions set, with their icons.
 const SPEEDS: [(f32, &str, &str); 4] = [
     (0.0, "isle_speed_pause", "Pause (Space)"),
-    (1.0, "isle_speed_1", "Normal speed (1)"),
-    (2.0, "isle_speed_2", "Double speed (2)"),
-    (4.0, "isle_speed_4", "Four times as fast (3)"),
+    (
+        1.0,
+        "isle_speed_1",
+        "Normal speed (+ and − change the speed)",
+    ),
+    (
+        2.0,
+        "isle_speed_2",
+        "Double speed (+ and − change the speed)",
+    ),
+    (
+        4.0,
+        "isle_speed_4",
+        "Four times as fast (+ and − change the speed)",
+    ),
 ];
+
+#[allow(dead_code)] // tools.rs keys the tabs from it (Brightsund thread)
+/// The build bar's tabs in shown order, each with its tiles in shown order for the island
+/// in view (tools.rs keys tab `i` to F2 + i, and steps through a tab's tiles in this order).
+pub fn bar_tabs(world: &World) -> Vec<(String, Vec<Kind>)> {
+    let by_type = world
+        .get_resource::<plan::Plan>()
+        .is_some_and(|p| p.by_type);
+    let isle = world.get_resource::<Hud>().map_or(0, |h| h.island);
+    plan::tabs(by_type)
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.name.to_string(), plan::tab_kinds(by_type, i, isle)))
+        .collect()
+}
+
+#[allow(dead_code)] // tools.rs opens a tab from its key (Brightsund thread)
+/// Show build tab `i` (clamped), as its key picks from it.
+pub fn open_tab(world: &mut World, i: usize) {
+    if !world.contains_resource::<Hud>() {
+        return;
+    }
+    let n = plan::tabs(world.resource::<plan::Plan>().by_type).len();
+    let i = i.min(n.saturating_sub(1));
+    if world.resource::<Hud>().category != i {
+        world.resource_mut::<Hud>().category = i;
+        refresh_items(world);
+    }
+}
+
+#[allow(dead_code)] // the ships' selection card folds it (helm.rs)
+/// Fold the "Next moves" notebook away (while something else uses the bottom left), or open
+/// it again.
+pub fn advisor_fold(world: &mut World, folded: bool) {
+    if let Some(mut a) = world.get_resource_mut::<advisor::Advisor>() {
+        if a.folded == folded {
+            return;
+        }
+        a.folded = folded;
+    } else {
+        return;
+    }
+    advisor::refresh(world);
+}
 
 pub(super) fn kind_icon(k: Kind) -> &'static str {
     match k {
@@ -88,7 +145,7 @@ pub(super) fn kind_icon(k: Kind) -> &'static str {
     }
 }
 
-fn category_icon(c: Category) -> &'static str {
+pub(super) fn category_icon(c: Category) -> &'static str {
     match c {
         Category::Roads => "isle_road",
         Category::Homes => "isle_house",
@@ -99,243 +156,16 @@ fn category_icon(c: Category) -> &'static str {
     }
 }
 
-fn kinds_in(c: Category) -> Vec<Kind> {
-    DEFS.iter()
-        .filter(|d| d.category == c)
-        .map(|d| d.kind)
-        .collect()
-}
-
-/// The build tile's tooltip: what it is for, then cost, workers, chain and upkeep.
-fn cost_text(k: Kind) -> String {
-    let d = k.def();
-    let mut cost = vec![format!("{} coins", d.coins)];
-    for (g, n) in d.cost {
-        cost.push(format!("{n} {}", g.name().to_lowercase()));
-    }
-    let mut s = String::new();
-    if !d.blurb.is_empty() {
-        s += &format!("[i]{}[/i]\n", d.blurb);
-    }
-    s += &format!("[b]Cost[/b]  {}", cost.join(" · "));
-    if let Some((t, w)) = d.workers {
-        s += &format!("\n[b]Workers[/b]  {w} {}", t.name().to_lowercase());
-    }
-    match (d.input, d.output) {
-        (Some(i), Some(o)) => {
-            let from = match d.input2 {
-                Some(j) => format!(
-                    "{} and {}",
-                    i.name().to_lowercase(),
-                    j.name().to_lowercase()
-                ),
-                None => i.name().to_lowercase(),
-            };
-            s += &format!("\n[b]Makes[/b]  {} from {from}", o.name().to_lowercase())
-        }
-        (None, Some(o)) => s += &format!("\n[b]Makes[/b]  {}", o.name().to_lowercase()),
-        _ => {}
-    }
-    if d.upkeep > 0.0 {
-        s += &format!("\n[b]Upkeep[/b]  {:.0} coins a minute", d.upkeep);
-    }
-    s
-}
-
-/// Big number with a small-caps line under it, beside a badge.
-fn stat(icon: &str, bind: &str, label_bind: &str, tip: &str, tip_text: &str) -> El {
+/// The game speed medallions.
+fn speed_row() -> El {
     El::new()
         .class("row")
-        .with_style(|s| s.gap(10.0))
-        .tooltip(tip, tip_text)
-        .child(brass::badge(icon, 46.0))
-        .child(
-            El::new()
-                .class("col")
-                .with_style(|s| s.gap(0.0))
-                .child(
-                    El::text(bind)
-                        .class("brass_number")
-                        .text_style(|t| t.nowrap().tabular().shadow())
-                        .pick_ignore(),
-                )
-                .child(
-                    El::text(label_bind)
-                        .class("brass_label")
-                        .text_style(|t| t.nowrap())
-                        .pick_ignore(),
-                ),
-        )
-}
-
-/// A good in the warehouse: badge and count in a recessed well.
-fn good_cell(g: Good, compact: bool) -> El {
-    let well = brass::well(g.icon(), &format!("{{isle.stock.{}}}", g.index()));
-    let well = if compact {
-        well.with_style(|s| s.padding([2.0, 7.0, 2.0, 2.0]).gap(3.0))
-    } else {
-        well
-    };
-    well.tooltip(
-        g.name(),
-        "In the warehouse of the island in view. Carts bring what workshops make; houses take what they need.",
-    )
-}
-
-/// Room held for the town cartouche in the middle of the top bar.
-const CARTOUCHE_ROOM: f32 = 340.0;
-
-/// Wells a row holds on either side of the town cartouche.
-const WELLS_PER_ROW: usize = 6;
-
-/// The goods wells in two rows at most, six to a row; `side` 0 is the block left of the town
-/// cartouche, 1 the block right of it (goods past twelve). The wells are smaller when the
-/// right block is in use.
-fn goods_rows(goods: &[Good], side: usize) -> Vec<El> {
-    let compact = goods.len() > 2 * WELLS_PER_ROW;
-    let part = if side == 0 {
-        &goods[..goods.len().min(2 * WELLS_PER_ROW)]
-    } else {
-        &goods[goods.len().min(2 * WELLS_PER_ROW)..]
-    };
-    part.chunks(WELLS_PER_ROW)
-        .map(|row| {
-            El::new()
-                .class("row")
-                .with_style(move |s| s.gap(if compact { 4.0 } else { 6.0 }))
-                .children(row.iter().map(|g| good_cell(*g, compact)))
-        })
-        .collect()
-}
-
-/// The top bar, with the wells for `goods` (the goods kept, made or used on the island in
-/// view; they change as the view moves to another island).
-fn top_bar(goods: &[Good]) -> El {
-    let block = |side: usize| {
-        El::new()
-            .class("col")
-            .id(if side == 0 {
-                "isle.goods"
-            } else {
-                "isle.goods2"
-            })
-            .with_style(|s| s.gap(4.0))
-            .children(goods_rows(goods, side))
-    };
-    let left = block(0);
-    // Goods past twelve: a second block just right of the town cartouche (an overlay row with
-    // the cartouche's room held free in the middle).
-    let right = El::new()
-        .with_style(|s| {
-            s.position(Position::Absolute)
-                .left(0.0)
-                .right(0.0)
-                .top(0.0)
-                .bottom(0.0)
-                .align_items(Align::Center)
-                .pick(Pick::Ignore)
-        })
-        .child(El::new().with_style(|s| s.grow(1.0).basis(0.0).pick(Pick::Ignore)))
-        .child(El::new().with_style(|s| s.width(CARTOUCHE_ROOM).pick(Pick::Ignore)))
-        .child(
-            El::new()
-                .with_style(|s| s.grow(1.0).basis(0.0).pick(Pick::Ignore))
-                .child(block(1)),
-        );
-    let speed = El::new()
-        .class("row")
-        .with_style(|s| s.gap(8.0))
+        .with_style(|s| s.gap(6.0))
         .children(SPEEDS.iter().map(|(v, icon, tip)| {
-            brass::medallion(icon, 42.0, &format!("isle.speed:{v}"))
+            brass::medallion(icon, 36.0, &format!("isle.speed:{v}"))
                 .id(format!("isle.speed:{v}"))
                 .tooltip("", *tip)
-        }));
-    let bar = El::new()
-        .class("brass_bar")
-        .with_style(|s| {
-            s.position(Position::Absolute)
-                .left(14.0)
-                .right(14.0)
-                .top(10.0)
-                .min_height(76.0)
-                .padding([8.0, 22.0])
-                .gap(22.0)
-                .align_items(Align::Center)
-        })
-        .child(stat(
-            "coin",
-            "{isle.coins}",
-            "{isle.balance}",
-            "Coins",
-            "Taxes from houses, minus every building's upkeep. The line under it is the balance per minute.",
-        ))
-        .child(stat(
-            "isle_people",
-            "{isle.people}",
-            "people",
-            "People",
-            "Every tier, on every island.",
-        ))
-        .child(left)
-        .child(right)
-        .child(El::new().with_style(|s| s.grow(1.0)))
-        .child(
-            El::new()
-                .class("col")
-                .with_style(|s| s.gap(0.0).align_items(Align::End))
-                .child(
-                    El::text("{isle.clock}")
-                        .class("brass_title")
-                        .text_style(|t| t.nowrap().shadow())
-                        .with_style(|s| s.font_size(20.0))
-                        .pick_ignore(),
-                )
-                .child(
-                    El::text("{isle.season}")
-                        .class("brass_label")
-                        .text_style(|t| t.nowrap())
-                        .pick_ignore(),
-                ),
-        )
-        .child(speed);
-    // The island in view, on a plaque hanging under the bar.
-    let cartouche = El::new()
-        .with_style(|s| {
-            s.position(Position::Absolute)
-                .left(0.0)
-                .right(0.0)
-                .top(80.0)
-                .justify(Justify::Center)
-                .pick(Pick::Ignore)
-        })
-        .child(
-            El::new()
-                .class("cartouche")
-                .tooltip(
-                    "Island in view",
-                    "The top bar shows this island's warehouse.",
-                )
-                .with_style(|s| {
-                    s.min_width(230.0)
-                        .enter(Enter::rise(0.5, -24.0).delay(0.15))
-                })
-                .child(
-                    El::text("{isle.island}")
-                        .class("ink_title")
-                        .text_style(|t| t.nowrap())
-                        .pick_ignore(),
-                )
-                .child(
-                    El::text("{isle.island_people}")
-                        .class("ink_label")
-                        .text_style(|t| t.nowrap())
-                        .pick_ignore(),
-                ),
-        );
-    El::new()
-        .with_style(|s| s.fill_parent().pick(Pick::Ignore))
-        .child(bar)
-        .child(cartouche)
+        }))
 }
 
 /// A build tile: the building's badge, its name and a price line. `compact` for a category
@@ -384,16 +214,7 @@ fn tile(
 /// the end of the row, with the reason in its tooltip).
 fn item_tile(k: Kind, selected: bool, i: usize, compact: bool, grows: Option<&str>) -> El {
     let d = k.def();
-    let price = El::new()
-        .class("row")
-        .with_style(|s| s.gap(3.0).justify(Justify::Center).pick(Pick::Ignore))
-        .child(El::icon("coin").with_style(|s| s.size(14.0, 14.0).pick(Pick::Ignore)))
-        .child(
-            El::text(d.coins.to_string())
-                .text_style(|t| t.size(13.0).nowrap().tabular())
-                .with_style(|s| s.color(Colors::ink_dim()))
-                .pick_ignore(),
-        );
+    let price = plan::price(k);
     let action = format!(
         "isle.build:{}",
         serde_json::to_value(k)
@@ -401,44 +222,20 @@ fn item_tile(k: Kind, selected: bool, i: usize, compact: bool, grows: Option<&st
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default()
     );
-    let mut tip = cost_text(k);
-    if let Some(isle) = grows {
-        tip.push_str(&format!("\n[i]Does not grow on {isle}.[/i]"));
-    }
+    // (Costs, upkeep, workers and the chain are on the plan card over the bar.)
     tile(kind_icon(k), d.name, price, action, selected, i, compact)
         .id(format!("isle.build:{k:?}"))
-        .with_style(move |s| s.opacity(if grows.is_some() { 0.5 } else { 1.0 }))
-        .tooltip(d.name, tip)
-}
-
-fn demolish_tile(selected: bool, i: usize) -> El {
-    let price = El::text("free")
-        .text_style(|t| t.size(13.0).nowrap().italic())
-        .with_style(|s| s.color(Colors::ink_dim()))
-        .pick_ignore();
-    tile(
-        "isle_demolish",
-        "Demolish",
-        price,
-        "isle.tool:demolish".into(),
-        selected,
-        i,
-        false,
-    )
-    .tooltip(
-        "Demolish",
-        "Click a building or a road to clear it. Nothing is refunded.\n[b]Key[/b]  Delete",
-    )
+        .with_style(move |s| s.opacity(if grows.is_some() { 0.48 } else { 1.0 }))
 }
 
 /// The category's build tiles for island `isle` (the one in view): farms whose crop does not
 /// grow there go last, faded.
-fn bar_items(category: usize, tool: Tool, isle: usize) -> Vec<El> {
-    let c = Category::ALL[category];
+fn bar_items(category: usize, tool: Tool, isle: usize, by_type: bool) -> Vec<El> {
     let here = island::islands().get(isle);
-    let grows = |k: Kind| !k.def().needs_fertility || here.is_none_or(|i| i.fertility.allows(k));
-    let mut kinds = kinds_in(c);
-    kinds.sort_by_key(|k| !grows(*k));
+    let grows = |k: Kind| plan::grows(k, isle);
+    let all = plan::tab_kinds(by_type, category, isle);
+    // Farms whose crop does not grow here go on a slim row of their own at the end.
+    let (kinds, elsewhere): (Vec<Kind>, Vec<Kind>) = all.into_iter().partition(|k| grows(*k));
     let compact = kinds.len() > 8;
     let mut v: Vec<El> = kinds
         .into_iter()
@@ -454,11 +251,67 @@ fn bar_items(category: usize, tool: Tool, isle: usize) -> Vec<El> {
             item_tile(k, sel, i, compact, not_here)
         })
         .collect();
-    if c == Category::Roads {
-        let n = v.len();
-        v.push(demolish_tile(tool == Tool::Demolish, n));
+    if !elsewhere.is_empty() {
+        let name = here.map_or("", |i| i.name);
+        v.push(
+            El::new()
+                .class("row")
+                .with_style(|s| {
+                    s.gap(6.0)
+                        .align_items(Align::Center)
+                        .justify(Justify::Center)
+                        .width(pct(100.0))
+                })
+                .child(
+                    El::text(format!("Grows elsewhere, not on {name}:"))
+                        .class("brass_label")
+                        .text_style(|t| t.nowrap())
+                        .pick_ignore(),
+                )
+                .children(elsewhere.into_iter().map(|k| {
+                    El::new()
+                        .class("brass_tile")
+                        .id(format!("isle.build:{k:?}"))
+                        .on_click(house::build_action(k))
+                        .with_style(|s| s.padding(3.0).opacity(0.75))
+                        .child(brass::badge(kind_icon(k), 34.0))
+                })),
+        );
     }
     v
+}
+
+/// How many full tiles tab `category` shows on island `isle`.
+fn tab_len(category: usize, by_type: bool, isle: usize) -> usize {
+    plan::tab_kinds(by_type, category, isle)
+        .into_iter()
+        .filter(|k| plan::grows(*k, isle))
+        .count()
+}
+
+/// The tab medallions and the sort switch.
+fn tab_row(category: usize, by_type: bool, demolish: bool) -> Vec<El> {
+    plan::tabs(by_type)
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            brass::medallion(t.icon, 52.0, &format!("isle.cat:{i}"))
+                .id(format!("isle.cat:{i}"))
+                .selected(i == category)
+                .tooltip(t.name, "")
+        })
+        .chain([
+            El::new().with_style(|s| s.width(10.0)),
+            plan::sort_switch(by_type),
+            brass::medallion("isle_demolish", 40.0, "isle.tool:demolish")
+                .id("isle.tool:demolish")
+                .selected(demolish)
+                .tooltip(
+                    "Demolish",
+                    "Click a building or a road to clear it. Nothing is refunded.\n[b]Key[/b]  X or Delete",
+                ),
+        ])
+        .collect()
 }
 
 /// The tiles row's width: one row up to ten tiles, then two even rows (so the bar stays
@@ -471,15 +324,12 @@ fn items_width(n: usize) -> f32 {
     }
 }
 
-fn build_bar(category: usize, tool: Tool, isle: usize) -> El {
-    let tabs = El::new().class("row").with_style(|s| s.gap(14.0)).children(
-        Category::ALL.iter().enumerate().map(|(i, c)| {
-            brass::medallion(category_icon(*c), 52.0, &format!("isle.cat:{i}"))
-                .id(format!("isle.cat:{i}"))
-                .selected(i == category)
-                .tooltip(c.name(), "")
-        }),
-    );
+fn build_bar(category: usize, tool: Tool, isle: usize, by_type: bool) -> El {
+    let tabs = El::new()
+        .class("row")
+        .id("isle.tabs")
+        .with_style(|s| s.gap(14.0).align_items(Align::Center))
+        .children(tab_row(category, by_type, tool == Tool::Demolish));
     let header = El::new()
         .class("row")
         .with_style(|s| s.gap(14.0).justify(Justify::Center))
@@ -510,9 +360,9 @@ fn build_bar(category: usize, tool: Tool, isle: usize) -> El {
                         .margin([4.0, 0.0, 0.0, 0.0])
                         .wrap(true)
                         .justify(Justify::Center)
-                        .max_width(items_width(kinds_in(Category::ALL[category]).len()))
+                        .max_width(items_width(tab_len(category, by_type, isle)))
                 })
-                .children(bar_items(category, tool, isle)),
+                .children(bar_items(category, tool, isle, by_type)),
         );
     let hint = El::text("{isle.hint}")
         .text_style(|t| t.bold().shadow().nowrap().size(17.0))
@@ -532,6 +382,11 @@ fn build_bar(category: usize, tool: Tool, isle: usize) -> El {
                         .gap(14.0)
                         .pick(Pick::Ignore)
                 })
+                .child(
+                    El::new()
+                        .id(plan::PLAN_ID)
+                        .with_style(|s| s.pick(Pick::Ignore)),
+                )
                 .child(hint)
                 .child(panel),
         )
@@ -560,12 +415,12 @@ fn card_row(i: usize) -> El {
 
 fn info_card(kind: Kind, ruin: bool, held: Option<(String, u32)>) -> El {
     let d = kind.def();
+    // The card never runs under the map table or off the screen: its sections scroll, and
+    // the header and the buttons stay put.
     let card = brass::parchment()
         .with_style(|s| {
-            s.position(Position::Absolute)
-                .right(22.0)
-                .top(140.0)
-                .width(360.0)
+            s.width(360.0)
+                .max_height(engine_ui::style::pct(100.0))
                 .padding([18.0, 22.0])
                 .gap(8.0)
                 .direction(Direction::Column)
@@ -598,13 +453,7 @@ fn info_card(kind: Kind, ruin: bool, held: Option<(String, u32)>) -> El {
                 ),
         )
         .child(brass::divider(316.0))
-        .child(trouble::card_placeholder())
-        .child_opt(d.output.map(|_| works::card_placeholder()))
-        .child_opt((kind == Kind::Harbour).then(store::card_placeholder))
-        .child_opt(yard::builds_craft(kind).then(yard::card_placeholder))
-        .child_opt((kind == Kind::House).then(house::card_placeholder))
-        .children((0..6).map(card_row))
-        .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
+        .child(card_body(kind))
         .child_opt(
             held.clone()
                 .map(|(name, colour)| held_ribbon(&name, colour)),
@@ -627,7 +476,33 @@ fn info_card(kind: Kind, ruin: bool, held: Option<(String, u32)>) -> El {
         }));
     El::new()
         .with_style(|s| s.fill_parent().pick(Pick::Ignore))
-        .child(card)
+        .child(
+            El::new()
+                .with_style(|s| {
+                    s.position(Position::Absolute)
+                        .right(22.0)
+                        .top(140.0)
+                        .bottom(map::ROOM_H)
+                        .direction(Direction::Column)
+                        .pick(Pick::Ignore)
+                })
+                .child(card),
+        )
+}
+
+/// The card's sections between the header and the buttons, in a scroll that gives way first.
+fn card_body(kind: Kind) -> El {
+    let d = kind.def();
+    El::new()
+        .class("scroll")
+        .with_style(|s| s.gap(8.0).shrink(1.0).padding([0.0, 4.0, 0.0, 0.0]))
+        .child(trouble::card_placeholder())
+        .child_opt(d.output.map(|_| works::card_placeholder()))
+        .child_opt((kind == Kind::Harbour).then(store::card_placeholder))
+        .child_opt(yard::builds_craft(kind).then(yard::card_placeholder))
+        .child_opt((kind == Kind::House).then(house::card_placeholder))
+        .children((0..6).map(card_row))
+        .child_opt(crate::items::Host::of(kind).map(|_| shelf::card_placeholder()))
 }
 
 /// A rival house's building: whose it is, in place of the buttons.
@@ -714,14 +589,17 @@ pub fn setup(world: &mut World) {
         brass::install(&mut theme);
     }
     world.init_resource::<Hud>();
-    world.resource_mut::<Hud>().category = 2;
+    world.init_resource::<plan::Plan>();
+    world.init_resource::<topbar::Slots>();
+    world.init_resource::<chains::Chains>();
+    world.resource_mut::<Hud>().category = 0;
     if std::env::args().any(|a| a == "--hud-demo") {
         world.resource_mut::<Hud>().demo = Some(0.0);
     }
     // `--hud-cat=k`: open the build bar on category k (tour shots).
     if let Some(k) = std::env::args()
         .find_map(|a| a.strip_prefix("--hud-cat=")?.parse::<usize>().ok())
-        .filter(|k| *k < Category::ALL.len())
+        .filter(|k| *k < plan::tabs(world.resource::<plan::Plan>().by_type).len())
     {
         world.resource_mut::<Hud>().category = k;
     }
@@ -729,7 +607,10 @@ pub fn setup(world: &mut World) {
     if let Err(e) = screens::spawn_screen(
         world,
         hud_screen(TOP, 0),
-        &top_bar(&world.resource::<Hud>().goods.clone()),
+        &topbar::bar(
+            &world.resource::<topbar::Slots>().goods.clone(),
+            speed_row(),
+        ),
     ) {
         engine::core::log::warn!("archipelago top bar: {e}");
     }
@@ -741,10 +622,12 @@ pub fn setup(world: &mut World) {
             world.resource::<Hud>().category,
             tool,
             world.resource::<Hud>().island,
+            world.resource::<plan::Plan>().by_type,
         ),
     ) {
         engine::core::log::warn!("archipelago build bar: {e}");
     }
+    refresh_items(world);
     map::install(world);
     if let Err(e) = screens::spawn_screen(world, hud_screen(MAP, 0), &map::panel()) {
         engine::core::log::warn!("archipelago map table: {e}");
@@ -802,6 +685,13 @@ pub fn setup(world: &mut World) {
     // `--hud-relations`: open the relations book (tour shots).
     if std::env::args().any(|a| a == "--hud-relations") {
         relations::toggle(world);
+    }
+    // `--hud-chains=Coats`: open the production chains book on that good (tour shots).
+    if let Some(g) = std::env::args()
+        .find_map(|a| a.strip_prefix("--hud-chains=").map(String::from))
+        .and_then(|n| Good::ALL.into_iter().find(|g| format!("{g:?}") == n))
+    {
+        chains::toggle(world, Some(g));
     }
     // `--hud-trade-lines`: show the trade lines (tour shots).
     if std::env::args().any(|a| a == "--hud-trade-lines") {
@@ -880,7 +770,13 @@ pub fn read_actions(world: &mut World) {
             .strip_prefix("isle.cat:")
             .and_then(|s| s.parse::<usize>().ok())
         {
-            world.resource_mut::<Hud>().category = i.min(Category::ALL.len() - 1);
+            let n = plan::tabs(world.resource::<plan::Plan>().by_type).len();
+            world.resource_mut::<Hud>().category = i.min(n - 1);
+            refresh_items(world);
+        } else if a == "isle.bar.sort" {
+            let tab = plan::toggle_sort(world);
+            world.resource_mut::<Hud>().category = tab;
+            refresh_tabs(world);
             refresh_items(world);
         } else if let Some(i) = a
             .strip_prefix("isle.led:")
@@ -925,7 +821,13 @@ pub fn read_actions(world: &mut World) {
                 &format!("{name}'s"),
                 "Only its owner gives orders here.",
             );
-        } else if shelf::action(world, &a)
+        } else if a.starts_with("isle.build:") && world.resource::<chains::Chains>().open {
+            // A link of the chains book: put it in hand and clear the view for placing it.
+            chains::built_from_book(world);
+            crate::tools::action(world, &a);
+        } else if topbar::action(world, &a)
+            || chains::action(world, &a)
+            || shelf::action(world, &a)
             || fleet::action(world, &a)
             || alerts::action(world, &a)
             || advisor::action(world, &a)
@@ -990,7 +892,14 @@ fn read_keys(world: &mut World) {
         keys.just_pressed(KeyCode::G),
         keys.just_pressed(KeyCode::Escape),
     );
-    let (p, v) = (keys.just_pressed(KeyCode::P), keys.just_pressed(KeyCode::V));
+    let (p, v, k) = (
+        keys.just_pressed(KeyCode::P),
+        keys.just_pressed(KeyCode::V),
+        keys.just_pressed(KeyCode::K),
+    );
+    if k || (esc && world.resource::<chains::Chains>().open) {
+        chains::toggle(world, None);
+    }
     if p || (esc && world.resource::<relations::Relations>().open) {
         relations::toggle(world);
     }
@@ -1027,19 +936,34 @@ fn set_selected(world: &mut World, id: &str, on: bool) {
 fn refresh_items(world: &mut World) {
     let (cat, tool) = (world.resource::<Hud>().category, *world.resource::<Tool>());
     let isle = world.resource::<Hud>().island;
+    let by_type = world.resource::<plan::Plan>().by_type;
     if let Some(e) = engine_ui::input::find_id(world, "isle.items") {
-        let _ = engine_ui::el::replace_children(world, e, &bar_items(cat, tool, isle));
-        let w = Some(engine_ui::style::Val::Px(items_width(
-            kinds_in(Category::ALL[cat]).len(),
-        )));
+        let _ = engine_ui::el::replace_children(world, e, &bar_items(cat, tool, isle, by_type));
+        let w = Some(engine_ui::style::Val::Px(items_width(tab_len(
+            cat, by_type, isle,
+        ))));
         if let Some(mut n) = world.get_mut::<Node>(e)
             && n.style.max_width != w
         {
             n.style.max_width = w;
         }
     }
-    for i in 0..Category::ALL.len() {
+    let kinds = plan::tab_kinds(by_type, cat, isle);
+    plan::note_tiles(world, &kinds);
+    plan::refresh_prices(world, &kinds, isle);
+    for i in 0..plan::tabs(by_type).len() {
         set_selected(world, &format!("isle.cat:{i}"), i == cat);
+    }
+    set_selected(world, "isle.tool:demolish", tool == Tool::Demolish);
+}
+
+/// Rebuild the tab medallions (after the sort changes).
+fn refresh_tabs(world: &mut World) {
+    let cat = world.resource::<Hud>().category;
+    let by_type = world.resource::<plan::Plan>().by_type;
+    if let Some(e) = engine_ui::input::find_id(world, "isle.tabs") {
+        let demolish = *world.resource::<Tool>() == Tool::Demolish;
+        let _ = engine_ui::el::replace_children(world, e, &tab_row(cat, by_type, demolish));
     }
 }
 
@@ -1159,6 +1083,13 @@ fn update_data_now(world: &mut World) {
         .map(|c| crate::rivals::company_name(world, c));
     let books = &econ.islands[isle];
     let category = world.get_resource::<Hud>().map_or(2, |h| h.category);
+    let tab_name = {
+        let by_type = world
+            .get_resource::<plan::Plan>()
+            .is_some_and(|p| p.by_type);
+        let tabs = plan::tabs(by_type);
+        tabs[category.min(tabs.len() - 1)].name
+    };
     {
         let mut data = world.resource_mut::<UiData>();
         data.set("isle.coins", fmt_int(econ.coins));
@@ -1195,16 +1126,6 @@ fn update_data_now(world: &mut World) {
                 .collect();
             tiers.join(" · ")
         });
-        for g in Good::ALL {
-            data.set(
-                &format!("isle.stock.{}", g.index()),
-                if rival_here.is_some() {
-                    "–".to_string()
-                } else {
-                    format!("{:.0}", books.get(g))
-                },
-            );
-        }
         data.set(
             "isle.map_note",
             format!(
@@ -1217,10 +1138,7 @@ fn update_data_now(world: &mut World) {
         data.set("isle.map_blurb", region.1);
         data.set("isle.clock", clock(econ.clock_s));
         data.set("isle.season", season(econ.clock_s));
-        data.set(
-            "isle.cat_name",
-            Category::ALL[category.min(Category::ALL.len() - 1)].name(),
-        );
+        data.set("isle.cat_name", tab_name);
         data.set("isle.hint", hint);
         data.set("isle.sel.title", title);
         data.set("isle.sel.sub", sub);
@@ -1266,19 +1184,7 @@ fn update_data_now(world: &mut World) {
     if moved {
         refresh_items(world);
     }
-    // The top bar's goods follow the island's: rebuild the wells when that set changes.
-    let goods = ledger::island_goods(&econ, isle);
-    if world
-        .get_resource::<Hud>()
-        .is_some_and(|h| h.goods != goods)
-    {
-        for (side, id) in ["isle.goods", "isle.goods2"].into_iter().enumerate() {
-            if let Some(e) = engine_ui::input::find_id(world, id) {
-                let _ = engine_ui::el::replace_children(world, e, &goods_rows(&goods, side));
-            }
-        }
-        world.resource_mut::<Hud>().goods = goods;
-    }
+    topbar::fill(world, &econ, isle);
 }
 
 /// Refresh the bars a few times a second.
@@ -1293,9 +1199,17 @@ pub fn update_data(world: &mut World) {
         h.refresh <= 0.0
     };
     read_keys(world);
+    let isle = world.resource::<Hud>().island;
+    plan::update(world, isle);
     if due {
         world.resource_mut::<Hud>().refresh = 0.2;
         update_data_now(world);
+        {
+            let by_type = world.resource::<plan::Plan>().by_type;
+            let cat = world.resource::<Hud>().category;
+            let kinds = plan::tab_kinds(by_type, cat, isle);
+            plan::refresh_prices(world, &kinds, isle);
+        }
         ledger::update(world);
         map::update(world, 0.2);
         shelf::update(world);

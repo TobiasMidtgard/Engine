@@ -154,7 +154,18 @@ fn input_badge(g: Good, stock: f64, island: &str) -> El {
         .with_style(|s| s.gap(2.0).align_items(Align::Center))
         .tooltip(
             g.name(),
-            format!("One a batch, taken from the warehouse.\n{stock:.0} in store on {island}."),
+            match super::chains::maker(g) {
+                Some(k) => format!(
+                    "One a batch, taken from the warehouse.\n{stock:.0} in store on {island}.\n[i]Click to place a {}.[/i]",
+                    k.def().name.to_lowercase()
+                ),
+                None => format!("One a batch, taken from the warehouse.\n{stock:.0} in store on {island}."),
+            },
+        )
+        .on_click(
+            super::chains::maker(g)
+                .map(super::house::build_action)
+                .unwrap_or_default(),
         )
         .child(brass::badge(g.icon(), 44.0).with_style(move |s| {
             s.border(2.5, c)
@@ -213,10 +224,11 @@ fn chain(s: &Shown) -> El {
             .tooltip(
                 s.output.name(),
                 format!(
-                    "Carted to the warehouse.\n{:.1} a minute at today's pace, {} made so far.{faster}",
+                    "Carted to the warehouse.\n{:.1} a minute at today's pace, {} made so far.{faster}\n[i]Click to see its whole production chain (K).[/i]",
                     s.rate, s.made
                 ),
             )
+            .on_click(format!("isle.chain.open:{}", s.output.index()))
             .child(brass::badge(s.output.icon(), 52.0).with_style(move |st| {
                 st.border(2.5, gold)
                     .shadow(Shadow::new(gold.with_alpha(0.5), 8.0, 0.0))

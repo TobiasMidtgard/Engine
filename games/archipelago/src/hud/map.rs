@@ -91,6 +91,8 @@ pub(super) const PH: usize = 472;
 /// The chart node's size, logical px (same aspect as the picture).
 pub const CHART_W: f32 = 360.0;
 pub const CHART_H: f32 = CHART_W * PH as f32 / PW as f32;
+/// Height the map table takes from the bottom of the screen, with a gap above it.
+pub const ROOM_H: f32 = CHART_H + 136.0;
 
 pub const PAINTER: &str = "isle_map";
 

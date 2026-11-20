@@ -1,0 +1,534 @@
+//! The build bar's tabs and the plan card: by tier (Fisherfolk, Labourers, Burghers) or by
+//! type, what each building costs set out large, greyed tiles for what the company can't
+//! afford yet, and a card over the bar for the tile under the pointer (or the building in
+//! hand) with its costs against what the island has, its upkeep, workers, chain and reach.
+
+use engine::prelude::*;
+use engine_ui::color::Color;
+use engine_ui::data::UiData;
+use engine_ui::el::El;
+use engine_ui::kit::brass::{self, Colors};
+use engine_ui::node::{Interaction, Node};
+use engine_ui::style::{Align, Direction, Enter, Justify, Pick};
+
+use crate::defs::{Category, DEFS, Good, Kind, Need, Tier};
+use crate::sim::Economy;
+use crate::tools::Tool;
+
+pub const PLAN_ID: &str = "isle.plan";
+pub const SORT_ID: &str = "isle.bar.sort";
+
+/// One tab of the build bar.
+pub struct Tab {
+    pub name: &'static str,
+    pub icon: &'static str,
+    pub kinds: Vec<Kind>,
+}
+
+/// The bar's state: how it is sorted, the tiles shown, and the plan card's subject.
+#[derive(Resource, Default)]
+pub struct Plan {
+    /// Six tabs by type instead of one per tier.
+    pub by_type: bool,
+    /// The shown tiles' nodes, to see which one the pointer is over.
+    pub tiles: Vec<(Kind, Entity)>,
+    /// The building the plan card shows, and what it was drawn from.
+    shown: Option<Kind>,
+    sig: String,
+}
+
+/// The tier a building belongs to: the people who work it, or the first tier that asks for
+/// it as a service; roads, houses and the harbour are everyone's (the first tier).
+pub fn tier_of(k: Kind) -> Tier {
+    if let Some((t, _)) = k.def().workers {
+        return t;
+    }
+    Tier::ALL
+        .into_iter()
+        .find(|t| t.wants().iter().any(|w| w.need == Need::Service(k)))
+        .unwrap_or(Tier::Fisherfolk)
+}
+
+pub fn tier_icon(t: Tier) -> &'static str {
+    match t {
+        Tier::Fisherfolk => "isle_tier_fisherfolk",
+        Tier::Labourers => "isle_tier_labourers",
+        Tier::Burghers => "isle_tier_burghers",
+    }
+}
+
+/// The tabs, in order: one per tier (each sorted by type), or one per type.
+pub fn tabs(by_type: bool) -> Vec<Tab> {
+    if by_type {
+        return Category::ALL
+            .iter()
+            .map(|c| Tab {
+                name: c.name(),
+                icon: super::category_icon(*c),
+                kinds: DEFS
+                    .iter()
+                    .filter(|d| d.category == *c)
+                    .map(|d| d.kind)
+                    .collect(),
+            })
+            .collect();
+    }
+    Tier::ALL
+        .into_iter()
+        .map(|t| {
+            let mut kinds: Vec<Kind> = DEFS
+                .iter()
+                .map(|d| d.kind)
+                .filter(|k| tier_of(*k) == t)
+                .collect();
+            kinds.sort_by_key(|k| k.def().category as usize);
+            Tab {
+                name: t.name(),
+                icon: tier_icon(t),
+                kinds,
+            }
+        })
+        .collect()
+}
+
+/// Tab `i`'s tiles in the order shown for island `isle`: farms whose crop does not grow
+/// there go last.
+pub fn tab_kinds(by_type: bool, i: usize, isle: usize) -> Vec<Kind> {
+    let tabs = tabs(by_type);
+    let Some(tab) = tabs.get(i.min(tabs.len().saturating_sub(1))) else {
+        return Vec::new();
+    };
+    let mut kinds = tab.kinds.clone();
+    kinds.sort_by_key(|k| !grows(*k, isle));
+    kinds
+}
+
+/// Whether building `k` can go up on island `isle` (farms need the island to suit the crop).
+pub fn grows(k: Kind, isle: usize) -> bool {
+    !k.def().needs_fertility
+        || crate::island::islands()
+            .get(isle)
+            .is_none_or(|i| i.fertility.allows(k))
+}
+
+/// The tab the building is on.
+pub fn tab_of(by_type: bool, k: Kind) -> usize {
+    tabs(by_type)
+        .iter()
+        .position(|t| t.kinds.contains(&k))
+        .unwrap_or(0)
+}
+
+/// What building `k` still lacks on island `isle`: coins first, then each good.
+pub fn short(econ: &Economy, isle: usize, k: Kind) -> Vec<(Option<Good>, f64)> {
+    let d = k.def();
+    let mut out = Vec::new();
+    let coins = econ.coins_of(crate::sim::PLAYER);
+    if coins < d.coins as f64 {
+        out.push((None, d.coins as f64 - coins.max(0.0)));
+    }
+    if let Some(b) = econ.islands.get(isle) {
+        for (g, n) in d.cost {
+            let have = b.get(*g);
+            if have < *n as f64 {
+                out.push((Some(*g), *n as f64 - have.max(0.0)));
+            }
+        }
+    }
+    out
+}
+
+fn price_id(k: Kind) -> String {
+    format!("isle.price.{k:?}")
+}
+
+fn good_price_id(k: Kind, j: usize) -> String {
+    format!("isle.cost.{k:?}.{j}")
+}
+
+/// A tile's price: coins on top, then each good it takes, every number bound so it turns
+/// red while the island is short of it.
+pub fn price(k: Kind) -> El {
+    let d = k.def();
+    let coins = El::new()
+        .class("row")
+        .with_style(|s| s.gap(3.0).justify(Justify::Center).pick(Pick::Ignore))
+        .child(El::icon("coin").with_style(|s| s.size(16.0, 16.0).pick(Pick::Ignore)))
+        .child(
+            El::text(format!("{{{}}}", price_id(k)))
+                .text_style(|t| t.size(14.5).bold().nowrap().tabular())
+                .with_style(|s| s.color(Colors::ink()))
+                .pick_ignore(),
+        );
+    let goods = (!d.cost.is_empty()).then(|| {
+        El::new()
+            .class("row")
+            .with_style(|s| s.gap(5.0).justify(Justify::Center).pick(Pick::Ignore))
+            .children(d.cost.iter().enumerate().map(|(j, (g, _))| {
+                El::new()
+                    .class("row")
+                    .with_style(|s| s.gap(1.0).pick(Pick::Ignore))
+                    .child(El::icon(g.icon()).with_style(|s| s.size(15.0, 15.0).pick(Pick::Ignore)))
+                    .child(
+                        El::text(format!("{{{}}}", good_price_id(k, j)))
+                            .text_style(|t| t.size(12.5).bold().nowrap().tabular())
+                            .with_style(|s| s.color(Colors::ink_dim()))
+                            .pick_ignore(),
+                    )
+            }))
+    });
+    El::new()
+        .class("col")
+        .with_style(|s| s.gap(1.0).align_items(Align::Center).pick(Pick::Ignore))
+        .child(coins)
+        .child_opt(goods)
+}
+
+fn hex(c: Color) -> String {
+    c.to_hex()
+}
+
+/// Fill the shown tiles' prices (red where short) and grey out what can't be built now.
+pub fn refresh_prices(world: &mut World, kinds: &[Kind], isle: usize) {
+    let econ = world.resource::<Economy>().clone();
+    let red = hex(Colors::bad_ink());
+    let mut faded: Vec<(Kind, bool)> = Vec::new();
+    {
+        let mut data = world.resource_mut::<UiData>();
+        for &k in kinds {
+            let d = k.def();
+            let lacks = short(&econ, isle, k);
+            let coins_short = lacks.iter().any(|(g, _)| g.is_none());
+            data.set(
+                &price_id(k),
+                if coins_short {
+                    format!("[color={red}]{}[/color]", d.coins)
+                } else {
+                    d.coins.to_string()
+                },
+            );
+            for (j, (g, n)) in d.cost.iter().enumerate() {
+                let lack = lacks.iter().any(|(s, _)| *s == Some(*g));
+                data.set(
+                    &good_price_id(k, j),
+                    if lack {
+                        format!("[color={red}]{n}[/color]")
+                    } else {
+                        n.to_string()
+                    },
+                );
+            }
+            faded.push((k, !lacks.is_empty() || !grows(k, isle)));
+        }
+    }
+    let tiles = world.resource::<Plan>().tiles.clone();
+    for (k, e) in tiles {
+        let Some(&(_, dim)) = faded.iter().find(|(x, _)| *x == k) else {
+            continue;
+        };
+        let want = if dim { 0.48 } else { 1.0 };
+        if let Some(mut n) = world.get_mut::<Node>(e)
+            && n.style.opacity != Some(want)
+        {
+            n.style.opacity = Some(want);
+        }
+    }
+}
+
+/// Remember the tile nodes after the bar's tiles were rebuilt.
+pub fn note_tiles(world: &mut World, kinds: &[Kind]) {
+    let tiles: Vec<(Kind, Entity)> = kinds
+        .iter()
+        .filter_map(|k| {
+            engine_ui::input::find_id(world, &format!("isle.build:{k:?}")).map(|e| (*k, e))
+        })
+        .collect();
+    world.resource_mut::<Plan>().tiles = tiles;
+}
+
+/// The plan card's subject: the tile under the pointer, else the building in hand.
+fn subject(world: &World) -> Option<Kind> {
+    let hovered = world.resource::<Plan>().tiles.iter().find_map(|(k, e)| {
+        world
+            .get::<Interaction>(*e)
+            .is_some_and(|i| i.hovered)
+            .then_some(*k)
+    });
+    hovered.or(match *world.resource::<Tool>() {
+        Tool::Build { kind, .. } => Some(kind),
+        _ => None,
+    })
+}
+
+/// Every frame: show, change or clear the plan card.
+pub fn update(world: &mut World, isle: usize) {
+    if !world.contains_resource::<Plan>() {
+        return;
+    }
+    let k = subject(world);
+    let econ = world.resource::<Economy>();
+    let sig = match k {
+        Some(k) => format!(
+            "{k:?}|{isle}|{:?}",
+            short(econ, isle, k)
+                .iter()
+                .map(|(g, n)| (*g, (*n).ceil() as i64))
+                .collect::<Vec<_>>()
+        ),
+        None => String::new(),
+    };
+    if world.resource::<Plan>().sig == sig {
+        return;
+    }
+    let card = k.map(|k| card(world, k, isle));
+    {
+        let mut p = world.resource_mut::<Plan>();
+        p.sig = sig;
+        p.shown = k;
+    }
+    if let Some(e) = engine_ui::input::find_id(world, PLAN_ID) {
+        let els: Vec<El> = card.into_iter().collect();
+        let _ = engine_ui::el::replace_children(world, e, &els);
+    }
+}
+
+/// A cost chip: the picture, how many, and how many more are needed when short.
+fn cost_chip(icon: &str, need: String, lack: Option<f64>) -> El {
+    let ok = lack.is_none();
+    El::new()
+        .class("row")
+        .with_style(move |s| {
+            s.gap(6.0)
+                .align_items(Align::Center)
+                .padding([4.0, 10.0, 4.0, 4.0])
+                .radius(18.0)
+                .background(if ok {
+                    Color::hexa(0x4f9a3c22)
+                } else {
+                    Color::hexa(0xb03a2426)
+                })
+                .border(
+                    1.2,
+                    if ok {
+                        Color::hexa(0x4f9a3c88)
+                    } else {
+                        Color::hexa(0xb03a24aa)
+                    },
+                )
+                .pick(Pick::Ignore)
+        })
+        .child(brass::badge(icon, 30.0))
+        .child(
+            El::new()
+                .class("col")
+                .with_style(|s| s.gap(0.0).pick(Pick::Ignore))
+                .child(
+                    El::text(need)
+                        .class("ink")
+                        .text_style(|t| t.size(19.0).bold().nowrap().tabular())
+                        .pick_ignore(),
+                )
+                .child_opt(lack.map(|n| {
+                    El::text(format!("{:.0} short", n.ceil()))
+                        .class("ink")
+                        .text_style(|t| t.size(12.0).bold().nowrap())
+                        .with_style(|s| s.color(Colors::bad_ink()))
+                        .pick_ignore()
+                })),
+        )
+}
+
+/// A small fact line: picture, label and value.
+fn fact(icon: &str, label: &str, value: String) -> El {
+    El::new()
+        .class("row")
+        .with_style(|s| s.gap(8.0).align_items(Align::Center).pick(Pick::Ignore))
+        .child(El::icon(icon).with_style(|s| s.size(22.0, 22.0).pick(Pick::Ignore)))
+        .child(
+            El::text(label)
+                .class("ink_label")
+                .text_style(|t| t.nowrap())
+                .with_style(|s| s.width(78.0))
+                .pick_ignore(),
+        )
+        .child(
+            El::text(value)
+                .class("ink")
+                .text_style(|t| t.size(14.5))
+                .with_style(|s| s.grow(1.0).shrink(1.0))
+                .pick_ignore(),
+        )
+}
+
+/// The plan card for building `k` on island `isle`.
+pub fn card(world: &World, k: Kind, isle: usize) -> El {
+    let d = k.def();
+    let econ = world.resource::<Economy>();
+    let lacks = short(econ, isle, k);
+    let lack_of = |g: Option<Good>| lacks.iter().find(|(x, _)| *x == g).map(|(_, n)| *n);
+    let here = crate::island::islands().get(isle).map_or("", |i| i.name);
+    let tier = tier_of(k);
+    let mut chips = vec![cost_chip("coin", d.coins.to_string(), lack_of(None))];
+    for (g, n) in d.cost {
+        chips.push(cost_chip(g.icon(), n.to_string(), lack_of(Some(*g))));
+    }
+    let mut facts: Vec<El> = Vec::new();
+    if d.upkeep > 0.0 {
+        facts.push(fact(
+            "coin",
+            "Upkeep",
+            format!("{:.0} coins a minute while it runs", d.upkeep),
+        ));
+    }
+    if let Some((t, n)) = d.workers {
+        facts.push(fact(
+            "isle_people",
+            "Workers",
+            format!("{n} {}", t.name().to_lowercase()),
+        ));
+    }
+    if let Some(o) = d.output {
+        let from: Vec<&str> = d
+            .input
+            .into_iter()
+            .chain(d.input2)
+            .map(|g| g.name())
+            .collect();
+        let rate = 60.0 / d.cycle_s.max(0.1);
+        facts.push(fact(
+            o.icon(),
+            "Makes",
+            if from.is_empty() {
+                format!("{} · {rate:.1} a minute", o.name())
+            } else {
+                format!(
+                    "{} from {} · {rate:.1} a minute",
+                    o.name(),
+                    from.join(" and ").to_lowercase()
+                )
+            },
+        ));
+    }
+    if d.reach > 0 && d.output.is_none() {
+        facts.push(fact(
+            "isle_house",
+            "Reach",
+            format!("houses within {} cells", d.reach),
+        ));
+    }
+    facts.push(fact(
+        "isle_workshop",
+        "Takes",
+        format!("{} by {} cells", d.size.0, d.size.1),
+    ));
+    let verdict = if !grows(k, isle) {
+        Some(format!(
+            "Does not grow on {here}: settle an island that suits it."
+        ))
+    } else if lacks.is_empty() {
+        None
+    } else {
+        let parts: Vec<String> = lacks
+            .iter()
+            .map(|(g, n)| match g {
+                None => format!("{:.0} coins", n.ceil()),
+                Some(g) => format!("{:.0} {}", n.ceil(), g.name().to_lowercase()),
+            })
+            .collect();
+        Some(format!("Short of {} on {here}.", parts.join(", ")))
+    };
+    let ready = verdict.is_none();
+    brass::parchment()
+        .with_style(|s| {
+            s.direction(Direction::Column)
+                .gap(8.0)
+                .padding([14.0, 20.0, 16.0, 20.0])
+                .width(470.0)
+                .pick(Pick::Ignore)
+                .enter(Enter::rise(0.18, 10.0))
+        })
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(12.0).align_items(Align::Center).pick(Pick::Ignore))
+                .child(brass::badge(super::kind_icon(k), 56.0))
+                .child(
+                    El::new()
+                        .class("col")
+                        .with_style(|s| s.gap(0.0).grow(1.0).shrink(1.0).pick(Pick::Ignore))
+                        .child(El::text(d.name).class("ink_title").pick_ignore())
+                        .child(
+                            El::text(format!("{} · {}", tier.name(), d.category.name()))
+                                .class("ink_label")
+                                .text_style(|t| t.nowrap())
+                                .pick_ignore(),
+                        ),
+                )
+                .child(brass::badge(tier_icon(tier), 34.0)),
+        )
+        .child_opt((!d.blurb.is_empty()).then(|| {
+            El::text(d.blurb)
+                .class("ink")
+                .text_style(|t| t.italic().size(14.0))
+                .with_style(|s| s.color(Colors::ink_dim()))
+                .pick_ignore()
+        }))
+        .child(brass::label("Costs", true))
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(8.0).wrap(true).pick(Pick::Ignore))
+                .children(chips),
+        )
+        .child(brass::divider(240.0))
+        .children(facts)
+        .child(
+            El::text(verdict.unwrap_or_else(|| format!("You can build it on {here} now.")))
+                .class("ink")
+                .text_style(|t| t.size(14.5).bold())
+                .with_style(move |s| {
+                    s.color(if ready {
+                        Colors::good_ink()
+                    } else {
+                        Colors::bad_ink()
+                    })
+                })
+                .pick_ignore(),
+        )
+}
+
+/// `isle.bar.sort`: by tier or by type; the bar opens on the tab that holds the building in
+/// hand.
+pub fn toggle_sort(world: &mut World) -> usize {
+    let by_type = {
+        let mut p = world.resource_mut::<Plan>();
+        p.by_type = !p.by_type;
+        p.by_type
+    };
+    match *world.resource::<Tool>() {
+        Tool::Build { kind, .. } => tab_of(by_type, kind),
+        _ => 0,
+    }
+}
+
+/// The sort switch at the end of the tabs.
+pub fn sort_switch(by_type: bool) -> El {
+    brass::medallion(
+        if by_type {
+            "isle_sort_type"
+        } else {
+            "isle_sort_tier"
+        },
+        40.0,
+        "isle.bar.sort",
+    )
+    .id(SORT_ID)
+    .tooltip(
+        if by_type { "Sorted by type" } else { "Sorted by tier" },
+        if by_type {
+            "Click to sort the buildings by the tier of people they serve: Fisherfolk, Labourers, Burghers."
+        } else {
+            "Click to sort the buildings by type: roads, homes, workshops, farms, public, harbour."
+        },
+    )
+}

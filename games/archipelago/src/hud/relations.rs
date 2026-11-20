@@ -1,10 +1,12 @@
 //! Relations: the rival houses and where the company stands with each. A book like the
 //! ledger. The left page lists every rival as a card: its shield in the house colours, name
-//! and temper, the treaty, and a standing bar from bitter to warm. The right page is the
+//! and temper, the treaty, and a standing bar from bitter to warm, then the standings of
+//! every house. The right page is the
 //! picked rival:
 //! - a dial for the standing, and the treaty;
-//! - three panels: diplomacy, trade (what passes between us, their wealth and what they buy
-//!   and sell), and military (their warships and guns against ours, as a balance);
+//! - you against them, side by side: coins, balance, people, islands, highest tier,
+//!   warships and guns, each as a bar split by who has more, with a verdict over them;
+//! - trade with us, and what they buy and sell;
 //! - what has happened of late, with what each thing did to the standing;
 //! - what would please them;
 //! - the moves the company can make, each saying why not when it can't.
@@ -82,6 +84,34 @@ struct Move {
     enabled: bool,
     why_not: String,
     args: Option<Value>,
+}
+
+/// A company's standing from the game (`brain::standings`): purse, people, islands, tiers.
+#[derive(Clone, Debug, Default)]
+struct Stand {
+    coins: f32,
+    balance: f32,
+    people: f32,
+    islands: f32,
+    /// The highest tier with people (0 fisherfolk), or none.
+    top: Option<usize>,
+}
+
+/// Every company's standing, the player's first.
+fn stands(world: &World) -> Vec<Stand> {
+    crate::brain::standings(world)
+        .iter()
+        .map(|v| Stand {
+            coins: num(v, &["coins"]),
+            balance: num(v, &["balance"]),
+            people: num(v, &["people"]),
+            islands: num(v, &["islands"]),
+            top: v
+                .get("tiers")
+                .and_then(Value::as_array)
+                .and_then(|t| t.iter().rposition(|x| x.as_f64().unwrap_or(0.0) >= 1.0)),
+        })
+        .collect()
 }
 
 fn num(v: &Value, keys: &[&str]) -> f32 {
@@ -444,33 +474,6 @@ fn rival_card(r: &Rival, picked: bool) -> El {
         )
 }
 
-fn panel(icon: &str, title: &str, body: El) -> El {
-    El::new()
-        .class("col")
-        .with_style(|s| {
-            s.gap(6.0)
-                .grow(1.0)
-                .basis(0.0)
-                .padding([10.0, 12.0])
-                .radius(8.0)
-                .background(Fill::Solid(Color::hexa(0x00000012)))
-                .border(1.0, Color::hexa(0x2a1a0a30))
-        })
-        .child(
-            El::new()
-                .class("row")
-                .with_style(|s| s.gap(8.0).align_items(Align::Center))
-                .child(El::icon(icon).with_style(|s| s.size(30.0, 30.0).pick(Pick::Ignore)))
-                .child(
-                    El::text(title)
-                        .class("ink_title")
-                        .text_style(|t| t.size(18.0).nowrap())
-                        .pick_ignore(),
-                ),
-        )
-        .child(body)
-}
-
 fn stat(label: &str, value: String, color: Option<Color>) -> El {
     El::new()
         .class("row")
@@ -507,35 +510,6 @@ fn good_chips(label: &str, goods: &[String]) -> Option<El> {
     )
 }
 
-/// Their strength against ours, as a balance: our share from the left in blue, theirs from
-/// the right in their colour.
-fn balance(ours: f32, theirs: f32, c: Color) -> El {
-    let total = (ours + theirs).max(0.001);
-    let us = (ours / total).clamp(0.0, 1.0);
-    El::new()
-        .class("brass_track")
-        .with_style(|s| {
-            s.width(pct(100.0))
-                .height(12.0)
-                .padding(0.0)
-                .direction(Direction::Row)
-        })
-        .child(El::new().with_style(move |s| {
-            s.width(pct(us * 100.0))
-                .height(pct(100.0))
-                .radius([6.0, 0.0, 0.0, 6.0])
-                .background(Fill::vertical(Color::hex(0x6a9ad0), Color::hex(0x2c5a86)))
-                .pick(Pick::Ignore)
-        }))
-        .child(El::new().with_style(move |s| {
-            s.grow(1.0)
-                .height(pct(100.0))
-                .radius([0.0, 6.0, 6.0, 0.0])
-                .background(Fill::vertical(c.lerp(Color::WHITE, 0.25), c))
-                .pick(Pick::Ignore)
-        }))
-}
-
 fn ago(clock: f64, at: f64) -> String {
     let s = (clock - at).max(0.0);
     if s < 60.0 {
@@ -547,7 +521,292 @@ fn ago(clock: f64, at: f64) -> String {
     }
 }
 
-fn detail(r: &Rival, clock: f64) -> El {
+/// Our blue, the player's colour against a rival's.
+fn our_color() -> Color {
+    Color::hex(0x3a6ea8)
+}
+
+/// One measure, you against them: both numbers, and a bar split by who has more.
+fn versus_row(label: &str, ours: f32, theirs: f32, text: (String, String), c: Color) -> El {
+    let lead = if (ours - theirs).abs() < 0.5 {
+        0
+    } else if ours > theirs {
+        1
+    } else {
+        2
+    };
+    let side = move |t: String, me: bool| {
+        let leads = (me && lead == 1) || (!me && lead == 2);
+        El::text(if leads { format!("{t} ◆") } else { t })
+            .class("ink")
+            .text_style(move |s| {
+                let s = s.size(16.0).tabular().nowrap();
+                if leads { s.bold() } else { s }
+            })
+            .with_style(move |s| {
+                s.width(118.0).color(if !leads {
+                    Colors::ink_dim()
+                } else if me {
+                    our_color()
+                } else {
+                    c.lerp(Colors::ink(), 0.35)
+                })
+            })
+            .pick_ignore()
+    };
+    let lo = ours.min(theirs).min(0.0);
+    El::new()
+        .class("row")
+        .with_style(|s| s.gap(10.0).align_items(Align::Center))
+        .child(side(text.0, true).text_style(|t| t.align(engine_ui::node::TextAlign::Right)))
+        .child(
+            El::new()
+                .class("col")
+                .with_style(|s| s.gap(2.0).grow(1.0).basis(0.0))
+                .child(
+                    El::text(label)
+                        .class("ink_label")
+                        .text_style(|t| t.center().nowrap())
+                        .pick_ignore(),
+                )
+                .child(balance_two(ours - lo, theirs - lo, c)),
+        )
+        .child(side(text.1, false))
+}
+
+/// A bar split between us (blue, from the left) and them (their colour, from the right).
+fn balance_two(ours: f32, theirs: f32, c: Color) -> El {
+    let total = ours + theirs;
+    let us = if total < 0.001 {
+        0.5
+    } else {
+        (ours / total).clamp(0.0, 1.0)
+    };
+    El::new()
+        .class("brass_track")
+        .with_style(|s| {
+            s.width(pct(100.0))
+                .height(10.0)
+                .padding(0.0)
+                .direction(Direction::Row)
+        })
+        .child(El::new().with_style(move |s| {
+            s.width(pct(us * 100.0))
+                .height(pct(100.0))
+                .radius([5.0, 0.0, 0.0, 5.0])
+                .background(Fill::vertical(Color::hex(0x6a9ad0), Color::hex(0x2c5a86)))
+                .pick(Pick::Ignore)
+        }))
+        .child(El::new().with_style(move |s| {
+            s.grow(1.0)
+                .height(pct(100.0))
+                .radius([0.0, 5.0, 5.0, 0.0])
+                .background(Fill::vertical(c.lerp(Color::WHITE, 0.25), c))
+                .pick(Pick::Ignore)
+        }))
+}
+
+fn tier_word(t: Option<usize>) -> String {
+    t.and_then(|i| crate::defs::Tier::ALL.get(i))
+        .map_or("nobody yet".into(), |t| t.name().to_string())
+}
+
+/// You against them, side by side: purse, balance, people, islands, top tier, fleet, guns.
+fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
+    let c = r.color;
+    let money = |x: f32| super::fmt_int(x as f64);
+    let signed = |x: f32| format!("{x:+.0}/min");
+    let rows = vec![
+        versus_row(
+            "coins",
+            us.coins,
+            them.coins,
+            (money(us.coins), money(them.coins)),
+            c,
+        ),
+        versus_row(
+            "balance a minute",
+            us.balance,
+            them.balance,
+            (signed(us.balance), signed(them.balance)),
+            c,
+        ),
+        versus_row(
+            "people",
+            us.people,
+            them.people,
+            (money(us.people), money(them.people)),
+            c,
+        ),
+        versus_row(
+            "islands",
+            us.islands,
+            them.islands,
+            (format!("{:.0}", us.islands), format!("{:.0}", them.islands)),
+            c,
+        ),
+        versus_row(
+            "highest tier",
+            us.top.map_or(0.0, |t| t as f32 + 1.0),
+            them.top.map_or(0.0, |t| t as f32 + 1.0),
+            (tier_word(us.top), tier_word(them.top)),
+            c,
+        ),
+        versus_row(
+            "warships",
+            r.our_warships,
+            r.warships,
+            (
+                format!("{:.0}", r.our_warships),
+                format!("{:.0}", r.warships),
+            ),
+            c,
+        ),
+        versus_row(
+            "guns",
+            r.our_firepower,
+            r.firepower,
+            (
+                format!("{:.0}", r.our_firepower),
+                format!("{:.0}", r.firepower),
+            ),
+            c,
+        ),
+    ];
+    let ahead = [
+        us.coins > them.coins,
+        us.balance > them.balance,
+        us.people > them.people,
+        us.islands > them.islands,
+        us.top > them.top,
+        r.our_warships > r.warships,
+        r.our_firepower > r.firepower,
+    ]
+    .iter()
+    .filter(|x| **x)
+    .count();
+    let verdict = match ahead {
+        6.. => ("You lead them on nearly every count", Colors::good_ink()),
+        4..=5 => ("You are ahead of them", Colors::good_ink()),
+        3 => ("Neck and neck", Colors::ink()),
+        1..=2 => ("They are ahead of you", Colors::bad_ink()),
+        _ => ("They lead you on every count", Colors::bad_ink()),
+    };
+    El::new()
+        .class("col")
+        .with_style(|s| s.gap(6.0))
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(10.0).align_items(Align::Center))
+                .child(brass::badge("isle_home", 34.0))
+                .child(
+                    El::text("Your company")
+                        .class("ink")
+                        .text_style(|t| t.bold().size(16.0).nowrap())
+                        .with_style(|s| s.color(our_color()))
+                        .pick_ignore(),
+                )
+                .child(El::new().with_style(|s| s.grow(1.0)))
+                .child(
+                    El::text(verdict.0)
+                        .class("ink")
+                        .text_style(|t| t.bold().size(15.0).nowrap())
+                        .with_style(move |s| s.color(verdict.1))
+                        .pick_ignore(),
+                )
+                .child(El::new().with_style(|s| s.grow(1.0)))
+                .child(
+                    El::text(r.name.clone())
+                        .class("ink")
+                        .text_style(|t| t.bold().size(16.0).nowrap())
+                        .with_style(move |s| s.color(c.lerp(Colors::ink(), 0.35)))
+                        .pick_ignore(),
+                )
+                .child(shield(r, 34.0)),
+        )
+        .children(rows)
+}
+
+/// Every house at a glance, you first: purse, people, islands; the leader of each in bold.
+fn league(list: &[Rival], all: &[Stand]) -> El {
+    let mut rows: Vec<(String, Color, Stand)> = Vec::new();
+    if let Some(us) = all.first() {
+        rows.push(("Your company".into(), our_color(), us.clone()));
+    }
+    for r in list {
+        // Without the game's numbers for a house, what the relations report says.
+        let st = all.get(r.id as usize).cloned().unwrap_or(Stand {
+            coins: r.wealth,
+            balance: 0.0,
+            people: r.people,
+            islands: r.islands as f32,
+            top: None,
+        });
+        rows.push((r.name.clone(), r.color, st));
+    }
+    let best =
+        |f: &dyn Fn(&Stand) -> f32| rows.iter().map(|(_, _, s)| f(s)).fold(f32::MIN, f32::max);
+    let (bc, bp, bi) = (
+        best(&|s| s.coins),
+        best(&|s| s.people),
+        best(&|s| s.islands),
+    );
+    let cell = |t: String, lead: bool, w: f32| {
+        El::text(t)
+            .class("ink")
+            .text_style(move |s| {
+                let s = s
+                    .size(13.5)
+                    .tabular()
+                    .nowrap()
+                    .align(engine_ui::node::TextAlign::Right);
+                if lead { s.bold() } else { s }
+            })
+            .with_style(move |s| s.width(w))
+            .pick_ignore()
+    };
+    let head = El::new()
+        .class("row")
+        .with_style(|s| s.gap(6.0))
+        .child(El::new().with_style(|s| s.grow(1.0)))
+        .child(cell("coins".into(), false, 70.0).class("ink_label"))
+        .child(cell("people".into(), false, 64.0).class("ink_label"))
+        .child(cell("isles".into(), false, 40.0).class("ink_label"));
+    El::new()
+        .class("col")
+        .with_style(|s| s.gap(4.0).margin([6.0, 0.0, 0.0, 0.0]))
+        .child(brass::label("Standings", true))
+        .child(head)
+        .children(rows.into_iter().map(move |(name, c, st)| {
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(6.0).align_items(Align::Center))
+                .child(El::new().with_style(move |s| {
+                    s.width(10.0)
+                        .height(10.0)
+                        .radius(5.0)
+                        .background(c)
+                        .pick(Pick::Ignore)
+                }))
+                .child(
+                    El::text(name)
+                        .class("ink")
+                        .text_style(|t| t.size(13.5).nowrap())
+                        .with_style(|s| s.grow(1.0).shrink(1.0))
+                        .pick_ignore(),
+                )
+                .child(cell(super::fmt_int(st.coins as f64), st.coins >= bc, 70.0))
+                .child(cell(
+                    super::fmt_int(st.people as f64),
+                    st.people >= bp,
+                    64.0,
+                ))
+                .child(cell(format!("{:.0}", st.islands), st.islands >= bi, 40.0))
+        }))
+}
+
+fn detail(r: &Rival, clock: f64, us: &Stand, them: &Stand) -> El {
     let (word, c) = mood(r.standing);
     let tc = treaty_color(&r.treaty);
     let head = El::new()
@@ -616,100 +875,11 @@ fn detail(r: &Rival, clock: f64) -> El {
                         .pick_ignore(),
                 ),
         );
-    // Diplomacy: the treaty, how the standing has moved of late.
-    let moved: f32 = r.events.iter().map(|e| e.2).sum();
-    let diplomacy = El::new()
-        .class("col")
-        .with_style(|s| s.gap(5.0))
-        .child(stat(
-            "treaty",
-            treaty_name(&r.treaty).into(),
-            Some(tc.lerp(Colors::ink(), 0.3)),
-        ))
-        .child(stat(
-            "of late",
-            format!("{moved:+.0}"),
-            Some(if moved >= 0.0 {
-                Colors::good_ink()
-            } else {
-                Colors::bad_ink()
-            }),
-        ))
-        .child(stat("standing", format!("{:+.0} of 100", r.standing), None));
     let trade_c = if r.trade_per_min >= 0.0 {
         Colors::good_ink()
     } else {
         Colors::bad_ink()
     };
-    let trade = El::new()
-        .class("col")
-        .with_style(|s| s.gap(5.0))
-        .child(stat(
-            "with us",
-            format!("{:+.0} a min", r.trade_per_min),
-            Some(trade_c),
-        ))
-        .child(stat(
-            if r.estimate {
-                "their wealth (est.)"
-            } else {
-                "their wealth"
-            },
-            super::fmt_int(r.wealth as f64),
-            None,
-        ))
-        .child(stat(
-            "people · islands",
-            format!("{} · {}", super::fmt_int(r.people as f64), r.islands),
-            None,
-        ))
-        .child_opt(good_chips("buy", &r.buys))
-        .child_opt(good_chips("sell", &r.sells));
-    let theirs = r.firepower.max(r.warships);
-    let ours = r.our_firepower.max(r.our_warships);
-    let edge = if ours + theirs < 0.01 {
-        ("No warships on either side", Colors::ink_dim())
-    } else if ours > theirs * 1.25 {
-        ("We hold the seas", Colors::good_ink())
-    } else if theirs > ours * 1.25 {
-        ("They outgun us", Colors::bad_ink())
-    } else {
-        ("Evenly matched", Colors::ink())
-    };
-    let military = El::new()
-        .class("col")
-        .with_style(|s| s.gap(5.0))
-        .child(stat(
-            "warships",
-            format!("{:.0} ours · {:.0} theirs", r.our_warships, r.warships),
-            None,
-        ))
-        .child(stat(
-            "guns",
-            format!("{:.0} · {:.0}", r.our_firepower, r.firepower),
-            None,
-        ))
-        .child(balance(ours, theirs, r.color))
-        .child(
-            El::text(edge.0)
-                .class("ink")
-                .text_style(|t| t.size(13.0).bold().nowrap())
-                .with_style(move |s| s.color(edge.1))
-                .pick_ignore(),
-        )
-        .child_opt((r.lost + r.taken > 0.0).then(|| {
-            stat(
-                "lately lost · taken",
-                format!("{:.0} · {:.0}", r.lost, r.taken),
-                None,
-            )
-        }));
-    let panels = El::new()
-        .class("row")
-        .with_style(|s| s.gap(12.0).align_items(Align::Stretch))
-        .child(panel("isle_rel_diplomacy", "Diplomacy", diplomacy))
-        .child(panel("isle_rel_trade", "Trade", trade))
-        .child(panel("isle_rel_military", "Military", military));
     // Of late.
     let mut events = El::new()
         .class("col")
@@ -813,12 +983,38 @@ fn detail(r: &Rival, clock: f64) -> El {
         .with_style(|s| s.gap(14.0))
         .child(head)
         .child(brass::divider(640.0))
-        .child(panels)
+        .child(versus(r, us, them))
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(16.0).wrap(true))
+                .child(stat(
+                    "trade with us",
+                    format!("{:+.0} a min", r.trade_per_min),
+                    Some(trade_c),
+                ))
+                .child_opt((r.lost + r.taken > 0.0).then(|| {
+                    stat(
+                        "ships lost · taken",
+                        format!("{:.0} · {:.0}", r.lost, r.taken),
+                        None,
+                    )
+                }))
+                .child_opt(r.estimate.then(|| {
+                    El::text("their numbers are estimates")
+                        .class("ink")
+                        .text_style(|t| t.italic().size(12.5).nowrap())
+                        .with_style(|s| s.color(Colors::ink_dim()))
+                        .pick_ignore()
+                }))
+                .child_opt(good_chips("they buy", &r.buys))
+                .child_opt(good_chips("they sell", &r.sells)),
+        )
         .child(lower)
         .child(moves)
 }
 
-fn body(list: &[Rival], picked: Option<u64>, clock: f64) -> Vec<El> {
+fn body(list: &[Rival], picked: Option<u64>, clock: f64, all: &[Stand]) -> Vec<El> {
     if list.is_empty() {
         return vec![
             El::new()
@@ -865,7 +1061,8 @@ fn body(list: &[Rival], picked: Option<u64>, clock: f64) -> Vec<El> {
             v.into_iter()
                 .map(|r| rival_card(r, r.id == pick.id))
                 .collect::<Vec<_>>()
-        });
+        })
+        .child(league(list, all));
     let spine = El::new().with_style(|s| {
         s.width(14.0)
             .background(Fill::Linear {
@@ -882,7 +1079,18 @@ fn body(list: &[Rival], picked: Option<u64>, clock: f64) -> Vec<El> {
                 .width(720.0)
                 .radius([0.0, 4.0, 4.0, 0.0])
         })
-        .child(detail(pick, clock));
+        .child({
+            let us = all.first().cloned().unwrap_or_default();
+            // Without the game's numbers for them, what the relations report says.
+            let them = all.get(pick.id as usize).cloned().unwrap_or(Stand {
+                coins: pick.wealth,
+                balance: 0.0,
+                people: pick.people,
+                islands: pick.islands as f32,
+                top: None,
+            });
+            detail(pick, clock, &us, &them)
+        });
     vec![
         El::new()
             .class("row")
@@ -992,7 +1200,8 @@ pub fn refresh(world: &mut World) {
     if world.resource::<Relations>().sig == sig {
         return;
     }
-    let els = body(&list, picked, clock);
+    let all = stands(world);
+    let els = body(&list, picked, clock, &all);
     if let Some(e) = engine_ui::input::find_id(world, BODY_ID) {
         let _ = engine_ui::el::replace_children(world, e, &els);
         world.resource_mut::<Relations>().sig = sig;

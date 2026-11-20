@@ -448,6 +448,22 @@ const RELATIONS: &[(&str, &str)] = &[
     ("isle_gift", include_str!("../assets/icons/isle_gift.svg")),
 ];
 
+/// The build bar's tier tabs, painted by `assets/icons/make_build_icons.py`.
+const TIERS: &[(&str, &str)] = &[
+    (
+        "isle_tier_fisherfolk",
+        include_str!("../assets/icons/isle_tier_fisherfolk.svg"),
+    ),
+    (
+        "isle_tier_labourers",
+        include_str!("../assets/icons/isle_tier_labourers.svg"),
+    ),
+    (
+        "isle_tier_burghers",
+        include_str!("../assets/icons/isle_tier_burghers.svg"),
+    ),
+];
+
 pub fn all() -> Vec<(&'static str, String)> {
     let mut v: Vec<(&'static str, String)> = PAINTED
         .iter()
@@ -455,6 +471,7 @@ pub fn all() -> Vec<(&'static str, String)> {
         .chain(CRAFT)
         .chain(MOOD)
         .chain(RELATIONS)
+        .chain(TIERS)
         .map(|(n, s)| (*n, s.to_string()))
         .collect();
     v.extend(vec![
@@ -520,6 +537,27 @@ pub fn all() -> Vec<(&'static str, String)> {
             svg(
                 &grad("sp", "#5a4128", "#24170b"),
                 r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><path d="M14 58 L22 8" stroke-width="7"/><path d="M50 58 L42 8" stroke-width="7"/><path d="M14 58 L22 8 M50 58 L42 8" stroke="url(#sp)" stroke-width="3"/><path d="M22 10 L36 14 L32 22 L40 28 L21 26 Z" fill="url(#sp)"/><path d="M42 10 L28 14 L32 22 L24 28 L43 26 Z" fill="url(#sp)" opacity="0.92"/></g><g stroke="#f0dfb4" stroke-width="1.6" fill="none" opacity="0.8" stroke-linecap="round"><path d="M25 14 L32 16 M39 14 L32 16"/></g>"##,
+            ),
+        ),
+        (
+            "isle_plus",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round"><path d="M26 8 L38 8 L38 26 L56 26 L56 38 L38 38 L38 56 L26 56 L26 38 L8 38 L8 26 L26 26 Z" fill="url(#sp)"/></g>"##,
+            ),
+        ),
+        (
+            "isle_sort_tier",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round"><path d="M6 56 L6 42 L22 42 L22 56 Z M24 56 L24 28 L40 28 L40 56 Z M42 56 L42 12 L58 12 L58 56 Z" fill="url(#sp)"/></g><g stroke="#f0dfb4" stroke-width="2" fill="none" opacity="0.85" stroke-linecap="round"><path d="M10 46 L18 46 M28 32 L36 32 M46 16 L54 16"/></g>"##,
+            ),
+        ),
+        (
+            "isle_sort_type",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round"><rect x="7" y="7" width="22" height="22" rx="3" fill="url(#sp)"/><rect x="35" y="7" width="22" height="22" rx="3" fill="url(#sp)"/><rect x="7" y="35" width="22" height="22" rx="3" fill="url(#sp)"/><rect x="35" y="35" width="22" height="22" rx="3" fill="url(#sp)"/></g><g stroke="#f0dfb4" stroke-width="2" fill="none" opacity="0.85" stroke-linecap="round"><path d="M12 12 L20 12 M40 12 L48 12 M12 40 L20 40 M40 40 L48 40"/></g>"##,
             ),
         ),
         (
