@@ -662,7 +662,9 @@ fn grow_scalp(
             density: 130.0,
             gravity: 0.25,
             loft: 0.012,
-            clump: 0.55,
+            // Set short hair lies in defined pieces with gaps between (at 0.55 neighbouring
+            // hairs fanned a centimetre apart at their tips: a frizz).
+            clump: 0.8,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
         },
@@ -838,13 +840,15 @@ fn grow_scalp(
             }
         }
         // The strand of hairs this one grows with (see the locks below).
-        // (Curls coil in wider strands.)
+        // (Curls coil in wider strands: a short curl coils about as wide as its strand, and
+        // strands narrower than that (7 mm at half curl) left hairs a few millimetres apart
+        // coiling out of step, tips a centimetre apart: wool, not curls.)
         let strand = strand_center(
             sp.rest,
             if g.gravity > 0.5 {
                 0.004
             } else {
-                0.003 + 0.004 * curl
+                0.003 + 0.012 * curl
             },
         );
         let mut lock_tone = None;

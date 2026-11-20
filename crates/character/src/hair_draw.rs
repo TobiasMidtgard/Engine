@@ -41,16 +41,25 @@ pub fn shared(kind: StrandKind, points: u32) -> bool {
     (kind == StrandKind::Scalp || (face && points > 3)) && !old
 }
 
-/// The people whose scalp hair the strand renderer draws this frame (and the character feature
-/// does not): those within [`NEAR_IN`] of the camera, until they are past [`NEAR_OUT`].
+/// The people whose hair the strand renderer draws this frame (and the character feature does
+/// not): the nearest [`MAX_NEAR`] within [`NEAR_IN`] of the camera, until they are past
+/// [`NEAR_OUT`].
 #[derive(Resource, Debug, Default)]
 pub struct SharedHairNear(pub std::collections::HashSet<Entity>);
 
-/// Where the strand renderer takes a person's hair over from their locks: where the feature
-/// shows the locks alone. A little farther before it hands them back, so a person standing at
-/// the line doesn't flicker between the two.
-pub const NEAR_IN: f32 = lod::LOCKS_TO;
-pub const NEAR_OUT: f32 = lod::LOCKS_TO + 0.3;
+/// Where the strand renderer takes a person's hair over from their locks: as far as the
+/// feature kept a person's single hairs on the GPU (so the video memory for hair is what it
+/// was), where a head is a few dozen pixels high and the locks' coarser look shows little (at
+/// 3.5 m the change from hairs to locks showed). A little farther before it hands them back,
+/// so a person standing at the line doesn't flicker between the two.
+pub const NEAR_IN: f32 = lod::HAIRS_KEPT;
+pub const NEAR_OUT: f32 = NEAR_IN + 0.5;
+/// How far a person's grooms are kept once made (and made again only when they come back
+/// within `NEAR_IN`): a long head of hair is some 50 MB of points, built on the frame.
+pub const KEEP_GROOMS: f32 = NEAR_OUT + 2.0;
+/// People drawn by the strand renderer at once, the nearest first: it draws the nearest 32
+/// grooms (animals' coats among them), and a person beyond that would lose their hair.
+pub const MAX_NEAR: usize = 24;
 
 /// A person's hair drawn by the strand renderer: on a child of the person, at the head bone.
 #[derive(Component, Debug, Clone)]
@@ -334,25 +343,37 @@ pub fn draw_hair(
         .map(|(_, g)| g.0.translation);
     let scale = lod_scale.map_or(1.0, |l| l.distance_scale);
     let was = std::mem::take(&mut near.0);
-    for (person, _, _, at, _) in &people {
-        let distance = match (eye, at) {
-            (Some(eye), Some(at)) => (at.0.translation - eye).length() as f32 * scale,
-            _ => 0.0,
-        };
-        let reach = if was.contains(&person) {
-            NEAR_OUT
-        } else {
-            NEAR_IN
-        };
-        if distance < reach {
-            near.0.insert(person);
-        }
-    }
+    let mut by_distance: Vec<(f32, Entity)> = people
+        .iter()
+        .map(|(person, _, _, at, _)| {
+            let distance = match (eye, at) {
+                (Some(eye), Some(at)) => (at.0.translation - eye).length() as f32 * scale,
+                _ => 0.0,
+            };
+            (distance, person)
+        })
+        .collect();
+    by_distance.sort_by(|a, b| a.0.total_cmp(&b.0));
+    near.0.extend(
+        by_distance
+            .iter()
+            .filter(|(d, p)| *d < if was.contains(p) { NEAR_OUT } else { NEAR_IN })
+            .take(MAX_NEAR)
+            .map(|(_, p)| *p),
+    );
+    let kept = |person: Entity| {
+        near.0.contains(&person)
+            || by_distance
+                .iter()
+                .any(|(d, p)| *p == person && *d < KEEP_GROOMS)
+    };
     let mut have: Vec<(Entity, u64)> = Vec::new();
     let mut weights = [0.0f32; MAX_CHANNELS];
     for (e, mut hair, mut t, mut instance) in &mut drawn {
         match people.get(hair.person) {
-            Ok((_, built, pose, _, face_controls)) if built.version == hair.version => {
+            Ok((_, built, pose, _, face_controls))
+                if built.version == hair.version && kept(hair.person) =>
+            {
                 let shown = near.0.contains(&hair.person);
                 if instance.visible != shown {
                     instance.visible = shown;
@@ -385,7 +406,7 @@ pub fn draw_hair(
         }
     }
     for (person, built, pose, _, _) in &people {
-        if have.contains(&(person, built.version)) {
+        if have.contains(&(person, built.version)) || !near.0.contains(&person) {
             continue;
         }
         let m = &built.meshes;
@@ -575,6 +596,6 @@ mod tests {
 
     #[test]
     fn the_hand_over_to_locks_has_a_margin() {
-        const { assert!(NEAR_OUT > NEAR_IN && NEAR_IN >= lod::LOCKS_TO) };
+        const { assert!(KEEP_GROOMS > NEAR_OUT && NEAR_OUT > NEAR_IN && NEAR_IN >= lod::LOCKS_TO) };
     }
 }
