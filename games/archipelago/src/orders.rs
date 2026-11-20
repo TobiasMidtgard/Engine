@@ -15,9 +15,13 @@ use crate::fleet::{Doing, Roam, Route, Routes, Stop, Vessel, building_by_id, mas
 use crate::sim::Building;
 
 fn route_mut<'w>(world: &'w mut World, r: usize) -> Result<Mut<'w, Routes>, String> {
+    let me = crate::sim::acting(world);
     let routes = world.resource_mut::<Routes>();
     if r >= routes.0.len() {
         return Err(format!("no route {r}"));
+    }
+    if routes.0[r].company != me {
+        return Err("That route is another company's.".into());
     }
     Ok(routes)
 }
@@ -30,8 +34,9 @@ fn stop_kind(air: bool) -> Kind {
     }
 }
 
-/// Check that building `at` can be a stop on an `air` (or sea) route.
-fn check_stop(world: &mut World, at: u32, air: bool) -> Result<(), String> {
+/// Check that building `at` can be a stop on an `air` (or sea) route: a harbour (or mast) on
+/// an island of the company giving orders.
+pub fn check_stop(world: &mut World, at: u32, air: bool) -> Result<(), String> {
     let b = building_by_id(world, at).ok_or(format!("no building {at}"))?;
     let want = stop_kind(air);
     if b.kind != want {
@@ -41,11 +46,21 @@ fn check_stop(world: &mut World, at: u32, air: bool) -> Result<(), String> {
             want.def().name
         ));
     }
+    if let Some(c) = world.resource::<crate::sim::Economy>().owner(b.island)
+        && c != crate::sim::acting(world)
+    {
+        return Err(format!(
+            "That {} is {}'s.",
+            want.def().name.to_lowercase(),
+            crate::rivals::company_name(world, c)
+        ));
+    }
     Ok(())
 }
 
 /// Open an empty route for ships (or, `air`, for aircraft). Returns its index.
 pub fn open_route(world: &mut World, name: &str, air: bool) -> usize {
+    let company = crate::sim::acting(world);
     let mut routes = world.resource_mut::<Routes>();
     let name = if name.trim().is_empty() {
         format!("Route {}", routes.0.len() + 1)
@@ -56,6 +71,7 @@ pub fn open_route(world: &mut World, name: &str, air: bool) -> usize {
         name,
         stops: Vec::new(),
         air,
+        company,
     });
     routes.0.len() - 1
 }
@@ -170,6 +186,9 @@ pub fn assign(world: &mut World, e: Entity, r: usize) -> Result<(), String> {
         .cloned()
         .ok_or(format!("no route {r}"))?;
     let v = world.get::<Vessel>(e).ok_or("no such vessel")?;
+    if v.company != route.company || v.company != crate::sim::acting(world) {
+        return Err(format!("{} is not this route's company's", v.name));
+    }
     if v.craft.flies() != route.air {
         return Err(if route.air {
             format!("{} is a ship; this route is for aircraft", v.name)

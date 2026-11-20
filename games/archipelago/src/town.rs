@@ -1213,6 +1213,7 @@ pub fn build_start(world: &mut World) {
             },
         ],
         air,
+        company: crate::sim::PLAYER,
     };
     if let (Some(h), Some(b)) = (h_id, b_id) {
         lines.push((
@@ -1257,6 +1258,7 @@ pub fn build_start(world: &mut World) {
                     },
                 ],
                 air: false,
+                company: crate::sim::PLAYER,
             },
             &[
                 (Craft::Steamer, "SS Brannock"),

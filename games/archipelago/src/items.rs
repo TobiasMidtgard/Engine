@@ -1557,15 +1557,27 @@ pub fn specialists_owned(world: &mut World) -> HashSet<usize> {
 
 /// How well known the company is: people count for more the higher their tier.
 pub fn renown(econ: &Economy) -> f32 {
+    renown_of(econ, crate::sim::PLAYER)
+}
+
+/// Company `c`'s renown, from the people of the islands it holds.
+pub fn renown_of(econ: &Economy, c: crate::sim::Company) -> f32 {
     econ.islands
         .iter()
-        .map(|b| b.population[0] + 2.0 * b.population[1] + 4.0 * b.population[2])
+        .enumerate()
+        .filter(|(i, _)| econ.owns(c, *i))
+        .map(|(_, b)| b.population[0] + 2.0 * b.population[1] + 4.0 * b.population[2])
         .sum()
 }
 
-/// How many of each of the three buildings the company's renown allows.
+/// How many of each of the three buildings the player's renown allows.
 pub fn allowed(econ: &Economy) -> usize {
-    (1 + (renown(econ) / RENOWN_STEP) as usize).min(4)
+    allowed_of(econ, crate::sim::PLAYER)
+}
+
+/// How many of each of the three buildings company `c`'s renown allows.
+pub fn allowed_of(econ: &Economy, c: crate::sim::Company) -> usize {
+    (1 + (renown_of(econ, c) / RENOWN_STEP) as usize).min(4)
 }
 
 /// Slots open in the buildings of an island: three, four once Burghers live there.

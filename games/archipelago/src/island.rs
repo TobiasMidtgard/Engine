@@ -198,10 +198,12 @@ fn far_lands() -> Vec<Island> {
             (3.6, 0.25),
             101,
             0.78,
+            // (Highland pasture above the jungle: a house can clothe its first town here.)
             Fertility {
                 clay: true,
                 grain: true,
                 cane: true,
+                wool: true,
                 ..none
             },
             Some((6, 520.0)),
@@ -307,8 +309,10 @@ fn far_lands() -> Vec<Island> {
             (5.6, 0.5),
             307,
             0.32,
+            // (Hardy barley on the southern slopes: bread for a town of its own.)
             Fertility {
                 wool: true,
+                grain: true,
                 furs: true,
                 oil: true,
                 ..none

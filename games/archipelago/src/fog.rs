@@ -375,15 +375,23 @@ pub fn update(world: &mut World) {
     fog.clock -= dt;
     if fog.clock <= 0.0 {
         fog.clock = 0.4;
+        let econ = world.resource::<crate::sim::Economy>().clone();
         let mut q = world.query::<&Building>();
         for b in q.iter(world) {
+            // (A rival's town shows only once the player has been to look.)
+            if econ
+                .owner(b.island)
+                .is_some_and(|c| c != crate::sim::PLAYER)
+            {
+                continue;
+            }
             let c = grid::footprint_center(b.kind, b.origin, b.rot);
             fog.reveal_map(c.x, c.y, sight(b.kind));
         }
         let mut q = world.query::<&Vessel>();
         for v in q.iter(world) {
             // The player's own: trade ships and aircraft, their smacks, and craft lying idle.
-            if v.owned() {
+            if v.owned() && v.company == crate::sim::PLAYER {
                 let far =
                     if v.craft.flies() { 1_600.0 } else { 1_000.0 } * (1.0 + v.kit.sight as f64);
                 fog.reveal_map(v.at.x, v.at.z, far);

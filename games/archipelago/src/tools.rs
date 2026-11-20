@@ -120,12 +120,14 @@ pub fn action(world: &mut World, a: &str) {
         select(world, None);
     } else if a == "isle.sel.pause" {
         if let Some(e) = world.resource::<Hand>().selected
+            && build::ours(world, e)
             && let Some(mut p) = world.get_mut::<Producer>(e)
         {
             p.paused = !p.paused;
         }
     } else if a == "isle.sel.demolish"
         && let Some(e) = world.resource::<Hand>().selected
+        && build::ours(world, e)
     {
         build::demolish(world, e);
         select(world, None);
@@ -432,14 +434,27 @@ pub fn input(world: &mut World) {
                 && let Some(c) = camera::pick(world).map(|h| grid::cell_of(h.x, h.z))
             {
                 match building_at(world, c) {
-                    Some(Occ::Building(e)) => {
+                    Some(Occ::Building(e)) if build::ours(world, e) => {
                         if world.resource::<Hand>().selected == Some(e) {
                             select(world, None);
                         }
                         build::demolish(world, e);
                     }
-                    Some(Occ::Road) => build::remove_road(world, c),
-                    Some(Occ::Field(_)) | None => {}
+                    Some(Occ::Road)
+                        if crate::island::island_at(
+                            grid::cell_center(c).x,
+                            grid::cell_center(c).y,
+                        )
+                        .is_none_or(|i| {
+                            world
+                                .resource::<crate::sim::Economy>()
+                                .owner(i)
+                                .is_none_or(|o| o == crate::sim::acting(world))
+                        }) =>
+                    {
+                        build::remove_road(world, c)
+                    }
+                    _ => {}
                 }
             }
         }

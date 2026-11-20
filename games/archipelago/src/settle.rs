@@ -47,13 +47,24 @@ pub const FIRST_CARGO: &[(Good, u32)] =
 /// The purse of a new game.
 pub const FIRST_COINS: f64 = 12_000.0;
 
-/// Whether the company has settled island `isle` (it has a harbour there).
+/// Whether the company giving orders ([`crate::sim::acting`]) holds island `isle` (its
+/// harbour was the island's first).
 pub fn claimed(world: &World, isle: usize) -> bool {
     world
         .resource::<Economy>()
-        .islands
-        .get(isle)
-        .is_some_and(|b| b.harbours > 0)
+        .owns(crate::sim::acting(world), isle)
+}
+
+/// The refusal for building on an island the company giving orders does not hold.
+pub fn unclaimed_text_in(world: &World, isle: usize) -> String {
+    match world.resource::<Economy>().owner(isle) {
+        Some(c) if c != crate::sim::acting(world) => format!(
+            "{} belongs to {}: nobody else builds there.",
+            islands()[isle].name,
+            crate::rivals::company_name(world, c)
+        ),
+        _ => unclaimed_text(isle),
+    }
 }
 
 /// The refusal for building on an island nobody has settled.
@@ -112,11 +123,17 @@ pub fn free(v: &Vessel) -> bool {
     !v.craft.flies() && v.route.is_none() && matches!(v.roam, Roam::Idle { .. })
 }
 
-/// A harbour of the company's whose mooring is within `reach` meters of `p`.
-fn harbour_near(world: &mut World, p: DVec2, reach: f64) -> Option<Building> {
+/// A harbour of company `c`'s whose mooring is within `reach` meters of `p`.
+fn harbour_near(
+    world: &mut World,
+    c: crate::sim::Company,
+    p: DVec2,
+    reach: f64,
+) -> Option<Building> {
+    let econ = world.resource::<Economy>().clone();
     let mut q = world.query::<&Building>();
     q.iter(world)
-        .filter(|b| b.kind == Kind::Harbour)
+        .filter(|b| b.kind == Kind::Harbour && econ.owns(c, b.island))
         .map(|b| (b.clone(), (mooring(b).0 - p).length()))
         .filter(|(_, d)| *d < reach)
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -142,17 +159,21 @@ pub fn send_settlers(world: &mut World, origin: IVec2, rot: u8, isle: usize) -> 
     let name = islands()[isle].name;
     let need = harbour_planks();
     let coins = Kind::Harbour.def().coins as f64;
-    if world.resource::<Economy>().coins < coins {
+    let me = crate::sim::acting(world);
+    let purse = world.resource::<Economy>().coins_of(me);
+    if purse < coins {
         return Err(format!(
-            "A harbour costs {coins:.0} coins; you have {:.0}.",
-            world.resource::<Economy>().coins
+            "A harbour costs {coins:.0} coins; you have {purse:.0}."
         ));
+    }
+    if world.resource::<Economy>().owner(isle).is_some() {
+        return Err(unclaimed_text_in(world, isle));
     }
     {
         let mut q = world.query::<&Vessel>();
         if let Some(v) = q
             .iter(world)
-            .find(|v| matches!(v.roam, Roam::Found { isle: i, .. } if i == isle))
+            .find(|v| v.company == me && matches!(v.roam, Roam::Found { isle: i, .. } if i == isle))
         {
             return Err(format!(
                 "{} is already on its way to settle {name}.",
@@ -169,7 +190,7 @@ pub fn send_settlers(world: &mut World, origin: IVec2, rot: u8, isle: usize) -> 
     let mut ships: Vec<(Entity, Vessel)> = {
         let mut q = world.query::<(Entity, &Vessel)>();
         q.iter(world)
-            .filter(|(_, v)| free(v))
+            .filter(|(_, v)| free(v) && v.company == me)
             .map(|(e, v)| (e, v.clone()))
             .collect()
     };
@@ -191,7 +212,7 @@ pub fn send_settlers(world: &mut World, origin: IVec2, rot: u8, isle: usize) -> 
             break;
         }
         let here = DVec2::new(v.at.x, v.at.z);
-        if let Some(h) = harbour_near(world, here, PROVISION_M)
+        if let Some(h) = harbour_near(world, me, here, PROVISION_M)
             && provision(world, *e, h.island) >= need
         {
             chosen = Some(*e);
@@ -207,7 +228,7 @@ pub fn send_settlers(world: &mut World, origin: IVec2, rot: u8, isle: usize) -> 
                 let econ = world.resource::<Economy>().clone();
                 let mut q = world.query::<&Building>();
                 q.iter(world)
-                    .filter(|b| b.kind == Kind::Harbour)
+                    .filter(|b| b.kind == Kind::Harbour && econ.owns(me, b.island))
                     .filter(|b| econ.islands[b.island].get(Good::Planks) >= (need + 12) as f64)
                     .max_by(|a, b| {
                         let p = |x: &Building| econ.islands[x.island].get(Good::Planks);
@@ -251,7 +272,9 @@ pub fn send_settlers(world: &mut World, origin: IVec2, rot: u8, isle: usize) -> 
             "{ship} weighs anchor with the settlers' stores. The harbour goes up when she is there."
         ),
     };
-    tell(world, &format!("Settling {name}"), &text);
+    if me == crate::sim::PLAYER {
+        tell(world, &format!("Settling {name}"), &text);
+    }
     engine::core::log::info!("archipelago: {ship} sails to settle {name} at {origin}");
     Ok(())
 }
@@ -362,24 +385,43 @@ pub fn land(world: &mut World, v: &mut Vessel) {
     v.doing = Doing::Moored(20.0);
     let need = harbour_planks();
     let coins = Kind::Harbour.def().coins as f64;
+    let me = v.company;
     let fail = |world: &mut World, why: String| {
-        crate::hud::complain(world, &format!("Settling {name}"), &why);
-        engine::core::log::info!("archipelago: settling {name} failed: {why}");
+        if me == crate::sim::PLAYER {
+            crate::hud::complain(world, &format!("Settling {name}"), &why);
+        }
+        engine::core::log::info!("archipelago: settling {name} for {me} failed: {why}");
     };
+    // Someone was there first.
+    if let Some(c) = world.resource::<Economy>().owner(isle)
+        && c != me
+    {
+        return fail(
+            world,
+            format!(
+                "{} raised a harbour on {name} first.",
+                crate::rivals::company_name(world, c)
+            ),
+        );
+    }
     if planks_aboard(v) < need {
         return fail(
             world,
             format!("{} has fewer than {need} planks aboard.", v.name),
         );
     }
-    if world.resource::<Economy>().coins < coins {
+    if world.resource::<Economy>().coins_of(me) < coins {
         return fail(world, format!("A harbour costs {coins:.0} coins."));
     }
     let e = match build::place(world, Kind::Harbour, origin, rot, false) {
         Ok(e) => e,
         Err(why) => return fail(world, format!("The harbour can't go up there: {why}")),
     };
-    world.resource_mut::<Economy>().coins -= coins;
+    {
+        let mut econ = world.resource_mut::<Economy>();
+        *econ.coins_mut(me) -= coins;
+        econ.islands[isle].owner = me;
+    }
     // A street inland from the warehouse, for the first works and houses to join.
     first_street(world, origin, rot, 12);
     let mut left = need;
@@ -405,25 +447,37 @@ pub fn land(world: &mut World, v: &mut Vessel) {
             at: DVec3::new(m.x, 0.0, m.y),
         };
     }
-    let first = world
-        .query::<&Building>()
-        .iter(world)
-        .filter(|b| b.kind == Kind::Harbour)
-        .count()
-        == 1;
-    if first {
+    let first = {
+        let econ = world.resource::<Economy>().clone();
+        world
+            .query::<&Building>()
+            .iter(world)
+            .filter(|b| b.kind == Kind::Harbour && econ.islands[b.island].owner == me)
+            .count()
+            <= 1
+    };
+    if first && me == crate::sim::PLAYER {
         crate::town::pedlar_calls(world, e);
     }
     let now = world.resource::<Economy>().clock_s;
-    world.resource_mut::<Settled>().0.push((isle, now));
-    tell(
-        world,
-        &format!("{name} settled"),
-        &format!(
-            "{} has raised the harbour and landed her stores. The island is the company's.",
-            v.name
-        ),
-    );
+    if me == crate::sim::PLAYER {
+        world.resource_mut::<Settled>().0.push((isle, now));
+        tell(
+            world,
+            &format!("{name} settled"),
+            &format!(
+                "{} has raised the harbour and landed her stores. The island is the company's.",
+                v.name
+            ),
+        );
+    } else {
+        let house = crate::rivals::company_name(world, me);
+        tell(
+            world,
+            &format!("{house} settled {name}"),
+            &format!("{house} raised a harbour on {name}. Nobody else may build there now."),
+        );
+    }
     engine::core::log::info!(
         "archipelago: {name} settled by {} at {:.0} s",
         v.name,
@@ -602,7 +656,7 @@ pub fn register(app: &mut App) {
         |world, args| {
             let e = vessel_of(world, &args)?;
             let v = world.get::<Vessel>(e).cloned().ok_or("no such vessel")?;
-            let h = harbour_near(world, DVec2::new(v.at.x, v.at.z), PROVISION_M).ok_or(format!("{} is not lying at a harbour of yours", v.name))?;
+            let h = harbour_near(world, v.company, DVec2::new(v.at.x, v.at.z), PROVISION_M).ok_or(format!("{} is not lying at a harbour of yours", v.name))?;
             let planks = provision(world, e, h.island);
             let cargo = world.get::<Vessel>(e).map(|v| v.cargo.iter().map(|(g, n)| json!([g.name(), n])).collect::<Vec<_>>());
             Ok(json!({"planks": planks, "cargo": cargo}))

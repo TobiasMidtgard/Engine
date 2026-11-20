@@ -358,6 +358,10 @@ pub struct IslandBooks {
     /// Houses per tier in each mood ([`Mood::ALL`] order), and ready ones.
     pub moods: [[u32; Mood::COUNT]; Tier::COUNT],
     pub ready: [u32; Tier::COUNT],
+    /// The company whose harbour was first on the island (meaningful once `harbours > 0`):
+    /// its taxes and upkeep go to that company's purse, and nobody else builds here.
+    #[serde(default)]
+    pub owner: Company,
 }
 
 impl IslandBooks {
@@ -388,11 +392,44 @@ impl IslandBooks {
     }
 }
 
-/// The player's purse and every island's books.
+/// Who owns an island, a ship or a route: [`PLAYER`], or a rival house by its
+/// [`crate::rivals::Rival::id`].
+pub type Company = u8;
+pub const PLAYER: Company = 0;
+
+/// A rival house's books, as the player's are [`Economy`]'s own fields.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Purse {
+    pub coins: f64,
+    pub balance_per_min: f64,
+    pub taxes_per_min: f64,
+    pub upkeep_per_min: f64,
+    pub public_upkeep: f32,
+    pub fleet_upkeep: f32,
+    pub debt_s: f64,
+    pub auto_paused: u32,
+}
+
+/// The company whose orders are being carried out now: the player's, except while a rival's
+/// captain gives its orders ([`crate::brain`]). Building, buying and founding charge its
+/// purse and keep to its islands.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Acting(pub Company);
+
+/// The company giving orders now.
+pub fn acting(world: &World) -> Company {
+    world.get_resource::<Acting>().map_or(PLAYER, |a| a.0)
+}
+
+/// The player's purse, the rivals' and every island's books.
 #[derive(Resource, Clone, Debug, Serialize)]
 pub struct Economy {
     pub coins: f64,
     pub islands: Vec<IslandBooks>,
+    /// The rival houses' purses: company `c` is `rivals[c - 1]` (empty in a game without
+    /// rivals).
+    #[serde(default)]
+    pub rivals: Vec<Purse>,
     /// Game seconds per real second (0 = paused).
     pub speed: f32,
     /// Taxes minus upkeep per minute, smoothed.
@@ -433,6 +470,7 @@ impl Default for Economy {
         Self {
             coins: 12_000.0,
             islands: vec![IslandBooks::default(); island::islands().len()],
+            rivals: Vec::new(),
             speed: 1.0,
             balance_per_min: 0.0,
             taxes_per_min: 0.0,
@@ -446,6 +484,76 @@ impl Default for Economy {
             auto_paused: 0,
             acc: 0.0,
         }
+    }
+}
+
+impl Economy {
+    /// Coins in company `c`'s purse.
+    pub fn coins_of(&self, c: Company) -> f64 {
+        if c == PLAYER {
+            self.coins
+        } else {
+            self.rivals.get(c as usize - 1).map_or(0.0, |p| p.coins)
+        }
+    }
+
+    /// Company `c`'s purse, to pay from or into.
+    pub fn coins_mut(&mut self, c: Company) -> &mut f64 {
+        if c == PLAYER {
+            return &mut self.coins;
+        }
+        &mut self.purse_mut(c).coins
+    }
+
+    /// A rival house's books (made on first use).
+    pub fn purse_mut(&mut self, c: Company) -> &mut Purse {
+        debug_assert!(
+            c != PLAYER,
+            "the player's books are the economy's own fields"
+        );
+        let i = c as usize - 1;
+        if self.rivals.len() <= i {
+            self.rivals.resize_with(i + 1, Purse::default);
+        }
+        &mut self.rivals[i]
+    }
+
+    /// Game seconds company `c` has been in debt.
+    pub fn debt_s_of(&self, c: Company) -> f64 {
+        if c == PLAYER {
+            self.debt_s
+        } else {
+            self.rivals.get(c as usize - 1).map_or(0.0, |p| p.debt_s)
+        }
+    }
+
+    /// Taxes less upkeep a minute, company `c`'s.
+    pub fn balance_of(&self, c: Company) -> f64 {
+        if c == PLAYER {
+            self.balance_per_min
+        } else {
+            self.rivals
+                .get(c as usize - 1)
+                .map_or(0.0, |p| p.balance_per_min)
+        }
+    }
+
+    /// The company that holds island `isle`, if anyone has settled it.
+    pub fn owner(&self, isle: usize) -> Option<Company> {
+        self.islands
+            .get(isle)
+            .filter(|b| b.harbours > 0)
+            .map(|b| b.owner)
+    }
+
+    /// Whether company `c` holds island `isle`.
+    pub fn owns(&self, c: Company, isle: usize) -> bool {
+        self.owner(isle) == Some(c)
+    }
+
+    /// How many companies keep books (the player and the rivals).
+    pub fn companies(&self) -> usize {
+        1 + self.rivals.len()
     }
 }
 
@@ -605,7 +713,14 @@ pub fn step(
         }
     }
     // Houses: each asked-for need brings its people, coins, joy and points.
-    let mut taxes = 0.0f64;
+    // Each company's taxes and upkeep, from the islands it holds.
+    let companies = econ.companies();
+    let own: Vec<usize> = econ
+        .islands
+        .iter()
+        .map(|b| (b.owner as usize).min(companies - 1))
+        .collect();
+    let mut taxes = vec![0.0f64; companies];
     let mood_step = MOOD_RATE * dt;
     for (b, mut h, boost) in houses.iter_mut() {
         let books = &econ.islands[b.island];
@@ -675,7 +790,7 @@ pub fn step(
         h.rent = rent;
         h.goodwill = goodwill;
         h.income = coins * (h.residents / base).min(cap / base) + rent + goodwill;
-        taxes += (h.income / 60.0 * dt) as f64;
+        taxes[own[b.island]] += (h.income / 60.0 * dt) as f64;
         // Ready to move up: full, every basic category met, not angry, no trouble. Once
         // ready it stays so until a category has been well short for a while.
         let full = h.residents >= cap - 0.25;
@@ -736,34 +851,37 @@ pub fn step(
         }
     }
     // Workshops.
-    let mut upkeep = ((econ.public_upkeep + econ.fleet_upkeep) / 60.0 * dt) as f64;
+    let mut upkeep: Vec<f64> = (0..companies)
+        .map(|c| {
+            let (public, fleet) = if c == 0 {
+                (econ.public_upkeep, econ.fleet_upkeep)
+            } else {
+                let p = &econ.rivals[c - 1];
+                (p.public_upkeep, p.fleet_upkeep)
+            };
+            ((public + fleet) / 60.0 * dt) as f64
+        })
+        .collect();
     let mut econ_chandlery = 0;
     let mut made = vec![[0.0f32; Good::COUNT]; n];
     let plain = Boost::default();
-    let in_debt = econ.debt_s >= DEBT_PAUSE_S;
+    let in_debt: Vec<bool> = (0..companies)
+        .map(|c| econ.debt_s_of(c as Company) >= DEBT_PAUSE_S)
+        .collect();
     let mut drains: Vec<Drain> = Vec::new();
     for (e, b, mut p, link, boost) in producers.iter_mut() {
         let def = b.kind.def();
         let boost = boost.unwrap_or(&plain);
-        // A works that paused itself for want of work wakes once its goods are in: it
-        // stopped to save its upkeep, not to keep the bread from the town.
-        if p.auto_paused && p.paused && def.input.is_some() {
-            let stock = &econ.islands[b.island].stock;
-            if [def.input, def.input2]
-                .into_iter()
-                .flatten()
-                .all(|g| stock[g.index()] >= 1.0)
-            {
-                p.paused = false;
-                p.auto_paused = false;
-                p.idle_s = 0.0;
-            }
-        }
         // In debt, works that have stood idle a while pause themselves.
-        if in_debt && !p.paused && p.idle_s >= IDLE_CHEAP_S {
+        let c = own[b.island];
+        if in_debt[c] && !p.paused && p.idle_s >= IDLE_CHEAP_S {
             p.paused = true;
             p.auto_paused = true;
-            econ.auto_paused += 1;
+            if c == 0 {
+                econ.auto_paused += 1;
+            } else {
+                econ.rivals[c - 1].auto_paused += 1;
+            }
         }
         if p.hit != Hit::Clear {
             p.status = match p.hit {
@@ -784,8 +902,9 @@ pub fn step(
             } else {
                 1.0
             };
-        upkeep += (cost / 60.0 * dt) as f64;
-        if cost > 0.0 {
+        upkeep[c] += (cost / 60.0 * dt) as f64;
+        // (What costs the most, of the player's.)
+        if cost > 0.0 && c == 0 {
             let idle = p.paused || p.idle_s >= LET_GO_S;
             match drains
                 .iter_mut()
@@ -835,8 +954,9 @@ pub fn step(
         } else if p.held >= 4.0 + boost.stock
             || out.is_some_and(|g| books.capacity > 0.0 && books.get(g) >= books.capacity - 0.5)
         {
-            // (Its carts cannot unload, or the warehouse is full of what it makes: it stands,
-            // lets its workers go and costs half until there is room, as a player would pause it.)
+            // (Its carts cannot unload, or the warehouse is full of what it makes: it stands
+            // with its workers waiting and costs its full upkeep; pausing it is the player's
+            // call.)
             Some(Status::Full)
         } else if site < 0.05 {
             Some(match b.kind {
@@ -856,9 +976,12 @@ pub fn step(
         if let Some(status) = idle {
             p.status = status;
             p.efficiency = 0.0;
-            p.idle_s += dt;
-            if p.idle_s >= LET_GO_S {
-                p.crew = 0.0;
+            // A full works is not idle for want of anything: it keeps its hands and its cost.
+            if status != Status::Full {
+                p.idle_s += dt;
+                if p.idle_s >= LET_GO_S {
+                    p.crew = 0.0;
+                }
             }
             continue;
         }
@@ -960,17 +1083,46 @@ pub fn step(
             b.used_per_min[g] += (per_min_used - b.used_per_min[g]) * k;
         }
     }
-    econ.coins += taxes - upkeep;
-    econ.debt_s = if econ.coins < 0.0 {
-        econ.debt_s + dt as f64
-    } else {
-        0.0
-    };
     let per_min = |x: f64| x / dt as f64 * 60.0;
     let kk = k as f64;
-    econ.taxes_per_min += (per_min(taxes) - econ.taxes_per_min) * kk;
-    econ.upkeep_per_min += (per_min(upkeep) - econ.upkeep_per_min) * kk;
-    econ.balance_per_min = econ.taxes_per_min - econ.upkeep_per_min;
+    let books = |coins: &mut f64,
+                 debt_s: &mut f64,
+                 taxes_per_min: &mut f64,
+                 upkeep_per_min: &mut f64,
+                 balance_per_min: &mut f64,
+                 taxes: f64,
+                 upkeep: f64| {
+        *coins += taxes - upkeep;
+        *debt_s = if *coins < 0.0 {
+            *debt_s + dt as f64
+        } else {
+            0.0
+        };
+        *taxes_per_min += (per_min(taxes) - *taxes_per_min) * kk;
+        *upkeep_per_min += (per_min(upkeep) - *upkeep_per_min) * kk;
+        *balance_per_min = *taxes_per_min - *upkeep_per_min;
+    };
+    let e = &mut *econ;
+    books(
+        &mut e.coins,
+        &mut e.debt_s,
+        &mut e.taxes_per_min,
+        &mut e.upkeep_per_min,
+        &mut e.balance_per_min,
+        taxes[0],
+        upkeep[0],
+    );
+    for (c, p) in e.rivals.iter_mut().enumerate() {
+        books(
+            &mut p.coins,
+            &mut p.debt_s,
+            &mut p.taxes_per_min,
+            &mut p.upkeep_per_min,
+            &mut p.balance_per_min,
+            taxes[c + 1],
+            upkeep[c + 1],
+        );
+    }
 }
 
 /// One need of a house as the economy sees it now.
@@ -1233,10 +1385,10 @@ mod tests {
         );
     }
 
-    /// A works whose warehouse is full of what it makes stands, lets its hands go and costs
-    /// half, instead of paying full upkeep to throw its goods away.
+    /// A works whose warehouse is full of what it makes stands but keeps its hands and costs
+    /// its full upkeep: standing it down is the player's call.
     #[test]
-    fn a_full_warehouse_stands_its_works_down() {
+    fn a_full_warehouse_stops_a_works_at_full_cost() {
         let mut w = bare_world();
         crate::town::build_start(&mut w);
         crate::town::prewarm(&mut w, 30.0);
@@ -1263,7 +1415,8 @@ mod tests {
         assert!(!mills.is_empty());
         for p in &mills {
             assert_eq!(p.status, Status::Full);
-            assert_eq!(p.upkeep_share(), 0.5);
+            assert_eq!(p.upkeep_share(), 1.0);
+            assert!(p.crew > 0.99, "{p:?}");
         }
     }
 
@@ -1281,7 +1434,7 @@ mod tests {
         assert!(econ.auto_paused > 0);
         assert!(!econ.drains.is_empty());
         assert!(weavers(&mut w).iter().all(|p| p.paused && p.auto_paused));
-        // Wool comes in: the weavers wake by themselves, still in debt.
+        // Wool comes in: the weavers stay paused until the player starts them again.
         let home = w
             .query::<&Building>()
             .iter(&w)
@@ -1289,7 +1442,7 @@ mod tests {
             .map_or(0, |b| b.island);
         w.resource_mut::<Economy>().islands[home].add(Good::Wool, 20.0);
         crate::town::prewarm(&mut w, 1.0);
-        assert!(weavers(&mut w).iter().any(|p| !p.paused));
+        assert!(weavers(&mut w).iter().all(|p| p.paused));
     }
 
     /// A ready house does not stop being ready on a short dip in supply.

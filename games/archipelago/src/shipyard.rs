@@ -254,6 +254,14 @@ pub fn order_fitted(world: &mut World, e: Entity, craft: Craft, fit: Fit) -> Res
     if queued >= MAX_QUEUE {
         return Err(format!("The yard has {MAX_QUEUE} on its list already."));
     }
+    // The yard's island's company pays, and only it gives the yard orders.
+    let owner = world.resource::<Economy>().islands[b.island].owner;
+    if owner != crate::sim::acting(world) {
+        return Err(format!(
+            "That yard belongs to {}.",
+            crate::rivals::company_name(world, owner)
+        ));
+    }
     let econ = world.resource::<Economy>();
     let books = &econ.islands[b.island];
     if books.population[p.tier.index()] < 1.0 {
@@ -264,12 +272,12 @@ pub fn order_fitted(world: &mut World, e: Entity, craft: Craft, fit: Fit) -> Res
             crate::island::islands()[b.island].name
         ));
     }
-    if econ.coins < coins as f64 {
+    if econ.coins_of(owner) < coins as f64 {
         return Err(format!(
             "A {} costs {} coins; you have {:.0}.",
             craft.name(),
             coins,
-            econ.coins
+            econ.coins_of(owner)
         ));
     }
     for (g, n) in &cost {
@@ -285,7 +293,7 @@ pub fn order_fitted(world: &mut World, e: Entity, craft: Craft, fit: Fit) -> Res
     }
     {
         let mut econ = world.resource_mut::<Economy>();
-        econ.coins -= coins as f64;
+        *econ.coins_mut(owner) -= coins as f64;
         for (g, n) in &cost {
             econ.islands[b.island].take(*g, *n as f64);
         }
@@ -332,7 +340,8 @@ pub fn cancel(world: &mut World, e: Entity) -> Result<Craft, String> {
     if let Some(p) = plan(craft) {
         let (fc, fg) = crate::fittings::price(&fit);
         let mut econ = world.resource_mut::<Economy>();
-        econ.coins += (p.coins + fc) as f64 * k;
+        let owner = econ.islands[b.island].owner;
+        *econ.coins_mut(owner) += (p.coins + fc) as f64 * k;
         for (g, n) in p.cost.iter().copied().chain(fg) {
             econ.islands[b.island].add(g, (n as f64 * k).floor());
         }
@@ -428,15 +437,23 @@ const NAMES: &[&str] = &[
 /// upkeep in the books.
 pub fn tick(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs() * world.resource::<Economy>().speed;
-    // What the company's craft cost a minute.
-    let fleet: f32 = {
+    // What each company's craft cost a minute.
+    let n = world.resource::<Economy>().companies();
+    let mut fleet = vec![0.0f32; n];
+    {
         let mut q = world.query::<&Vessel>();
-        q.iter(world)
-            .filter(|v| v.owned())
-            .map(|v| upkeep_of(v.craft) + crate::fittings::upkeep(&v.fit))
-            .sum()
-    };
-    world.resource_mut::<Economy>().fleet_upkeep = fleet;
+        for v in q.iter(world).filter(|v| v.owned()) {
+            fleet[(v.company as usize).min(n - 1)] +=
+                upkeep_of(v.craft) + crate::fittings::upkeep(&v.fit);
+        }
+    }
+    {
+        let mut econ = world.resource_mut::<Economy>();
+        econ.fleet_upkeep = fleet[0];
+        for (p, u) in econ.rivals.iter_mut().zip(&fleet[1..]) {
+            p.fleet_upkeep = *u;
+        }
+    }
     if dt <= 0.0 {
         return;
     }
@@ -481,15 +498,21 @@ pub fn launch(world: &mut World, e: Entity) {
         (craft, fit, y.launched)
     };
     clear_slip(world, e);
+    let owner = world.resource::<Economy>().islands[b.island].owner;
+    let names = if owner == crate::sim::PLAYER {
+        NAMES
+    } else {
+        crate::rivals::ship_names(owner)
+    };
     let name = {
         let taken: Vec<String> = world
             .query::<&Vessel>()
             .iter(world)
             .map(|v| v.name.clone())
             .collect();
-        let k = (b.id as usize * 7 + n as usize) % NAMES.len();
-        (0..NAMES.len())
-            .map(|i| NAMES[(k + i) % NAMES.len()].to_string())
+        let k = (b.id as usize * 7 + n as usize) % names.len();
+        (0..names.len())
+            .map(|i| names[(k + i) % names.len()].to_string())
             .find(|s| !taken.contains(s))
             .unwrap_or(format!("{} {}", craft.name(), b.id * 10 + n))
     };
@@ -524,6 +547,7 @@ pub fn launch(world: &mut World, e: Entity) {
     if let Some(mut vv) = world.get_mut::<Vessel>(v) {
         vv.doing = Doing::Moored(20.0);
         vv.fit = fit;
+        vv.company = owner;
     }
     // Its fittings go into its kit, and those that show go on the hull.
     world.resource_mut::<crate::build::Changed>().any = true;
@@ -531,12 +555,19 @@ pub fn launch(world: &mut World, e: Entity) {
     if world.get::<Yard>(e).is_some_and(|y| !y.queue.is_empty()) {
         lay_down(world, e);
     }
+    let isle = crate::island::islands()[b.island].name;
+    if owner != crate::sim::PLAYER {
+        engine::core::log::info!(
+            "archipelago: {} {name} launched for company {owner} on {isle}",
+            craft.name()
+        );
+        return;
+    }
     let now = world.resource::<Economy>().clock_s;
     world
         .resource_mut::<Launched>()
         .0
         .push((craft, name.clone(), now));
-    let isle = crate::island::islands()[b.island].name;
     if world.get_resource::<engine_ui::theme::Theme>().is_some() {
         engine_ui::toast::notify(
             world,

@@ -321,6 +321,10 @@ pub struct Route {
     pub name: String,
     pub stops: Vec<Stop>,
     pub air: bool,
+    /// Whose route it is: only that company's ships sail it, and its stops are that
+    /// company's harbours.
+    #[serde(default)]
+    pub company: crate::sim::Company,
 }
 
 #[derive(Resource, Default, Debug, Serialize)]
@@ -387,6 +391,8 @@ pub struct Vessel {
     pub kit: crate::gear::Kit,
     /// What the hull was built with ([`crate::fittings`]).
     pub fit: crate::fittings::Fit,
+    /// Whose ship she is ([`crate::sim::PLAYER`] for the player's and the free traders).
+    pub company: crate::sim::Company,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -502,6 +508,7 @@ pub fn spawn_vessel(
         haste: 0.0,
         kit: crate::gear::Kit::default(),
         fit: crate::fittings::Fit::default(),
+        company: crate::sim::acting(world),
     };
     let mut e = world.spawn((
         Name::new(format!("{}: {name}", craft.name())),
@@ -630,11 +637,12 @@ fn arrive(world: &mut World, v: &mut Vessel) {
                 }
                 // Postage for every landing of a mail aircraft.
                 if v.kit.postage > 0.0 {
-                    world.resource_mut::<Economy>().coins += v.kit.postage as f64;
+                    *world.resource_mut::<Economy>().coins_mut(v.company) += v.kit.postage as f64;
                 }
                 let duty = landed as f64 * boost.duty as f64;
                 if duty > 0.0 {
-                    world.resource_mut::<Economy>().coins += duty;
+                    let quay = world.resource::<Economy>().islands[b.island].owner;
+                    *world.resource_mut::<Economy>().coins_mut(quay) += duty;
                     world.resource_mut::<crate::items::Items>().duty_earned += duty;
                 }
                 // A packet home from over the ocean may have fished something up.
@@ -644,7 +652,7 @@ fn arrive(world: &mut World, v: &mut Vessel) {
                     .stops
                     .iter()
                     .any(|s| isle_of(world, s.at).is_some_and(|i| i >= 4));
-                if far && b.island < 4 && !v.craft.flies() {
+                if far && b.island < 4 && !v.craft.flies() && v.company == crate::sim::PLAYER {
                     crate::items::flotsam(world, &v.name, v.kit.luck);
                 }
             }

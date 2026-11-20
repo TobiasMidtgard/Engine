@@ -971,9 +971,16 @@ pub fn rebuild(world: &mut World, id: u32) -> Result<(), String> {
         .cloned()
         .ok_or("No such building.")?;
     let (coins, goods) = rebuild_cost(b.kind);
+    let owner = world.resource::<Economy>().islands[b.island].owner;
+    if owner != crate::sim::acting(world) {
+        return Err(format!(
+            "That ruin is {}'s to rebuild.",
+            crate::rivals::company_name(world, owner)
+        ));
+    }
     {
         let econ = world.resource::<Economy>();
-        if econ.coins < coins as f64 {
+        if econ.coins_of(owner) < coins as f64 {
             return Err(format!("Rebuilding costs {coins} coins."));
         }
         let books = &econ.islands[b.island];
@@ -983,7 +990,7 @@ pub fn rebuild(world: &mut World, id: u32) -> Result<(), String> {
     }
     {
         let mut econ = world.resource_mut::<Economy>();
-        econ.coins -= coins as f64;
+        *econ.coins_mut(owner) -= coins as f64;
         for (g, n) in &goods {
             econ.islands[b.island].take(*g, *n as f64);
         }

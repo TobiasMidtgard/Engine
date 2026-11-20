@@ -16,6 +16,7 @@
 
 mod api;
 mod art;
+mod brain;
 mod build;
 mod burgher;
 mod camera;
@@ -80,6 +81,28 @@ fn main() {
     // `--sandbox`: start with the finished town of earlier rounds (the tour always does).
     if args.iter().any(|a| a == "--sandbox") || tour.is_some() {
         app.insert_resource(settle::StartMode::Sandbox);
+    }
+    // `--rivals N [--rival-level admiral]`: a new game with N rival houses (0 to 3).
+    let level_arg = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| brain::Level::from_name(s))
+    };
+    if let Some(n) = args
+        .iter()
+        .position(|a| a == "--rivals")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        app.insert_resource(brain::RivalSetup {
+            count: n.min(3),
+            level: level_arg("--rival-level").unwrap_or(brain::Level::Captain),
+        });
+    }
+    // `--play-level admiral`: how well the scripted player plays (Captain unless told).
+    if let Some(l) = level_arg("--play-level") {
+        app.insert_resource(brain::Seat { knobs: l.knobs() });
     }
     // `--play <game minutes> [--play-speed 4] [--play-shots town,harbour]`: a scripted player.
     if let Some(i) = args.iter().position(|a| a == "--play") {
@@ -156,6 +179,7 @@ pub fn add_game(app: &mut App) {
         .init_resource::<shipyard::Launched>()
         .init_resource::<incidents::Incidents>()
         .init_resource::<fittings::Designs>()
+        .init_resource::<brain::Captains>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, sim::economy_system)
         .add_systems(
@@ -182,7 +206,7 @@ pub fn add_game(app: &mut App) {
                     walkers::walk,
                 )
                     .chain(),
-                (fleet::launch_smacks, shipyard::tick).chain(),
+                (fleet::launch_smacks, shipyard::tick, brain::tick).chain(),
                 fleet::plan_legs,
                 fleet::sail,
                 fleet::spin_props,
@@ -230,7 +254,14 @@ fn setup(world: &mut World) {
     sea::spawn(world);
     match *world.resource::<settle::StartMode>() {
         settle::StartMode::Sandbox => town::build_start(world),
-        settle::StartMode::Fresh => settle::fresh(world),
+        settle::StartMode::Fresh => {
+            settle::fresh(world);
+            if let Some(r) = world.get_resource::<brain::RivalSetup>().copied()
+                && r.count > 0
+            {
+                brain::start_rivals(world, r.count, r.level);
+            }
+        }
     }
     fog::start(world);
     build::refresh(world);

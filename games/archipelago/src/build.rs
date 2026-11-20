@@ -40,13 +40,20 @@ pub fn by_id(world: &mut World, id: u32) -> Option<Entity> {
 
 fn pay(world: &mut World, kind: Kind, isle: usize) -> Result<(), String> {
     let def = kind.def();
+    let me = crate::sim::acting(world);
     let econ = world.resource::<Economy>();
-    // (Something free, such as a house, can be built in debt: rent is the way out of it.)
-    if def.coins > 0 && econ.coins < def.coins as f64 {
-        return Err(format!(
-            "{} costs {} coins; you have {:.0}.",
-            def.name, def.coins, econ.coins
-        ));
+    // Nothing is built in debt, not even a house: a purse below zero has to be won back
+    // first (pause works, sell goods), as a company would.
+    let purse = econ.coins_of(me);
+    if purse < def.coins as f64 || purse < 0.0 {
+        return Err(if purse < 0.0 {
+            format!("The purse is {purse:.0} coins in debt: nothing can be built until it is out.")
+        } else {
+            format!(
+                "{} costs {} coins; you have {purse:.0}.",
+                def.name, def.coins
+            )
+        });
     }
     let books = &econ.islands[isle];
     for (g, n) in def.cost {
@@ -62,7 +69,7 @@ fn pay(world: &mut World, kind: Kind, isle: usize) -> Result<(), String> {
         }
     }
     let mut econ = world.resource_mut::<Economy>();
-    econ.coins -= def.coins as f64;
+    *econ.coins_mut(me) -= def.coins as f64;
     for (g, n) in def.cost {
         econ.islands[isle].take(*g, *n as f64);
     }
@@ -152,15 +159,16 @@ pub fn place_road(world: &mut World, c: IVec2, charge: bool) -> Result<(), Strin
         && let Some(i) = crate::island::island_at(grid::cell_center(c).x, grid::cell_center(c).y)
         && !crate::settle::claimed(world, i)
     {
-        return Err(crate::settle::unclaimed_text(i));
+        return Err(crate::settle::unclaimed_text_in(world, i));
     }
     if charge {
+        let me = crate::sim::acting(world);
         let mut econ = world.resource_mut::<Economy>();
         let cost = Kind::Road.def().coins as f64;
-        if econ.coins < cost {
+        if econ.coins_of(me) < cost {
             return Err("Not enough coins for a road.".into());
         }
-        econ.coins -= cost;
+        *econ.coins_mut(me) -= cost;
     }
     crate::fields::release_cell(world, c);
     {
@@ -187,9 +195,15 @@ pub fn place_paving(world: &mut World, c: IVec2, charge: bool) -> Result<(), Str
     if charge {
         let p = grid::cell_center(c);
         let isle = island::island_at(p.x, p.y);
+        let me = crate::sim::acting(world);
+        if let Some(i) = isle
+            && !crate::settle::claimed(world, i)
+        {
+            return Err(crate::settle::unclaimed_text_in(world, i));
+        }
         let mut econ = world.resource_mut::<Economy>();
         let cost = Kind::PavedRoad.def().coins as f64;
-        if econ.coins < cost {
+        if econ.coins_of(me) < cost {
             return Err("Not enough coins for paving.".into());
         }
         if let Some(books) = isle.and_then(|i| econ.islands.get_mut(i))
@@ -197,7 +211,7 @@ pub fn place_paving(world: &mut World, c: IVec2, charge: bool) -> Result<(), Str
         {
             return Err("Paving needs bricks in this island's warehouse.".into());
         }
-        econ.coins -= cost;
+        *econ.coins_mut(me) -= cost;
     }
     world.resource_mut::<Grid>().paved.insert(c);
     crate::streets::mark(world, c);
@@ -270,19 +284,21 @@ pub fn place(
         .map_err(|b| b.message().to_string())?;
     // An island nobody has settled: its first harbour comes by ship; nothing else before it.
     if charge && !crate::settle::claimed(world, isle) {
-        if kind == Kind::Harbour {
+        if kind == Kind::Harbour && world.resource::<Economy>().owner(isle).is_none() {
             crate::settle::send_settlers(world, origin, rot, isle)?;
             return Ok(Entity::PLACEHOLDER);
         }
-        return Err(crate::settle::unclaimed_text(isle));
+        return Err(crate::settle::unclaimed_text_in(world, isle));
     }
     if charge && crate::items::Host::of(kind).is_some() {
         // The company's renown says how many of each it may keep.
-        let allowed = crate::items::allowed(world.resource::<Economy>());
+        let me = crate::sim::acting(world);
+        let econ = world.resource::<Economy>().clone();
+        let allowed = crate::items::allowed_of(&econ, me);
         let have = world
             .query::<&Building>()
             .iter(world)
-            .filter(|b| b.kind == kind)
+            .filter(|b| b.kind == kind && econ.owns(me, b.island))
             .count();
         if have >= allowed {
             return Err(format!(
@@ -554,6 +570,18 @@ fn plant_garden(world: &mut World, owner: Entity) {
 pub struct MovingParts(pub Vec<Entity>);
 
 /// Remove a building (or a road cell).
+/// Whether building `e` is the acting company's to order about (pause, pull down, fit
+/// out): it stands on an island the company holds, or on one nobody holds.
+pub fn ours(world: &World, e: Entity) -> bool {
+    let Some(b) = world.get::<Building>(e) else {
+        return false;
+    };
+    world
+        .resource::<Economy>()
+        .owner(b.island)
+        .is_none_or(|c| c == crate::sim::acting(world))
+}
+
 pub fn demolish(world: &mut World, e: Entity) {
     let Some(b) = world.get::<Building>(e).cloned() else {
         return;
@@ -864,12 +892,20 @@ pub fn refresh(world: &mut World) {
         let i = SERVICES.iter().position(|k| *k == b.kind).unwrap_or(0);
         street_reach(b, &roads, &paved, &mut by_road[i]);
     }
-    // What the buildings that make nothing cost to run.
-    world.resource_mut::<Economy>().public_upkeep = all
-        .iter()
-        .filter(|(_, b)| !b.kind.def().works())
-        .map(|(_, b)| b.kind.def().upkeep)
-        .sum();
+    // What the buildings that make nothing cost to run, company by company.
+    {
+        let mut econ = world.resource_mut::<Economy>();
+        let n = econ.companies();
+        let mut public = vec![0.0f32; n];
+        for (_, b) in all.iter().filter(|(_, b)| !b.kind.def().works()) {
+            let c = (econ.islands[b.island].owner as usize).min(n - 1);
+            public[c] += b.kind.def().upkeep;
+        }
+        econ.public_upkeep = public[0];
+        for (p, u) in econ.rivals.iter_mut().zip(&public[1..]) {
+            p.public_upkeep = *u;
+        }
+    }
     // Smoky works, and how far (centre to centre) their smoke spoils a street.
     let smoky: Vec<(usize, DVec2)> = all
         .iter()
@@ -955,7 +991,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_town_in_debt_can_still_build_houses() {
+    fn nothing_is_built_in_debt() {
         let mut world = World::new();
         let mut econ = Economy {
             coins: -500.0,
@@ -963,10 +999,26 @@ mod tests {
         };
         econ.islands[0].stock[Good::Planks.index()] = 10.0;
         world.insert_resource(econ);
-        // A house costs a plank and no coins: rent is how the town gets out of debt.
-        assert_eq!(pay(&mut world, Kind::House, 0), Ok(()));
-        // A works with a price does wait for the money.
+        // Not even a house, which costs no coins: the purse has to be won back first.
+        assert!(pay(&mut world, Kind::House, 0).is_err());
         assert!(pay(&mut world, Kind::Sawmill, 0).is_err());
+        world.resource_mut::<Economy>().coins = 0.0;
+        assert_eq!(pay(&mut world, Kind::House, 0), Ok(()));
+    }
+
+    #[test]
+    fn a_rival_pays_from_its_own_purse() {
+        let mut world = World::new();
+        let mut econ = Economy::default();
+        econ.islands[0].stock[Good::Planks.index()] = 40.0;
+        *econ.coins_mut(2) = 1_000.0;
+        world.insert_resource(econ);
+        world.insert_resource(crate::sim::Acting(2));
+        let before = world.resource::<Economy>().coins;
+        assert_eq!(pay(&mut world, Kind::Sawmill, 0), Ok(()));
+        let econ = world.resource::<Economy>();
+        assert_eq!(econ.coins, before, "the player paid nothing");
+        assert_eq!(econ.coins_of(2), 1_000.0 - Kind::Sawmill.def().coins as f64);
     }
 
     #[test]

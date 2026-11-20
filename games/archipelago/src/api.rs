@@ -181,6 +181,9 @@ pub fn register(app: &mut App) {
     .register_api("isle.demolish", "Remove a building by id, or a road at a cell.", r#"{"id": 12}"#, |world, args| {
         if let Some(id) = args["id"].as_u64() {
             let e = build::by_id(world, id as u32).ok_or("no building with that id")?;
+            if !build::ours(world, e) {
+                return Err("That building is another company's.".into());
+            }
             build::demolish(world, e);
         } else {
             build::remove_road(world, cell(&args, "at")?);
@@ -287,6 +290,7 @@ pub fn register(app: &mut App) {
                 if kind != Some(want) {
                     return Err(format!("stop {at} is not a {}", want.def().name));
                 }
+                orders::check_stop(world, at, craft.flies())?;
                 stops.push(Stop { at, load: goods(&s["load"])?, unload: goods(&s["unload"])? });
             }
             if stops.len() < 2 {
@@ -302,14 +306,15 @@ pub fn register(app: &mut App) {
                     None => {
                         let mut q = world.query::<(Entity, &Vessel)>();
                         q.iter(world)
-                            .find(|(_, v)| v.craft == craft && v.route.is_none() && v.owned() && !matches!(v.roam, Roam::Fishing { .. } | Roam::Found { .. }))
+                            .find(|(_, v)| v.craft == craft && v.company == crate::sim::acting(world) && v.route.is_none() && v.owned() && !matches!(v.roam, Roam::Fishing { .. } | Roam::Found { .. }))
                             .map(|(e, _)| e)
                             .ok_or(format!("No {} of yours is off duty: build one at a {}.", craft.name().to_lowercase(), if craft.flies() { "airship mast" } else { "shipyard" }))?
                     }
                 };
+                let company = crate::sim::acting(world);
                 let r = {
                     let mut routes = world.resource_mut::<Routes>();
-                    routes.0.push(Route { name, stops, air: craft.flies() });
+                    routes.0.push(Route { name, stops, air: craft.flies(), company });
                     routes.0.len() - 1
                 };
                 orders::assign(world, e, r)?;
@@ -318,7 +323,7 @@ pub fn register(app: &mut App) {
             let vessel = args["vessel"].as_str().unwrap_or(craft.name()).to_string();
             let r = {
                 let mut routes = world.resource_mut::<Routes>();
-                routes.0.push(Route { name, stops, air: craft.flies() });
+                routes.0.push(Route { name, stops, air: craft.flies(), company: crate::sim::PLAYER });
                 routes.0.len() - 1
             };
             let (at, heading) = if craft.flies() {

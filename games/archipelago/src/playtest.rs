@@ -29,7 +29,7 @@ use crate::vessels::Craft;
 const TURN_S: f64 = 30.0;
 
 #[derive(Default)]
-struct Log {
+pub(crate) struct Log {
     text: String,
     /// Refusals by message, with how often.
     refused: HashMap<String, u32>,
@@ -41,12 +41,24 @@ struct Log {
     launched_seen: usize,
     incidents_seen: usize,
     /// The run's seed: houses go up two or three at a time by it.
-    seed: u64,
+    pub(crate) seed: u64,
     /// Houses that lacked a service when one was last built for them, per (island, kind).
     lacking: HashMap<(usize, Kind), usize>,
 }
 
 impl Log {
+    /// A rival captain's log (`seed` varies its habits as the run's seed does the player's).
+    pub(crate) fn for_captain(seed: u64) -> Log {
+        Log {
+            seed,
+            ..Log::default()
+        }
+    }
+
+    /// The whole log so far.
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
     fn line(&mut self, clock: f64, s: impl AsRef<str>) {
         let _ = writeln!(self.text, "[{}] {}", clock_text(clock), s.as_ref());
     }
@@ -68,6 +80,66 @@ fn clock(world: &World) -> f64 {
     world.resource::<Economy>().clock_s
 }
 
+/// The company the bot plays this turn ([`crate::sim::acting`]): the player's seat in
+/// `--play`, or a rival house's under its captain ([`crate::brain`]).
+fn me(world: &World) -> crate::sim::Company {
+    crate::sim::acting(world)
+}
+
+fn my_coins(world: &World) -> f64 {
+    world.resource::<Economy>().coins_of(me(world))
+}
+
+/// The island the company began on.
+fn home(world: &World) -> usize {
+    crate::brain::home_of(world, me(world))
+}
+
+/// Whether the company holds island `i`.
+fn mine(world: &World, i: usize) -> bool {
+    world.resource::<Economy>().owns(me(world), i)
+}
+
+/// The economy as the company sees its own: other companies' islands empty.
+fn my_books(world: &World) -> Economy {
+    let me = me(world);
+    let mut econ = world.resource::<Economy>().clone();
+    for i in 0..econ.islands.len() {
+        if !econ.owns(me, i) {
+            let b = &mut econ.islands[i];
+            b.population = Default::default();
+            b.stock = [0.0; Good::COUNT];
+            b.supply = Default::default();
+            b.wanted_per_min = Default::default();
+            b.made_per_min = Default::default();
+        }
+    }
+    econ
+}
+
+/// The difficulty the bot plays at this turn.
+fn knobs(world: &World) -> crate::brain::Knobs {
+    world
+        .get_resource::<crate::brain::Seat>()
+        .map_or(crate::brain::Level::Captain.knobs(), |s| s.knobs)
+}
+
+/// A slip: the bot forgets to look at something this turn (one in `slip` chances; never at
+/// Admiral). Deterministic from the clock, the company and what is looked at.
+fn slips(world: &World, what: u64) -> bool {
+    let k = knobs(world);
+    if k.slip <= 0.0 {
+        return false;
+    }
+    let t = (clock(world) / 5.0) as u64;
+    let mut h = t
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(what.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(me(world) as u64 * 0x94D0_49BB_1331_11EB);
+    h ^= h >> 31;
+    (h % 10_000) as f32 / 10_000.0 < k.slip
+}
+
 /// Run the scripted game for `minutes` of game time at `speed`.
 pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u64, out: &str) {
     let _ = std::fs::create_dir_all(out);
@@ -85,6 +157,17 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u6
     app.update();
     let startup_s = started.elapsed().as_secs_f64();
     app.world.resource_mut::<Economy>().speed = speed;
+    // The player's seat plays at `--play-level` (Captain, the bot of earlier rounds, unless
+    // told).
+    let seat = app
+        .world
+        .get_resource::<crate::brain::Seat>()
+        .copied()
+        .unwrap_or(crate::brain::Seat {
+            knobs: crate::brain::Level::Captain.knobs(),
+        });
+    app.world.insert_resource(seat);
+    let turn_s = seat.knobs.turn_s;
     let mut log = Log {
         seed,
         ..Log::default()
@@ -98,7 +181,7 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u6
     let mut frames: Vec<f32> = Vec::new();
     let mut slow: Vec<Value> = Vec::new();
     // Each seed takes its turns at a different second of the half minute.
-    let mut next_turn = c0 + (seed.wrapping_mul(7) % TURN_S as u64) as f64;
+    let mut next_turn = c0 + (seed.wrapping_mul(7) % turn_s.max(1.0) as u64) as f64;
     let mut next_row = c0;
     let mut stuck: HashMap<u32, (Status, f64)> = HashMap::new();
     let mut moored: HashMap<String, f64> = HashMap::new();
@@ -131,7 +214,7 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u6
                 &mut moored,
                 &mut tiers_seen,
             );
-            next_turn += TURN_S;
+            next_turn += turn_s;
         }
         if now >= next_row {
             rows.push(row(&mut app.world, &frames));
@@ -170,6 +253,11 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u6
         serde_json::to_string_pretty(&rows).unwrap_or_default(),
     );
     let _ = std::fs::write(format!("{out}/events.log"), &log.text);
+    if let Some(caps) = app.world.get_resource::<crate::brain::Captains>() {
+        for cap in &caps.0 {
+            let _ = std::fs::write(format!("{out}/rival_{}.log", cap.company), cap.log.text());
+        }
+    }
     engine::core::log::info!("playtest: done, see {out}/");
     if let Some(keys) = shots {
         app.world.remove_resource::<RenderPaused>();
@@ -180,38 +268,60 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u6
 
 // ------------------------------------------------------------------------------ the player
 
-fn turn(world: &mut World, log: &mut Log) {
+/// One turn of the company's (whichever is acting): everything a careful player looks at.
+pub(crate) fn turn(world: &mut World, log: &mut Log) {
     let now = clock(world);
     let fresh = *world.resource::<StartMode>() == StartMode::Fresh;
-    if fresh {
+    if fresh && !slips(world, 1) {
         colonise(world, log, now);
     }
-    press_orders(world, log, now);
-    fill_slots(world, log, now);
-    shop(world, log, now);
+    // (Items are the player's: the pedlar sells only to the player's company.)
+    if me(world) == crate::sim::PLAYER {
+        press_orders(world, log, now);
+        fill_slots(world, log, now);
+        shop(world, log, now);
+    }
     let n = world.resource::<Economy>().islands.len();
     for i in 0..n {
+        if !mine(world, i) {
+            continue;
+        }
         if world.resource::<Economy>().islands[i]
             .population
             .iter()
             .sum::<f32>()
             < 1.0
         {
-            if fresh && crate::settle::claimed(world, i) {
+            if fresh {
                 bootstrap(world, log, now, i);
             }
             continue;
         }
-        supply(world, log, now, i);
-        services(world, log, now, i);
-        move_up(world, log, now, i);
+        let w = 100 + 10 * i as u64;
+        if !slips(world, w) {
+            supply(world, log, now, i);
+        }
+        if !slips(world, w + 1) {
+            services(world, log, now, i);
+        }
+        if !slips(world, w + 2) {
+            move_up(world, log, now, i);
+        }
         paving(world, log, now, i);
-        safety(world, log, now, i);
-        grow(world, log, now, i);
+        if !slips(world, w + 3) {
+            safety(world, log, now, i);
+        }
+        if !slips(world, w + 4) {
+            grow(world, log, now, i);
+        }
     }
-    trade(world, log, now);
+    if !slips(world, 2) {
+        trade(world, log, now);
+    }
     restart_paused(world, log, now);
-    tidy(world, log, now);
+    if !slips(world, 3) {
+        tidy(world, log, now);
+    }
     incidents_seen(world, log);
 }
 
@@ -222,6 +332,10 @@ fn turn(world: &mut World, log: &mut Log) {
 struct BotHolds(std::collections::HashSet<usize>);
 
 fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
+    // (A house moving up takes planks too: not those put by.)
+    if world.resource::<Economy>().islands[i].get(Good::Planks) < planks_kept(world, i) {
+        return;
+    }
     // Labourers move up to Burghers only once what Burghers must have can be had: food
     // beyond bread (salt fish or date cakes) and coats, made here or brought by ship.
     let from = settled_islands(world);
@@ -279,7 +393,7 @@ fn services(world: &mut World, log: &mut Log, now: f64, i: usize) {
     }
     log.last.insert((i + 6000, None), now);
     let books = world.resource::<Economy>().islands[i].clone();
-    let coins = world.resource::<Economy>().coins;
+    let coins = my_coins(world);
     for kind in crate::build::SERVICES {
         let mut lacking: Vec<DVec2> = Vec::new();
         for (b, h) in world.query::<(&Building, &House)>().iter(world) {
@@ -401,13 +515,14 @@ fn paving(world: &mut World, log: &mut Log, now: f64, i: usize) {
 
 /// Works that paused themselves in debt start again once the purse has recovered.
 fn restart_paused(world: &mut World, log: &mut Log, now: f64) {
-    let econ = world.resource::<Economy>();
-    if econ.coins < 1500.0 || econ.balance_per_min <= 0.0 {
+    let me = me(world);
+    let econ = world.resource::<Economy>().clone();
+    if econ.coins_of(me) < 1500.0 || econ.balance_of(me) <= 0.0 {
         return;
     }
     let mut n = 0;
-    for mut p in world.query::<&mut Producer>().iter_mut(world) {
-        if p.auto_paused {
+    for (b, mut p) in world.query::<(&Building, &mut Producer)>().iter_mut(world) {
+        if p.auto_paused && econ.owns(me, b.island) {
             p.paused = false;
             p.auto_paused = false;
             p.idle_s = 0.0;
@@ -430,6 +545,7 @@ struct BotPaused(std::collections::HashSet<Entity>);
 /// (a quarter of its upkeep instead of half) and starts it again once half the room is free.
 fn tidy(world: &mut World, log: &mut Log, now: f64) {
     let econ = world.resource::<Economy>().clone();
+    let me = me(world);
     let mut held = std::mem::take(&mut world.get_resource_or_insert_with(BotPaused::default).0);
     let (mut paused, mut woke) = (0, 0);
     for (e, b, mut p) in world
@@ -439,6 +555,9 @@ fn tidy(world: &mut World, log: &mut Log, now: f64) {
         let Some(g) = b.kind.def().output else {
             continue;
         };
+        if !econ.owns(me, b.island) {
+            continue;
+        }
         let books = &econ.islands[b.island];
         if held.contains(&e) {
             if !p.paused {
@@ -508,7 +627,7 @@ fn safety(world: &mut World, log: &mut Log, now: f64, i: usize) {
             1 + ((pop - from) / 500.0) as usize
         }
     };
-    let coins = world.resource::<Economy>().coins;
+    let coins = my_coins(world);
     for (kind, from, why) in [
         (Kind::FireWatch, crate::incidents::QUIET_BELOW, "fires"),
         (Kind::WatchHouse, 250.0, "riots"),
@@ -529,7 +648,7 @@ fn safety(world: &mut World, log: &mut Log, now: f64, i: usize) {
         let (price, _) = crate::incidents::rebuild_cost(kind);
         let works = kind.def().output.is_some();
         let keep = if works { 150.0 } else { 1200.0 };
-        if isle != i || world.resource::<Economy>().coins < price as f64 + keep {
+        if isle != i || my_coins(world) < price as f64 + keep {
             continue;
         }
         match crate::incidents::rebuild(world, id) {
@@ -655,7 +774,7 @@ fn fill_slots(world: &mut World, log: &mut Log, now: f64) {
 fn shop(world: &mut World, log: &mut Log, now: f64) {
     let (offers, coins) = {
         let items = world.resource::<Items>();
-        (items.offers.clone(), world.resource::<Economy>().coins)
+        (items.offers.clone(), my_coins(world))
     };
     if let Some((i, o)) = offers
         .iter()
@@ -664,6 +783,7 @@ fn shop(world: &mut World, log: &mut Log, now: f64) {
         .min_by_key(|(_, o)| o.price)
         && coins > o.price as f64 * 4.0
         && coins > 8_000.0
+        && world.resource::<Items>().market_open
         // (Not with the starting purse: only once the town pays its way.)
         && world.resource::<Economy>().balance_per_min > 20.0
         && world.resource::<Economy>().islands[0].population.iter().sum::<f32>() > 600.0
@@ -705,9 +825,6 @@ fn chain_has(g: Good, input: Good) -> bool {
     })
 }
 
-/// Coins the bot keeps in hand for running costs.
-const RESERVE: f64 = 1_000.0;
-
 fn build_near(
     world: &mut World,
     log: &mut Log,
@@ -732,7 +849,7 @@ fn build_within(
 ) -> bool {
     // A careful player keeps a reserve for running costs; only what every town lives on
     // (timber, fish, the market, houses) may dip into it.
-    let coins = world.resource::<Economy>().coins;
+    let coins = my_coins(world);
     let basic = matches!(
         kind,
         Kind::Woodcutter | Kind::Sawmill | Kind::Fishery | Kind::Market | Kind::House
@@ -745,7 +862,7 @@ fn build_within(
             })
         })
     });
-    if !basic && coins - (kind.def().coins as f64) < RESERVE {
+    if !basic && coins - (kind.def().coins as f64) < knobs(world).reserve {
         return false;
     }
     // Where a kind found no spot that joins the roads lately, leave it be a while (each try
@@ -788,8 +905,9 @@ fn build_within(
                             // (A trial placing: the price comes back, as an undo would.)
                             crate::build::demolish(world, e);
                             let d = kind.def();
+                            let me = me(world);
                             let mut econ = world.resource_mut::<Economy>();
-                            econ.coins += d.coins as f64;
+                            *econ.coins_mut(me) += d.coins as f64;
                             if let Some(b) = crate::island::island_at(at.x, at.y)
                                 .and_then(|i| econ.islands.get_mut(i))
                             {
@@ -991,7 +1109,8 @@ fn materials(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
         .iter(world)
         .filter(|(b, h)| b.island == i && h.wait == crate::sim::Wait::NoMaterials)
         .count();
-    if (planks > 40.0 || planks > 15.0 && waiting < 3)
+    let kept = planks_kept(world, i);
+    if (planks > 40.0f64.max(kept + 6.0) || planks > 15.0f64.max(kept) && waiting < 3)
         || log
             .last
             .get(&(i + 3000, None))
@@ -1249,7 +1368,10 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
     if log.last.get(&(i, None)).is_some_and(|t| now - t < 120.0) {
         return;
     }
-    // (Houses cost no coins: a town in debt builds them too, since rent is how it gets out.)
+    // Planks put by for the next shipyard or settlers' ship come first.
+    if books.get(Good::Planks) < planks_kept(world, i) {
+        return;
+    }
     if fed || short_hands {
         log.last.insert((i, None), now);
         let Some(at) = heart(world, i) else { return };
@@ -1273,16 +1395,26 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
 }
 
 fn trade(world: &mut World, log: &mut Log, now: f64) {
-    // One check every five minutes is enough.
-    if (now / TURN_S) as i64 % 10 != 0 {
+    // One check every ten turns is enough (every five minutes at Captain).
+    let every = (knobs(world).turn_s * 10.0).max(150.0);
+    if log.last.get(&(3000, None)).is_some_and(|t| now - t < every) {
         return;
     }
-    let econ = world.resource::<Economy>().clone();
-    let routes = world.resource::<crate::fleet::Routes>().0.clone();
+    log.last.insert((3000, None), now);
+    let econ = my_books(world);
+    let me = me(world);
+    let routes: Vec<crate::fleet::Route> = world
+        .resource::<crate::fleet::Routes>()
+        .0
+        .iter()
+        .filter(|r| r.company == me)
+        .cloned()
+        .collect();
     let settled = settled_islands(world);
     let standing: std::collections::HashSet<(usize, Kind)> = world
         .query::<&Building>()
         .iter(world)
+        .filter(|b| econ.owns(me, b.island))
         .map(|b| (b.island, b.kind))
         .collect();
     let starved: std::collections::HashSet<(usize, Good)> = world
@@ -1389,6 +1521,9 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                 continue;
             }
             let harbour = |w: &mut World, i: usize| {
+                if !econ.owns(me, i) {
+                    return None;
+                }
                 w.query::<&Building>()
                     .iter(w)
                     .find(|b| b.island == i && b.kind == Kind::Harbour)
@@ -1401,11 +1536,7 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
             // A new game: the route needs a ship of ours that is off duty.
             let craft = if *world.resource::<StartMode>() == StartMode::Fresh {
                 let mut q = world.query::<&Vessel>();
-                match q
-                    .iter(world)
-                    .find(|v| crate::settle::free(v))
-                    .map(|v| v.craft)
-                {
+                match q.iter(world).find(|v| bot_free(v, me)).map(|v| v.craft) {
                     Some(c) => c,
                     None => {
                         log.refuse(now, "open a route", "no ship of ours is off duty");
@@ -1421,7 +1552,7 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                 json!({
                     "name": format!("{} run", g.name()),
                     "craft": craft.name(),
-                    "vessel": format!("Playtest {}", g.name()),
+                    "vessel": format!("Playtest {} {}", me, g.name()),
                     "stops": [
                         {"at": a, "load": [g.name()], "unload": []},
                         {"at": z, "load": [], "unload": [g.name()]},
@@ -1457,12 +1588,14 @@ fn more_ships(world: &mut World, log: &mut Log, now: f64, g: Good) {
         .resource::<crate::fleet::Routes>()
         .0
         .iter()
-        .position(|r| !r.air && r.stops.iter().any(|s| s.load.contains(&g)));
+        .position(|r| {
+            r.company == me(world) && !r.air && r.stops.iter().any(|s| s.load.contains(&g))
+        });
     let Some(r) = r else { return };
     let ship = world
         .query::<(Entity, &Vessel)>()
         .iter(world)
-        .find(|(_, v)| crate::settle::free(v))
+        .find(|(_, v)| bot_free(v, me(world)))
         .map(|(e, _)| e);
     let Some(e) = ship else {
         log.refuse(now, "add a ship to a route", "no ship of ours is off duty");
@@ -1477,10 +1610,24 @@ fn more_ships(world: &mut World, log: &mut Log, now: f64, g: Good) {
     }
 }
 
+/// A ship of company `me`'s the bot may give an errand: off duty, and not still on its way to
+/// look at an island (it would forget why it went).
+fn bot_free(v: &Vessel, me: crate::sim::Company) -> bool {
+    crate::settle::free(v)
+        && v.company == me
+        && match &v.roam {
+            crate::fleet::Roam::Idle { at } => {
+                v.doing != Doing::Sailing
+                    || DVec2::new(at.x - v.at.x, at.z - v.at.z).length() < 300.0
+            }
+            _ => true,
+        }
+}
+
 fn free_ships(world: &mut World) -> Vec<Vessel> {
     let mut q = world.query::<&Vessel>();
     q.iter(world)
-        .filter(|v| crate::settle::free(v))
+        .filter(|v| bot_free(v, me(world)))
         .cloned()
         .collect()
 }
@@ -1530,13 +1677,14 @@ fn bootstrap(world: &mut World, log: &mut Log, now: f64, i: usize) {
 
 /// Where island `i`'s first harbour should go: its settlement's coast, or the shore facing
 /// the home island.
-fn landfall(i: usize) -> DVec2 {
+fn landfall(i: usize, home: usize) -> DVec2 {
     let isle = &islands()[i];
     if let Some(p) = crate::island::settle_coast(isle) {
         return p;
     }
-    let home = islands()[0].center;
-    let dir = if isle.region() == 0 {
+    let region = globe_region(home);
+    let home = islands()[home].center;
+    let dir = if isle.region() == region {
         (home - isle.center).normalize_or_zero()
     } else {
         DVec2::X
@@ -1565,7 +1713,7 @@ fn found(world: &mut World, log: &mut Log, now: f64, i: usize) -> bool {
     log.last.insert((i + 1000, None), now);
     // The settlement's landfall first, then the coast all round the island.
     let isle = &islands()[i];
-    let mut shores = vec![landfall(i)];
+    let mut shores = vec![landfall(i, home(world))];
     for k in 0..12 {
         let dir = DVec2::from_angle(k as f64 * std::f64::consts::TAU / 12.0);
         let mut p = isle.center;
@@ -1633,18 +1781,74 @@ fn try_harbour(world: &mut World, log: &mut Log, now: f64, i: usize, shore: DVec
     false
 }
 
+/// Planks the company puts by on island `i` for growing beyond it: its first shipyard's, or
+/// the settlers' stores for the next island once it is ready to settle one. Houses and
+/// moving up wait for anything above it.
+fn planks_kept(world: &mut World, i: usize) -> f64 {
+    let h = home(world);
+    if i != h || *world.resource::<StartMode>() != StartMode::Fresh {
+        return 0.0;
+    }
+    let me = me(world);
+    let econ = world.resource::<Economy>().clone();
+    let people: f32 = econ.islands[h].population.iter().sum();
+    if people < 100.0 {
+        return 0.0;
+    }
+    let yard = world
+        .query::<&Building>()
+        .iter(world)
+        .any(|b| b.kind == Kind::Shipyard && econ.owns(me, b.island));
+    if !yard {
+        let planks = Kind::Shipyard
+            .def()
+            .cost
+            .iter()
+            .find(|(g, _)| *g == Good::Planks)
+            .map_or(0.0, |c| c.1 as f64);
+        return planks + 6.0;
+    }
+    // Ready to settle (as `colonise` asks), with somewhere left to settle.
+    let settled = (0..econ.islands.len())
+        .filter(|&j| econ.owns(me, j))
+        .count();
+    let (need, coins) = expansion_bar(world, settled);
+    let open = (0..econ.islands.len()).any(|j| econ.owner(j).is_none());
+    if open && people >= need && econ.coins_of(me) >= coins {
+        (crate::settle::harbour_planks() as f64).max(40.0) + 6.0
+    } else {
+        0.0
+    }
+}
+
+/// The people at home and the coins a company wants before it settles its next island,
+/// holding `settled` already.
+fn expansion_bar(world: &World, settled: usize) -> (f32, f64) {
+    let n = settled.max(1) as f32 - 1.0;
+    if knobs(world).race {
+        ((100.0 + 100.0 * n).min(600.0), 1_200.0)
+    } else {
+        ((150.0 + 150.0 * n).min(900.0), 1_500.0)
+    }
+}
+
 /// A new game: settle Haverholm first, then build a shipyard and ships, and settle the next
 /// island whenever a ship is free and home can spare the stores.
 fn colonise(world: &mut World, log: &mut Log, now: f64) {
     let n = islands().len();
+    let me = me(world);
+    let h = home(world);
     let claimed: Vec<bool> = (0..n).map(|i| crate::settle::claimed(world, i)).collect();
+    let taken: Vec<bool> = (0..n)
+        .map(|i| world.resource::<Economy>().owner(i).is_some())
+        .collect();
     let under_way = world
         .query::<&Vessel>()
         .iter(world)
-        .any(|v| matches!(v.roam, crate::fleet::Roam::Found { .. }));
-    if !claimed[0] {
+        .any(|v| v.company == me && matches!(v.roam, crate::fleet::Roam::Found { .. }));
+    if !claimed[h] {
         if !under_way {
-            found(world, log, now, 0);
+            found(world, log, now, h);
         }
         return;
     }
@@ -1652,20 +1856,21 @@ fn colonise(world: &mut World, log: &mut Log, now: f64) {
     if under_way {
         return;
     }
-    let (coins, home) = {
-        let e = world.resource::<Economy>();
-        (e.coins, e.islands[0].clone())
-    };
+    let coins = my_coins(world);
+    let home_books = world.resource::<Economy>().islands[h].clone();
     let settled = claimed.iter().filter(|c| **c).count();
-    // Each new island asks for a bigger home first.
-    let need_people = (150.0 + 150.0 * (settled - 1) as f32).min(900.0);
-    if home.population.iter().sum::<f32>() < need_people
-        || coins < 1_500.0
-        || home.get(Good::Planks) < 40.0
+    // Each new island asks for a bigger home first (less when racing for islands).
+    let (need_people, need_coins) = expansion_bar(world, settled);
+    if home_books.population.iter().sum::<f32>() < need_people
+        || coins < need_coins
+        || home_books.get(Good::Planks) < 40.0
         || free_ships(world).is_empty()
     {
         return;
     }
+    // Only islands the company's ships have seen; none worth having in sight: send a free
+    // ship to look at the nearest unknown one.
+    let known: Vec<bool> = (0..n).map(|i| crate::brain::knows(world, me, i)).collect();
     // The home region first, the island whose ground grows the most of what the settled
     // ones cannot (grain and hops for bread and ale) first, then the nearest; then the far
     // regions in turn.
@@ -1686,8 +1891,9 @@ fn colonise(world: &mut World, log: &mut Log, now: f64) {
             .get(&(i + 1100, None))
             .is_some_and(|t| now - t < 1800.0)
     };
+    let home_region = globe_region(h);
     let target = (0..n)
-        .filter(|&i| !claimed[i] && !gave_up(i))
+        .filter(|&i| !taken[i] && known[i] && !gave_up(i))
         .min_by(|&a, &b| {
             let key = |i: usize| {
                 let isle = &islands()[i];
@@ -1705,30 +1911,80 @@ fn colonise(world: &mut World, log: &mut Log, now: f64) {
                 // (An island that grows something new comes first, near or far.)
                 (
                     new == 0,
+                    isle.region() != home_region,
                     isle.region(),
                     std::cmp::Reverse(new),
-                    (isle.center - islands()[0].center).length() as i64,
+                    (isle.center - islands()[h].center).length() as i64,
                 )
             };
             key(a).cmp(&key(b))
         });
-    if let Some(i) = target {
-        found(world, log, now, i);
+    match target {
+        Some(i) => {
+            found(world, log, now, i);
+        }
+        None => scout(world, log, now, &known, &taken),
+    }
+}
+
+/// The region (sheet of the map) island `i` lies in.
+fn globe_region(i: usize) -> usize {
+    islands()[i].region()
+}
+
+/// No island worth settling is known: send a free ship to look at the nearest one nobody
+/// holds and the company has not seen (its own region first).
+fn scout(world: &mut World, log: &mut Log, now: f64, known: &[bool], taken: &[bool]) {
+    if log.last.get(&(2100, None)).is_some_and(|t| now - t < 240.0) {
+        return;
+    }
+    let h = home(world);
+    let me = me(world);
+    let from = islands()[h].center;
+    let target = (0..islands().len())
+        .filter(|&i| !known[i] && !taken[i])
+        .min_by_key(|&i| {
+            let isle = &islands()[i];
+            (
+                isle.region() != globe_region(h),
+                (isle.center - from).length() as i64,
+            )
+        });
+    let Some(i) = target else { return };
+    let ship = world
+        .query::<(Entity, &Vessel)>()
+        .iter(world)
+        .find(|(_, v)| bot_free(v, me))
+        .map(|(e, _)| e);
+    let Some(e) = ship else { return };
+    log.last.insert((2100, None), now);
+    let isle = &islands()[i];
+    // Off its coast, on the side facing home.
+    let to = isle.center + (from - isle.center).normalize_or(DVec2::X) * (isle.radius + 400.0);
+    match crate::settle::sail_to(world, e, to) {
+        Ok(()) => {
+            log.act("ship sent to look");
+            log.line(now, format!("sent a ship to look at {}", isle.name));
+        }
+        Err(why) => log.refuse(now, "send a ship to look", &why),
     }
 }
 
 /// The yards: a shipyard on the home island once it has people to spare, and a ship ordered
 /// whenever none is free and none is building.
 fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
-    let coins = world.resource::<Economy>().coins;
+    let coins = my_coins(world);
+    let h = home(world);
+    let econ = world.resource::<Economy>().clone();
+    let me = me(world);
     let yards: Vec<(Entity, Building)> = world
         .query::<(Entity, &Building)>()
         .iter(world)
-        .filter(|(_, b)| b.kind == Kind::Shipyard)
+        .filter(|(_, b)| b.kind == Kind::Shipyard && econ.owns(me, b.island))
         .map(|(e, b)| (e, b.clone()))
         .collect();
     if yards.is_empty() {
-        let people: f32 = world.resource::<Economy>().islands[0]
+        let people: f32 = world.resource::<Economy>().islands[h]
             .population
             .iter()
             .sum();
@@ -1737,7 +1993,7 @@ fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
             && !log.last.get(&(2000, None)).is_some_and(|t| now - t < 300.0)
         {
             log.last.insert((2000, None), now);
-            if let Some(at) = heart(world, 0) {
+            if let Some(at) = heart(world, h) {
                 build_near(world, log, now, Kind::Shipyard, at, "ships to settle with");
             }
         }
@@ -2035,7 +2291,7 @@ fn row(world: &mut World, frames: &[f32]) -> Value {
         .map(|(_, n)| *n)
         .sum::<u32>();
     json!({
-        "entities": entities, "renderers": renderers, "mesh_version": mesh_version, "rss_mb": rss_mb(), "meshes_live": meshes_live,
+        "entities": entities, "renderers": renderers, "mesh_version": mesh_version, "rss_mb": rss_mb(), "meshes_live": meshes_live, "companies": crate::brain::standings(world),
         "clock": clock_text(now),
         "minute": (now / 60.0).round(),
         "people": people, "jobs": jobs, "idle_works": idle,

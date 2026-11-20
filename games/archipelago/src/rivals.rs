@@ -1,9 +1,10 @@
 //! The rival houses the player shares the seas with, and where the player stands with each:
 //! goodwill from -100 to 100, a treaty, trade, fleets and what has passed between them.
 //!
-//! This first round keeps the standing, treaties and the history for real (gifts, pacts and
-//! war change them, and the relations screen shows it), while each rival's own wealth, people,
-//! islands and fleet are set numbers until rival AI arrives (round 9 of the economy plan).
+//! The standing, treaties and the history are real (gifts, pacts and war change them, and the
+//! relations screen shows it). In a game with rivals ([`crate::brain`]) each house's wealth,
+//! people, islands and trade goods are its company's own; in a game without, and for its
+//! warships until war arrives, they are set numbers.
 
 use std::collections::VecDeque;
 
@@ -201,6 +202,65 @@ impl Default for Rivals {
     }
 }
 
+/// A company's name for messages: a rival house's, or "your company" for the player's.
+pub fn company_name(world: &World, c: crate::sim::Company) -> String {
+    if c == crate::sim::PLAYER {
+        return "Your company".into();
+    }
+    world
+        .get_resource::<Rivals>()
+        .and_then(|r| r.0.iter().find(|x| x.id == c as u32))
+        .map_or_else(|| format!("House {c}"), |r| r.name.to_string())
+}
+
+/// Names for a rival house's new ships, taken in turn.
+pub fn ship_names(c: crate::sim::Company) -> &'static [&'static str] {
+    match c {
+        1 => &[
+            "Gullwick Pride",
+            "Tern",
+            "Factor's Purse",
+            "Bright Ledger",
+            "Fulmar",
+            "Sandpiper",
+            "Gannet",
+            "Kestrel Bay",
+            "Thrift",
+            "Gull's Wing",
+            "Ready Coin",
+            "Skua",
+        ],
+        2 => &[
+            "Ostrava",
+            "Lantern Bearer",
+            "Proud Margit",
+            "Iron Countess",
+            "Vigil",
+            "Ambition",
+            "Black Amber",
+            "Duke Teodor",
+            "Ember",
+            "High Tower",
+            "Vesna",
+            "Brazen",
+        ],
+        _ => &[
+            "Free Hammer",
+            "Anvil Song",
+            "Harrowgate",
+            "Common Weal",
+            "Honest Toil",
+            "Plough",
+            "Smithy Smoke",
+            "Fair Share",
+            "Bellows",
+            "Tinker",
+            "Mill Race",
+            "Ironwood",
+        ],
+    }
+}
+
 /// What the relations screen shows for one rival.
 #[derive(Clone, Debug, Serialize)]
 pub struct RivalView {
@@ -315,7 +375,54 @@ const VERBS: [(&str, &str); 5] = [
 pub fn relations(world: &mut World) -> Vec<RivalView> {
     let (ours, our_fire) = our_fleet(world);
     let coins = world.resource::<Economy>().coins;
-    let rivals = world.resource::<Rivals>().0.clone();
+    let mut rivals = world.resource::<Rivals>().0.clone();
+    // A house that plays (a rival game): its real purse, people, islands and trade goods.
+    let in_play: Vec<u32> = world
+        .get_resource::<crate::brain::Captains>()
+        .map(|k| k.0.iter().map(|c| c.company as u32).collect())
+        .unwrap_or_default();
+    let econ = world.resource::<Economy>().clone();
+    let mut trades: std::collections::HashMap<u32, (Vec<Good>, Vec<Good>)> = Default::default();
+    for r in rivals.iter_mut().filter(|r| in_play.contains(&r.id)) {
+        let c = r.id as crate::sim::Company;
+        let isles: Vec<usize> = (0..econ.islands.len())
+            .filter(|&i| econ.owns(c, i))
+            .collect();
+        r.wealth = econ.coins_of(c).round();
+        r.people = isles
+            .iter()
+            .map(|&i| econ.islands[i].population.iter().sum::<f32>())
+            .sum::<f32>()
+            .round() as u32;
+        r.islands = isles.len() as u32;
+        let mut made: Vec<(Good, f32, f32)> = Good::ALL
+            .iter()
+            .map(|&g| {
+                let (mut spare, mut short) = (0.0, 0.0);
+                for &i in &isles {
+                    let b = &econ.islands[i];
+                    spare += b.made_per_min[g.index()] - b.used_per_min[g.index()];
+                    short += (b.wanted_per_min[g.index()] * (1.0 - b.supply[g.index()])).max(0.0);
+                }
+                (g, spare, short)
+            })
+            .collect();
+        made.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let sells: Vec<Good> = made
+            .iter()
+            .filter(|m| m.1 > 0.5)
+            .take(2)
+            .map(|m| m.0)
+            .collect();
+        made.sort_by(|a, b| b.2.total_cmp(&a.2));
+        let buys: Vec<Good> = made
+            .iter()
+            .filter(|m| m.2 > 0.2)
+            .take(2)
+            .map(|m| m.0)
+            .collect();
+        trades.insert(r.id, (sells, buys));
+    }
     rivals
         .iter()
         .map(|r| RivalView {
@@ -332,8 +439,18 @@ pub fn relations(world: &mut World) -> Vec<RivalView> {
                 wealth: r.wealth,
                 people: r.people,
                 islands: r.islands,
-                they_sell: r.sells.iter().map(|g| g.name().to_string()).collect(),
-                they_buy: r.buys.iter().map(|g| g.name().to_string()).collect(),
+                they_sell: trades
+                    .get(&r.id)
+                    .map_or(r.sells, |t| t.0.as_slice())
+                    .iter()
+                    .map(|g| g.name().to_string())
+                    .collect(),
+                they_buy: trades
+                    .get(&r.id)
+                    .map_or(r.buys, |t| t.1.as_slice())
+                    .iter()
+                    .map(|g| g.name().to_string())
+                    .collect(),
             },
             military: Military {
                 warships: r.warships,
