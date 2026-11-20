@@ -461,7 +461,7 @@ impl GpuMeshes {
         {
             // Hair the strand renderer takes over near the camera: the feature shows only its
             // locks (from where they stand in alone), so its hairs never go to the GPU.
-            let distance = if crate::hair_draw::shared(s.kind) {
+            let distance = if crate::hair_draw::shared(s.kind, s.points) {
                 f32::INFINITY
             } else {
                 distance
@@ -552,7 +552,7 @@ impl GpuMeshes {
                 }
             };
             // (Near the camera scalp hair is drawn by the strand renderer: `hair_draw`.)
-            if fade <= 0.0 || (shared_near && crate::hair_draw::shared(s.kind)) {
+            if fade <= 0.0 || (shared_near && crate::hair_draw::shared(s.kind, s.points)) {
                 drawn = 0;
             }
             s.drawn = drawn;

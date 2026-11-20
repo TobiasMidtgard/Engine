@@ -219,7 +219,9 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let fur = inst.more.y == 1u;
     let v = normalize(-rel);
     let nc = normalize(v - t * dot(v, t) + vec3<f32>(0.0, 1e-5, 0.0));
-    let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(HUMAN_SHINE, 1.0, fur));
+    // (Combed head hair shines; coarser beard and brow hair, rougher, much less.)
+    let shine = mix(HUMAN_SHINE, 0.8, smoothstep(0.35, 0.42, rough_in));
+    let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(shine, 1.0, fur));
     let rough = rough_in * (0.85 + 0.3 * fract(random * 37.3));
     // No fibre runs quite straight: each leans its own way, and its highlight with it.
     let b = normalize(cross(t, nc));

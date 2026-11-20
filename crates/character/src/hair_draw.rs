@@ -6,8 +6,9 @@
 //! the skin's rest space, worn by a child entity that rides the head bone ([`DrawnHair`]):
 //! the head carries the hair exactly, and hair that moves takes the rest from its guides,
 //! posed by the hair simulation (`HairGuidesPosed` on the person) and brought into the head's
-//! frame when the renderer draws it ([`guides_now`]). Brows, lashes and beards follow the face's
-//! expressions and are still drawn by the character feature.
+//! frame when the renderer draws it ([`guides_now`]). Beards follow the face: their hairs go
+//! with guides made from the skin vertices they grow from, which the face's expressions and the
+//! jaw move ([`FaceFollow`]). Brows and lashes are still drawn by the character feature.
 //!
 //! Only near the camera ([`SharedHairNear`]): past [`lod::LOCKS_TO`] the character feature has
 //! long drawn a head of hair as its locks alone (locks.rs), cheap enough for a crowd, and the
@@ -18,19 +19,24 @@ use engine_core::math::{Mat4, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Camera, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance};
 use engine_world::animation::SkeletonPose;
+use engine_world::character::FaceControls;
 use engine_world::{HairGuides, HairGuidesPosed};
 
 use crate::BuiltCharacter;
 use crate::build::CharacterMeshes;
+use crate::face::{self, MAX_CHANNELS};
 use crate::lod::{self, CharacterLod};
 use crate::strands::{PackedStrands, StrandKind, StrandSet};
 
-/// Whether hair of this kind is drawn by the strand renderer (and not by the character
-/// feature). `ENGINE_CHARACTER_HAIR=old` keeps all of it in the character feature (to compare).
-pub fn shared(kind: StrandKind) -> bool {
+/// Whether hair of this kind, `points` points a hair, is drawn by the strand renderer near the
+/// camera (and not by the character feature): scalp hair and beards, but not stubble (three
+/// points, a millimetre or two), whose hairs are far thinner than a pixel and vanish into the
+/// skin there; the character feature's marks read as stubble. `ENGINE_CHARACTER_HAIR=old` keeps
+/// all of it in the character feature (to compare).
+pub fn shared(kind: StrandKind, points: u32) -> bool {
     static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let old = *OLD.get_or_init(|| std::env::var("ENGINE_CHARACTER_HAIR").is_ok_and(|v| v == "old"));
-    kind == StrandKind::Scalp && !old
+    (kind == StrandKind::Scalp || (kind == StrandKind::Beard && points > 3)) && !old
 }
 
 /// The people whose scalp hair the strand renderer draws this frame (and the character feature
@@ -54,10 +60,23 @@ pub struct DrawnHair {
     pub set: usize,
     /// The groom's guides at rest, the skin's rest space.
     rest_guides: Vec<Vec3>,
+    /// Hair that follows the face (beards); `None` for hair the simulation moves.
+    face: Option<FaceFollow>,
 }
 
-/// How rough the cuticle of scalp hair is (brows and beard: 0.42).
+/// The guides of hair that follows the face: one per skin vertex its hairs grow from, which
+/// moves as that vertex does (its expressions, then its bones), and its hairs with it.
+#[derive(Debug, Clone, Default)]
+pub struct FaceFollow {
+    /// Per guide, the skin vertex.
+    roots: Vec<u32>,
+    /// The guides this frame, in the head's frame (`draw_hair`).
+    now: Vec<Vec3>,
+}
+
+/// How rough the cuticle of scalp hair is, and of brows and beard.
 const SCALP_ROUGHNESS: f32 = 0.33;
+const FACE_ROUGHNESS: f32 = 0.42;
 
 /// Absorption of a hair fibre per unit length (relative) from its pigments, as measured for
 /// real hair (d'Eon et al. 2011): eumelanin browns and blacks, pheomelanin reds. As the
@@ -130,7 +149,12 @@ pub fn groom(set: &StrandSet, packed: &PackedStrands, pigment: [f32; 3]) -> Opti
         // Toward the tips hair is older, weathered by sun and combing: a little fairer.
         let tip = hair_color(eu * 0.9, red, grey, random) * shade;
         roots.push([root.x, root.y, root.z, random]);
-        tips.push([tip.x, tip.y, tip.z, SCALP_ROUGHNESS]);
+        let rough = if set.kind == StrandKind::Scalp {
+            SCALP_ROUGHNESS
+        } else {
+            FACE_ROUGHNESS
+        };
+        tips.push([tip.x, tip.y, tip.z, rough]);
     }
     let follow = if set.follow.len() == strands {
         set.follow
@@ -159,6 +183,97 @@ pub fn groom(set: &StrandSet, packed: &PackedStrands, pigment: [f32; 3]) -> Opti
     g.is_valid().then_some(g)
 }
 
+/// Guides for hair that follows the face (a groom without guides of its own): the first hair
+/// grown from each skin vertex stands for all hairs from it. `roots`: per hair, its skin vertex.
+/// Returns each guide's vertex (empty when `roots` doesn't fit the groom).
+pub fn face_guides(g: &mut StrandGroom, roots: &[u32]) -> Vec<u32> {
+    let per = g.points_per as usize;
+    let strands = g.strand_count();
+    if !g.guides.is_empty() || roots.len() != strands || per < 2 {
+        return Vec::new();
+    }
+    let mut of_vertex = std::collections::HashMap::new();
+    let mut guide_roots = Vec::new();
+    g.follow = roots
+        .iter()
+        .enumerate()
+        .map(|(h, &v)| {
+            let guide = *of_vertex.entry(v).or_insert_with(|| {
+                guide_roots.push(v);
+                g.guides.extend(
+                    g.points[h * per..(h + 1) * per]
+                        .iter()
+                        .map(|p| [p[0], p[1], p[2]]),
+                );
+                guide_roots.len() as u32 - 1
+            });
+            StrandFollow {
+                guides: [guide, u32::MAX, u32::MAX],
+                weights: [1.0, 0.0, 0.0],
+            }
+        })
+        .collect();
+    guide_roots
+}
+
+/// A half float's value from the low 16 bits (the expression shapes' packing).
+fn half(bits: u32) -> f32 {
+    face::f16_value(bits as u16)
+}
+
+/// Where the face's guides are this frame, in the head's frame: each guide's points carried as
+/// its skin vertex is, by `weights` (the expression channels) and the bones in `palette`.
+fn pose_face_guides(
+    meshes: &CharacterMeshes,
+    rest: &[Vec3],
+    face: &mut FaceFollow,
+    weights: &[f32; MAX_CHANNELS],
+    palette: &[Mat4],
+    to_head: Mat4,
+) {
+    let per = rest.len() / face.roots.len().max(1);
+    face.now.clear();
+    for (g, &v) in face.roots.iter().enumerate() {
+        let at = v as usize;
+        let mut dp = Vec3::ZERO;
+        let shapes = &meshes.face;
+        if let (Some(&a), Some(&b)) = (shapes.offsets.get(at), shapes.offsets.get(at + 1)) {
+            for e in shapes.entries.get(a as usize..b as usize).unwrap_or(&[]) {
+                let w = weights
+                    .get((e[0] & 0xffff) as usize)
+                    .copied()
+                    .unwrap_or(0.0);
+                if w != 0.0 {
+                    dp += Vec3::new(half(e[0] >> 16), half(e[1]), half(e[1] >> 16)) * w;
+                }
+            }
+        }
+        let skin = if palette.is_empty() {
+            Mat4::IDENTITY
+        } else {
+            let bones = meshes.skin.bones.get(at).copied().unwrap_or_default();
+            let w = meshes
+                .skin
+                .weights
+                .get(at)
+                .copied()
+                .unwrap_or([255, 0, 0, 0]);
+            let mut m = Mat4::ZERO;
+            for (b, w) in bones.iter().zip(w) {
+                m += palette.get(*b as usize).copied().unwrap_or(Mat4::IDENTITY)
+                    * (w as f32 / 255.0);
+            }
+            m
+        };
+        let m = to_head * skin;
+        face.now.extend(
+            rest[g * per..(g + 1) * per]
+                .iter()
+                .map(|p| m.transform_point3(*p + dp)),
+        );
+    }
+}
+
 /// The head bone's skinning matrix (the skin's rest space to the person's model space) in
 /// `pose`; identity without a rig or a pose (the skin is drawn at rest then).
 fn head_matrix(
@@ -166,6 +281,7 @@ fn head_matrix(
     pose: Option<&SkeletonPose>,
     palette: &mut Vec<Mat4>,
 ) -> Mat4 {
+    palette.clear();
     let (Some(rig), Some(pose)) = (meshes.rig.as_ref(), pose) else {
         return Mat4::IDENTITY;
     };
@@ -195,8 +311,9 @@ pub fn draw_hair(
         &BuiltCharacter,
         Option<&SkeletonPose>,
         Option<&GlobalTransform>,
+        Option<&FaceControls>,
     )>,
-    mut drawn: Query<(Entity, &DrawnHair, &mut Transform, &mut StrandInstance)>,
+    mut drawn: Query<(Entity, &mut DrawnHair, &mut Transform, &mut StrandInstance)>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     grooms: Option<ResMut<Assets<StrandGroom>>>,
     lod_scale: Option<Res<CharacterLod>>,
@@ -215,7 +332,7 @@ pub fn draw_hair(
         .map(|(_, g)| g.0.translation);
     let scale = lod_scale.map_or(1.0, |l| l.distance_scale);
     let was = std::mem::take(&mut near.0);
-    for (person, _, _, at) in &people {
+    for (person, _, _, at, _) in &people {
         let distance = match (eye, at) {
             (Some(eye), Some(at)) => (at.0.translation - eye).length() as f32 * scale,
             _ => 0.0,
@@ -230,17 +347,34 @@ pub fn draw_hair(
         }
     }
     let mut have: Vec<(Entity, u64)> = Vec::new();
-    for (e, hair, mut t, mut instance) in &mut drawn {
+    let mut weights = [0.0f32; MAX_CHANNELS];
+    for (e, mut hair, mut t, mut instance) in &mut drawn {
         match people.get(hair.person) {
-            Ok((_, built, pose, _)) if built.version == hair.version => {
+            Ok((_, built, pose, _, face_controls)) if built.version == hair.version => {
                 let shown = near.0.contains(&hair.person);
                 if instance.visible != shown {
                     instance.visible = shown;
                 }
                 if shown {
-                    let next = to_transform(head_matrix(&built.meshes, pose, &mut palette));
+                    let head = head_matrix(&built.meshes, pose, &mut palette);
+                    let next = to_transform(head);
                     if *t != next {
                         *t = next;
+                    }
+                    let hair = &mut *hair;
+                    if let Some(follow) = hair.face.as_mut() {
+                        match face_controls {
+                            Some(f) => face::channel_weights(f, &mut weights),
+                            None => weights.fill(0.0),
+                        }
+                        pose_face_guides(
+                            &built.meshes,
+                            &hair.rest_guides,
+                            follow,
+                            &weights,
+                            &palette,
+                            head.inverse(),
+                        );
                     }
                 }
                 have.push((hair.person, hair.version));
@@ -248,27 +382,38 @@ pub fn draw_hair(
             _ => commands.entity(e).despawn(),
         }
     }
-    for (person, built, pose, _) in &people {
+    for (person, built, pose, _, _) in &people {
         if have.contains(&(person, built.version)) {
             continue;
         }
         let m = &built.meshes;
         let head = head_matrix(m, pose, &mut palette);
-        let pigment = [
-            built.uniform.hair[0],
-            built.uniform.hair[1],
-            built.uniform.hair[2],
-        ];
         for (i, set) in m.strands.iter().enumerate() {
-            if !shared(set.kind) {
+            if !shared(set.kind, set.points_per) {
                 continue;
             }
             let Some(packed) = m.packed_strands.get(i) else {
                 continue;
             };
-            let Some(g) = groom(set, packed, pigment) else {
+            let p = if set.kind == StrandKind::Beard {
+                built.uniform.beard
+            } else {
+                built.uniform.hair
+            };
+            let Some(mut g) = groom(set, packed, [p[0], p[1], p[2]]) else {
                 continue;
             };
+            // Hair the simulation doesn't move follows the face (beards).
+            let face = (set.kind != StrandKind::Scalp).then(|| {
+                let roots = m.strand_roots.get(i).map_or(&[][..], |r| &r[..]);
+                FaceFollow {
+                    roots: face_guides(&mut g, roots),
+                    now: Vec::new(),
+                }
+            });
+            if !g.is_valid() {
+                continue;
+            }
             let moves = !g.guides.is_empty();
             let rest_guides = g.guides.iter().map(|p| Vec3::from_array(*p)).collect();
             let handle: Handle<StrandGroom> = grooms.add(g);
@@ -284,6 +429,7 @@ pub fn draw_hair(
                     version: built.version,
                     set: i,
                     rest_guides,
+                    face,
                 },
                 ChildOf(person),
             ));
@@ -300,6 +446,14 @@ fn guides_now(world: &World, entity: Entity, out: &mut Vec<Vec3>) -> bool {
     let Some(hair) = world.get::<DrawnHair>(entity) else {
         return false;
     };
+    if let Some(face) = &hair.face {
+        if face.now.len() != hair.rest_guides.len() || face.now.is_empty() {
+            return false;
+        }
+        out.clear();
+        out.extend_from_slice(&face.now);
+        return true;
+    }
     let (Some(guides), Some(posed), Some(t)) = (
         world.get::<HairGuides>(hair.person),
         world.get::<HairGuidesPosed>(hair.person),
@@ -377,6 +531,35 @@ mod tests {
             dark += (s < 0.81) as u32;
         }
         assert!((80..=300).contains(&dark), "{dark} dark hairs in 1000");
+    }
+
+    #[test]
+    fn face_guides_take_one_hair_per_skin_vertex() {
+        let (set, packed) = packed_set(6);
+        let mut g = groom(&set, &packed, [0.3, 0.1, 0.0]).unwrap();
+        let roots = face_guides(&mut g, &[7, 7, 9, 7, 9, 11]);
+        assert_eq!(roots, vec![7, 9, 11]);
+        assert_eq!(g.guides.len(), 3 * 4);
+        let guide_of: Vec<u32> = g.follow.iter().map(|f| f.guides[0]).collect();
+        assert_eq!(guide_of, vec![0, 0, 1, 0, 1, 2]);
+        // Each guide is the first hair grown from its vertex.
+        assert_eq!(
+            g.guides[4],
+            [g.points[8][0], g.points[8][1], g.points[8][2]]
+        );
+        assert!(g.is_valid());
+        // Roots that don't fit the groom give no guides.
+        let mut h = groom(&set, &packed, [0.3, 0.1, 0.0]).unwrap();
+        assert!(face_guides(&mut h, &[1, 2]).is_empty() && h.guides.is_empty());
+    }
+
+    #[test]
+    fn half_floats_decode() {
+        assert_eq!(half(0x3c00), 1.0);
+        assert_eq!(half(0xc000), -2.0);
+        assert_eq!(half(0x3555), 0.333_251_95);
+        assert_eq!(half(0), 0.0);
+        assert!((half(crate::face::f16_bits(0.0123) as u32) - 0.0123).abs() < 1e-5);
     }
 
     #[test]
