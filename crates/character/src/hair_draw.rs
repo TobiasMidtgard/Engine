@@ -15,6 +15,9 @@
 //! long drawn a head of hair as its locks alone (locks.rs), cheap enough for a crowd, and the
 //! strand renderer draws the nearest few dozen grooms only.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use engine_assets::{Assets, Handle};
 use engine_core::math::{Mat4, Vec3};
 use engine_core::prelude::*;
@@ -26,6 +29,7 @@ use engine_world::{HairGuides, HairGuidesPosed};
 use crate::BuiltCharacter;
 use crate::build::CharacterMeshes;
 use crate::face::{self, MAX_CHANNELS};
+use crate::feature::GpuCharacter;
 use crate::lod::{self, CharacterLod};
 use crate::strands::{PackedStrands, StrandKind, StrandSet};
 
@@ -315,7 +319,7 @@ fn to_transform(m: Mat4) -> Transform {
 /// `PostUpdate`, before transforms propagate: give each built person's shared hair its
 /// grooms and instances (again after a rebuild), and keep them on the head bone.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-pub fn draw_hair(
+pub(crate) fn draw_hair(
     mut commands: Commands,
     people: Query<(
         Entity,
@@ -329,8 +333,12 @@ pub fn draw_hair(
     grooms: Option<ResMut<Assets<StrandGroom>>>,
     lod_scale: Option<Res<CharacterLod>>,
     mut near: ResMut<SharedHairNear>,
+    config: Option<Res<engine_core::config::EngineConfig>>,
+    mut pending: Local<HashMap<(Entity, u64), Slot>>,
+    mut nothing: Local<std::collections::HashSet<(Entity, u64)>>,
     mut palette: Local<Vec<Mat4>>,
 ) {
+    let off_frame = config.is_some_and(|c| c.off_frame());
     let Some(mut grooms) = grooms else {
         near.0.clear();
         return;
@@ -405,40 +413,53 @@ pub fn draw_hair(
             _ => commands.entity(e).despawn(),
         }
     }
+    let mut spawned = Vec::new();
     for (person, built, pose, _, _) in &people {
-        if have.contains(&(person, built.version)) || !near.0.contains(&person) {
+        let key = (person, built.version);
+        if have.contains(&key) || !near.0.contains(&person) || nothing.contains(&key) {
             continue;
         }
-        let m = &built.meshes;
-        let head = head_matrix(m, pose, &mut palette);
-        for (i, set) in m.strands.iter().enumerate() {
-            if !shared(set.kind, set.points_per) {
-                continue;
-            }
-            let Some(packed) = m.packed_strands.get(i) else {
-                continue;
-            };
-            let p = match set.kind {
-                StrandKind::Beard => built.uniform.beard,
-                StrandKind::Brows => built.uniform.brows,
-                _ => built.uniform.hair,
-            };
-            let Some(mut g) = groom(set, packed, [p[0], p[1], p[2]]) else {
-                continue;
-            };
-            // A thin layer, with next to no hair behind it to scatter light back.
-            g.thin = set.kind == StrandKind::Brows;
-            // Hair the simulation doesn't move follows the face (brows, beards).
-            let face = (set.kind != StrandKind::Scalp).then(|| {
-                let roots = m.strand_roots.get(i).map_or(&[][..], |r| &r[..]);
-                FaceFollow {
-                    roots: face_guides(&mut g, roots),
-                    now: Vec::new(),
+        // Built once per build of the person: on a worker while the game runs (a long head
+        // of hair is millions of points), in the frame for headless runs (a picture shows
+        // everyone it is asked for).
+        let made = if off_frame {
+            let slot = pending.entry(key).or_insert_with(|| {
+                let slot: Slot = Arc::new(Mutex::new(None));
+                let (done, meshes, uniform) = (slot.clone(), built.meshes.clone(), built.uniform);
+                let spawned = std::thread::Builder::new()
+                    .name("character hair grooms".into())
+                    .spawn(move || {
+                        let _span = tracing::info_span!("character hair grooms").entered();
+                        let made = make_grooms(&meshes, &uniform);
+                        *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(made);
+                    });
+                if spawned.is_err() {
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
                 }
+                slot
             });
-            if !g.is_valid() {
+            let Some(made) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
                 continue;
-            }
+            };
+            pending.remove(&key);
+            made
+        } else {
+            make_grooms(&built.meshes, &built.uniform)
+        };
+        if made.is_empty() {
+            // (Bald and clean-shaven, or nothing that makes a groom: not looked at again.)
+            nothing.insert(key);
+            continue;
+        }
+        let head = head_matrix(&built.meshes, pose, &mut palette);
+        spawned.push(person);
+        for Made {
+            set,
+            kind,
+            groom: g,
+            face,
+        } in made
+        {
             let moves = !g.guides.is_empty();
             let rest_guides = g.guides.iter().map(|p| Vec3::from_array(*p)).collect();
             let handle: Handle<StrandGroom> = grooms.add(g);
@@ -446,20 +467,16 @@ pub fn draw_hair(
                 Name::new("Hair"),
                 to_transform(head),
                 StrandInstance {
-                    visible: near.0.contains(&person),
+                    visible: true,
                     // Brow hairs are coarser than scalp hair, and so few that a thinner
                     // sprinkle of them lets the skin show through as a pale brow.
-                    width_scale: if set.kind == StrandKind::Brows {
-                        1.3
-                    } else {
-                        1.0
-                    },
+                    width_scale: if kind == StrandKind::Brows { 1.3 } else { 1.0 },
                     ..StrandInstance::new(handle)
                 },
                 DrawnHair {
                     person,
                     version: built.version,
-                    set: i,
+                    set,
                     rest_guides,
                     face,
                 },
@@ -470,6 +487,73 @@ pub fn draw_hair(
             }
         }
     }
+    // (A build nobody waits for any more: its worker finishes and its grooms are dropped.)
+    pending.retain(|(person, version), _| {
+        people
+            .get(*person)
+            .is_ok_and(|(_, b, ..)| b.version == *version && near.0.contains(person))
+    });
+    nothing.retain(|(person, version)| {
+        people
+            .get(*person)
+            .is_ok_and(|(_, b, ..)| b.version == *version)
+    });
+    // The character feature leaves a person's hair to the strand renderer only once it has
+    // their grooms (it draws their locks while a worker makes them).
+    near.0
+        .retain(|p| have.iter().any(|(q, _)| q == p) || spawned.contains(p));
+}
+
+/// A groom made for one of a person's strand sets ([`make_grooms`]).
+pub(crate) struct Made {
+    set: usize,
+    kind: StrandKind,
+    groom: StrandGroom,
+    face: Option<FaceFollow>,
+}
+
+/// Grooms being made on a worker, per person and build.
+pub(crate) type Slot = Arc<Mutex<Option<Vec<Made>>>>;
+
+/// The grooms of a person's hair the strand renderer draws ([`shared`]), with the face's
+/// guides for hair that follows it.
+fn make_grooms(m: &CharacterMeshes, uniform: &GpuCharacter) -> Vec<Made> {
+    let mut out = Vec::new();
+    for (i, set) in m.strands.iter().enumerate() {
+        if !shared(set.kind, set.points_per) {
+            continue;
+        }
+        let Some(packed) = m.packed_strands.get(i) else {
+            continue;
+        };
+        let p = match set.kind {
+            StrandKind::Beard => uniform.beard,
+            StrandKind::Brows => uniform.brows,
+            _ => uniform.hair,
+        };
+        let Some(mut g) = groom(set, packed, [p[0], p[1], p[2]]) else {
+            continue;
+        };
+        // A thin layer, with next to no hair behind it to scatter light back.
+        g.thin = set.kind == StrandKind::Brows;
+        // Hair the simulation doesn't move follows the face (brows, beards).
+        let face = (set.kind != StrandKind::Scalp).then(|| {
+            let roots = m.strand_roots.get(i).map_or(&[][..], |r| &r[..]);
+            FaceFollow {
+                roots: face_guides(&mut g, roots),
+                now: Vec::new(),
+            }
+        });
+        if g.is_valid() {
+            out.push(Made {
+                set: i,
+                kind: set.kind,
+                groom: g,
+                face,
+            });
+        }
+    }
+    out
 }
 
 /// The guides of a person's drawn hair as the hair simulation left them, in the head's frame
