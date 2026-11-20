@@ -461,6 +461,8 @@ pub fn land(world: &mut World, v: &mut Vessel) {
     }
     let now = world.resource::<Economy>().clock_s;
     if me == crate::sim::PLAYER {
+        // The island is the company's: no fog over any of it, and the sea charted round it.
+        crate::fog::reveal_island(world, isle);
         world.resource_mut::<Settled>().0.push((isle, now));
         tell(
             world,

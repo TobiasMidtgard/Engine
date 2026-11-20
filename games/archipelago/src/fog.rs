@@ -365,6 +365,33 @@ fn sight(kind: crate::defs::Kind) -> f64 {
     }
 }
 
+/// How far a craft of the player's sees, meters: far enough that the lane it clears through
+/// the bank is wide open from the strategy view (the bank's edge is a slope four cells wide,
+/// so a ship that saw only a kilometre left a notch hardly wider than its wake).
+pub fn sight_m(v: &Vessel) -> f64 {
+    let base = if v.craft.flies() {
+        AIR_SIGHT_M
+    } else {
+        SHIP_SIGHT_M
+    };
+    base * (1.0 + v.kit.sight as f64)
+}
+
+/// How far a ship and an aircraft of the player's see, meters.
+pub const SHIP_SIGHT_M: f64 = 1_800.0;
+pub const AIR_SIGHT_M: f64 = 2_600.0;
+/// The sea charted round an island when it is settled, past its shore, meters.
+pub const SETTLED_RING_M: f64 = 1_800.0;
+
+/// A newly settled island in the clear: the whole island and a ring of sea round it.
+pub fn reveal_island(world: &mut World, isle: usize) {
+    let Some(mut fog) = world.get_resource_mut::<FogOfWar>() else {
+        return;
+    };
+    let i = &island::islands()[isle];
+    fog.reveal_map(i.center.x, i.center.y, i.radius * 1.25 + SETTLED_RING_M);
+}
+
 /// Clear the fog around the player's buildings and craft, and rebuild the pieces that
 /// changed (a few a frame).
 pub fn update(world: &mut World) {
@@ -392,9 +419,7 @@ pub fn update(world: &mut World) {
         for v in q.iter(world) {
             // The player's own: trade ships and aircraft, their smacks, and craft lying idle.
             if v.owned() && v.company == crate::sim::PLAYER {
-                let far =
-                    if v.craft.flies() { 1_600.0 } else { 1_000.0 } * (1.0 + v.kit.sight as f64);
-                fog.reveal_map(v.at.x, v.at.z, far);
+                fog.reveal_map(v.at.x, v.at.z, sight_m(v));
             }
         }
     }

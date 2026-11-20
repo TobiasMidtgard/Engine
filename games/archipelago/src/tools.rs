@@ -101,6 +101,7 @@ pub fn action(world: &mut World, a: &str) {
                 _ => Tool::Build { kind: k, rot },
             },
         );
+    } else if crate::helm::action(world, a) {
     } else if a == "isle.tool.paved" {
         // The road tool's other mode: dirt and paved in turn.
         let next = if *world.resource::<Tool>() == Tool::Paving {
@@ -389,6 +390,7 @@ pub fn input(world: &mut World) {
     if buttons.just_released(MouseButton::Right)
         && world.resource::<Hand>().right_travel < 6.0
         && !capture.pointer
+        && !crate::helm::right_click(world)
     {
         set_tool(world, Tool::Select);
     }
@@ -398,6 +400,9 @@ pub fn input(world: &mut World) {
     let tool = *world.resource::<Tool>();
     match tool {
         Tool::Select => {
+            if crate::helm::input(world, &buttons) {
+                return;
+            }
             if buttons.just_pressed(MouseButton::Left) {
                 let hit = camera::pick(world).map(|h| grid::cell_of(h.x, h.z));
                 let e = hit.and_then(|c| match building_at(world, c) {

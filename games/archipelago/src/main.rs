@@ -33,6 +33,7 @@ mod gear;
 mod globe;
 mod grid;
 mod halls;
+mod helm;
 mod hud;
 mod icons;
 mod incidents;
@@ -143,6 +144,12 @@ fn main() {
         title::shots(app);
         return;
     }
+    // `--helm-shots [keys]`: pictures of picking and ordering ships (helm.rs).
+    if let Some(i) = args.iter().position(|a| a == "--helm-shots") {
+        let only = args.get(i + 1).filter(|s| !s.starts_with("--")).cloned();
+        helm::shots(app, only.as_deref());
+        return;
+    }
     match tour {
         Some(only) => tour::run(app, only.as_deref()),
         None => {
@@ -214,7 +221,7 @@ pub fn add_game(app: &mut App) {
                 draw::spin_parts,
                 draw::follow_bodies,
                 effects::follow_riders,
-                (fog::update, tradelines::update).chain(),
+                (fog::update, tradelines::update, helm::update).chain(),
                 tools::ghost,
                 hud::update_data,
             )
@@ -226,6 +233,7 @@ pub fn add_game(app: &mut App) {
     rivals::register(app);
     tradelines::register(app);
     settle::register(app);
+    helm::register(app);
     incidents::register(app);
     fittings::register(app);
 }
@@ -269,6 +277,7 @@ fn setup(world: &mut World) {
     town::prewarm(world, 600.0);
     tools::setup(world);
     hud::setup(world);
+    helm::setup(world);
     let isle = &island::islands()[0];
     let focus = world
         .get_resource::<town::TownCentre>()

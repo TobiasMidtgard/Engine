@@ -1135,7 +1135,7 @@ fn update_data_now(world: &mut World) {
     let (ships, airships) = {
         let mut q = world.query::<&crate::fleet::Vessel>();
         q.iter(world)
-            .filter(|v| v.company == crate::sim::PLAYER)
+            .filter(|v| v.commanded())
             .fold((0, 0), |(s, a), v| {
                 if v.craft == crate::vessels::Craft::Airship {
                     (s, a + 1)

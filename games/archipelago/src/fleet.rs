@@ -353,7 +353,23 @@ impl Vessel {
                     | Roam::Idle { .. }
                     | Roam::Found { .. }
                     | Roam::Circling { .. }
+                    | Roam::Scout { .. }
             )
+    }
+
+    /// One the player commands ([`crate::helm`]): the player's own craft on a route, lying
+    /// idle, settling, scouting or circling its mast. Not the free traders, the pedlar or the
+    /// fisheries' smacks (all filed under [`crate::sim::PLAYER`] too), nor a rival's.
+    pub fn commanded(&self) -> bool {
+        self.company == crate::sim::PLAYER
+            && (self.route.is_some()
+                || matches!(
+                    self.roam,
+                    Roam::Idle { .. }
+                        | Roam::Found { .. }
+                        | Roam::Circling { .. }
+                        | Roam::Scout { .. }
+                ))
     }
 }
 
@@ -420,6 +436,9 @@ pub enum Roam {
         rot: u8,
         stores: Option<u32>,
     },
+    /// Charting the fog: sails for the nearest sea nobody has seen, again and again, and
+    /// comes back to `home` when nothing is left in reach ([`crate::helm::scout_goal`]).
+    Scout { home: DVec3 },
 }
 
 /// Seconds the pedlar lies off the quay with his stock, and stays away.
@@ -701,6 +720,8 @@ fn arrive(world: &mut World, v: &mut Vessel) {
             None,
         ) => crate::settle::take_stores(world, v),
         (Roam::Found { .. }, None) => crate::settle::land(world, v),
+        // A look round, and on to the next stretch of fog.
+        (Roam::Scout { .. }, None) => v.doing = Doing::Lingering(2.0),
         _ => v.doing = Doing::Lingering(if v.craft.flies() { 0.01 } else { 4.0 }),
     }
 }
@@ -871,6 +892,7 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
             let p = crate::settle::landing(*origin, *rot, *isle);
             Some(DVec3::new(p.x, 0.0, p.y))
         }
+        (Roam::Scout { .. }, None) => crate::helm::scout_leg(world, v),
         (Roam::None, None) => None,
     };
     let Some(to) = target else {
