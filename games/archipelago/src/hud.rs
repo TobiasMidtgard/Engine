@@ -32,6 +32,7 @@ mod fleet;
 mod house;
 mod ledger;
 mod map;
+mod pedlar;
 mod plan;
 mod relations;
 mod routes;
@@ -466,6 +467,14 @@ fn info_card(kind: Kind, ruin: bool, held: Option<(String, u32)>) -> El {
                 .child_opt(d.output.filter(|_| !ruin).map(|_| {
                     El::button("{isle.sel.pause}", "isle.sel.pause").class("brass_button")
                 }))
+                .child_opt((kind == Kind::Harbour && !ruin).then(|| {
+                    El::button("Pedlar's stall", "isle.pedlar")
+                        .class("brass_button")
+                        .tooltip(
+                            "The pedlar",
+                            "His barque calls at the home quay now and then with five items for sale.\n[b]Key[/b]  M",
+                        )
+                }))
                 .child(
                     El::button(
                         if ruin { "Clear the ruin" } else { "Demolish" },
@@ -650,9 +659,14 @@ pub fn setup(world: &mut World) {
     relations::install(world);
     trouble::install(world);
     shelf::install(world);
+    pedlar::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
         shelf::toggle(world);
+    }
+    // `--hud-pedlar`: open the pedlar's stall (tour shots).
+    if std::env::args().any(|a| a == "--hud-pedlar") {
+        pedlar::toggle(world);
     }
     // `--hud-routes`: open the trade routes with the second route picked out (tour shots).
     if std::env::args().any(|a| a == "--hud-routes") {
@@ -828,6 +842,7 @@ pub fn read_actions(world: &mut World) {
         } else if topbar::action(world, &a)
             || chains::action(world, &a)
             || shelf::action(world, &a)
+            || pedlar::action(world, &a)
             || fleet::action(world, &a)
             || alerts::action(world, &a)
             || advisor::action(world, &a)
@@ -844,6 +859,7 @@ pub fn read_actions(world: &mut World) {
         } else if a.starts_with("isle.item.") {
             crate::tools::action(world, &a);
             shelf::after_item_action(world, &a);
+            pedlar::after_item_action(world, &a);
         } else {
             crate::tools::action(world, &a);
         }
@@ -873,7 +889,8 @@ fn toggle_ledger(world: &mut World) {
     }
 }
 
-/// The HUD's own keys: L the ledger, T the trade routes, H home, Esc closes either book.
+/// The HUD's own keys: L the ledger, T the trade routes, H home, M the pedlar's stall, Esc
+/// closes the book that is open.
 fn read_keys(world: &mut World) {
     let typing = world
         .get_resource::<engine_ui::UiInputCapture>()
@@ -892,11 +909,15 @@ fn read_keys(world: &mut World) {
         keys.just_pressed(KeyCode::G),
         keys.just_pressed(KeyCode::Escape),
     );
-    let (p, v, k) = (
+    let (p, v, k, m) = (
         keys.just_pressed(KeyCode::P),
         keys.just_pressed(KeyCode::V),
         keys.just_pressed(KeyCode::K),
+        keys.just_pressed(KeyCode::M),
     );
+    if m || (esc && world.resource::<pedlar::Stall>().open) {
+        pedlar::toggle(world);
+    }
     if k || (esc && world.resource::<chains::Chains>().open) {
         chains::toggle(world, None);
     }
@@ -1213,6 +1234,9 @@ pub fn update_data(world: &mut World) {
         ledger::update(world);
         map::update(world, 0.2);
         shelf::update(world);
+        pedlar::update(world);
+        let here = pedlar::here(world);
+        set_selected(world, map::PEDLAR_MEDAL, here);
         house::refresh(world);
         works::refresh(world);
         store::refresh(world);

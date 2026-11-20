@@ -1,6 +1,7 @@
 # Painted-style icons for the build bar's tier tabs, in the same hand as make_icons.py: a
 # fisher's oilskin sou'wester (isle_tier_fisherfolk), a labourer's flat cap over a hammer
-# (isle_tier_labourers) and a burgher's top hat (isle_tier_burghers).
+# (isle_tier_labourers) and a burgher's top hat (isle_tier_burghers); and the pedlar's stall
+# (isle_pedlar): a striped awning over an open chest of wares.
 # Usage: python3 make_build_icons.py <out dir>
 import os, sys
 def o(w):
@@ -42,6 +43,25 @@ I['isle_tier_burghers'] = svg(lg('th', (0, '#5a5a6a'), (.4, '#2a2a34'), (1, '#0c
     f'<g {o(1.8)}><path d="M17.4 36 C27 38 37 38 46.6 36 L47 44 C37 46 27 46 17 44 Z" fill="url(#bd)"/></g>'
     '<path d="M23 12 L22 32" stroke="#fff" stroke-width="2.6" opacity=".35" stroke-linecap="round"/>'
     '<ellipse cx="32" cy="8" rx="13" ry="2.6" fill="#3a3a48" stroke="#2a1708" stroke-width="1.6"/>')
+
+# The pedlar's stall: a red and cream awning on two posts over an open chest with a gem.
+I['isle_pedlar'] = svg(WOOD + lg('aw', (0, '#ff7a5a'), (.6, '#c8321e'), (1, '#7a160c')) + lg('cr', (0, '#fff6dc'), (1, '#d8c08a'))
+    + lg('gd', (0, '#fff2a0'), (.5, '#e8b030'), (1, '#8a5a10')) + lg('gm', (0, '#a8f0ff'), (.5, '#2a9ad8'), (1, '#0a3a7a')),
+    shadow(32, 59, 26, 3.5) +
+    f'<g {o(2.4)}><path d="M10 22 L12 56 L16 56 L15 22 Z" fill="url(#wd)"/><path d="M54 22 L52 56 L48 56 L49 22 Z" fill="url(#wd)"/></g>'
+    # Awning: a sloped roof of five stripes with a scalloped edge.
+    f'<g {o(2.4)}><path d="M6 22 L14 6 L50 6 L58 22 Z" fill="url(#cr)"/></g>'
+    '<path d="M14 6 L20.7 6 L16.4 22 L6 22 Z M28 6 L35.5 6 L37 22 L27 22 Z M43 6 L50 6 L58 22 L47.6 22 Z" fill="url(#aw)"/>'
+    f'<g {o(2.4)}><path d="M6 22 C6 28 16.4 28 16.4 22 C16.4 28 27 28 27 22 C27 28 37 28 37 22 C37 28 47.6 28 47.6 22 C47.6 28 58 28 58 22 Z" fill="url(#aw)"/></g>'
+    f'<g {o(2.4)} fill="none"><path d="M6 22 L14 6 L50 6 L58 22 Z"/></g>'
+    # The chest: open lid behind, gold and a gem heaped in it.
+    f'<g {o(2.4)}><path d="M18 40 L20 32 L44 32 L46 40 Z" fill="url(#wd)"/>'
+    '<path d="M20 40 C22 34 30 33 32 35 C35 32 42 34 44 40 Z" fill="url(#gd)"/>'
+    '<path d="M28 39 L32 33 L36 39 L32 43 Z" fill="url(#gm)"/>'
+    '<path d="M16 40 L48 40 L46 56 L18 56 Z" fill="url(#wd)"/></g>'
+    f'<g {o(1.8)} fill="none"><path d="M17 46 L47 46"/></g>'
+    '<rect x="29" y="44" width="6" height="6" rx="1" fill="url(#gd)" stroke="#2a1708" stroke-width="1.6"/>'
+    '<path d="M30 35.5 L32 33.5" stroke="#fff" stroke-width="1.6" opacity=".8" stroke-linecap="round"/>')
 
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)

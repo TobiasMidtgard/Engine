@@ -91,6 +91,9 @@ pub(super) const PH: usize = 472;
 /// The chart node's size, logical px (same aspect as the picture).
 pub const CHART_W: f32 = 360.0;
 pub const CHART_H: f32 = CHART_W * PH as f32 / PW as f32;
+/// The pedlar's medallion by the chart, lit while he is at the quay.
+pub const PEDLAR_MEDAL: &str = "isle.pedlar.medal";
+
 /// Height the map table takes from the bottom of the screen, with a gap above it.
 pub const ROOM_H: f32 = CHART_H + 136.0;
 
@@ -659,7 +662,12 @@ pub fn panel() -> El {
                 .with_style(|s| s.gap(6.0))
                 .child(
                     brass::medallion("isle_items", 34.0, "isle.shelf")
-                        .tooltip("Items", "The shelf of spare items, and the pedlar's wares while he is at the quay.\n[b]Key[/b]  I"),
+                        .tooltip("Items", "The shelf of spare items, and the sockets they go in.\n[b]Key[/b]  I"),
+                )
+                .child(
+                    brass::medallion("isle_pedlar", 34.0, "isle.pedlar")
+                        .id(PEDLAR_MEDAL)
+                        .tooltip("The pedlar's stall", "Buy items from the pedlar while his barque lies at the home quay; it shines while he is in.\n[b]Key[/b]  M"),
                 )
                 .child(
                     brass::medallion("isle_ledger", 34.0, "isle.ledger")

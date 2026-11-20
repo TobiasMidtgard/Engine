@@ -1,6 +1,6 @@
 //! Items in the HUD: the sockets on a Trading Union's, Town Hall's or Harbour Office's card
 //! (with what the item in each does right now), and the shelf: the company's spare items, the
-//! pedlar's offers while he lies at the quay, and the place to choose an item for a socket.
+//! place to choose an item for a socket. Buying is at the pedlar's stall (hud/pedlar.rs).
 //!
 //! Data and rules are the game's (crate::items); this is the UI thread's.
 
@@ -55,7 +55,7 @@ fn sort_name(s: Sort) -> &'static str {
     }
 }
 
-fn host_name(h: items::Host) -> &'static str {
+pub(super) fn host_name(h: items::Host) -> &'static str {
     match h {
         items::Host::Union => "Trading Union",
         items::Host::Hall => "Town Hall",
@@ -69,7 +69,7 @@ fn stars(n: u32) -> String {
 }
 
 /// "Rare device · Millers · ★★", in the item's rank colour.
-fn kind_line(iv: &ItemView) -> String {
+pub(super) fn kind_line(iv: &ItemView) -> String {
     let mut parts = vec![format!(
         "{} {}",
         ui_rank(iv.rank).name(),
@@ -170,7 +170,7 @@ pub(super) fn socket_state(iv: &ItemView) -> SocketState {
 }
 
 /// How an item acts, in words: "Order · acts 2 min, then 10 min to ready".
-fn way_line(iv: &ItemView) -> Option<String> {
+pub(super) fn way_line(iv: &ItemView) -> Option<String> {
     let m = |t: f32| {
         if t >= 60.0 {
             format!("{:.0} min", t / 60.0)
@@ -213,7 +213,7 @@ fn way_line(iv: &ItemView) -> Option<String> {
 
 /// An item's socket with its state and hover card; `state_id` names the overlay so the card
 /// can move its sweep and arcs every tick without a rebuild.
-fn item_socket(iv: &ItemView, size: f32, action: &str, state_id: &str) -> El {
+pub(super) fn item_socket(iv: &ItemView, size: f32, action: &str, state_id: &str) -> El {
     brass::socket_with(
         Some((iv.icon, ui_rank(iv.rank))),
         size,
@@ -521,13 +521,13 @@ pub fn card_opened(world: &mut World) {
     refresh_card(world);
 }
 
-/// The shelf's body: the picking banner, the items, the chosen one's details, the pedlar.
+/// The shelf's body: the picking banner, the items, the chosen one's details, and the way to
+/// the pedlar's stall.
 fn body(world: &World) -> Vec<El> {
     let st = world.resource::<Shelf>();
     let picking = st.picking;
     let chosen = st.chosen;
     let shelf = items::shelf_view(world);
-    let offers = items::offers_view(world);
     let market = world
         .get_resource::<items::Items>()
         .is_some_and(|i| i.market_open);
@@ -608,56 +608,35 @@ fn body(world: &World) -> Vec<El> {
             );
         }
     }
-    if market {
-        out.push(brass::divider(300.0));
-        out.push(
-            El::text("The pedlar is at the quay")
-                .class("ink_title")
-                .text_style(|t| t.size(18.0))
+    // Buying is at the pedlar's own stall (playtest note 18): the shelf only points there.
+    out.push(brass::divider(300.0));
+    out.push(
+        El::new()
+            .class("row")
+            .with_style(|s| s.gap(10.0).align_items(Align::Center))
+            .child(brass::badge("isle_pedlar", 40.0))
+            .child(
+                El::text(if market {
+                    "The pedlar is at the quay with wares for sale."
+                } else {
+                    "The pedlar is away at sea."
+                })
+                .class("ink")
+                .text_style(|t| t.size(14.0).bold())
+                .with_style(|s| s.grow(1.0).shrink(1.0))
                 .pick_ignore(),
-        );
-        if offers.is_empty() {
-            out.push(ink("He has sold everything he brought.", 14.0));
-        }
-        for o in &offers {
-            out.push(
-                El::new()
-                    .class("row")
-                    .with_style(|s| s.gap(10.0).align_items(Align::Center))
-                    .child(item_socket(&o.item, 44.0, "", ""))
-                    .child(
-                        El::new()
-                            .class("col")
-                            .with_style(|s| s.gap(0.0).grow(1.0).shrink(1.0))
-                            .child(
-                                El::text(o.item.name)
-                                    .class("ink")
-                                    .text_style(|t| t.bold().size(15.0))
-                                    .pick_ignore(),
-                            )
-                            .child(brass::label(&kind_line(&o.item), true)),
-                    )
-                    .child(
-                        El::button(
-                            format!("Buy · {}", o.price),
-                            format!("isle.item.buy:{}", o.index),
-                        )
-                        .class("brass_button")
-                        .text_style(|t| t.nowrap())
-                        .with_style(|s| s.shrink(0.0))
-                        .tooltip(
-                            "",
-                            if o.affordable {
-                                "Buy it onto the shelf."
-                            } else {
-                                "Not enough coins."
-                            },
-                        )
-                        .disabled(!o.affordable),
-                    ),
-            );
-        }
-    }
+            )
+            .child(
+                El::button("His stall", "isle.pedlar")
+                    .class(if market {
+                        "brass_button"
+                    } else {
+                        "brass_button_dark"
+                    })
+                    .text_style(|t| t.nowrap())
+                    .tooltip("", "Open the pedlar's stall [color=#6a5339](M)[/color]"),
+            ),
+    );
     out
 }
 

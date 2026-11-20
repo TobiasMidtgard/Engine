@@ -448,7 +448,8 @@ const RELATIONS: &[(&str, &str)] = &[
     ("isle_gift", include_str!("../assets/icons/isle_gift.svg")),
 ];
 
-/// The build bar's tier tabs, painted by `assets/icons/make_build_icons.py`.
+/// The build bar's tier tabs and the pedlar's stall, painted by
+/// `assets/icons/make_build_icons.py`.
 const TIERS: &[(&str, &str)] = &[
     (
         "isle_tier_fisherfolk",
@@ -461,6 +462,10 @@ const TIERS: &[(&str, &str)] = &[
     (
         "isle_tier_burghers",
         include_str!("../assets/icons/isle_tier_burghers.svg"),
+    ),
+    (
+        "isle_pedlar",
+        include_str!("../assets/icons/isle_pedlar.svg"),
     ),
 ];
 
