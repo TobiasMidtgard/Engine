@@ -69,7 +69,9 @@ fn strand_base_color(kind: u32, random: f32) -> vec3<f32> {
     if (kind == 2u) {
         c = hair_color(max(pig.x + 0.45, 0.85), pig.y * 0.3, 0.0, random) * 0.6;
     }
-    return c;
+    // Wet hair is darker and deeper in color, as the strand renderer's (`hair_draw::wet_groom`).
+    let wet = saturate(pose.wear.w);
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 + wet)) * (1.0 - 0.25 * wet);
 }
 
 const HAIR_F0: f32 = 0.04654; // cuticle, index 1.55
@@ -189,7 +191,8 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let glint = vec2<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1));
     // Scalp hair is smoother than brows and beard; fair hair scatters more light between
     // fibers than dark.
-    let rough = select(0.42, 0.33, kind == 0u) * (0.85 + 0.3 * fract(random * 37.3));
+    let rough = select(0.42, 0.33, kind == 0u) * (0.85 + 0.3 * fract(random * 37.3))
+        * (1.0 - 0.45 * saturate(pose.wear.w));
     // No fiber runs quite straight: each wavers a few degrees every few millimetres and leans
     // its own way, and its highlight moves with it (Unreal's photoreal character jitters the
     // shading tangent per strand; Scheuermann 2004 shifts it by noise). With every fiber of a

@@ -23,7 +23,7 @@ use engine_core::math::{Mat4, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Camera, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance};
 use engine_world::animation::SkeletonPose;
-use engine_world::character::FaceControls;
+use engine_world::character::{Appearance, FaceControls};
 use engine_world::{HairGuides, HairGuidesPosed};
 
 use crate::BuiltCharacter;
@@ -73,6 +73,8 @@ pub struct DrawnHair {
     pub version: u64,
     /// The strand set it draws (`CharacterMeshes::strands`).
     pub set: usize,
+    /// The wetness it was made for ([`wet_step`]).
+    pub wet: u8,
     /// The groom's guides at rest, the skin's rest space.
     rest_guides: Vec<Vec3>,
     /// Hair that follows the face (beards); `None` for hair the simulation moves.
@@ -196,6 +198,97 @@ pub fn groom(set: &StrandSet, packed: &PackedStrands, pigment: [f32; 3]) -> Opti
         ..Default::default()
     };
     g.is_valid().then_some(g)
+}
+
+/// Wet hair, from `Appearance::wear.wet` (0 dry .. 1 soaked): water in and on the cuticle
+/// darkens and deepens the color (as wet sand), smooths the cuticle (a sharper, brighter
+/// highlight), and draws neighbouring hairs together into pointed clumps. `cell`: about how
+/// wide a clump is at the root (m); 0 leaves the hairs where they are.
+pub fn wet_groom(g: &mut StrandGroom, wet: f32, cell: f32) {
+    let wet = wet.clamp(0.0, 1.0);
+    if wet <= 0.0 {
+        return;
+    }
+    let deepen = |c: &mut [f32; 4]| {
+        for v in &mut c[..3] {
+            *v = v.max(0.0).powf(1.0 + WET_DEEPEN * wet) * (1.0 - WET_DARKEN * wet);
+        }
+    };
+    g.roots.iter_mut().for_each(deepen);
+    for t in &mut g.tips {
+        deepen(t);
+        t[3] *= 1.0 - WET_SMOOTH * wet;
+    }
+    let per = g.points_per as usize;
+    let strands = g.strand_count();
+    if cell <= 0.0 || per < 2 || strands == 0 {
+        return;
+    }
+    // Clumps: the hairs rooted in one cell whose tips end near each other (hairs combed apart
+    // at a parting stay apart). Each is drawn toward the clump's mean hair, more toward the
+    // tip, where water pulls wet hair into points.
+    let cell_of = |v: f32, size: f32| (v / size).floor() as i32;
+    let key = |s: usize| {
+        let (r, t) = (g.points[s * per], g.points[s * per + per - 1]);
+        [
+            cell_of(r[0], cell),
+            cell_of(r[1], cell),
+            cell_of(r[2], cell),
+            cell_of(t[0], WET_TIP_CELL),
+            cell_of(t[1], WET_TIP_CELL),
+            cell_of(t[2], WET_TIP_CELL),
+        ]
+    };
+    let mut clumps: HashMap<[i32; 6], (f32, Vec<Vec3>)> = HashMap::new();
+    let mut of_hair = Vec::with_capacity(strands);
+    for s in 0..strands {
+        let k = key(s);
+        let (n, mean) = clumps
+            .entry(k)
+            .or_insert_with(|| (0.0, vec![Vec3::ZERO; per]));
+        *n += 1.0;
+        for (m, p) in mean.iter_mut().zip(&g.points[s * per..(s + 1) * per]) {
+            *m += Vec3::new(p[0], p[1], p[2]);
+        }
+        of_hair.push(k);
+    }
+    for (n, mean) in clumps.values_mut() {
+        mean.iter_mut().for_each(|m| *m /= *n);
+    }
+    for (s, k) in of_hair.iter().enumerate() {
+        let mean = &clumps[k].1;
+        let hair = &mut g.points[s * per..(s + 1) * per];
+        let from_mean = Vec3::new(hair[0][0], hair[0][1], hair[0][2]) - mean[0];
+        for (i, (p, m)) in hair.iter_mut().zip(mean).enumerate() {
+            let along = i as f32 / (per - 1) as f32;
+            let to = *m + from_mean * (1.0 - along);
+            let pull = WET_CLUMP * wet * along.sqrt();
+            let at = Vec3::new(p[0], p[1], p[2]).lerp(to, pull);
+            (p[0], p[1], p[2]) = (at.x, at.y, at.z);
+        }
+    }
+}
+
+/// How far apart the tips of one wet clump's hairs may end at most (m), and how strongly a
+/// soaked clump's tips meet (1: at one point).
+const WET_TIP_CELL: f32 = 0.04;
+const WET_CLUMP: f32 = 0.9;
+/// Wet hair's color: deeper (a power of the dry color), darker, and its cuticle smoother
+/// (wet fair hair reads as dark honey; as the character shaders' `strand_base_color`).
+const WET_DEEPEN: f32 = 1.0;
+const WET_DARKEN: f32 = 0.25;
+const WET_SMOOTH: f32 = 0.45;
+/// About how wide a clump of wet scalp hair is at the root, and of beard hair (m).
+const WET_SCALP_CELL: f32 = 0.012;
+const WET_BEARD_CELL: f32 = 0.007;
+/// The wetness a person's grooms are made for: a few steps, so a person getting wetter
+/// remakes their grooms a few times, not every frame.
+const WET_STEPS: f32 = 3.0;
+
+fn wet_step(appearance: Option<&Appearance>) -> u8 {
+    appearance.map_or(0, |a| {
+        (a.wear.wet.clamp(0.0, 1.0) * WET_STEPS).round() as u8
+    })
 }
 
 /// Guides for hair that follows the face (a groom without guides of its own): the first hair
@@ -327,6 +420,7 @@ pub(crate) fn draw_hair(
         Option<&SkeletonPose>,
         Option<&GlobalTransform>,
         Option<&FaceControls>,
+        Option<&Appearance>,
     )>,
     mut drawn: Query<(Entity, &mut DrawnHair, &mut Transform, &mut StrandInstance)>,
     cameras: Query<(&Camera, &GlobalTransform)>,
@@ -334,8 +428,8 @@ pub(crate) fn draw_hair(
     lod_scale: Option<Res<CharacterLod>>,
     mut near: ResMut<SharedHairNear>,
     config: Option<Res<engine_core::config::EngineConfig>>,
-    mut pending: Local<HashMap<(Entity, u64), Slot>>,
-    mut nothing: Local<std::collections::HashSet<(Entity, u64)>>,
+    mut pending: Local<HashMap<(Entity, u64, u8), Slot>>,
+    mut nothing: Local<std::collections::HashSet<(Entity, u64, u8)>>,
     mut palette: Local<Vec<Mat4>>,
 ) {
     let off_frame = config.is_some_and(|c| c.off_frame());
@@ -353,7 +447,7 @@ pub(crate) fn draw_hair(
     let was = std::mem::take(&mut near.0);
     let mut by_distance: Vec<(f32, Entity)> = people
         .iter()
-        .map(|(person, _, _, at, _)| {
+        .map(|(person, _, _, at, ..)| {
             let distance = match (eye, at) {
                 (Some(eye), Some(at)) => (at.0.translation - eye).length() as f32 * scale,
                 _ => 0.0,
@@ -375,13 +469,20 @@ pub(crate) fn draw_hair(
                 .iter()
                 .any(|(d, p)| *p == person && *d < KEEP_GROOMS)
     };
-    let mut have: Vec<(Entity, u64)> = Vec::new();
+    let mut have: Vec<(Entity, u64, u8)> = Vec::new();
+    // Hair made for another wetness: drawn until the person's new grooms are made.
+    let mut stale: Vec<(Entity, Entity)> = Vec::new();
     let mut weights = [0.0f32; MAX_CHANNELS];
     for (e, mut hair, mut t, mut instance) in &mut drawn {
         match people.get(hair.person) {
-            Ok((_, built, pose, _, face_controls))
+            Ok((_, built, pose, _, face_controls, look))
                 if built.version == hair.version && kept(hair.person) =>
             {
+                if hair.wet == wet_step(look) {
+                    have.push((hair.person, hair.version, hair.wet));
+                } else {
+                    stale.push((e, hair.person));
+                }
                 let shown = near.0.contains(&hair.person);
                 if instance.visible != shown {
                     instance.visible = shown;
@@ -408,14 +509,14 @@ pub(crate) fn draw_hair(
                         );
                     }
                 }
-                have.push((hair.person, hair.version));
             }
             _ => commands.entity(e).despawn(),
         }
     }
     let mut spawned = Vec::new();
-    for (person, built, pose, _, _) in &people {
-        let key = (person, built.version);
+    for (person, built, pose, _, _, look) in &people {
+        let wet = wet_step(look);
+        let key = (person, built.version, wet);
         if have.contains(&key) || !near.0.contains(&person) || nothing.contains(&key) {
             continue;
         }
@@ -430,7 +531,7 @@ pub(crate) fn draw_hair(
                     .name("character hair grooms".into())
                     .spawn(move || {
                         let _span = tracing::info_span!("character hair grooms").entered();
-                        let made = make_grooms(&meshes, &uniform);
+                        let made = make_grooms(&meshes, &uniform, wet);
                         *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(made);
                     });
                 if spawned.is_err() {
@@ -444,7 +545,7 @@ pub(crate) fn draw_hair(
             pending.remove(&key);
             made
         } else {
-            make_grooms(&built.meshes, &built.uniform)
+            make_grooms(&built.meshes, &built.uniform, wet)
         };
         if made.is_empty() {
             // (Bald and clean-shaven, or nothing that makes a groom: not looked at again.)
@@ -453,6 +554,9 @@ pub(crate) fn draw_hair(
         }
         let head = head_matrix(&built.meshes, pose, &mut palette);
         spawned.push(person);
+        for (old, _) in stale.iter().filter(|(_, p)| *p == person) {
+            commands.entity(*old).despawn();
+        }
         for Made {
             set,
             kind,
@@ -477,6 +581,7 @@ pub(crate) fn draw_hair(
                     person,
                     version: built.version,
                     set,
+                    wet,
                     rest_guides,
                     face,
                 },
@@ -488,20 +593,23 @@ pub(crate) fn draw_hair(
         }
     }
     // (A build nobody waits for any more: its worker finishes and its grooms are dropped.)
-    pending.retain(|(person, version), _| {
-        people
-            .get(*person)
-            .is_ok_and(|(_, b, ..)| b.version == *version && near.0.contains(person))
+    pending.retain(|(person, version, wet), _| {
+        people.get(*person).is_ok_and(|(_, b, .., look)| {
+            b.version == *version && wet_step(look) == *wet && near.0.contains(person)
+        })
     });
-    nothing.retain(|(person, version)| {
+    nothing.retain(|(person, version, wet)| {
         people
             .get(*person)
-            .is_ok_and(|(_, b, ..)| b.version == *version)
+            .is_ok_and(|(_, b, .., look)| b.version == *version && wet_step(look) == *wet)
     });
     // The character feature leaves a person's hair to the strand renderer only once it has
     // their grooms (it draws their locks while a worker makes them).
-    near.0
-        .retain(|p| have.iter().any(|(q, _)| q == p) || spawned.contains(p));
+    near.0.retain(|p| {
+        have.iter().any(|(q, ..)| q == p)
+            || stale.iter().any(|(_, q)| q == p)
+            || spawned.contains(p)
+    });
 }
 
 /// A groom made for one of a person's strand sets ([`make_grooms`]).
@@ -517,7 +625,8 @@ pub(crate) type Slot = Arc<Mutex<Option<Vec<Made>>>>;
 
 /// The grooms of a person's hair the strand renderer draws ([`shared`]), with the face's
 /// guides for hair that follows it.
-fn make_grooms(m: &CharacterMeshes, uniform: &GpuCharacter) -> Vec<Made> {
+fn make_grooms(m: &CharacterMeshes, uniform: &GpuCharacter, wet: u8) -> Vec<Made> {
+    let wet = wet as f32 / WET_STEPS;
     let mut out = Vec::new();
     for (i, set) in m.strands.iter().enumerate() {
         if !shared(set.kind, set.points_per) {
@@ -534,6 +643,12 @@ fn make_grooms(m: &CharacterMeshes, uniform: &GpuCharacter) -> Vec<Made> {
         let Some(mut g) = groom(set, packed, [p[0], p[1], p[2]]) else {
             continue;
         };
+        let cell = match set.kind {
+            StrandKind::Scalp => WET_SCALP_CELL,
+            StrandKind::Beard => WET_BEARD_CELL,
+            _ => 0.0,
+        };
+        wet_groom(&mut g, wet, cell);
         // A thin layer, with next to no hair behind it to scatter light back.
         g.thin = set.kind == StrandKind::Brows;
         // Hair the simulation doesn't move follows the face (brows, beards).
@@ -667,6 +782,48 @@ mod tests {
         // Roots that don't fit the groom give no guides.
         let mut h = groom(&set, &packed, [0.3, 0.1, 0.0]).unwrap();
         assert!(face_guides(&mut h, &[1, 2]).is_empty() && h.guides.is_empty());
+    }
+
+    #[test]
+    fn wet_hair_is_darker_smoother_and_clumps_at_the_tips() {
+        // Pairs of hairs rooted 2 mm apart, 2 cm apart at the tip.
+        let mut g = StrandGroom {
+            points_per: 4,
+            points: (0..2)
+                .flat_map(|h| {
+                    (0..4).map(move |k| {
+                        let x = 0.0011 + h as f32 * (0.002 + 0.006 * k as f32);
+                        [x, 0.001 + 0.05 * k as f32, 0.001, 1e-4]
+                    })
+                })
+                .collect(),
+            roots: vec![[0.6, 0.5, 0.3, 0.2], [0.6, 0.5, 0.3, 0.7]],
+            tips: vec![[0.6, 0.5, 0.3, SCALP_ROUGHNESS]; 2],
+            ..Default::default()
+        };
+        let dry = g.clone();
+        wet_groom(&mut g, 0.0, WET_SCALP_CELL);
+        assert_eq!(g.points, dry.points);
+        wet_groom(&mut g, 1.0, WET_SCALP_CELL);
+        assert!(g.is_valid());
+        // Darker (fair hair by about a half), the random value kept, a smoother cuticle.
+        assert!(
+            g.roots[0][0] < 0.6 * 0.55 && g.roots[0][0] > 0.6 * 0.3,
+            "{:?}",
+            g.roots[0]
+        );
+        assert_eq!(g.roots[1][3], 0.7);
+        assert!((g.tips[0][3] - SCALP_ROUGHNESS * (1.0 - WET_SMOOTH)).abs() < 1e-6);
+        // The roots stay; the tips come together.
+        assert_eq!(g.points[0], dry.points[0]);
+        assert_eq!(g.points[4], dry.points[4]);
+        let gap = |p: &[[f32; 4]]| (p[3][0] - p[7][0]).abs();
+        assert!(
+            gap(&g.points) < gap(&dry.points) * 0.3,
+            "{} {}",
+            gap(&g.points),
+            gap(&dry.points)
+        );
     }
 
     #[test]
