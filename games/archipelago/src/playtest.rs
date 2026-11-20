@@ -211,6 +211,7 @@ fn turn(world: &mut World, log: &mut Log) {
     }
     trade(world, log, now);
     restart_paused(world, log, now);
+    tidy(world, log, now);
     incidents_seen(world, log);
 }
 
@@ -421,6 +422,49 @@ fn restart_paused(world: &mut World, log: &mut Log, now: f64) {
     }
 }
 
+/// Works the bot paused because their warehouse stood full of what they make.
+#[derive(Resource, Default)]
+struct BotPaused(std::collections::HashSet<Entity>);
+
+/// A careful player pauses a works whose goods have filled the warehouse for five minutes
+/// (a quarter of its upkeep instead of half) and starts it again once half the room is free.
+fn tidy(world: &mut World, log: &mut Log, now: f64) {
+    let econ = world.resource::<Economy>().clone();
+    let mut held = std::mem::take(&mut world.get_resource_or_insert_with(BotPaused::default).0);
+    let (mut paused, mut woke) = (0, 0);
+    for (e, b, mut p) in world
+        .query::<(Entity, &Building, &mut Producer)>()
+        .iter_mut(world)
+    {
+        let Some(g) = b.kind.def().output else {
+            continue;
+        };
+        let books = &econ.islands[b.island];
+        if held.contains(&e) {
+            if !p.paused {
+                // The player (or a rule) started it again.
+                held.remove(&e);
+            } else if books.get(g) < books.capacity * 0.5 {
+                p.paused = false;
+                p.idle_s = 0.0;
+                held.remove(&e);
+                woke += 1;
+            }
+        } else if !p.paused && p.status == Status::Full && p.idle_s > 300.0 {
+            p.paused = true;
+            held.insert(e);
+            paused += 1;
+        }
+    }
+    world.resource_mut::<BotPaused>().0 = held;
+    if paused + woke > 0 {
+        log.line(
+            now,
+            format!("paused {paused} works with a full warehouse, restarted {woke}"),
+        );
+    }
+}
+
 /// Copy new fires, riots and sicknesses into the log.
 fn incidents_seen(world: &mut World, log: &mut Log) {
     let Some(inc) = world.get_resource::<crate::incidents::Incidents>() else {
@@ -480,7 +524,12 @@ fn safety(world: &mut World, log: &mut Log, now: f64, i: usize) {
     }
     // Ruins: rebuilt when there is money.
     for (id, kind, isle, _) in crate::incidents::ruins(world) {
-        if isle != i || world.resource::<Economy>().coins < 1200.0 {
+        // A burnt works costs half its price to put back: a link in a chain (the farm that
+        // feeds the home bakery) is worth it as soon as there is the money, the rest wait.
+        let (price, _) = crate::incidents::rebuild_cost(kind);
+        let works = kind.def().output.is_some();
+        let keep = if works { 150.0 } else { 1200.0 };
+        if isle != i || world.resource::<Economy>().coins < price as f64 + keep {
             continue;
         }
         match crate::incidents::rebuild(world, id) {
@@ -901,7 +950,10 @@ fn build_chain(
                 None => continue,
             },
         };
-        if count(world, m, j) < count(world, k, i) {
+        // One maker of the input for each works that uses it: here, and at the far end
+        // its own (a sheep farm at home feeds the home weaver and the one abroad).
+        let users = count(world, k, i) + if j != i { count(world, k, j) } else { 0 };
+        if count(world, m, j) < users {
             let why = if j == i {
                 format!("input {} for it", input.name())
             } else {
@@ -1189,7 +1241,9 @@ fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
             toward += crate::sim::appraise(h, &books, boost).residents;
         }
     }
-    if toward > 0.0 && held < toward * 0.85 {
+    // (Short of hands, more houses go up anyway: a sick or unhappy street that is slow to
+    // fill must not leave the farms unworked.)
+    if !short_hands && toward > 0.0 && held < toward * 0.85 {
         return;
     }
     if log.last.get(&(i, None)).is_some_and(|t| now - t < 120.0) {
@@ -1272,7 +1326,20 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                 .islands
                 .iter()
                 .enumerate()
-                .filter(|(j, x)| *j != to && x.stock[gi] > 30.0)
+                // A works there that makes it ships what it has from the start (a farm put
+                // up to feed this island); a stock that only piled up waits for a hold's worth.
+                .filter(|(j, x)| {
+                    *j != to
+                        && x.stock[gi]
+                            > if standing
+                                .iter()
+                                .any(|(k, kind)| *k == *j && kind.def().output == Some(g))
+                            {
+                                6.0
+                            } else {
+                                30.0
+                            }
+                })
                 .max_by(|a, c| a.1.stock[gi].total_cmp(&c.1.stock[gi]))
                 .map(|(j, _)| j);
             let Some(from) = from else {
@@ -1681,7 +1748,7 @@ fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
             .get::<crate::shipyard::Yard>(*e)
             .is_some_and(|y| !y.queue.is_empty())
     });
-    if building || !free_ships(world).is_empty() || coins < 2_500.0 {
+    if building || !free_ships(world).is_empty() || coins < 1_400.0 {
         return;
     }
     if log.last.get(&(2001, None)).is_some_and(|t| now - t < 120.0) {
@@ -1689,12 +1756,29 @@ fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
     }
     log.last.insert((2001, None), now);
     let (e, b) = &yards[0];
-    let labourers = world.resource::<Economy>().islands[b.island].population[1] >= 1.0;
-    let craft = if labourers && coins > 6_000.0 {
-        Craft::Barque
-    } else {
-        Craft::Schooner
+    // The first hull it can pay for now and keep 600 coins: a barque when rich, else a
+    // schooner, else a paddle steamer (bricks instead of the clothes a young town lacks).
+    let books = world.resource::<Economy>().islands[b.island].clone();
+    let can = |c: Craft| {
+        crate::shipyard::PLANS
+            .iter()
+            .find(|p| p.craft == c)
+            .is_some_and(|p| {
+                coins >= p.coins as f64 + 600.0
+                    && books.population[p.tier.index()] >= 1.0
+                    && p.cost.iter().all(|(g, n)| books.get(*g) >= *n as f64)
+            })
     };
+    let wish: &[Craft] = if coins > 6_000.0 {
+        &[Craft::Barque, Craft::Schooner, Craft::PaddleSteamer]
+    } else {
+        &[Craft::Schooner, Craft::PaddleSteamer]
+    };
+    let craft = wish
+        .iter()
+        .copied()
+        .find(|c| can(*c))
+        .unwrap_or(Craft::Schooner);
     match crate::shipyard::order(world, *e, craft) {
         Ok(()) => {
             log.act("ship ordered");

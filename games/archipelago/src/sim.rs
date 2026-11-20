@@ -66,7 +66,7 @@ impl Status {
             Status::NoInput => "Waiting for goods",
             Status::NoWorkers => "Not enough workers",
             Status::NoRoad => "No road to a harbour",
-            Status::Full => "Store full: carts are busy",
+            Status::Full => "Store full",
             Status::NoTrees => "No trees in reach",
             Status::NoWilds => "No wild country in reach",
             Status::NoFields => "No room for fields",
@@ -745,6 +745,20 @@ pub fn step(
     for (e, b, mut p, link, boost) in producers.iter_mut() {
         let def = b.kind.def();
         let boost = boost.unwrap_or(&plain);
+        // A works that paused itself for want of work wakes once its goods are in: it
+        // stopped to save its upkeep, not to keep the bread from the town.
+        if p.auto_paused && p.paused && def.input.is_some() {
+            let stock = &econ.islands[b.island].stock;
+            if [def.input, def.input2]
+                .into_iter()
+                .flatten()
+                .all(|g| stock[g.index()] >= 1.0)
+            {
+                p.paused = false;
+                p.auto_paused = false;
+                p.idle_s = 0.0;
+            }
+        }
         // In debt, works that have stood idle a while pause themselves.
         if in_debt && !p.paused && p.idle_s >= IDLE_CHEAP_S {
             p.paused = true;
@@ -818,7 +832,11 @@ pub fn step(
         let connected = link.is_some_and(|l| l.path.is_some());
         let idle = if !connected {
             Some(Status::NoRoad)
-        } else if p.held >= 4.0 + boost.stock {
+        } else if p.held >= 4.0 + boost.stock
+            || out.is_some_and(|g| books.capacity > 0.0 && books.get(g) >= books.capacity - 0.5)
+        {
+            // (Its carts cannot unload, or the warehouse is full of what it makes: it stands,
+            // lets its workers go and costs half until there is room, as a player would pause it.)
             Some(Status::Full)
         } else if site < 0.05 {
             Some(match b.kind {
@@ -1215,6 +1233,40 @@ mod tests {
         );
     }
 
+    /// A works whose warehouse is full of what it makes stands, lets its hands go and costs
+    /// half, instead of paying full upkeep to throw its goods away.
+    #[test]
+    fn a_full_warehouse_stands_its_works_down() {
+        let mut w = bare_world();
+        crate::town::build_start(&mut w);
+        crate::town::prewarm(&mut w, 30.0);
+        let home = w
+            .query::<&Building>()
+            .iter(&w)
+            .find(|b| b.kind == Kind::Sawmill)
+            .map_or(0, |b| b.island);
+        let fill = |w: &mut World| {
+            let books = &mut w.resource_mut::<Economy>().islands[home];
+            let cap = books.capacity;
+            books.add(Good::Planks, cap);
+        };
+        for _ in 0..90 {
+            fill(&mut w);
+            crate::town::prewarm(&mut w, 1.0);
+        }
+        let mills: Vec<Producer> = w
+            .query::<(&Building, &Producer)>()
+            .iter(&w)
+            .filter(|(b, _)| b.kind == Kind::Sawmill && b.island == home)
+            .map(|(_, p)| p.clone())
+            .collect();
+        assert!(!mills.is_empty());
+        for p in &mills {
+            assert_eq!(p.status, Status::Full);
+            assert_eq!(p.upkeep_share(), 0.5);
+        }
+    }
+
     /// In debt for two minutes, works idle for a minute pause themselves.
     #[test]
     fn debt_pauses_idle_works() {
@@ -1229,6 +1281,15 @@ mod tests {
         assert!(econ.auto_paused > 0);
         assert!(!econ.drains.is_empty());
         assert!(weavers(&mut w).iter().all(|p| p.paused && p.auto_paused));
+        // Wool comes in: the weavers wake by themselves, still in debt.
+        let home = w
+            .query::<&Building>()
+            .iter(&w)
+            .find(|b| b.kind == Kind::Weaver)
+            .map_or(0, |b| b.island);
+        w.resource_mut::<Economy>().islands[home].add(Good::Wool, 20.0);
+        crate::town::prewarm(&mut w, 1.0);
+        assert!(weavers(&mut w).iter().any(|p| !p.paused));
     }
 
     /// A ready house does not stop being ready on a short dip in supply.
