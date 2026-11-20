@@ -10,6 +10,7 @@ pub mod demo;
 pub mod eyes;
 pub mod face;
 pub mod feature;
+pub mod hair_draw;
 pub mod hair_motion;
 pub mod hands;
 pub mod headgear;
@@ -238,6 +239,7 @@ impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CharacterDebug>()
             .init_resource::<CharacterSubsurface>()
+            .init_resource::<hair_draw::SharedHairNear>()
             .register_component::<CharacterBuild>(
                 "How a character is built: region (body, bust or head), levels (skin subdivision 0..2), hair (grow strands).",
             )
@@ -259,6 +261,14 @@ impl Plugin for CharacterPlugin {
                 )
                     .chain()
                     .in_set(CharacterSet),
+            )
+            // Scalp hair through the one strand renderer: its instances ride the head bone,
+            // placed before transforms propagate.
+            .add_systems(
+                PostUpdate,
+                hair_draw::draw_hair
+                    .after(engine_world::WorldShiftSet::Apply)
+                    .before(engine_core::schedule::UpdateSet::Propagate),
             )
             .add_render_feature(CharacterFeature::default());
         // Every person is drawn here, skinned to the animation module's pose, once the pack

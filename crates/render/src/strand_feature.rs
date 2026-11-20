@@ -92,7 +92,7 @@ const MIN_STRANDS: f32 = 16.0;
 const SLOT_ROOM: f32 = 1.25;
 const SLOT_KEEP: f32 = 1.6;
 /// How opaque one fibre is across its width: hair, fur.
-const OPACITY: [f32; 2] = [0.85, 0.9];
+const OPACITY: [f32; 2] = [0.95, 0.9];
 /// Strands cast into the cascades: one in this many, as much wider.
 const CASCADE_SHARE: u32 = 4;
 /// Grooms nobody drew in this many frames leave the GPU, the longest unseen first, while the

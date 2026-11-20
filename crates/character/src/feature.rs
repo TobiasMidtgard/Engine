@@ -459,6 +459,13 @@ impl GpuMeshes {
             .iter_mut()
             .filter(|s| s.role == StrandRole::HandsOver)
         {
+            // Hair the strand renderer takes over near the camera: the feature shows only its
+            // locks (from where they stand in alone), so its hairs never go to the GPU.
+            let distance = if crate::hair_draw::shared(s.kind) {
+                f32::INFINITY
+            } else {
+                distance
+            };
             if let Some(done) = s
                 .pending
                 .as_ref()
@@ -517,7 +524,8 @@ impl GpuMeshes {
     }
 
     /// Pick this frame's detail for a person `distance` m from the camera.
-    fn choose_detail(&mut self, gpu: &GpuShared, distance: f32) {
+    /// `shared_near`: the strand renderer draws this person's shared hair (`hair_draw`).
+    fn choose_detail(&mut self, gpu: &GpuShared, distance: f32, shared_near: bool) {
         self.coarse = self.coarse_count > 0 && distance > lod::COARSE_SKIN;
         let share = lod::lock_share(distance);
         // A set's locks stand in for its hairs in full while those are not on the GPU yet.
@@ -543,7 +551,8 @@ impl GpuMeshes {
                     locks
                 }
             };
-            if fade <= 0.0 {
+            // (Near the camera scalp hair is drawn by the strand renderer: `hair_draw`.)
+            if fade <= 0.0 || (shared_near && crate::hair_draw::shared(s.kind)) {
                 drawn = 0;
             }
             s.drawn = drawn;
@@ -1710,6 +1719,7 @@ impl RenderFeature for CharacterFeature {
         let debug = world
             .get_resource::<CharacterDebug>()
             .map_or(0, |d| d.view as u32);
+        let shared_near = world.get_resource::<crate::hair_draw::SharedHairNear>();
         let lod_scale = world
             .get_resource::<CharacterLod>()
             .map_or(1.0, |l| l.distance_scale);
@@ -1888,7 +1898,11 @@ impl RenderFeature for CharacterFeature {
                 uploaded = true;
                 upload_ms += hair_start.elapsed().as_secs_f32() * 1000.0;
             }
-            c.choose_detail(gpu, distance);
+            c.choose_detail(
+                gpu,
+                distance,
+                shared_near.is_some_and(|n| n.0.contains(&entity)),
+            );
             self.stats.instances += 1;
             self.stats.triangles += c.triangles();
             self.stats.draw_calls += 2 + c.strands.iter().filter(|s| s.drawn > 0).count() as u32;

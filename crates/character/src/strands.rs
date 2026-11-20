@@ -893,11 +893,28 @@ fn grow_scalp(
             lock_edge = (off.length() / 0.025).min(1.0);
             // A shorter hair follows its lock only as far as it reaches.
             let reach = scale.min(1.0);
+            let end = if g.gravity > 0.5 {
+                let e = Vec3::new(r.normal(), r.normal() * 0.3, r.normal()) * 0.035;
+                e - sp.n * e.dot(sp.n) * 0.5
+            } else {
+                Vec3::ZERO
+            };
             let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
                 let own = off + to_strand * (tight * t.sqrt());
-                let follow = along(gpts, t * reach) + own * (1.0 - c * t.powf(0.8));
+                // Hanging locks gather down their length but loosen again over the last
+                // third: gathered all the way, every lock ended in one point, a paintbrush,
+                // where real ends spread and thin out unevenly. Each hair's end strays its
+                // own way a little (`end`).
+                let gather = if g.gravity > 0.5 {
+                    c * t.powf(0.8) * (1.0 - 0.5 * smoothstep(0.6, 1.0, t))
+                } else {
+                    c * t.powf(0.8)
+                };
+                let follow = along(gpts, t * reach)
+                    + own * (1.0 - gather)
+                    + end * (smoothstep(0.7, 1.0, t) * g.length);
                 // Hanging hair takes its lock's shape all along (its own wander would cross
                 // its neighbors' and look like straw); short hair only toward the tip.
                 let w = if g.gravity > 0.5 {

@@ -231,9 +231,10 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let up = normalize(strand_to_model_dir(inst, vec3<f32>(0.0, 1.0, 0.0)));
     let out = normalize(strand_to_model_dir(inst, nc));
     let tau_sky = 0.5 * (strand_depth(inst, m, up, 16u) + strand_depth(inst, m, out, 16u));
-    let occ = mix(exp(-tau_sky), 1.0, 0.1);
-    // The gaps between locks and the roots stay darker under every light.
-    let lit = mix(occ, 1.0, 0.6);
+    let occ = mix(exp(-tau_sky), 1.0, select(0.06, 0.1, fur));
+    // The gaps between locks and the roots stay darker under every light: deep in a head of
+    // hair much darker (it is what parts one lock from the next), in fur less.
+    let lit = mix(occ, 1.0, select(0.45, 0.6, fur));
 
     var color = vec3<f32>(0.0);
     let caps = capsule_occlusion(rel, nc);
@@ -261,7 +262,10 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let fill = frame.ambient.rgb;
     let sky = (sky_ambient_covered(nc, sky_vis) - fill) * sky_vis + fill;
     let ao = occ * caps.y;
-    color += base * sky * ao * (0.4 + 0.5 * scatter);
+    // Sky light reaching into the hair has passed through fibres on the way, taking their color
+    // (blonde goes amber in its depths, not grey-green).
+    let sky_tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(min(0.25 * tau_sky, 2.0)));
+    color += base * sky * ao * sky_tint * (0.4 + 0.5 * scatter);
     // The sky's sheen along the fibres.
     let env = sample_env_rough(reflect(-v, nc), 0.35) * sky_vis + fill;
     color += env * 0.04 * ao;
