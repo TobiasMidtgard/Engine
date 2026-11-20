@@ -83,10 +83,12 @@ fn cs_tile_depth(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------- shading
 
 // Optical depth of the hair between model-space point `m` and the edge of the density volume
-// along model direction `dir` (unit), up to `steps` cells.
-fn strand_depth(inst: StrandInst, m: vec3<f32>, dir: vec3<f32>, steps: u32) -> f32 {
+// along model direction `dir` (unit), up to `steps` cells. `jitter` (cells, each axis within
+// ±0.5) shifts where one hair samples the grid: hairs side by side read different cells, so
+// the grid's cells don't show as square patches of shade across a lock.
+fn strand_depth(inst: StrandInst, m: vec3<f32>, dir: vec3<f32>, steps: u32, jitter: vec3<f32>) -> f32 {
     let d = i32(params.misc.w);
-    var q = (m - inst.grid.xyz) / inst.grid.w + dir;
+    var q = (m - inst.grid.xyz) / inst.grid.w + jitter + dir;
     var sum = 0u;
     for (var k = 0u; k < steps; k++) {
         let c = vec3<i32>(floor(q));
@@ -101,6 +103,9 @@ fn strand_depth(inst: StrandInst, m: vec3<f32>, dir: vec3<f32>, steps: u32) -> f
 }
 
 const HAIR_F0: f32 = 0.04654; // cuticle, index 1.55
+// How much brighter head hair's R highlight is than fur's: the near-white sheen that breaks
+// along the locks of a combed head.
+const HUMAN_SHINE: f32 = 2.2;
 
 fn hair_fresnel(cos_theta: f32) -> f32 {
     return HAIR_F0 + (1.0 - HAIR_F0) * pow(1.0 - saturate(cos_theta), 5.0);
@@ -113,8 +118,9 @@ fn hair_gauss(b: f32, x: f32) -> f32 {
 // Marschner's fibre model in Karis's fit ("Physically Based Hair Shading in Unreal", 2016):
 // light from `l` scattered toward `v` by a fibre along `t` of color `base`. The R highlight off
 // the cuticle, TT through the fibre when backlit, TRT off its back wall (colored, with glints).
-// `glint.x` scales TRT, `glint.y` the tilt of the cuticle scales.
-fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec2<f32>) -> vec3<f32> {
+// `glint.x` scales TRT, `glint.y` the tilt of the cuticle scales, `glint.z` R (the cuticle's
+// shine: combed, conditioned head hair shines brighter than an animal's coat).
+fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec3<f32>) -> vec3<f32> {
     let sin_v = clamp(dot(t, v), -1.0, 1.0);
     let sin_l = clamp(dot(t, l), -1.0, 1.0);
     let cos_theta_d = max(cos(0.5 * abs(asin(sin_v) - asin(sin_l))), 0.05);
@@ -129,7 +135,7 @@ fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f
     let vol = dot(v, l);
     var out = vec3<f32>(0.0);
     let mr = hair_gauss(b * 1.4142 * cos_theta_d, s + shift * 2.0);
-    out += vec3<f32>(mr * 0.4 * cos_half_phi * hair_fresnel(sqrt(saturate(0.5 + 0.5 * vol))));
+    out += vec3<f32>(mr * 0.4 * glint.z * cos_half_phi * hair_fresnel(sqrt(saturate(0.5 + 0.5 * vol))));
     let mtt = hair_gauss(b * 0.5, s - shift);
     let a = 1.0 / n_prime;
     let h = cos_half_phi * (1.0 + a * (0.6 - 0.8 * cos_phi));
@@ -158,7 +164,7 @@ fn hair_multiple(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, shad
 // One light through `depth` of hair, with the shadow maps' `shadow`. Dual scattering (Zinke et
 // al. 2008), roughly: the hair in the way stops light singly scattered toward the eye, but light
 // scattered between fibres goes around them, deeper the fairer they are, and takes their color.
-fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec2<f32>, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
+fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec3<f32>, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
     let fair = saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.0);
     let tau = depth * mix(1.0, 0.45, fair);
     // The shadow maps hold the hair too: the darker of the two counts, not both.
@@ -213,7 +219,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let fur = inst.more.y == 1u;
     let v = normalize(-rel);
     let nc = normalize(v - t * dot(v, t) + vec3<f32>(0.0, 1e-5, 0.0));
-    let glint = vec2<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1));
+    let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(HUMAN_SHINE, 1.0, fur));
     let rough = rough_in * (0.85 + 0.3 * fract(random * 37.3));
     // No fibre runs quite straight: each leans its own way, and its highlight with it.
     let b = normalize(cross(t, nc));
@@ -230,7 +236,8 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     // sky light and the gaps between locks.
     let up = normalize(strand_to_model_dir(inst, vec3<f32>(0.0, 1.0, 0.0)));
     let out = normalize(strand_to_model_dir(inst, nc));
-    let tau_sky = 0.5 * (strand_depth(inst, m, up, 16u) + strand_depth(inst, m, out, 16u));
+    let jitter = vec3<f32>(fract(random * 13.7), fract(random * 29.3), fract(random * 47.9)) - 0.5;
+    let tau_sky = 0.5 * (strand_depth(inst, m, up, 16u, jitter) + strand_depth(inst, m, out, 16u, jitter));
     let occ = mix(exp(-tau_sky), 1.0, select(0.06, 0.1, fur));
     // The gaps between locks and the roots stay darker under every light: deep in a head of
     // hair much darker (it is what parts one lock from the next), in fur less.
@@ -242,7 +249,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
     if (dot(sun, sun) > 0.0) {
         let shadow = min(shadow_factor(rel, nc), caps.x);
-        let depth = strand_depth(inst, m, normalize(strand_to_model_dir(inst, l)), 48u);
+        let depth = strand_depth(inst, m, normalize(strand_to_model_dir(inst, l)), 48u, jitter);
         color += hair_light(ts, v, l, base, rough, glint, shadow, depth, scatter) * sun * lit;
     }
     let count = frame.counts.x;
@@ -254,7 +261,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
         if (dist2 > range * range) { continue; }
         let pl = to_light * inverseSqrt(max(dist2, 1e-8));
         let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
-        let depth = strand_depth(inst, m, normalize(strand_to_model_dir(inst, pl)), 24u);
+        let depth = strand_depth(inst, m, normalize(strand_to_model_dir(inst, pl)), 24u, jitter);
         let body = strand_capsule_light(rel, pl, sqrt(dist2));
         color += hair_light(ts, v, pl, base, rough, glint, body, depth, scatter) * light.color_radius.rgb * falloff * lit;
     }
@@ -264,7 +271,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let ao = occ * caps.y;
     // Sky light reaching into the hair has passed through fibres on the way, taking their color
     // (blonde goes amber in its depths, not grey-green).
-    let sky_tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(min(0.25 * tau_sky, 2.0)));
+    let sky_tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(min(0.6 * tau_sky, 3.0)));
     color += base * sky * ao * sky_tint * (0.4 + 0.5 * scatter);
     // The sky's sheen along the fibres.
     let env = sample_env_rough(reflect(-v, nc), 0.35) * sky_vis + fill;
