@@ -1608,11 +1608,19 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
         })
         .filter(|(i, g)| econ.islands[*i].stock[g.index()] < 1.0)
         .collect();
-    let carried = |g: Good| {
+    // (A route counts for the island it lands the good at: one bringing bricks to the home
+    // island does nothing for a new one.)
+    let port_of: HashMap<u32, usize> = world
+        .query::<&Building>()
+        .iter(world)
+        .map(|b| (b.id, b.island))
+        .collect();
+    let carried_to = |g: Good, to: usize| {
         routes.iter().any(|r| {
-            r.stops
-                .iter()
-                .any(|s| s.load.contains(&g) || s.unload.contains(&g))
+            r.stops.iter().any(|s| s.load.contains(&g))
+                && r.stops
+                    .iter()
+                    .any(|s| s.unload.contains(&g) && port_of.get(&s.at) == Some(&to))
         })
     };
     for (to, b) in econ.islands.iter().enumerate() {
@@ -1654,7 +1662,7 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                 .map(|(j, _)| j);
             let Some(from) = from else {
                 // Another company has it to spare: buy it there.
-                if !carried(g) && buy_abroad(world, log, now, g, to) {
+                if !carried_to(g, to) && buy_abroad(world, log, now, g, to) {
                     return;
                 }
                 if builders {
@@ -1689,7 +1697,7 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                 }
                 continue;
             };
-            if carried(g) {
+            if carried_to(g, to) {
                 log.line(
                     now,
                     format!(
