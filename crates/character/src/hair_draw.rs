@@ -6,9 +6,10 @@
 //! the skin's rest space, worn by a child entity that rides the head bone ([`DrawnHair`]):
 //! the head carries the hair exactly, and hair that moves takes the rest from its guides,
 //! posed by the hair simulation (`HairGuidesPosed` on the person) and brought into the head's
-//! frame when the renderer draws it ([`guides_now`]). Beards follow the face: their hairs go
-//! with guides made from the skin vertices they grow from, which the face's expressions and the
-//! jaw move ([`FaceFollow`]). Brows and lashes are still drawn by the character feature.
+//! frame when the renderer draws it ([`guides_now`]). Brows and beards follow the face: their
+//! hairs go with guides made from the skin vertices they grow from, which the face's expressions
+//! and the jaw move ([`FaceFollow`]). Lashes (they blink) and stubble are still drawn by the
+//! character feature.
 //!
 //! Only near the camera ([`SharedHairNear`]): past [`lod::LOCKS_TO`] the character feature has
 //! long drawn a head of hair as its locks alone (locks.rs), cheap enough for a crowd, and the
@@ -29,14 +30,15 @@ use crate::lod::{self, CharacterLod};
 use crate::strands::{PackedStrands, StrandKind, StrandSet};
 
 /// Whether hair of this kind, `points` points a hair, is drawn by the strand renderer near the
-/// camera (and not by the character feature): scalp hair and beards, but not stubble (three
+/// camera (and not by the character feature): scalp hair, brows and beards, but not stubble (three
 /// points, a millimetre or two), whose hairs are far thinner than a pixel and vanish into the
 /// skin there; the character feature's marks read as stubble. `ENGINE_CHARACTER_HAIR=old` keeps
 /// all of it in the character feature (to compare).
 pub fn shared(kind: StrandKind, points: u32) -> bool {
     static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let old = *OLD.get_or_init(|| std::env::var("ENGINE_CHARACTER_HAIR").is_ok_and(|v| v == "old"));
-    (kind == StrandKind::Scalp || (kind == StrandKind::Beard && points > 3)) && !old
+    let face = matches!(kind, StrandKind::Beard | StrandKind::Brows);
+    (kind == StrandKind::Scalp || (face && points > 3)) && !old
 }
 
 /// The people whose scalp hair the strand renderer draws this frame (and the character feature
@@ -395,15 +397,17 @@ pub fn draw_hair(
             let Some(packed) = m.packed_strands.get(i) else {
                 continue;
             };
-            let p = if set.kind == StrandKind::Beard {
-                built.uniform.beard
-            } else {
-                built.uniform.hair
+            let p = match set.kind {
+                StrandKind::Beard => built.uniform.beard,
+                StrandKind::Brows => built.uniform.brows,
+                _ => built.uniform.hair,
             };
             let Some(mut g) = groom(set, packed, [p[0], p[1], p[2]]) else {
                 continue;
             };
-            // Hair the simulation doesn't move follows the face (beards).
+            // A thin layer, with next to no hair behind it to scatter light back.
+            g.thin = set.kind == StrandKind::Brows;
+            // Hair the simulation doesn't move follows the face (brows, beards).
             let face = (set.kind != StrandKind::Scalp).then(|| {
                 let roots = m.strand_roots.get(i).map_or(&[][..], |r| &r[..]);
                 FaceFollow {
@@ -422,6 +426,13 @@ pub fn draw_hair(
                 to_transform(head),
                 StrandInstance {
                     visible: near.0.contains(&person),
+                    // Brow hairs are coarser than scalp hair, and so few that a thinner
+                    // sprinkle of them lets the skin show through as a pale brow.
+                    width_scale: if set.kind == StrandKind::Brows {
+                        1.3
+                    } else {
+                        1.0
+                    },
                     ..StrandInstance::new(handle)
                 },
                 DrawnHair {
