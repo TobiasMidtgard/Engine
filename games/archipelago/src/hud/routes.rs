@@ -25,12 +25,15 @@ use crate::sim::Building;
 pub const SCREEN: &str = "isle_routes";
 const PAINTER: &str = "isle_routes_map";
 const PAGE_W: f32 = 520.0;
+/// The chart page: click an island on it to add its harbour to the picked route.
+const PAGE_ID: &str = "isle.routes.chart";
 
-/// Route inks, in order.
-const INKS: [u32; 5] = [0x9a2f1c, 0x2c5a86, 0x3f7a2c, 0x9a6a12, 0x6a2f7a];
-
-fn ink(i: usize) -> Color {
-    Color::hex(INKS[i % INKS.len()])
+/// A route's ink: the colour its trade line has across the world (`tradelines`), a shade
+/// deeper so it reads on parchment.
+pub(super) fn ink(i: usize) -> Color {
+    let [r, g, b] = crate::tradelines::route_color(i);
+    let to = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+    Color::hex(to(r) << 16 | to(g) << 8 | to(b)).lerp(Color::hex(0x2a1708), 0.18)
 }
 
 /// The book's state: open, the route picked out, and each route's drawn lines.
@@ -571,7 +574,7 @@ fn el(world: &mut World) -> El {
         .child(brass::divider(70.0))
         .child(El::new().with_style(|s| s.grow(1.0)))
         .child(
-            El::text("click a route to follow and change it")
+            El::text("click islands on the chart to add stops")
                 .class("brass_label")
                 .text_style(|t| t.nowrap())
                 .pick_ignore(),
@@ -589,12 +592,17 @@ fn el(world: &mut World) -> El {
         .children(tiles);
     let page = brass::parchment()
         .with_style(|s| s.padding(14.0).direction(Direction::Column))
-        .child(El::new().paint(PAINTER).with_style(|s| {
-            s.size(PAGE_W, PAGE_W * map::PH as f32 / map::PW as f32)
-                .border(1.0, Color::hex(0x2a1a0a))
-                .radius(2.0)
-                .pick(Pick::Ignore)
-        }));
+        .child(
+            El::new()
+                .paint(PAINTER)
+                .id(PAGE_ID)
+                .on_click("isle.route.chart")
+                .with_style(|s| {
+                    s.size(PAGE_W, PAGE_W * map::PH as f32 / map::PW as f32)
+                        .border(1.0, Color::hex(0x2a1a0a))
+                        .radius(2.0)
+                }),
+        );
     let book = brass::plate()
         .with_style(|s| {
             s.direction(Direction::Column)
@@ -646,6 +654,122 @@ pub fn toggle(world: &mut World) {
     let el = el(world);
     if engine_ui::screens::spawn_screen(world, screen, &el).is_ok() {
         world.resource_mut::<RouteBook>().open = true;
+    }
+}
+
+/// What a click on island `i` of the chart would do for the picked route (or a new one).
+enum ChartPick {
+    /// Add building `id` as stop `n` (1-based) of route `r` (None: a new route).
+    Add { r: Option<usize>, id: u32, n: usize },
+    /// Already stop `n` of the route.
+    Already(usize),
+    /// No harbour (or mast) of ours there.
+    Nothing(&'static str),
+}
+
+/// The island under the pointer on the chart page, if any.
+fn island_under(world: &mut World) -> Option<usize> {
+    let e = engine_ui::input::find_id(world, PAGE_ID)?;
+    let r = world.get::<engine_ui::node::ComputedNode>(e)?.rect;
+    let p = world.resource::<engine::input::Mouse>().position?;
+    let uv = Vec2::new((p.x - r.x) / r.w, (p.y - r.y) / r.h);
+    if !(0.0..=1.0).contains(&uv.x) || !(0.0..=1.0).contains(&uv.y) {
+        return None;
+    }
+    let chart = world.resource::<RouteBook>().chart;
+    let at = map::from_uv(chart, uv);
+    island::island_at(at.x, at.y)
+}
+
+fn chart_pick(world: &mut World, i: usize) -> ChartPick {
+    let sel = world.resource::<RouteBook>().selected;
+    let route = sel.and_then(|r| world.resource::<Routes>().0.get(r).cloned());
+    let air = route.as_ref().is_some_and(|r| r.air);
+    let want = if air {
+        crate::defs::Kind::AirshipMast
+    } else {
+        crate::defs::Kind::Harbour
+    };
+    let here: Vec<u32> = {
+        let mut q = world.query::<&Building>();
+        q.iter(world)
+            .filter(|b| b.kind == want && b.island == i)
+            .map(|b| b.id)
+            .collect()
+    };
+    if here.is_empty() {
+        return ChartPick::Nothing(if air { "no airship mast" } else { "no harbour" });
+    }
+    match route {
+        Some(r) => {
+            if let Some(n) = r.stops.iter().position(|s| here.contains(&s.at)) {
+                ChartPick::Already(n + 1)
+            } else {
+                ChartPick::Add {
+                    r: sel,
+                    id: here[0],
+                    n: r.stops.len() + 1,
+                }
+            }
+        }
+        None => ChartPick::Add {
+            r: None,
+            id: here[0],
+            n: 1,
+        },
+    }
+}
+
+/// Where island `i` sits on the chart page, in screen px (`--hud-route-island`).
+pub fn demo_point(world: &mut World, i: usize) -> Option<Vec2> {
+    let e = engine_ui::input::find_id(world, PAGE_ID)?;
+    let r = world.get::<engine_ui::node::ComputedNode>(e)?.rect;
+    let chart = world.resource::<RouteBook>().chart;
+    let c = island::islands().get(i)?.center;
+    let uv = map::to_uv(chart, c.x, c.y);
+    Some(Vec2::new(r.x + uv.x * r.w, r.y + uv.y * r.h))
+}
+
+/// The chart page was clicked: add the island's harbour to the picked route, or open a new
+/// route from it when none is picked.
+pub fn chart_clicked(world: &mut World) {
+    let Some(i) = island_under(world) else {
+        return;
+    };
+    let name = island::islands()[i].name;
+    match chart_pick(world, i) {
+        ChartPick::Add { r, id, .. } => {
+            let r = match r {
+                Some(r) => r,
+                None => {
+                    let r = crate::orders::open_route(world, "", false);
+                    world.resource_mut::<RouteBook>().selected = Some(r);
+                    r
+                }
+            };
+            crate::tools::action(world, &format!("isle.route.stop.add:{r}:{id}"));
+            refresh(world);
+        }
+        ChartPick::Already(n) => {
+            engine_ui::toast::notify(
+                world,
+                engine_ui::toast::ToastKind::Info,
+                "isle_anchor",
+                "Trade route",
+                &format!("{name} is already stop {n} of this route."),
+                3.0,
+            );
+        }
+        ChartPick::Nothing(what) => {
+            engine_ui::toast::notify(
+                world,
+                engine_ui::toast::ToastKind::Warn,
+                "isle_anchor",
+                "Trade route",
+                &format!("{name} has {what} of ours yet: settle it or build one first."),
+                4.0,
+            );
+        }
     }
 }
 
@@ -760,4 +884,66 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
         Rect::new(r.x + r.w - s - 10.0 * px, r.y + 10.0 * px, s, s),
         Color::WHITE,
     );
+    hover_hint(world, ctx, chart, sel);
+}
+
+/// Under the pointer: the island ringed in the picked route's ink and a label saying what a
+/// click does ("+ Brannsey as stop 3", "New route from Haverholm", "no harbour").
+fn hover_hint(world: &mut World, ctx: &mut DrawCtx, chart: usize, sel: Option<usize>) {
+    let px = ctx.px;
+    let r = ctx.rect;
+    let Some(i) = island_under(world) else {
+        return;
+    };
+    let isle = &island::islands()[i];
+    let name = isle.name;
+    let (text, col) = match chart_pick(world, i) {
+        ChartPick::Add { r: Some(k), n, .. } => (format!("+ {name} as stop {n}"), ink(k)),
+        ChartPick::Add { r: None, .. } => (format!("+ New route from {name}"), ink(0)),
+        ChartPick::Already(n) => (format!("{name} is stop {n}"), Colors::ink_dim()),
+        ChartPick::Nothing(what) => (format!("{name}: {what}"), Colors::bad_ink()),
+    };
+    let _ = sel;
+    let uv = map::to_uv(chart, isle.center.x, isle.center.y);
+    let c = Vec2::new(r.x + uv.x * r.w, r.y + uv.y * r.h);
+    // The island's reach on the chart, from its radius in map units.
+    let edge = map::to_uv(chart, isle.center.x + isle.radius * 1.3, isle.center.y);
+    let rad = ((edge.x - uv.x) * r.w).abs().max(18.0 * px);
+    let tau = std::f32::consts::TAU;
+    let pulse = 0.5 + 0.5 * (ctx.time * 3.0).sin();
+    ctx.glow(c, rad * 1.3, col.with_alpha(0.18 + 0.1 * pulse), 1.6);
+    ctx.ring(
+        c,
+        Vec2::splat(rad),
+        2.6 * px,
+        col.with_alpha(0.9),
+        0.0,
+        tau,
+        18.0,
+    );
+    let spec = TextSpec {
+        text,
+        size: 15.0 * px,
+        weight: 700,
+        color: Color::hex(0xf6ead0),
+        family: Some(DISPLAY_FONT.into()),
+        wrap: false,
+        ..Default::default()
+    };
+    let size = ctx.measure(&spec);
+    let pad = Vec2::new(10.0, 5.0) * px;
+    let w = size.x + pad.x * 2.0;
+    let h = size.y + pad.y * 2.0;
+    let x = (c.x - w * 0.5).clamp(r.x + 4.0 * px, r.x + r.w - w - 4.0 * px);
+    let y = (c.y - rad - h - 6.0 * px).max(r.y + 4.0 * px);
+    let box_ = Rect::new(x, y, w, h);
+    ctx.shadow(box_, h * 0.5, 8.0 * px, Color::hexa(0x00000080));
+    ctx.rect(
+        box_,
+        col.lerp(Color::hex(0x1a1008), 0.35),
+        h * 0.5,
+        1.5 * px,
+        Color::hex(0xe8c880),
+    );
+    ctx.text_spec(&spec, Vec2::new(x + w * 0.5, y + h * 0.5), Vec2::splat(0.5));
 }

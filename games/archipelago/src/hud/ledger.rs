@@ -29,6 +29,8 @@ const PEOPLE_PAINTER: &str = "isle_led_people";
 const SAMPLE_S: f64 = 10.0;
 /// The biggest costs under the coin chart, and moving up under the people.
 const DRAINS_ID: &str = "isle.led.drains";
+/// The goods page's filter chips, column heads and rows (rebuilt when what they show changes).
+const GOODS_ID: &str = "isle.led.goods";
 const MOVING_ID: &str = "isle.led.moving";
 const KEEP: usize = 360;
 
@@ -50,6 +52,275 @@ pub struct Ledger {
     /// What the costs and the moving-up blocks last showed (rebuilt when it changes).
     drains_sig: String,
     moving_sig: String,
+    goods_sig: String,
+    /// Which goods the left page shows, and in what order.
+    pub filter: Filter,
+    pub sort: Sort,
+}
+
+/// Which goods the ledger lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Filter {
+    #[default]
+    All,
+    /// Asked for and not fully met, or running out.
+    Short,
+    Falling,
+    Rising,
+    /// Goods houses ask for.
+    Homes,
+    /// Goods buildings are built from.
+    Building,
+}
+
+impl Filter {
+    const ALL: [Filter; 6] = [
+        Filter::All,
+        Filter::Short,
+        Filter::Falling,
+        Filter::Rising,
+        Filter::Homes,
+        Filter::Building,
+    ];
+    fn name(self) -> &'static str {
+        match self {
+            Filter::All => "All",
+            Filter::Short => "Short",
+            Filter::Falling => "Falling",
+            Filter::Rising => "Rising",
+            Filter::Homes => "For homes",
+            Filter::Building => "Building",
+        }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Filter::All => "all",
+            Filter::Short => "short",
+            Filter::Falling => "falling",
+            Filter::Rising => "rising",
+            Filter::Homes => "homes",
+            Filter::Building => "building",
+        }
+    }
+}
+
+/// A column the goods sort by, and which way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sort {
+    pub col: Col,
+    pub desc: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Col {
+    /// The game's own order of goods.
+    #[default]
+    Usual,
+    Name,
+    Store,
+    Net,
+    Lasts,
+    Met,
+}
+
+impl Col {
+    fn key(self) -> &'static str {
+        match self {
+            Col::Usual => "usual",
+            Col::Name => "name",
+            Col::Store => "store",
+            Col::Net => "net",
+            Col::Lasts => "lasts",
+            Col::Met => "met",
+        }
+    }
+    fn from_key(s: &str) -> Option<Col> {
+        [
+            Col::Usual,
+            Col::Name,
+            Col::Store,
+            Col::Net,
+            Col::Lasts,
+            Col::Met,
+        ]
+        .into_iter()
+        .find(|c| c.key() == s)
+    }
+}
+
+/// One good's numbers, for the filters and the sorting.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GoodNums {
+    pub stock: f64,
+    pub net: f32,
+    pub used: f32,
+    pub supply: f32,
+    /// Minutes until the store is empty at today's pace (None: not falling).
+    pub lasts: Option<f32>,
+}
+
+pub fn nums(b: &crate::sim::IslandBooks, g: Good) -> GoodNums {
+    let i = g.index();
+    let net = b.made_per_min[i] - b.used_per_min[i];
+    GoodNums {
+        stock: b.stock[i],
+        net,
+        used: b.used_per_min[i],
+        supply: b.supply[i],
+        lasts: (net < -0.05).then(|| (b.stock[i] as f32 / -net).max(0.0)),
+    }
+}
+
+/// How long a store lasts, in a few characters.
+pub fn lasts_text(m: f32) -> String {
+    if m < 1.0 {
+        "now".into()
+    } else if m < 60.0 {
+        format!("{m:.0} min")
+    } else {
+        format!("{:.0} h", m / 60.0)
+    }
+}
+
+fn for_homes(g: Good) -> bool {
+    Tier::ALL.iter().any(|t| {
+        t.wants()
+            .iter()
+            .any(|w| w.need == crate::defs::Need::Good(g))
+    })
+}
+
+fn for_building(g: Good) -> bool {
+    crate::defs::DEFS
+        .iter()
+        .any(|d| d.cost.iter().any(|(c, _)| *c == g))
+}
+
+fn passes(f: Filter, g: Good, n: &GoodNums) -> bool {
+    match f {
+        Filter::All => true,
+        Filter::Short => (n.used > 0.01 && n.supply < 0.99) || n.lasts.is_some_and(|m| m < 10.0),
+        Filter::Falling => n.net < -0.05,
+        Filter::Rising => n.net > 0.05,
+        Filter::Homes => for_homes(g),
+        Filter::Building => for_building(g),
+    }
+}
+
+/// The goods listed, filtered and sorted. `nums` is per good index (empty: no numbers yet).
+fn goods_shown(goods: &[Good], nums: &[GoodNums], f: Filter, sort: Sort) -> Vec<Good> {
+    let get = |g: Good| nums.get(g.index()).copied().unwrap_or_default();
+    let mut v: Vec<Good> = goods
+        .iter()
+        .copied()
+        .filter(|g| passes(f, *g, &get(*g)))
+        .collect();
+    let key = |g: &Good| -> f64 {
+        let n = get(*g);
+        match sort.col {
+            Col::Usual | Col::Name => 0.0,
+            Col::Store => n.stock,
+            Col::Net => n.net as f64,
+            Col::Lasts => n.lasts.map_or(f64::MAX, |m| m as f64),
+            Col::Met => {
+                if n.used > 0.01 {
+                    n.supply as f64
+                } else {
+                    2.0
+                }
+            }
+        }
+    };
+    match sort.col {
+        Col::Usual => {}
+        Col::Name => v.sort_by_key(|g| g.name()),
+        _ => v.sort_by(|a, b| key(a).total_cmp(&key(b))),
+    }
+    if sort.desc {
+        v.reverse();
+    }
+    v
+}
+
+/// A column head that sorts by it: its words, an arrow when it is the one sorted by.
+fn sort_head(text: &str, width: f32, right: bool, col: Col, sort: Sort) -> El {
+    let on = sort.col == col;
+    let arrow = match (on, sort.desc) {
+        (true, false) => " ▲",
+        (true, true) => " ▼",
+        _ => "",
+    };
+    El::text(format!("{text}{arrow}"))
+        .class("ink_label")
+        .on_click(format!("isle.led.sort:{}", col.key()))
+        .tooltip(
+            "",
+            if on {
+                "Click to turn the order round"
+            } else {
+                "Click to sort by this"
+            },
+        )
+        .text_style(move |t| {
+            let t = t.nowrap();
+            if right { t.align(TextAlign::Right) } else { t }
+        })
+        .with_style(move |s| {
+            let s = s.width(width);
+            if on { s.color(Colors::ink()) } else { s }
+        })
+}
+
+/// The filter chips, the column heads and a row per good shown.
+fn goods_table(shown: &[Good], f: Filter, sort: Sort, all: &[Good]) -> Vec<El> {
+    let chips = El::new()
+        .class("row")
+        .with_style(|s| {
+            s.gap(6.0)
+                .wrap(true)
+                .align_items(Align::Center)
+                .margin([2.0, 0.0, 4.0, 0.0])
+        })
+        .child(brass::label("show", true))
+        .children(Filter::ALL.iter().map(|k| {
+            let on = *k == f;
+            El::button(k.name(), format!("isle.led.filter:{}", k.key()))
+                .class(if on {
+                    "brass_button"
+                } else {
+                    "brass_button_dark"
+                })
+                .text_style(|t| t.size(13.0).nowrap())
+                .with_style(|s| s.padding([3.0, 10.0]))
+        }));
+    let heads = El::new()
+        .class("row")
+        .with_style(|s| s.gap(10.0).margin([4.0, 0.0, 4.0, 0.0]))
+        .child(sort_head("good", 130.0, false, Col::Name, sort))
+        .child(sort_head("store", 40.0, true, Col::Store, sort))
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.width(150.0).justify(Justify::SpaceBetween))
+                .child(head("used", 60.0, false))
+                .child(head("made", 60.0, true)),
+        )
+        .child(sort_head("a min", 46.0, true, Col::Net, sort))
+        .child(sort_head("lasts", 46.0, true, Col::Lasts, sort))
+        .child(sort_head("met", 40.0, true, Col::Met, sort));
+    let mut out = vec![chips, heads];
+    out.extend(shown.iter().copied().map(good_row));
+    if shown.is_empty() {
+        out.push(
+            El::text("No goods here are like that just now.")
+                .class("ink")
+                .text_style(|t| t.italic().size(14.0))
+                .with_style(|s| s.color(Colors::ink_dim()).margin([10.0, 0.0, 0.0, 40.0]))
+                .pick_ignore(),
+        );
+    }
+    out.extend(others(all));
+    out
 }
 
 impl Ledger {
@@ -179,14 +450,21 @@ fn good_row(g: Good) -> El {
             El::text(format!("{{isle.led.net{i}}}"))
                 .class("ink")
                 .text_style(|t| t.nowrap().tabular().align(TextAlign::Right))
-                .with_style(|s| s.width(54.0))
+                .with_style(|s| s.width(46.0))
+                .pick_ignore(),
+        )
+        .child(
+            El::text(format!("{{isle.led.lasts{i}}}"))
+                .class("ink")
+                .text_style(|t| t.nowrap().tabular().align(TextAlign::Right).size(14.0))
+                .with_style(|s| s.width(46.0))
                 .pick_ignore(),
         )
         .child(
             El::text(format!("{{isle.led.met{i}}}"))
                 .class("ink")
                 .text_style(|t| t.nowrap().tabular().align(TextAlign::Right))
-                .with_style(|s| s.width(48.0))
+                .with_style(|s| s.width(40.0))
                 .pick_ignore(),
         )
 }
@@ -306,22 +584,16 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
         )
         .child(
             El::new()
-                .class("row")
-                .with_style(|s| s.gap(10.0).margin([4.0, 0.0, 4.0, 0.0]))
-                .child(head("good", 130.0, false))
-                .child(head("store", 40.0, true))
-                .child(
-                    El::new()
-                        .class("row")
-                        .with_style(|s| s.width(150.0).justify(Justify::SpaceBetween))
-                        .child(head("used", 60.0, false))
-                        .child(head("made", 60.0, true)),
-                )
-                .child(head("a minute", 54.0, true))
-                .child(head("need met", 48.0, true)),
-        )
-        .children(goods.iter().copied().map(good_row))
-        .child_opt(others(goods));
+                .class("col")
+                .id(GOODS_ID)
+                .with_style(|s| s.gap(2.0))
+                .children(goods_table(
+                    &goods_shown(goods, &[], Filter::All, Sort::default()),
+                    Filter::All,
+                    Sort::default(),
+                    goods,
+                )),
+        );
     let spine = El::new().with_style(|s| {
         s.width(14.0)
             .background(Fill::Linear {
@@ -491,6 +763,22 @@ pub fn update(world: &mut World) {
         .unwrap_or(econ.clock_s);
     let books = econ.islands[shown].clone();
     let name = island::islands()[shown].name;
+    {
+        let all = island_goods(&econ, shown);
+        let n: Vec<GoodNums> = Good::ALL.iter().map(|g| nums(&books, *g)).collect();
+        let (f, sort) = {
+            let l = world.resource::<Ledger>();
+            (l.filter, l.sort)
+        };
+        let list = goods_shown(&all, &n, f, sort);
+        let sig = format!("{shown}|{f:?}|{sort:?}|{list:?}|{all:?}");
+        if world.resource::<Ledger>().goods_sig != sig
+            && let Some(e) = engine_ui::input::find_id(world, GOODS_ID)
+        {
+            let _ = engine_ui::el::replace_children(world, e, &goods_table(&list, f, sort, &all));
+            world.resource_mut::<Ledger>().goods_sig = sig;
+        }
+    }
     // Bars share one scale so goods compare at a glance.
     let top = Good::ALL
         .iter()
@@ -533,6 +821,16 @@ pub fn update(world: &mut World) {
                 format!("{:.0}", books.stock[i]),
             );
             d.set(&format!("isle.led.net{i}"), signed(made - used));
+            d.set(
+                &format!("isle.led.lasts{i}"),
+                match nums(&books, g).lasts {
+                    Some(m) if m < 10.0 => {
+                        format!("[color=#9a2f1c][b]{}[/b][/color]", lasts_text(m))
+                    }
+                    Some(m) => lasts_text(m),
+                    None => "—".into(),
+                },
+            );
             let met = if used > 0.01 {
                 let p = books.supply[i] * 100.0;
                 let c = if p >= 99.0 {
@@ -829,48 +1127,87 @@ fn moving(books: &crate::sim::IslandBooks, name: &str) -> Vec<El> {
     ]
 }
 
+/// Move every ready house on island `i` up (those whose works can spare the people) and say
+/// what happened.
+pub fn up_all(world: &mut World, i: usize) {
+    let (moved, waiting) = crate::reports::move_up_all(world, i);
+    let left: u32 = waiting.values().sum();
+    let why: Vec<String> = waiting
+        .iter()
+        .map(|(k, n)| {
+            let w = match k.as_str() {
+                "would_empty_works" => "their works need the people",
+                "no_materials" => "the warehouse is short of building goods",
+                "needs_paving" => "they want a paved street",
+                _ => "they are not ready",
+            };
+            format!("{n}: {w}")
+        })
+        .collect();
+    let text = match (moved, left) {
+        (m, 0) => format!("{m} {} moved up.", if m == 1 { "house" } else { "houses" }),
+        (0, _) => format!("None could go ({}).", why.join("; ")),
+        (m, l) => format!(
+            "{m} moved up; {l} still {} ({}).",
+            if l == 1 { "waits" } else { "wait" },
+            why.join("; ")
+        ),
+    };
+    engine_ui::toast::notify(
+        world,
+        if moved > 0 {
+            engine_ui::toast::ToastKind::Good
+        } else {
+            engine_ui::toast::ToastKind::Warn
+        },
+        "isle_move_up",
+        "Moving up",
+        &text,
+        5.0,
+    );
+}
+
+/// Open the ledger on island `i` with filter `f` ("short", "falling", ...).
+pub fn open_filtered(world: &mut World, i: usize, f: &str) {
+    let filter = Filter::ALL
+        .into_iter()
+        .find(|x| x.key() == f)
+        .unwrap_or_default();
+    world.resource_mut::<Ledger>().filter = filter;
+    show(world, Some(i.min(island::islands().len() - 1)));
+    update(world);
+}
+
 /// `isle.led.up_all` and `isle.led.auto_up` on the island shown. Returns false for anything
 /// else.
 pub fn action(world: &mut World, a: &str) -> bool {
     let i = world.resource::<Ledger>().island;
-    match a {
-        "isle.led.up_all" => {
-            let (moved, waiting) = crate::reports::move_up_all(world, i);
-            let left: u32 = waiting.values().sum();
-            let why: Vec<String> = waiting
-                .iter()
-                .map(|(k, n)| {
-                    let w = match k.as_str() {
-                        "would_empty_works" => "their works need the people",
-                        "no_materials" => "the warehouse is short of building goods",
-                        "needs_paving" => "they want a paved street",
-                        _ => "they are not ready",
-                    };
-                    format!("{n}: {w}")
-                })
-                .collect();
-            let text = match (moved, left) {
-                (m, 0) => format!("{m} {} moved up.", if m == 1 { "house" } else { "houses" }),
-                (0, _) => format!("None could go ({}).", why.join("; ")),
-                (m, l) => format!(
-                    "{m} moved up; {l} still {} ({}).",
-                    if l == 1 { "waits" } else { "wait" },
-                    why.join("; ")
-                ),
-            };
-            engine_ui::toast::notify(
-                world,
-                if moved > 0 {
-                    engine_ui::toast::ToastKind::Good
-                } else {
-                    engine_ui::toast::ToastKind::Warn
-                },
-                "isle_move_up",
-                "Moving up",
-                &text,
-                5.0,
-            );
+    if let Some(k) = a.strip_prefix("isle.led.filter:") {
+        if let Some(f) = Filter::ALL.into_iter().find(|f| f.key() == k) {
+            world.resource_mut::<Ledger>().filter = f;
         }
+        update(world);
+        return true;
+    }
+    if let Some(c) = a.strip_prefix("isle.led.sort:").and_then(Col::from_key) {
+        {
+            let mut l = world.resource_mut::<Ledger>();
+            // Again on the same column turns the order round; a third time goes back to usual.
+            l.sort = match (l.sort.col == c, l.sort.desc) {
+                (false, _) => Sort {
+                    col: c,
+                    // Numbers read best biggest first; names from A.
+                    desc: !matches!(c, Col::Name | Col::Lasts | Col::Met),
+                },
+                (true, d) if d == matches!(c, Col::Name | Col::Lasts | Col::Met) => Sort::default(),
+                (true, d) => Sort { col: c, desc: !d },
+            };
+        }
+        update(world);
+        return true;
+    }
+    match a {
+        "isle.led.up_all" => up_all(world, i),
         "isle.led.auto_up" => {
             let on = world.resource::<Economy>().islands[i].auto_up;
             crate::reports::auto_up(world, i, !on);
@@ -936,7 +1273,14 @@ pub fn show(world: &mut World, island: Option<usize>) {
     let Some(i) = island else {
         return;
     };
-    world.resource_mut::<Ledger>().island = i;
+    {
+        // A new page: everything is drawn afresh.
+        let mut l = world.resource_mut::<Ledger>();
+        l.island = i;
+        l.goods_sig.clear();
+        l.drains_sig.clear();
+        l.moving_sig.clear();
+    }
     let screen = engine_ui::node::Screen {
         key: SCREEN.into(),
         modal: false,

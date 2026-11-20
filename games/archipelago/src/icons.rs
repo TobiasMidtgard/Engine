@@ -398,12 +398,63 @@ const MOOD: &[(&str, &str)] = &[
     ("isle_hold", include_str!("../assets/icons/isle_hold.svg")),
 ];
 
+/// The relations screen's emblems, treaties and sides, painted by
+/// `assets/icons/make_relations_icons.py`.
+const RELATIONS: &[(&str, &str)] = &[
+    (
+        "isle_emblem_gull",
+        include_str!("../assets/icons/isle_emblem_gull.svg"),
+    ),
+    (
+        "isle_emblem_lantern",
+        include_str!("../assets/icons/isle_emblem_lantern.svg"),
+    ),
+    (
+        "isle_emblem_anvil",
+        include_str!("../assets/icons/isle_emblem_anvil.svg"),
+    ),
+    (
+        "isle_treaty_war",
+        include_str!("../assets/icons/isle_treaty_war.svg"),
+    ),
+    (
+        "isle_treaty_hostile",
+        include_str!("../assets/icons/isle_treaty_hostile.svg"),
+    ),
+    (
+        "isle_treaty_neutral",
+        include_str!("../assets/icons/isle_treaty_neutral.svg"),
+    ),
+    (
+        "isle_treaty_pact",
+        include_str!("../assets/icons/isle_treaty_pact.svg"),
+    ),
+    (
+        "isle_treaty_alliance",
+        include_str!("../assets/icons/isle_treaty_alliance.svg"),
+    ),
+    (
+        "isle_rel_diplomacy",
+        include_str!("../assets/icons/isle_rel_diplomacy.svg"),
+    ),
+    (
+        "isle_rel_trade",
+        include_str!("../assets/icons/isle_rel_trade.svg"),
+    ),
+    (
+        "isle_rel_military",
+        include_str!("../assets/icons/isle_rel_military.svg"),
+    ),
+    ("isle_gift", include_str!("../assets/icons/isle_gift.svg")),
+];
+
 pub fn all() -> Vec<(&'static str, String)> {
     let mut v: Vec<(&'static str, String)> = PAINTED
         .iter()
         .chain(GEAR)
         .chain(CRAFT)
         .chain(MOOD)
+        .chain(RELATIONS)
         .map(|(n, s)| (*n, s.to_string()))
         .collect();
     v.extend(vec![
@@ -462,6 +513,20 @@ pub fn all() -> Vec<(&'static str, String)> {
             svg(
                 &grad("sp", "#5a4128", "#24170b"),
                 r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><circle cx="32" cy="32" r="17" fill="none" stroke-width="9"/><circle cx="32" cy="32" r="17" fill="none" stroke="url(#sp)" stroke-width="4.5"/><path d="M32 4 L32 60 M4 32 L60 32 M12.2 12.2 L51.8 51.8 M51.8 12.2 L12.2 51.8" stroke-width="7"/><path d="M32 4 L32 60 M4 32 L60 32 M12.2 12.2 L51.8 51.8 M51.8 12.2 L12.2 51.8" stroke="url(#sp)" stroke-width="3"/><circle cx="32" cy="32" r="6.5" fill="url(#sp)"/></g>"##,
+            ),
+        ),
+        (
+            "isle_relations",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><path d="M14 58 L22 8" stroke-width="7"/><path d="M50 58 L42 8" stroke-width="7"/><path d="M14 58 L22 8 M50 58 L42 8" stroke="url(#sp)" stroke-width="3"/><path d="M22 10 L36 14 L32 22 L40 28 L21 26 Z" fill="url(#sp)"/><path d="M42 10 L28 14 L32 22 L24 28 L43 26 Z" fill="url(#sp)" opacity="0.92"/></g><g stroke="#f0dfb4" stroke-width="1.6" fill="none" opacity="0.8" stroke-linecap="round"><path d="M25 14 L32 16 M39 14 L32 16"/></g>"##,
+            ),
+        ),
+        (
+            "isle_tradelines",
+            svg(
+                &grad("sp", "#5a4128", "#24170b"),
+                r##"<g stroke="#2a1708" stroke-linecap="round" fill="none"><path d="M12 48 C18 18 46 18 52 30" stroke-width="7" stroke-dasharray="1 9"/><path d="M12 48 C18 18 46 18 52 30" stroke="url(#sp)" stroke-width="3.6" stroke-dasharray="7 5"/><path d="M14 30 C26 54 44 56 52 50" stroke-width="7" stroke-dasharray="1 9"/><path d="M14 30 C26 54 44 56 52 50" stroke="url(#sp)" stroke-width="3.6" stroke-dasharray="7 5"/></g><g stroke="#2a1708" stroke-width="2.6"><circle cx="12" cy="48" r="6" fill="url(#sp)"/><circle cx="52" cy="30" r="6" fill="url(#sp)"/><circle cx="14" cy="30" r="5" fill="url(#sp)"/><circle cx="52" cy="50" r="5" fill="url(#sp)"/></g>"##,
             ),
         ),
         (

@@ -18,7 +18,7 @@ use engine_ui::el::El;
 use engine_ui::kit::brass::{self, Colors};
 use engine_ui::style::{Align, Fill, Justify, Pick, Position, Shadow, pct};
 
-use crate::defs::{Cat, Need, Tier};
+use crate::defs::{Cat, Kind, Need, Tier};
 use crate::items::Boost;
 use crate::sim::{self, Appraisal, Building, Economy, House, IslandBooks, Mood, Wait};
 use crate::tools::Hand;
@@ -290,31 +290,42 @@ fn mood_line(h: &House) -> String {
     }
 }
 
-/// A need's small badge, ringed by how well it is met (faded when not asked for yet).
+/// A need's small badge, its ring split green for the share supplied and red for the rest
+/// (dim when the island does not ask for it yet). Clicking a need that is short picks up the
+/// building that answers it, ready to place.
 fn need_chip(n: Need, met: f32, asked: bool, tip: String) -> El {
-    let c = if asked {
-        ring(met)
-    } else {
-        Color::hex(0x8a7a62)
+    let ring = brass::SplitRing {
+        frac: met,
+        idle: !asked,
+        width: 3.0,
     };
-    El::new()
-        .class("brass_badge")
-        .tooltip(need_name(n), tip)
-        .with_style(move |s| {
-            s.size(28.0, 28.0)
-                .border(2.2, c)
-                .shadow(Shadow::new(
-                    c.with_alpha(if asked { 0.4 } else { 0.0 }),
-                    5.0,
-                    0.0,
-                ))
-                .opacity(if asked { 1.0 } else { 0.55 })
-        })
-        .child(El::icon(need_icon(n)).with_style(move |s| {
-            s.size(20.0, 20.0)
-                .opacity(if asked && met > 0.05 { 1.0 } else { 0.5 })
-                .pick(Pick::Ignore)
-        }))
+    let chip = brass::split_badge(need_icon(n), 28.0, &ring, "").tooltip(need_name(n), tip);
+    match fixer(n).filter(|_| asked && met < 0.99) {
+        Some(k) => chip.on_click(build_action(k)),
+        None => chip,
+    }
+}
+
+/// The building that answers a need: its service, or the first works that makes the good.
+pub(super) fn fixer(n: Need) -> Option<Kind> {
+    match n {
+        Need::Service(k) => Some(k),
+        Need::Good(g) => crate::defs::DEFS
+            .iter()
+            .find(|d| d.output == Some(g))
+            .map(|d| d.kind),
+    }
+}
+
+/// The build menu's action for `k`.
+pub(super) fn build_action(k: Kind) -> String {
+    format!(
+        "isle.build:{}",
+        serde_json::to_value(k)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default()
+    )
 }
 
 fn chip_tip(s: &Seen, j: usize) -> String {
@@ -350,6 +361,15 @@ fn chip_tip(s: &Seen, j: usize) -> String {
         t.push_str(&format!(", +{:.0} happiness", w.joy));
     }
     t.push('.');
+    if l.asked
+        && l.met < 0.99
+        && let Some(k) = fixer(w.need)
+    {
+        t.push_str(&format!(
+            "\n[color=#2f6e28][b]Click[/b] to place a {}.[/color]",
+            k.def().name.to_lowercase()
+        ));
+    }
     t
 }
 

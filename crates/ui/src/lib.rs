@@ -112,6 +112,7 @@ impl Plugin for UiPlugin {
             skills::add_painters(&mut painters);
             crafting::add_painters(&mut painters);
             painters.add("brass_socket_state", kit::brass::paint_socket_state);
+            painters.add("brass_split_ring", kit::brass::paint_split_ring);
             saves::add_painters(&mut painters);
             title::add_painters(&mut painters);
             loading::add_painters(&mut painters);
@@ -331,6 +332,9 @@ fn register_types(app: &mut App) {
     .register_component::<hud::Crosshair>("Crosshair (paint: crosshair): spread 0..1 or bind.")
     .register_component::<kit::brass::SocketState>(
         "What an item in a brass socket is doing (paint: brass_socket_state): cooldown, fill, acting, pips, ready, inert, color, label.",
+    )
+    .register_component::<kit::brass::SplitRing>(
+        "How well a need is met, as a ring split green and red (paint: brass_split_ring): frac 0..1, idle, width.",
     )
     .register_component::<hud::TimeGauge>("Ring gauge of the engine's time scale (paint: time_gauge).")
     .register_component::<hud::MarkerDistance>("The distance label inside a world marker.")

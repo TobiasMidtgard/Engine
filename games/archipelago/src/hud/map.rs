@@ -108,7 +108,7 @@ pub(super) fn to_uv(k: usize, x: f64, z: f64) -> Vec2 {
     )
 }
 
-fn from_uv(k: usize, uv: Vec2) -> DVec2 {
+pub(super) fn from_uv(k: usize, uv: Vec2) -> DVec2 {
     let b = bounds(k);
     DVec2::new(
         b.x0 + uv.x as f64 * (b.x1 - b.x0),
@@ -135,9 +135,43 @@ pub struct MapTable {
     /// What was last laid into the chart picture: the region, its fog and which islands
     /// were the company's.
     laid: Option<(usize, Vec<f32>, Vec<bool>)>,
+    /// The trade lines are drawn across the world (the game draws them; this lights the
+    /// button).
+    pub trade_lines: bool,
 }
 
 const FOG: usize = 72;
+const TRADE_LINES_ID: &str = "isle.map.trade_lines";
+
+/// Show or hide the trade lines (the game draws them) and light the button.
+pub fn toggle_trade_lines(world: &mut World) {
+    crate::tools::action(world, "isle.view.trade_lines");
+    light_trade_lines(world);
+}
+
+/// Light the trade-lines button when the game shows them.
+pub fn light_trade_lines(world: &mut World) {
+    let on = world
+        .get_resource::<crate::tradelines::TradeLines>()
+        .is_some_and(|t| t.show);
+    if let Some(mut m) = world.get_resource_mut::<MapTable>() {
+        m.trade_lines = on;
+    }
+    if let Some(e) = engine_ui::input::find_id(world, TRADE_LINES_ID)
+        && let Some(mut it) = world.get_mut::<engine_ui::node::Interaction>(e)
+    {
+        it.selected = on;
+    }
+}
+
+/// `isle.view.trade_lines`. Returns false for anything else.
+pub fn action(world: &mut World, a: &str) -> bool {
+    if a == "isle.view.trade_lines" {
+        toggle_trade_lines(world);
+        return true;
+    }
+    false
+}
 
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     let t = t.clamp(0.0, 1.0);
@@ -380,6 +414,7 @@ fn camera_region(world: &mut World) -> usize {
 /// Keep the chart on the camera's region (unless the player turned to another) and the fog
 /// fresh. Called with the bars' refresh.
 pub fn update(world: &mut World, dt: f32) {
+    light_trade_lines(world);
     if !world.contains_resource::<MapTable>() {
         return;
     }
@@ -631,6 +666,10 @@ pub fn panel() -> El {
                         .tooltip("Trade routes", "Every route, its stops and cargo, and its ships on the chart.\n[b]Key[/b]  T"),
                 )
                 .child(
+                    brass::medallion("isle_relations", 34.0, "isle.relations")
+                        .tooltip("Relations", "Where the company stands with every rival house: diplomacy, trade and warships.\n[b]Key[/b]  P"),
+                )
+                .child(
                     brass::medallion("isle_home", 34.0, "isle.home")
                         .tooltip("Home", "Back to the town on Haverholm.\n[b]Key[/b]  H"),
                 ),
@@ -661,7 +700,31 @@ pub fn panel() -> El {
         .child(
             El::new()
                 .with_style(|s| s.position(Position::Absolute).right(24.0).bottom(24.0))
-                .child(plate.child(header).child(chart)),
+                .child(
+                    plate.child(header).child(
+                        El::new()
+                            .with_style(|s| s.size(CHART_W, CHART_H))
+                            .child(chart)
+                            .child(
+                                El::new()
+                                    .with_style(|s| {
+                                        s.position(Position::Absolute).left(8.0).bottom(8.0)
+                                    })
+                                    .child(
+                                        brass::medallion(
+                                            "isle_tradelines",
+                                            38.0,
+                                            "isle.view.trade_lines",
+                                        )
+                                        .id(TRADE_LINES_ID)
+                                        .tooltip(
+                                            "Trade lines",
+                                            "Draw every trade route across the sea and the globe, each in its own colour, so you can see the whole web when you zoom out.\n[b]Key[/b]  V",
+                                        ),
+                                    ),
+                            ),
+                    ),
+                ),
         )
 }
 

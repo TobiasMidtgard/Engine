@@ -729,6 +729,164 @@ pub mod brass {
         pub label: String,
     }
 
+    /// How well something is met, drawn as a ring split in two by [`split_badge`]: green
+    /// clockwise from the top for the share met, red for the rest, a hairline gap at each
+    /// join and a soft glow when it is whole. Not asked for yet: one dim ring.
+    #[derive(
+        bevy_ecs::component::Component,
+        Clone,
+        Debug,
+        Default,
+        PartialEq,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[serde(default)]
+    pub struct SplitRing {
+        /// 0..1 met.
+        pub frac: f32,
+        /// Not asked for (locked, paused): one dim ring, no red.
+        pub idle: bool,
+        /// Ring width in px (0: a tenth of the badge).
+        pub width: f32,
+    }
+
+    /// The green and red of [`SplitRing`].
+    pub fn met_color() -> Color {
+        Color::hex(0x4f9a3c)
+    }
+    pub fn unmet_color() -> Color {
+        Color::hex(0xb03a24)
+    }
+
+    /// An icon on an enamel badge `size` px across, ringed green for the share `ring.frac`
+    /// that is met and red for the rest (a pie of how well a need is supplied). `ring_id`
+    /// (or "") names the ring so a game can update its [`SplitRing`] in place.
+    pub fn split_badge(icon: &str, size: f32, ring: &SplitRing, ring_id: &str) -> El {
+        let idle = ring.idle;
+        let frac = ring.frac;
+        let overlay = El::new()
+            .paint("brass_split_ring")
+            .attach("SplitRing", ring)
+            .with_style(move |s| {
+                let pad = size * 0.12;
+                s.position(crate::style::Position::Absolute)
+                    .left(-pad)
+                    .top(-pad)
+                    .size(size + pad * 2.0, size + pad * 2.0)
+                    .pick(Pick::Ignore)
+            });
+        let overlay = if ring_id.is_empty() {
+            overlay
+        } else {
+            overlay.id(ring_id)
+        };
+        El::new()
+            .with_style(move |s| s.size(size, size))
+            .child(
+                El::new()
+                    .class("brass_badge")
+                    .with_style(move |s| s.size(size, size).opacity(if idle { 0.6 } else { 1.0 }))
+                    .child(El::icon(icon).with_style(move |s| {
+                        s.size(size * 0.7, size * 0.7)
+                            .opacity(if idle || frac < 0.05 { 0.5 } else { 1.0 })
+                            .pick(Pick::Ignore)
+                    })),
+            )
+            .child(overlay)
+    }
+
+    pub(crate) fn paint_split_ring(
+        world: &mut bevy_ecs::world::World,
+        e: bevy_ecs::entity::Entity,
+        ctx: &mut crate::draw::DrawCtx,
+    ) {
+        use engine_core::math::Vec2;
+        let Some(st) = world.get::<SplitRing>(e).cloned() else {
+            return;
+        };
+        let tau = std::f32::consts::TAU;
+        let rect = ctx.rect;
+        let c = rect.center();
+        let outer = rect.w.min(rect.h) * 0.5 / 1.24 * 1.04;
+        let w = if st.width > 0.0 {
+            st.width * ctx.px
+        } else {
+            (outer * 0.2).max(2.5 * ctx.px)
+        };
+        let rr = Vec2::splat(outer);
+        // The dark bed the arcs sit in, a little wider than them.
+        ctx.ring(
+            c,
+            rr,
+            w + 2.0 * ctx.px,
+            Colors::outline().with_alpha(0.85),
+            0.0,
+            tau,
+            0.0,
+        );
+        if st.idle {
+            ctx.ring(
+                c,
+                rr,
+                w,
+                Color::hex(0x8a7a62).with_alpha(0.75),
+                0.0,
+                tau,
+                0.0,
+            );
+            return;
+        }
+        let f = st.frac.clamp(0.0, 1.0);
+        if f >= 0.995 {
+            ctx.glow(c, outer * 1.25, met_color().with_alpha(0.3), 1.6);
+            ctx.ring(c, rr, w, met_color(), 0.0, tau, 0.0);
+            ctx.ring(
+                c,
+                rr - Vec2::splat(w * 0.25),
+                w * 0.3,
+                met_color().lerp(Color::WHITE, 0.45).with_alpha(0.6),
+                -0.6,
+                1.4,
+                0.0,
+            );
+            return;
+        }
+        if f <= 0.005 {
+            ctx.ring(c, rr, w, unmet_color(), 0.0, tau, 0.0);
+            return;
+        }
+        // A hairline gap at each join, so the split reads even when tiny.
+        let gap = (1.2 * ctx.px / outer).min(0.12);
+        ctx.ring(
+            c,
+            rr,
+            w,
+            met_color(),
+            gap * 0.5,
+            (tau * f - gap).max(0.01),
+            0.0,
+        );
+        ctx.ring(
+            c,
+            rr,
+            w,
+            unmet_color(),
+            tau * f + gap * 0.5,
+            (tau * (1.0 - f) - gap).max(0.01),
+            0.0,
+        );
+        // A lit edge on the green, where the share ends.
+        let a = tau * f;
+        let tip = c + Vec2::new(a.sin(), -a.cos()) * outer;
+        ctx.glow(
+            tip,
+            w * 1.6,
+            met_color().lerp(Color::WHITE, 0.5).with_alpha(0.5),
+            1.8,
+        );
+    }
+
     /// How much wider than its socket a state overlay is.
     const SOCKET_OVERLAY: f32 = 1.8;
 

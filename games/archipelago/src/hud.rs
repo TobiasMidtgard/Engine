@@ -25,11 +25,13 @@ use crate::island;
 use crate::sim::{Building, Economy, House, Producer, population};
 use crate::tools::{Hand, Tool};
 
+mod advisor;
 mod alerts;
 mod fleet;
 mod house;
 mod ledger;
 mod map;
+mod relations;
 mod routes;
 mod shelf;
 mod store;
@@ -693,6 +695,8 @@ pub fn setup(world: &mut World) {
     store::install(world);
     yard::install(world);
     alerts::install(world);
+    advisor::install(world);
+    relations::install(world);
     trouble::install(world);
     shelf::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
@@ -714,7 +718,26 @@ pub fn setup(world: &mut World) {
         }
         let isle = world.resource::<Hud>().island;
         ledger::show(world, Some(isle));
+        // `--hud-ledger-filter=short`, `--hud-ledger-sort=net`: press those (tour shots).
+        if let Some(f) =
+            std::env::args().find_map(|a| a.strip_prefix("--hud-ledger-filter=").map(String::from))
+        {
+            ledger::action(world, &format!("isle.led.filter:{f}"));
+        }
+        if let Some(c) =
+            std::env::args().find_map(|a| a.strip_prefix("--hud-ledger-sort=").map(String::from))
+        {
+            ledger::action(world, &format!("isle.led.sort:{c}"));
+        }
         ledger::update(world);
+    }
+    // `--hud-relations`: open the relations book (tour shots).
+    if std::env::args().any(|a| a == "--hud-relations") {
+        relations::toggle(world);
+    }
+    // `--hud-trade-lines`: show the trade lines (tour shots).
+    if std::env::args().any(|a| a == "--hud-trade-lines") {
+        map::toggle_trade_lines(world);
     }
 }
 
@@ -809,6 +832,8 @@ pub fn read_actions(world: &mut World) {
             update_data_now(world);
         } else if a == "isle.home" {
             map::home(world);
+        } else if a == "isle.route.chart" {
+            routes::chart_clicked(world);
         } else if a.starts_with("isle.route.") {
             let opened = a.starts_with("isle.route.open");
             crate::tools::action(world, &a);
@@ -820,6 +845,9 @@ pub fn read_actions(world: &mut World) {
         } else if shelf::action(world, &a)
             || fleet::action(world, &a)
             || alerts::action(world, &a)
+            || advisor::action(world, &a)
+            || relations::action(world, &a)
+            || map::action(world, &a)
             || house::action(world, &a)
             || ledger::action(world, &a)
             || works::action(world, &a)
@@ -879,6 +907,13 @@ fn read_keys(world: &mut World) {
         keys.just_pressed(KeyCode::G),
         keys.just_pressed(KeyCode::Escape),
     );
+    let (p, v) = (keys.just_pressed(KeyCode::P), keys.just_pressed(KeyCode::V));
+    if p || (esc && world.resource::<relations::Relations>().open) {
+        relations::toggle(world);
+    }
+    if v {
+        map::toggle_trade_lines(world);
+    }
     if g || (esc && world.resource::<fleet::Fleet>().open) {
         fleet::toggle(world);
     }
@@ -1164,6 +1199,8 @@ pub fn update_data(world: &mut World) {
         yard::refresh(world);
         fleet::refresh(world);
         alerts::refresh(world);
+        advisor::refresh(world);
+        relations::refresh(world);
         trouble::refresh(world);
     }
     demo_step(world, dt);
@@ -1353,7 +1390,14 @@ fn demo_step(world: &mut World, dt: f32) {
             }
         }
     }
+    // `--hud-route-island=i`: keep the pointer over island `i` on the routes chart.
     if t > 2.5
+        && let Some(i) = std::env::args()
+            .find_map(|a| a.strip_prefix("--hud-route-island=")?.parse::<usize>().ok())
+        && let Some(p) = routes::demo_point(world, i)
+    {
+        world.write_message(engine::input::InputEvent::CursorMoved { position: p });
+    } else if t > 2.5
         && let Some(e) = engine_ui::input::find_id(world, &demo_tile())
         && let Some(c) = world.get::<engine_ui::node::ComputedNode>(e)
     {
