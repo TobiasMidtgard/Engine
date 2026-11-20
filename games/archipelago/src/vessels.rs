@@ -183,7 +183,8 @@ impl Craft {
 
 /// A lofted hull: `len` long, `beam` wide, `draft` below and `free` above the waterline,
 /// with a sheer that rises toward the ends. `bottom` paints below `boot` m (red lead),
-/// `topside` above.
+/// `topside` above. Returns its sections, stern to bow, each from the keel up to the sheer
+/// on the +Z side, for [`strake`].
 #[allow(clippy::too_many_arguments)]
 fn hull(
     p: &mut Parts,
@@ -196,7 +197,7 @@ fn hull(
     topside: Vec4,
     bottom: Vec4,
     boot: f32,
-) {
+) -> Vec<Vec<Vec3>> {
     let n = 28;
     let k = 7;
     let mut rows: Vec<Vec<Vec3>> = Vec::new();
@@ -243,20 +244,49 @@ fn hull(
             }
         }
     }
-    // Deck.
+    // Deck, facing up, and the bulwarks' inner faces from the sheer down to it. Planks and
+    // the hull's paint are single-sided, so without these the hull is open from above and
+    // the sea shows inside it.
+    let deck = |q: Vec3, s: f32| v3(q.x, q.y - 0.25, q.z * s * 0.96);
+    let rim = |q: Vec3, s: f32| v3(q.x, q.y, q.z * s);
     for i in 0..n {
         let a = rows[i][k];
         let b = rows[i + 1][k];
-        let deck = |q: Vec3, s: f32| v3(q.x, q.y - 0.25, q.z * s * 0.96);
         p.quad(
             Mat::Planks,
             deck(a, 1.0),
-            deck(a, -1.0),
-            deck(b, -1.0),
             deck(b, 1.0),
+            deck(b, -1.0),
+            deck(a, -1.0),
             hexc(0xc8a878),
         );
+        p.quad(
+            mat,
+            deck(a, 1.0),
+            rim(a, 1.0),
+            rim(b, 1.0),
+            deck(b, 1.0),
+            topside,
+        );
+        p.quad(
+            mat,
+            deck(a, -1.0),
+            deck(b, -1.0),
+            rim(b, -1.0),
+            rim(a, -1.0),
+            topside,
+        );
     }
+    // The transom's inner face above the deck.
+    let s = rows[0][k];
+    p.quad(
+        mat,
+        deck(s, 1.0),
+        deck(s, -1.0),
+        rim(s, -1.0),
+        rim(s, 1.0),
+        topside,
+    );
     // Transom.
     let r = &rows[0];
     for j in 0..k {
@@ -274,6 +304,35 @@ fn hull(
             v3(r[j].x, r[j].y, -r[j].z),
             topside,
         );
+    }
+    rows
+}
+
+/// A painted band on both sides of a hull (`rows` from [`hull`]): from `y0` to `y1` m above
+/// the waterline, between `x0` and `x1`, standing 8 cm proud of the planking (any less and
+/// the hull's own facets break it up).
+fn strake(p: &mut Parts, rows: &[Vec<Vec3>], x0: f32, x1: f32, y0: f32, y1: f32, col: Vec4) {
+    // Where a section's side is at height `y` (clamped to the keel and the sheer).
+    let at = |row: &[Vec3], y: f32| -> Vec3 {
+        let j = row.iter().rposition(|q| q.y <= y).unwrap_or(0);
+        let (a, b) = (row[j], row[(j + 1).min(row.len() - 1)]);
+        let t = if b.y > a.y {
+            ((y - a.y) / (b.y - a.y)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let q = a.lerp(b, t);
+        v3(q.x, y.clamp(row[0].y, row[row.len() - 1].y), q.z + 0.08)
+    };
+    for w in rows.windows(2) {
+        let (r0, r1) = (&w[0], &w[1]);
+        if r0[0].x < x0 || r1[0].x > x1 {
+            continue;
+        }
+        let (a, b, c, d) = (at(r0, y0), at(r1, y0), at(r1, y1), at(r0, y1));
+        p.quad(Mat::Paint, a, b, c, d, col);
+        let m = |q: Vec3| v3(q.x, q.y, -q.z);
+        p.quad(Mat::Paint, m(b), m(a), m(d), m(c), col);
     }
 }
 
@@ -475,7 +534,7 @@ pub fn schooner() -> Parts {
 pub fn steamer() -> Parts {
     let mut p = Parts::default();
     let (len, beam) = (56.0, 9.5);
-    hull(
+    let h = hull(
         &mut p,
         Mat::Paint,
         len,
@@ -489,13 +548,7 @@ pub fn steamer() -> Parts {
     );
     let deck = 2.4;
     // White boot line.
-    p.cuboid(
-        Mat::Paint,
-        v3(-27.0, 0.38, -0.02),
-        v3(27.0, 0.48, 0.02),
-        Vec4::ONE,
-        false,
-    );
+    strake(&mut p, &h, -27.0, 27.0, 0.38, 0.48, Vec4::ONE);
     // Bridge and engine house amidships.
     p.cuboid(
         Mat::Paint,
@@ -671,7 +724,7 @@ pub fn smack() -> Parts {
 pub fn barque() -> Parts {
     let mut p = Parts::default();
     let (len, beam) = (44.0, 9.0);
-    hull(
+    let h = hull(
         &mut p,
         Mat::Paint,
         len,
@@ -684,13 +737,7 @@ pub fn barque() -> Parts {
         0.3,
     );
     // Painted gunports band.
-    p.cuboid(
-        Mat::Paint,
-        v3(-19.0, 1.4, -0.02),
-        v3(19.0, 1.9, 0.02),
-        hexc(0xe0d8b8),
-        false,
-    );
+    strake(&mut p, &h, -19.0, 19.0, 1.4, 1.9, hexc(0xe0d8b8));
     let deck = 2.1;
     p.rod(
         Mat::Timber,
@@ -1019,7 +1066,7 @@ pub fn craft_model(c: Craft) -> Parts {
 pub fn clipper() -> Parts {
     let mut p = Parts::default();
     let (len, beam) = (62.0, 10.5);
-    hull(
+    let h = hull(
         &mut p,
         Mat::Paint,
         len,
@@ -1032,13 +1079,7 @@ pub fn clipper() -> Parts {
         0.4,
     );
     // Gilt strake and a white-painted bulwark line.
-    p.cuboid(
-        Mat::Paint,
-        v3(-29.0, 2.0, -0.02),
-        v3(29.0, 2.25, 0.02),
-        hexc(0xc8a040),
-        false,
-    );
+    strake(&mut p, &h, -29.0, 29.0, 2.0, 2.25, hexc(0xc8a040));
     let deck = 2.2;
     // Bowsprit and jib boom, steeply steeved.
     p.rod(
@@ -1465,7 +1506,7 @@ fn gun_ports(p: &mut Parts, x0: f32, x1: f32, n: u32, y: f32, half_beam: f32, ba
 pub fn cutter() -> Parts {
     let mut p = Parts::default();
     let (len, beam) = (20.0, 5.6);
-    hull(
+    let h = hull(
         &mut p,
         Mat::Paint,
         len,
@@ -1477,13 +1518,7 @@ pub fn cutter() -> Parts {
         hexc(0x7a2a1a),
         0.25,
     );
-    p.cuboid(
-        Mat::Paint,
-        v3(-9.0, 1.1, -0.02),
-        v3(9.0, 1.35, 0.02),
-        hexc(0xf0ece0),
-        false,
-    );
+    strake(&mut p, &h, -9.0, 9.0, 1.1, 1.35, hexc(0xf0ece0));
     let deck = 1.3;
     p.rod(
         Mat::Timber,
@@ -1537,7 +1572,7 @@ pub fn cutter() -> Parts {
 pub fn brig() -> Parts {
     let mut p = Parts::default();
     let (len, beam) = (34.0, 8.0);
-    hull(
+    let h = hull(
         &mut p,
         Mat::Paint,
         len,
@@ -1549,13 +1584,7 @@ pub fn brig() -> Parts {
         hexc(0x5a2014),
         0.3,
     );
-    p.cuboid(
-        Mat::Paint,
-        v3(-15.0, 1.3, -0.02),
-        v3(15.0, 1.7, 0.02),
-        hexc(0xd8b040),
-        false,
-    );
+    strake(&mut p, &h, -15.0, 15.0, 1.3, 1.7, hexc(0xd8b040));
     let deck = 1.8;
     p.rod(
         Mat::Timber,
@@ -1603,7 +1632,7 @@ pub fn brig() -> Parts {
 pub fn frigate() -> Parts {
     let mut p = Parts::default();
     let (len, beam) = (52.0, 12.0);
-    hull(
+    let h = hull(
         &mut p,
         Mat::Paint,
         len,
@@ -1617,13 +1646,7 @@ pub fn frigate() -> Parts {
     );
     // Two bands of ochre with the gun deck ports.
     gun_ports(&mut p, -18.0, 18.0, 13, 1.9, 5.4, hexc(0xc89a3a));
-    p.cuboid(
-        Mat::Paint,
-        v3(-20.0, 3.3, -0.02),
-        v3(20.0, 3.6, 0.02),
-        hexc(0xc89a3a),
-        false,
-    );
+    strake(&mut p, &h, -20.0, 20.0, 3.3, 3.6, hexc(0xc89a3a));
     let deck = 3.4;
     p.rod(
         Mat::Timber,
@@ -1828,7 +1851,7 @@ pub fn gunboat() -> Parts {
 pub fn liner() -> Parts {
     let mut p = Parts::default();
     let (len, beam) = (80.0, 12.0);
-    hull(
+    let h = hull(
         &mut p,
         Mat::Paint,
         len,
@@ -1841,13 +1864,7 @@ pub fn liner() -> Parts {
         0.5,
     );
     let deck = 3.8;
-    p.cuboid(
-        Mat::Paint,
-        v3(-38.0, 3.4, -0.02),
-        v3(38.0, 3.7, 0.02),
-        hexc(0xe8e4d8),
-        false,
-    );
+    strake(&mut p, &h, -38.0, 38.0, 3.4, 3.7, hexc(0xe8e4d8));
     // Portholes along the hull.
     for (n, z) in [(Vec3::Z, 5.7f32), (-Vec3::Z, -5.7)] {
         p.windows(v3(0.0, 2.4, z), n, 22, 0.5, 0.5, 2.6, hexc(0x2a2a2a));
@@ -2140,6 +2157,8 @@ pub fn cart() -> Parts {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -2150,5 +2169,74 @@ mod tests {
         }
         assert!(cart().triangles() < 4_000);
         assert_eq!(Craft::from_name("airship"), Some(Craft::Airship));
+    }
+
+    /// Looking straight down anywhere over a ship's hull, the first single-sided surface
+    /// faces up. One that faces down is culled, and the sea inside the hull shows through.
+    #[test]
+    fn hulls_are_closed_from_above() {
+        // Off the round numbers the models are built on, so no ray runs down an edge.
+        const STEP: f32 = 0.5;
+        const OFF: f32 = 0.013;
+        for c in Craft::ALL {
+            if matches!(c, Craft::Airship | Craft::Biplane) {
+                continue;
+            }
+            // Each triangle in the columns of the grid its x range covers: (corners, its
+            // facing's y, whether it is drawn from both sides).
+            let mut cols: BTreeMap<i32, Vec<([Vec3; 3], f32, bool)>> = BTreeMap::new();
+            for (m, mesh) in &craft_model(c).meshes {
+                let both = matches!(m, Mat::Canvas | Mat::SailDark | Mat::Crop | Mat::Leaf);
+                for t in mesh.indices.chunks(3) {
+                    let p = |i: u32| Vec3::from(mesh.vertices[i as usize].position);
+                    let q = [p(t[0]), p(t[1]), p(t[2])];
+                    let ny = (q[1] - q[0]).cross(q[2] - q[0]).normalize_or_zero().y;
+                    let x0 = q.iter().map(|v| v.x).fold(f32::MAX, f32::min);
+                    let x1 = q.iter().map(|v| v.x).fold(f32::MIN, f32::max);
+                    for i in ((x0 - OFF) / STEP).ceil() as i32..=((x1 - OFF) / STEP).floor() as i32
+                    {
+                        cols.entry(i).or_default().push((q, ny, both));
+                    }
+                }
+            }
+            let mut open = Vec::new();
+            for (&i, tris) in &cols {
+                let x = i as f32 * STEP + OFF;
+                for j in -40..=40 {
+                    let z = j as f32 * STEP * 0.5 + OFF;
+                    let mut low = f32::MAX;
+                    let mut top: Option<(f32, f32)> = None;
+                    for (q, ny, both) in tris {
+                        let Some(y) = down_hit(q, x, z) else { continue };
+                        low = low.min(y);
+                        if !both && top.is_none_or(|(t, _)| y > t) {
+                            top = Some((y, *ny));
+                        }
+                    }
+                    // Only over the hull's body under the water.
+                    if low < -0.1 && top.is_some_and(|(_, ny)| ny <= 0.0) {
+                        open.push((x, z));
+                    }
+                }
+            }
+            assert!(
+                open.is_empty(),
+                "{c:?}: the sea shows through from above at {} points, first {:?}",
+                open.len(),
+                &open[..open.len().min(6)]
+            );
+        }
+    }
+
+    /// Where a ray straight down through (`x`, `z`) meets a triangle, its height.
+    fn down_hit(q: &[Vec3; 3], x: f32, z: f32) -> Option<f32> {
+        let (a, b, c) = (q[0], q[1], q[2]);
+        let d = (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
+        if d.abs() < 1e-9 {
+            return None;
+        }
+        let u = ((x - a.x) * (c.z - a.z) - (c.x - a.x) * (z - a.z)) / d;
+        let v = ((b.x - a.x) * (z - a.z) - (x - a.x) * (b.z - a.z)) / d;
+        (u >= 0.0 && v >= 0.0 && u + v <= 1.0).then_some(a.y + u * (b.y - a.y) + v * (c.y - a.y))
     }
 }
