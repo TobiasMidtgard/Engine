@@ -166,11 +166,26 @@ impl StrandSet {
     }
 
     fn push(&mut self, pts: &[Vec3], root_radius: f32, tip_radius: f32, random: f32) {
+        self.push_cut(pts, root_radius, tip_radius, random, 0.0);
+    }
+
+    /// A hair that keeps its width to `from` (0 root .. 1 tip) and tapers after: a cut hair,
+    /// blunt but for its last stretch, where `push` tapers over all its length as a hair
+    /// that grew to its end does.
+    fn push_cut(
+        &mut self,
+        pts: &[Vec3],
+        root_radius: f32,
+        tip_radius: f32,
+        random: f32,
+        from: f32,
+    ) {
         debug_assert_eq!(pts.len(), self.points_per as usize);
         let n = pts.len().max(2) - 1;
         for (i, p) in pts.iter().enumerate() {
             let t = i as f32 / n as f32;
-            let r = root_radius + (tip_radius - root_radius) * t;
+            let u = ((t - from) / (1.0 - from).max(1e-3)).clamp(0.0, 1.0);
+            let r = root_radius + (tip_radius - root_radius) * u;
             self.points.push([p.x, p.y, p.z, r]);
             self.attrs.push([1.0, random, t, 0.0]);
         }
@@ -673,7 +688,7 @@ fn grow_scalp(
             points: 18,
             density: 170.0,
             gravity: 1.0,
-            loft: 0.016,
+            loft: 0.022,
             clump: 0.6,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
@@ -683,7 +698,9 @@ fn grow_scalp(
             points: 32,
             density: 190.0,
             gravity: 1.0,
-            loft: 0.012,
+            // (Standing off the scalp as much as a real head of long hair does: at 1.2 cm it
+            // lay flat as a wig on the head.)
+            loft: 0.018,
             clump: 0.75,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
@@ -1026,17 +1043,22 @@ fn grow_scalp(
                 pts[k] = mid;
             }
         }
-        // Hairs taper to a fine tip.
-        set.push(
+        // Scalp hair is cut, so it keeps its width almost to the end and tapers only over its
+        // last fifth (tapered all along, as a hair that grows to its end does, the lower half of
+        // long hair was half as wide as the top: thin, see-through ends). Fine hairs at the
+        // hairline and short hairs growing back still taper all along.
+        let cut = if broken { 0.0 } else { 0.8 * fine };
+        set.push_cut(
             &pts,
             g.root_radius * HAIR_WIDTH * thin,
-            g.root_radius * HAIR_WIDTH * thin * 0.25,
+            g.root_radius * HAIR_WIDTH * thin * if cut > 0.0 { 0.4 } else { 0.25 },
             // Hanging locks show their own tone; short or slicked hair mixes across its clumps,
             // and tones shared by whole clumps read as stripes.
             lock_tone.map_or(r.f32(), |l| {
                 let w = if g.gravity > 0.5 { 0.6 } else { 0.25 };
                 w * l + (1.0 - w) * r.f32()
             }),
+            cut,
         );
         // Fine hairline hairs are short, so they don't sit in their own root shadow.
         let n = set.attrs.len();
@@ -1391,8 +1413,12 @@ fn grow_hair(
     // How far this hair stands off the head (one value per hair: a new one at every point
     // pushed hanging hair in and out into a crimp).
     // (Short hair lies on its set shape: nearly the same height for every hair.)
+    // (Hanging hair in a band of heights: from 0.4 the hairs lay at depths a centimetre apart,
+    // and seen down the curve of the head the layers crossed each other like straw.)
     let lift = if a.hair_style() == HairStyle::Short {
         r.range(0.85, 1.0)
+    } else if g.gravity > 0.5 {
+        r.range(0.7, 1.0)
     } else {
         r.range(0.4, 1.0)
     };
@@ -1857,6 +1883,22 @@ mod tests {
         assert_eq!(s.strand_count(), 1);
         assert_eq!(s.points[2][3], 0.0);
         assert_eq!(s.attrs[1][2], 0.5);
+    }
+
+    #[test]
+    fn cut_hair_keeps_its_width_until_its_last_stretch() {
+        let pts: Vec<Vec3> = (0..11).map(|k| Vec3::Y * -(k as f32 * 0.01)).collect();
+        let mut s = StrandSet::new(StrandKind::Scalp, 11);
+        s.push_cut(&pts, 1e-4, 4e-5, 0.5, 0.8);
+        s.push(&pts, 1e-4, 4e-5, 0.5);
+        let (cut, grown) = (&s.points[..11], &s.points[11..]);
+        // Full width at mid-length and at four fifths, then down to the tip's.
+        assert_eq!(cut[5][3], 1e-4);
+        assert_eq!(cut[8][3], 1e-4);
+        assert!((cut[10][3] - 4e-5).abs() < 1e-9);
+        assert!(cut[9][3] < 1e-4 && cut[9][3] > 4e-5);
+        // A grown hair tapers all along.
+        assert!(grown[5][3] < 0.8e-4);
     }
 
     #[test]

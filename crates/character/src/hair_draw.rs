@@ -91,6 +91,14 @@ pub struct FaceFollow {
     now: Vec<Vec3>,
 }
 
+/// Scalp hair drawn this much wider than its fibres: a real head's hundred thousand hairs
+/// cover it, and where long hair spreads over the shoulders and thins at its ends ours, at
+/// true width and a little under a pixel each at 1440p, let the shirt show through: thin.
+const SCALP_WIDTH: f32 = 1.2;
+
+/// How dark the most buried hair is drawn, against hair in the open (its color's share).
+const BURIED_DARK: f32 = 0.8;
+
 /// How rough the cuticle of scalp hair is, and of brows and beard.
 const SCALP_ROUGHNESS: f32 = 0.33;
 const FACE_ROUGHNESS: f32 = 0.42;
@@ -162,9 +170,23 @@ pub fn groom(set: &StrandSet, packed: &PackedStrands, pigment: [f32; 3]) -> Opti
         // No two hairs on a head are quite the same shade: some a good deal darker, a few
         // fairer (what lets single hairs show inside a lock instead of one painted sheet).
         let shade = strand_shade(random);
-        let root = hair_color(eu, red, grey, random) * shade;
+        // How buried the hair is (the build's occlusion, from a 3 mm grid of all the hair):
+        // hairs under the outer layer and in the gaps between locks darker. The renderer's own
+        // light through the hair comes from a coarser volume (centimetre cells over a head of
+        // long hair), which shades the layers but can't part one lock from the next: without
+        // this the hair read as one smooth even sheet, thin beside the deep gaps between
+        // clumps real hair shows.
+        let occ = |from: usize, to: usize| {
+            let n = (to - from).max(1) as f32;
+            (from..to)
+                .map(|k| packed.attrs.get(s * per + k).map_or(1.0, |a| unorm(*a)))
+                .sum::<f32>()
+                / n
+        };
+        let buried = |o: f32| BURIED_DARK + (1.0 - BURIED_DARK) * o.clamp(0.0, 1.0);
+        let root = hair_color(eu, red, grey, random) * shade * buried(occ(0, per.div_ceil(3)));
         // Toward the tips hair is older, weathered by sun and combing: a little fairer.
-        let tip = hair_color(eu * 0.9, red, grey, random) * shade;
+        let tip = hair_color(eu * 0.9, red, grey, random) * shade * buried(occ(per / 3, per));
         roots.push([root.x, root.y, root.z, random]);
         let rough = if set.kind == StrandKind::Scalp {
             SCALP_ROUGHNESS
@@ -574,7 +596,11 @@ pub(crate) fn draw_hair(
                     visible: true,
                     // Brow hairs are coarser than scalp hair, and so few that a thinner
                     // sprinkle of them lets the skin show through as a pale brow.
-                    width_scale: if kind == StrandKind::Brows { 1.3 } else { 1.0 },
+                    width_scale: match kind {
+                        StrandKind::Brows => 1.3,
+                        StrandKind::Scalp => SCALP_WIDTH,
+                        _ => 1.0,
+                    },
                     ..StrandInstance::new(handle)
                 },
                 DrawnHair {
