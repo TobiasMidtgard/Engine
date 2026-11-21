@@ -4,8 +4,9 @@
 //! gathers for itself. The same triangles, so each scene of `probe_gi.rs` is lit as before; a
 //! thing that moves is in the rays where it went and one that leaves is gone; the sun's rays
 //! are stopped where the shadow falls, by what casts it or by its stand-in, and pass what
-//! casts none; a thing inside its stand-in is not shaded by it; a mesh drawn only as clusters
-//! is in the rays; the scene follows the camera as
+//! casts none; a thing inside its stand-in is not shaded by it; a dense mesh is in the rays at
+//! a coarse level of detail that casts its shadow; a mesh drawn only as clusters is in the
+//! rays; the scene follows the camera as
 //! it walks and when it jumps; a world shift leaves the structures as built, whatever is
 //! turned, stretched or hangs on another thing; more movers than the moving structure holds
 //! wait their turn, and so do more things at rest than the still one holds; a mesh that takes
@@ -17,6 +18,7 @@
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_render::prelude::*;
+use engine_render::rock::rock;
 use engine_render::settings::trial_cut_more::RAY_WORLD;
 use engine_render::{RenderDisabled, capture_now};
 
@@ -858,11 +860,149 @@ fn a_thing_inside_its_shadow_stand_in_is_lit() {
 /// from the pool's ranges: it is in the rays the frame it shows up. Once the pool has let it
 /// go, a new scene builds it from a copy of its triangles made on the main thread. Either
 /// way it keeps most of the noon sky out.
+/// A dense stone is in the rays whole in the frame it shows up and, once its levels of detail
+/// are built, at the coarsest of them that stays within 3 cm of it: fewer triangles in the
+/// scene and the same shadow on the ground. Placed again 16 times as large, the one structure
+/// both share is built again at a finer level.
+#[test]
+fn a_dense_mesh_is_in_the_rays_at_a_coarse_level() {
+    // The ground alone for 6 frames, then the stone: 4 m across, 12 m up the sun's way from
+    // the middle of the view and outside it, so that only its shadow is in view. Returns the
+    // ground's triangles and the stone's.
+    let scene = |levels: bool| {
+        let mut app = under_the_sun(false);
+        if !levels {
+            app.world.resource_mut::<RenderSettings>().mesh_lod_pixels = 0.0;
+        }
+        set_probes(&mut app, FEW_PROBES);
+        app.update_n(6);
+        let ground = diag(&app, "render.ray.triangles");
+        let mesh = rock(Vec3::new(1.0, 0.6, 0.8), 7, 5);
+        let whole = (mesh.indices.len() / 3) as f64;
+        let stone = app.world.resource_mut::<Assets<Mesh>>().add(mesh);
+        app.world.spawn((
+            Transform::from_translation(DVec3::new(-12.0, 12.0, 0.0)).with_scale(Vec3::splat(4.0)),
+            MeshRenderer::new(
+                stone,
+                StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9),
+            ),
+        ));
+        (app, stone, ground, whole)
+    };
+
+    // Without levels of detail the stone stays whole.
+    let (mut full, _, ground, whole) = scene(false);
+    if !can_run(&full) {
+        return;
+    }
+    assert!(
+        ground > 0.0,
+        "the ground is in the rays before the stone shows up"
+    );
+    full.update_n(8);
+    assert_in_ray_scene(&full, "the stone, whole");
+    assert_eq!(diag(&full, "render.ray.triangles"), ground + whole);
+    let (rays, hits_full) = sun_counts(&mut full);
+    assert_eq!(rays, W * H, "the stone is not in view");
+    assert!(hits_full > 100, "its shadow is: {hits_full} rays stopped");
+    drop(full);
+
+    // With them it is whole in the frame it shows up ...
+    let (mut app, stone, ground, whole) = scene(true);
+    for _ in 0..8 {
+        app.update();
+        if diag(&app, "render.ray.instances") == 2.0 {
+            break;
+        }
+    }
+    assert_eq!(diag(&app, "render.ray.instances"), 2.0);
+    assert_eq!(
+        diag(&app, "render.ray.triangles"),
+        ground + whole,
+        "whole at once: the levels are not waited for"
+    );
+    // ... and at its ray level once they are built (a worker's time: frames and wall time
+    // bound the wait) and its first structure is 30 frames old.
+    let started = std::time::Instant::now();
+    let mut frames = 0;
+    while diag(&app, "render.ray.triangles") >= ground + whole
+        && (frames < 600 || started.elapsed() < std::time::Duration::from_secs(120))
+    {
+        app.update();
+        frames += 1;
+        assert_eq!(
+            diag(&app, "render.meshes.ray_waiting"),
+            0.0,
+            "the whole stone serves"
+        );
+        assert_eq!(diag(&app, "render.ray.instances"), 2.0);
+    }
+    let coarse = diag(&app, "render.ray.triangles") - ground;
+    eprintln!("the stone's ray level: {coarse} of {whole} triangles after {frames} frames");
+    // (A level keeps at most 80% of the one above: `mesh_lod::MIN_GAIN`.)
+    assert!(
+        (16.0..=whole * 0.8).contains(&coarse),
+        "{coarse} of {whole} triangles"
+    );
+    assert_eq!(
+        diag(&app, "render.ray.geometries"),
+        2.0,
+        "the same geometry, built again"
+    );
+    app.update_n(48);
+    assert_in_ray_scene(&app, "the stone at its ray level");
+    // (Read 30 frames after the structures were last touched; the whole stone's structure
+    // goes once the GPU is past it, which touches them once more.)
+    for _ in 0..120 {
+        if diag(&app, "render.ray.blas_mb") > 0.0 {
+            break;
+        }
+        app.update();
+    }
+    assert!(
+        diag(&app, "render.ray.blas_mb") > 0.0,
+        "the structures' memory is read"
+    );
+    let (rays, hits) = sun_counts(&mut app);
+    assert_eq!(rays, W * H);
+    assert!(
+        hits.abs_diff(hits_full) * 8 <= hits_full,
+        "the coarse stone casts the whole stone's shadow: {hits} rays stopped, {hits_full}"
+    );
+
+    // The same mesh at scale 64, behind the camera: 3 cm there is half a millimeter of the
+    // mesh, so the structure both instances share is built again, finer.
+    app.world.spawn((
+        Transform::from_translation(DVec3::new(0.0, 0.0, 150.0)).with_scale(Vec3::splat(64.0)),
+        MeshRenderer::new(stone, StandardMaterial::color(0.5, 0.5, 0.5)),
+    ));
+    app.update_n(40);
+    let fine = diag(&app, "render.ray.triangles") - ground;
+    eprintln!("placed at scale 64: {fine} triangles");
+    assert!(
+        fine > coarse,
+        "{fine} triangles for the larger stone, {coarse} before"
+    );
+    assert_eq!(
+        diag(&app, "render.ray.geometries"),
+        2.0,
+        "one structure serves both"
+    );
+    assert_eq!(diag(&app, "render.ray.instances"), 3.0);
+    assert_eq!(diag(&app, "render.meshes.ray_waiting"), 0.0);
+}
+
 #[test]
 fn a_mesh_drawn_as_clusters_is_in_the_rays() {
     let scene = |probe_gi: bool| {
         let mut app = app(true);
-        app.world.resource_mut::<RenderSettings>().probe_gi = probe_gi;
+        {
+            let mut s = app.world.resource_mut::<RenderSettings>();
+            s.probe_gi = probe_gi;
+            // (About the copy, which is the whole mesh: so is what the pool's copy gives, and
+            // the counts and pictures of the two compare.)
+            s.mesh_lod_pixels = 0.0;
+        }
         let w = &mut app.world;
         w.spawn((
             Transform::from_translation(DVec3::new(0.0, 1.5, 0.0)),
@@ -1475,6 +1615,8 @@ fn more_things_than_the_still_structure_holds_wait_for_room() {
 fn a_reused_mesh_handle_is_another_geometry_and_an_edited_mesh_the_same() {
     let mut app = app(true);
     set_probes(&mut app, FEW_PROBES);
+    // (About names and edits: the meshes stay whole, so their triangles add up.)
+    app.world.resource_mut::<RenderSettings>().mesh_lod_pixels = 0.0;
     ground(&mut app.world);
     sun(&mut app.world, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
     camera(&mut app.world, EYE, TARGET, 12.0);

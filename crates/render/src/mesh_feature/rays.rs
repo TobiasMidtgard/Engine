@@ -11,11 +11,13 @@
 //! in the scene for the shadow rays alone, if it casts into the finest maps: the thing it
 //! casts for casts no shadow itself, so the light at a hit is shadowed as the frame draws
 //! that shadow (a shadow ray is stopped where it goes into a stand-in, not where it leaves
-//! one: `RayClass::ShadowOnly`). A slot's geometry is its mesh at full detail, built by the GPU straight from
-//! the mesh's ranges of the pool; a mesh drawn only as clusters has no such ranges, so the
-//! main thread copies its triangles when the scene asks. A geometry is named by its mesh's
-//! handle index and that index's generation: an index a streamed-out mesh left to another
-//! is another geometry.
+//! one: `RayClass::ShadowOnly`). A slot's geometry is its mesh at its ray level, built by
+//! the GPU straight from the mesh's ranges of the pool: the coarsest of its levels of detail
+//! that strays at most 3 cm from it at the largest scale it is placed with (the whole mesh
+//! while its levels are on their way, and when none is that close). A mesh drawn only as
+//! clusters has no such ranges, so the main thread copies its triangles when the scene asks.
+//! A geometry is named by its mesh's handle index and that index's generation: an index a
+//! streamed-out mesh left to another is another geometry.
 //!
 //! The scene is not walked every frame. The mesh scene logs the entities whose slot a sync
 //! wrote, moved or dropped (`mesh_scene::SlotLog`), and a frame looks at those, at the
@@ -71,6 +73,62 @@ pub(super) fn indices_in_range(mesh: &Mesh) -> bool {
         .copied()
         .max()
         .is_some_and(|most| (most as usize) < mesh.vertices.len())
+}
+
+/// A mesh's ray level is the coarsest of its levels of detail whose surface strays at most
+/// this far from the mesh, in meters at the largest scale the mesh is placed with: one
+/// structure serves every instance, and a ray's hit is within this of the drawn surface.
+pub(super) const LEVEL_ERROR_M: f32 = 0.03;
+
+/// The level the rays trace a mesh at (0: the mesh itself). `levels`: each level's error in
+/// mesh space and whether the scene may build from it (`GpuLod::ray_ok`), finest first
+/// (errors never fall along them). `scale`: the largest scale the mesh is placed with (0: not
+/// known yet, so the mesh itself).
+pub(super) fn level_for(levels: impl Iterator<Item = (f32, bool)>, scale: f32) -> u8 {
+    if scale <= 0.0 {
+        return 0;
+    }
+    let mut level = 0;
+    for (i, (error, ok)) in levels.enumerate() {
+        if error * scale > LEVEL_ERROR_M {
+            break;
+        }
+        if ok {
+            level = i as u8 + 1;
+        }
+    }
+    level
+}
+
+/// Which levels of `mesh` have every index name one of the mesh's vertices or one of those
+/// the chain adds (bit `l`: `levels.levels[l]`), for `GpuLod::ray_ok`. Run where the levels
+/// are built, on the worker.
+pub(super) fn levels_in_range(mesh: &Mesh, levels: &crate::mesh_lod::Lods) -> u8 {
+    let most = mesh.vertices.len() + levels.vertices.len();
+    let mut ok = 0u8;
+    for (l, level) in levels.levels.iter().enumerate().take(8) {
+        if level.indices.iter().all(|&i| (i as usize) < most) {
+            ok |= 1 << l;
+        }
+    }
+    ok
+}
+
+/// The scene's version of a mesh's geometry. The mesh itself (level 0, from the pool or from
+/// a copy) is named by the asset's version alone: its triangles are the asset's wherever the
+/// pool keeps them. A level of detail is named by the asset's version, the level and the
+/// stamp of the pool ranges it is read from (`GpuMesh::ranges`), so that no structure is
+/// built from ranges read before they were given to another level or mesh.
+pub(super) fn ray_version(asset: u64, ranges: u32, level: u8) -> u64 {
+    if level == 0 {
+        return asset << 24;
+    }
+    (asset << 24) | ((ranges as u64 & 0x1f_ffff) << 3) | (level as u64 & 7)
+}
+
+/// The asset version a geometry's version names ([`ray_version`]).
+pub(super) fn asset_of(version: u64) -> u64 {
+    version >> 24
 }
 
 /// What a frame's fill did, for `render.meshes.ray_*`.
@@ -311,7 +369,8 @@ struct Fill<'a> {
     scene: &'a MeshScene,
     mesh_frames: &'a [MeshFrame],
     material_frames: &'a [MaterialFrame],
-    meshes: &'a FastMap<u32, GpuMesh>,
+    /// (Mutable for the scale the rays see each at, and a level the scene refused.)
+    meshes: &'a mut FastMap<u32, GpuMesh>,
     pool: &'a MeshPool,
     clusters: Option<&'a ClusterRenderer>,
     clustered: &'a FastSet<u32>,
@@ -425,49 +484,74 @@ impl Fill<'_> {
     }
 
     /// The scene's geometry of `mesh` at its version: there already, built now from its
-    /// ranges of the pool or from its copy, or waiting (its copy is asked for).
-    fn geometry(&mut self, mesh: &MeshFrame, out: &mut RaySceneOut<'_>) -> RayGeometryState {
+    /// ranges of the pool at its ray level or from its copy, or waiting (its copy is asked
+    /// for). `raw`, `scale`: the handle index slots name, and the largest scale of the slot
+    /// that asks (0: no slot).
+    fn geometry(
+        &mut self,
+        mesh: &MeshFrame,
+        raw: u32,
+        scale: f32,
+        out: &mut RaySceneOut<'_>,
+    ) -> RayGeometryState {
         let key = self.rays.key(mesh.index);
-        if out.has_geometry(key, mesh.version) {
+        if let Some(gpu_mesh) = self.meshes.get_mut(&mesh.index)
+            && gpu_mesh.version == mesh.version
+        {
+            // The largest scale it is placed with. The first look takes every slot that names
+            // its handle, so that a scene switched on where the levels are there already
+            // builds each mesh once, at its level.
+            if gpu_mesh.ray_scale <= 0.0 {
+                for &s in self.scene.slots_of_mesh(raw) {
+                    if let Some(hot) = self.scene.hot.get(s as usize) {
+                        gpu_mesh.ray_scale = gpu_mesh.ray_scale.max(hot.scale);
+                    }
+                }
+            }
+            gpu_mesh.ray_scale = gpu_mesh.ray_scale.max(scale);
+            let wanted = ray_version(mesh.version, gpu_mesh.ranges, gpu_mesh.ray_level());
+            if out.has_geometry(key, wanted) {
+                return RayGeometryState::Ready;
+            }
+            // This very mesh at another level (its levels came since, or it is placed larger
+            // than it was): that serves, and the walk of the edited meshes asks for this
+            // level, once a frame (its instances are never out of the rays meanwhile).
+            if out
+                .geometry_version(key)
+                .is_some_and(|v| asset_of(v) == mesh.version)
+            {
+                self.rays.edited.insert(mesh.index);
+                return RayGeometryState::Ready;
+            }
+            if !gpu_mesh.ray_ok {
+                return RayGeometryState::Refused;
+            }
+            return Self::from_pool(self.pool, key, gpu_mesh, out);
+        }
+        // Not in the pool (any more): what the scene has of this version of the mesh serves,
+        // at whatever level it was built while the pool held it.
+        let whole = ray_version(mesh.version, 0, 0);
+        if out.has_geometry(key, whole) {
             return RayGeometryState::Ready;
         }
-        let wait = if out.geometry_version(key).is_some() {
+        let held = out.geometry_version(key);
+        if let Some(v) = held
+            && asset_of(v) == mesh.version
+            && out.has_geometry(key, v)
+        {
+            return RayGeometryState::Ready;
+        }
+        let wait = if held.is_some() {
             RayGeometryState::Older
         } else {
             RayGeometryState::Building
         };
-        if let Some(gpu_mesh) = self.meshes.get(&mesh.index)
-            && gpu_mesh.version == mesh.version
-        {
-            if !gpu_mesh.ray_ok {
-                return RayGeometryState::Refused;
-            }
-            let Some((vertex, index)) = self.pool.buffers(gpu_mesh.pool.page) else {
-                return wait;
-            };
-            // The whole mesh (level 0): its vertices first, its indices count from them.
-            return out.geometry(
-                key,
-                mesh.version,
-                true,
-                RaySource::Buffers {
-                    vertex,
-                    first_vertex: gpu_mesh.pool.base_vertex,
-                    vertex_count: gpu_mesh.pool.vertex_count,
-                    vertex_stride: crate::mesh_pool::VERTEX_BYTES as u32,
-                    index,
-                    index_format: wgpu::IndexFormat::Uint32,
-                    first_index: gpu_mesh.pool.first_index,
-                    index_count: gpu_mesh.pool.index_count,
-                },
-            );
-        }
         if let Some(copy) = self.rays.copies.get_mut(&mesh.index)
             && copy.version == mesh.version
         {
             let state = out.geometry(
                 key,
-                mesh.version,
+                whole,
                 true,
                 RaySource::Cpu {
                     positions: &copy.positions,
@@ -492,6 +576,66 @@ impl Fill<'_> {
         wait
     }
 
+    /// Ask the scene for `gpu_mesh` at its ray level, from its ranges of the pool as they are
+    /// now. A level the scene refuses is passed over for the next finer one (so a refusal
+    /// never takes out of the rays what the whole mesh would have put in).
+    fn from_pool(
+        pool: &MeshPool,
+        key: RayKey,
+        gpu_mesh: &mut GpuMesh,
+        out: &mut RaySceneOut<'_>,
+    ) -> RayGeometryState {
+        let Some((vertex, index)) = pool.buffers(gpu_mesh.pool.page) else {
+            return if out.geometry_version(key).is_some() {
+                RayGeometryState::Older
+            } else {
+                RayGeometryState::Building
+            };
+        };
+        loop {
+            let level = gpu_mesh.ray_level();
+            // Indices count from the first vertex named: the mesh's own for the whole mesh,
+            // the level's base (the lower of its two ranges) for a level.
+            let lod = level
+                .checked_sub(1)
+                .and_then(|l| gpu_mesh.lods.get(l as usize));
+            let (first_vertex, vertex_count, first_index, index_count) = match lod {
+                None => (
+                    gpu_mesh.pool.base_vertex,
+                    gpu_mesh.pool.vertex_count,
+                    gpu_mesh.pool.first_index,
+                    gpu_mesh.pool.index_count,
+                ),
+                Some(lod) => (
+                    lod.base_vertex,
+                    gpu_mesh.lod_span(lod),
+                    lod.first_index,
+                    lod.index_count,
+                ),
+            };
+            let state = out.geometry(
+                key,
+                ray_version(gpu_mesh.version, gpu_mesh.ranges, level),
+                true,
+                RaySource::Buffers {
+                    vertex,
+                    first_vertex,
+                    vertex_count,
+                    vertex_stride: crate::mesh_pool::VERTEX_BYTES as u32,
+                    index,
+                    index_format: wgpu::IndexFormat::Uint32,
+                    first_index,
+                    index_count,
+                },
+            );
+            if state == RayGeometryState::Refused && level > 0 {
+                gpu_mesh.lods[level as usize - 1].ray_ok = false;
+                continue;
+            }
+            return state;
+        }
+    }
+
     /// Bring slot `s` up to date in the scene: placed as it stands, or removed.
     fn slot(&mut self, s: usize, out: &mut RaySceneOut<'_>) {
         let cold = &self.scene.cold[s];
@@ -512,7 +656,7 @@ impl Fill<'_> {
         let Some((&mesh, &mat)) = self.tables(hot) else {
             return;
         };
-        match self.geometry(&mesh, out) {
+        match self.geometry(&mesh, hot.mesh, hot.scale, out) {
             RayGeometryState::Ready => {}
             // Placed with the shape before, and asked again every frame until its own is
             // built.
@@ -585,7 +729,7 @@ impl Fill<'_> {
             }
             return;
         }
-        match self.geometry(&mesh, out) {
+        match self.geometry(&mesh, raw, 0.0, out) {
             RayGeometryState::Ready => {
                 for &s in slots {
                     self.slot(s as usize, out);
@@ -634,7 +778,7 @@ impl MeshFeature {
             scene: &self.scene,
             mesh_frames: &self.mesh_frames,
             material_frames: &self.material_frames,
-            meshes: &self.meshes,
+            meshes: &mut self.meshes,
             pool: &self.pool,
             clusters: self.clusters.as_ref(),
             clustered: &self.clustered,
@@ -654,26 +798,25 @@ impl MeshFeature {
                 None => out.remove(RayKey(entity.to_bits(), 0)),
             }
         }
-        // Meshes edited in place: the scene's geometry of them is built again while an
-        // instance uses it (their instances stay as they are, with the older shape until
-        // then; one nothing uses is left to be forgotten).
+        // Meshes edited in place, and meshes whose ray level changed (their levels came, or
+        // they are placed larger than they were): the scene's geometry of them is built again
+        // while an instance uses it (their instances stay as they are, with the shape before
+        // until then; one nothing uses is left to be forgotten).
         for index in edited {
             let key = fill.rays.key(index);
-            if let Some(gpu_mesh) = fill.meshes.get(&index)
-                && out
-                    .geometry_version(key)
-                    .is_some_and(|v| v != gpu_mesh.version)
+            let Some(gpu_mesh) = fill.meshes.get_mut(&index) else {
+                continue;
+            };
+            if !gpu_mesh.ray_ok {
+                continue;
+            }
+            let wanted = ray_version(gpu_mesh.version, gpu_mesh.ranges, gpu_mesh.ray_level());
+            if out.geometry_version(key).is_some_and(|v| v != wanted)
                 && out.geometry_users(key) > 0
+                && Fill::from_pool(fill.pool, key, gpu_mesh, out) == RayGeometryState::Older
             {
-                let mesh = MeshFrame {
-                    index,
-                    version: gpu_mesh.version,
-                    ..Default::default()
-                };
-                if fill.geometry(&mesh, out) == RayGeometryState::Older {
-                    // Put off (built lately, or the frame's allowance is spent).
-                    fill.rays.edited.insert(index);
-                }
+                // Put off (built lately, or the frame's allowance is spent).
+                fill.rays.edited.insert(index);
             }
         }
         for raw in waiting {
@@ -718,5 +861,65 @@ impl MeshFeature {
         rays.touched = touched;
         rays.gone = gone;
         self.rays = rays;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ray_level_is_the_coarsest_within_three_centimeters_at_the_largest_scale() {
+        let checked = [(0.004, true), (0.012, true), (0.04, true)];
+        assert_eq!(level_for(checked.into_iter(), 1.0), 2);
+        assert_eq!(level_for(checked.into_iter(), 3.0), 1);
+        assert_eq!(level_for(checked.into_iter(), 10.0), 0);
+        // No scale known yet: the mesh itself.
+        assert_eq!(level_for(checked.into_iter(), 0.0), 0);
+        // A level whose indices were not checked is passed over, not a stop.
+        let second_unchecked = [(0.004, true), (0.012, false), (0.02, true)];
+        assert_eq!(level_for(second_unchecked.into_iter(), 1.0), 3);
+        let only_first = [(0.004, true), (0.012, false), (0.04, true)];
+        assert_eq!(level_for(only_first.into_iter(), 1.0), 1);
+        assert_eq!(level_for(std::iter::empty(), 1.0), 0);
+    }
+
+    #[test]
+    fn a_levels_version_names_its_asset_level_and_ranges() {
+        let asset = 1234;
+        for (ranges, level) in [(0, 0), (7, 0), (7, 1), (8, 1), (7, 6), (0x1f_ffff, 3)] {
+            assert_eq!(asset_of(ray_version(asset, ranges, level)), asset);
+        }
+        // The mesh itself is the same geometry wherever the pool keeps it.
+        assert_eq!(ray_version(asset, 3, 0), ray_version(asset, 9, 0));
+        assert_eq!(ray_version(asset, 3, 0), asset << 24);
+        // Two levels, two ranges, and a level against the whole mesh all differ.
+        assert_ne!(ray_version(asset, 3, 1), ray_version(asset, 3, 2));
+        assert_ne!(ray_version(asset, 3, 1), ray_version(asset, 4, 1));
+        assert_ne!(ray_version(asset, 3, 1), ray_version(asset, 3, 0));
+        assert_ne!(ray_version(asset, 3, 1), ray_version(asset + 1, 3, 1));
+    }
+
+    #[test]
+    fn a_level_with_an_index_past_the_vertices_is_not_built_from() {
+        let mesh = crate::mesh::cuboid(Vec3::ONE);
+        let own = mesh.vertices.len() as u32;
+        let added = vec![mesh.vertices[0]; 2];
+        let level = |indices: Vec<u32>| crate::mesh_lod::LodIndices {
+            indices,
+            error: 0.01,
+        };
+        let lods = crate::mesh_lod::Lods {
+            levels: vec![
+                level(vec![0, 1, 2]),
+                // The last vertex the chain adds: still in range.
+                level(vec![0, own, own + 1]),
+                // One past it.
+                level(vec![0, 1, own + 2]),
+                level(vec![2, 1, 0]),
+            ],
+            vertices: added,
+        };
+        assert_eq!(levels_in_range(&mesh, &lods), 0b1011);
     }
 }

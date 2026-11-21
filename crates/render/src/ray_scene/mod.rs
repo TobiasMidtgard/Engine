@@ -84,6 +84,15 @@ struct RayUniform {
 pub(crate) struct RayStats {
     pub geometries: u32,
     pub triangles: u64,
+    /// Geometries built from a feature's buffers with more triangles than a mesh's ray level
+    /// should have (60,000), and their triangles; geometries built from a copy on the CPU,
+    /// and theirs.
+    pub over_cap: u32,
+    pub over_cap_triangles: u64,
+    pub copied: u32,
+    pub copied_triangles: u64,
+    /// GPU memory under the bottom-level structures, MiB (`None`: not read yet).
+    pub blas_mb: Option<f64>,
     pub instances: u32,
     pub still: u32,
     pub moving: u32,
@@ -430,7 +439,7 @@ impl RayScene {
 
     /// After the frame's submit (`failed`: wgpu rejected it).
     pub(crate) fn after_submit(&mut self, failed: bool) {
-        self.store.after_submit(&self.queue, failed);
+        self.store.after_submit(&self.queue, failed, self.frame);
     }
 
     pub(crate) fn stats(&self) -> RayStats {
@@ -438,7 +447,12 @@ impl RayScene {
         let i = self.instances.stats();
         RayStats {
             geometries: s.geometries,
-            triangles: s.triangles,
+            triangles: s.held.triangles,
+            over_cap: s.held.over_cap,
+            over_cap_triangles: s.held.over_cap_triangles,
+            copied: s.held.copied,
+            copied_triangles: s.held.copied_triangles,
+            blas_mb: s.blas_bytes.map(|b| b as f64 / (1u64 << 20) as f64),
             instances: self.instances.len() as u32,
             still: i.still,
             moving: i.moving,
@@ -466,12 +480,26 @@ impl RayScene {
     /// The rows of a scene that is gone: zeros (its last numbers would stand otherwise,
     /// beside `render.ray.on` 0).
     pub(crate) fn publish_none(d: &mut Diagnostics) {
-        Self::publish_stats(&RayStats::default(), d);
+        Self::publish_stats(
+            &RayStats {
+                blas_mb: Some(0.0),
+                ..Default::default()
+            },
+            d,
+        );
     }
 
     fn publish_stats(s: &RayStats, d: &mut Diagnostics) {
         d.set("render.ray.geometries", s.geometries as f64);
         d.set("render.ray.triangles", s.triangles as f64);
+        d.set("render.ray.over_cap", s.over_cap as f64);
+        d.set("render.ray.over_cap_triangles", s.over_cap_triangles as f64);
+        d.set("render.ray.copied", s.copied as f64);
+        d.set("render.ray.copied_triangles", s.copied_triangles as f64);
+        // (Only once read: a row of zeros would read as a scene without structures.)
+        if let Some(mb) = s.blas_mb {
+            d.set("render.ray.blas_mb", mb);
+        }
         d.set("render.ray.instances", s.instances as f64);
         d.set("render.ray.still_instances", s.still as f64);
         d.set("render.ray.moving_instances", s.moving as f64);

@@ -231,6 +231,13 @@ struct GpuMesh {
     /// on: it builds a structure straight from the mesh's ranges of the pool, and an index
     /// past them would have the GPU read whatever lies there).
     ray_ok: bool,
+    /// The largest scale it is placed with in the frame's ray scene, as far as the scene's
+    /// hook has looked (0: not looked yet): its ray level is chosen for it (`ray_level`).
+    ray_scale: f32,
+    /// Changes whenever its ranges of the pool change while the ray scene is on (a new
+    /// upload, its levels uploaded): part of the name of a level's structure
+    /// (`rays::ray_version`), so that none is built from ranges given back since.
+    ranges: u32,
 }
 
 /// One level of detail of a [`GpuMesh`]: fewer triangles over the mesh's vertices and those
@@ -241,6 +248,9 @@ struct GpuLod {
     base_vertex: u32,
     /// How far its surface strays from the full mesh, meters in mesh space.
     error: f32,
+    /// Every index names one of the mesh's vertices or one its levels add (checked where the
+    /// level was built): the ray scene may build a structure from it.
+    ray_ok: bool,
 }
 
 impl GpuMesh {
@@ -287,13 +297,34 @@ impl GpuMesh {
             .map_or(self.pool.index_count, |l| l.index_count)
             / 3
     }
+
+    /// The level the frame's rays trace it at (0: the mesh itself; `rays::level_for`).
+    fn ray_level(&self) -> u8 {
+        rays::level_for(
+            self.lods.iter().map(|l| (l.error, l.ray_ok)),
+            self.ray_scale,
+        )
+    }
+
+    /// The vertices a level's indices may name, counted from the level's base vertex: up to
+    /// the end of the higher of the mesh's two vertex ranges (its own, and those its levels
+    /// add; the lower one starts at the base vertex).
+    fn lod_span(&self, lod: &GpuLod) -> u32 {
+        let own_end = self.pool.base_vertex + self.pool.vertex_count;
+        let end = self
+            .lod_vertices
+            .map_or(own_end, |(first, count)| own_end.max(first + count));
+        end - lod.base_vertex
+    }
 }
 
-/// Meshes' levels of detail being built on a worker thread, one mesh after another.
+/// Meshes' levels of detail being built on a worker thread, one mesh after another: for each,
+/// its levels, its movable shares and which of its levels name only vertices it has
+/// (`rays::levels_in_range`).
 struct LodJob {
     /// Each mesh's index and the version its build started from.
     meshes: Vec<(u32, u64)>,
-    job: std::thread::JoinHandle<Vec<(crate::mesh_lod::Lods, [f32; 3])>>,
+    job: std::thread::JoinHandle<Vec<(crate::mesh_lod::Lods, [f32; 3], u8)>>,
 }
 
 /// What a texture set binds in one slot.
@@ -1539,6 +1570,8 @@ pub struct MeshFeature {
     lod_vertices: [u64; 2],
     /// Meshes moved to another pool page to make room for the vertices their levels add.
     lod_moves: u32,
+    /// Hands out `GpuMesh::ranges` while the ray scene is on.
+    ray_ranges: u32,
     /// Meshes waiting for a free worker to build their levels.
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
@@ -2253,8 +2286,11 @@ impl MeshFeature {
     /// there (no triangles, or too large): it is then left off until it changes.
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) -> bool {
         let edit = self.meshes.contains_key(&index);
+        // (An edit in place keeps its instances, and so the scale the rays saw them at.)
+        let mut ray_scale = 0.0;
         if let Some(mut old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
+            ray_scale = old.ray_scale;
             // A mesh edited in place: static shadow images may show its old shape, but only
             // those drawn once it had been still long enough to join them (a mesh edited every
             // frame casts as a moving caster and never redraws them).
@@ -2278,6 +2314,10 @@ impl MeshFeature {
             self.unusable.insert(index, version);
             return false;
         };
+        // Other ranges than any structure of the scene was built from.
+        if self.rays.on() {
+            self.ray_ranges = self.ray_ranges.wrapping_add(1);
+        }
         self.meshes.insert(
             index,
             GpuMesh {
@@ -2299,6 +2339,8 @@ impl MeshFeature {
                 lod_vertices: None,
                 movable: None,
                 ray_ok: self.rays.on() && rays::indices_in_range(mesh),
+                ray_scale,
+                ranges: self.ray_ranges,
             },
         );
         self.unusable.remove(&index);
@@ -2350,7 +2392,7 @@ impl MeshFeature {
                 );
                 continue;
             };
-            for ((index, version), (levels, movable)) in built.into_iter().zip(levels) {
+            for ((index, version), (levels, movable, in_range)) in built.into_iter().zip(levels) {
                 // A mesh changed meanwhile has been queued again by its upload; one that is
                 // gone is dropped here.
                 let Some(gpu_mesh) = self.meshes.get_mut(&index).filter(|m| m.version == version)
@@ -2413,7 +2455,8 @@ impl MeshFeature {
                 gpu_mesh.lods = levels
                     .levels
                     .into_iter()
-                    .filter_map(|l| {
+                    .enumerate()
+                    .filter_map(|(n, l)| {
                         indices.clear();
                         for &i in &l.indices {
                             indices.push(match i.checked_sub(own) {
@@ -2426,12 +2469,21 @@ impl MeshFeature {
                             index_count: l.indices.len() as u32,
                             base_vertex: lod_base,
                             error: l.error,
+                            ray_ok: in_range & (1 << n) != 0,
                         })
                     })
                     .collect();
                 self.lod_built[0] += 1;
                 self.lod_built[1] += (count == 0) as u32;
                 self.lod_built[2] += (gpu_mesh.lods.len() < count) as u32;
+                // Its ranges are others from here on (the levels before were given back, the
+                // mesh may have moved): the scene's structure of it is built again at its ray
+                // level, the one it has serving meanwhile.
+                if self.rays.on() {
+                    self.ray_ranges = self.ray_ranges.wrapping_add(1);
+                    gpu_mesh.ranges = self.ray_ranges;
+                    self.rays.edited(index);
+                }
             }
         }
         // Each free worker takes as many of the waiting meshes (the newest first) as it can
@@ -2478,7 +2530,10 @@ impl MeshFeature {
                             } else {
                                 [1.0; 3]
                             };
-                            (levels, movable)
+                            // (Whether or not the ray scene is on: nothing on the CPU holds a
+                            // level's indices once they are uploaded.)
+                            let in_range = rays::levels_in_range(mesh, &levels);
+                            (levels, movable, in_range)
                         })
                         .collect()
                 });
@@ -3956,6 +4011,8 @@ impl RenderFeature for MeshFeature {
                             .get(handle)
                             .filter(|_| meshes.version(handle) == gpu_mesh.version)
                             .is_some_and(rays::indices_in_range);
+                        // The new scene learns the scales anew.
+                        gpu_mesh.ray_scale = 0.0;
                     }
                 }
             }
@@ -5766,6 +5823,48 @@ mod tests {
         assert_eq!(slot_use(&own, 5), TextureUse::Red);
         let none: [Option<u32>; TEXTURE_SLOTS] = [None; TEXTURE_SLOTS];
         assert_eq!(slot_use(&none, 4), TextureUse::Red);
+    }
+
+    /// A level's indices count from the lower of the mesh's two vertex ranges and may name
+    /// any vertex up to the end of the higher one.
+    #[test]
+    fn a_levels_span_reaches_the_end_of_the_higher_vertex_range() {
+        let mesh = |added: Option<(u32, u32)>| GpuMesh {
+            pool: PoolMesh {
+                page: 0,
+                base_vertex: 100,
+                vertex_count: 50,
+                first_index: 0,
+                index_count: 300,
+            },
+            version: 1,
+            center: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+            min_y: -1.0,
+            height: 2.0,
+            area: 1.0,
+            last_used: 0,
+            still_from: 0,
+            lods: Vec::new(),
+            lod_vertices: added,
+            movable: None,
+            ray_ok: true,
+            ray_scale: 1.0,
+            ranges: 0,
+        };
+        let lod = |base_vertex| GpuLod {
+            first_index: 300,
+            index_count: 30,
+            base_vertex,
+            error: 0.001,
+            ray_ok: true,
+        };
+        // Added below its own: from 40 to 150.
+        assert_eq!(mesh(Some((40, 20))).lod_span(&lod(40)), 110);
+        // Added above: from 100 to 230.
+        assert_eq!(mesh(Some((200, 30))).lod_span(&lod(100)), 130);
+        // None added: its own 50.
+        assert_eq!(mesh(None).lod_span(&lod(100)), 50);
     }
 
     /// Other crates bind `MeshInstance::layout()` next to their own vertex data at locations 11

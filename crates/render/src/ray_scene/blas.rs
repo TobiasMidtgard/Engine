@@ -21,10 +21,26 @@ const BUILDS_PER_FRAME: u32 = 256;
 /// Structures out of the scene that may be freed a frame (each is a few driver calls on the
 /// render thread): what a zone left behind goes over a few frames, as it came.
 const FREES_PER_FRAME: u32 = 64;
-/// Geometries with more triangles than this have their structure compacted once built (a
-/// copy that frees what the build reserved): each that may be compacted carries a query and
-/// a readback for its size, so a patch of ground or a small prop is left as built.
+/// Geometries with more triangles than this have their structure compacted once it has
+/// served a while (a copy that frees what the build reserved): each that may be compacted
+/// carries a query and a readback for its size, so a patch of ground or a small prop is left
+/// as built.
 const COMPACT_ABOVE_TRIANGLES: u32 = 4_000;
+/// Frames a structure serves before it is compacted: one built again soon after (a mesh's
+/// coarse level after the whole mesh it streamed in as, an edit) is not worth the copy.
+const COMPACT_AFTER_FRAMES: u64 = 120;
+/// A geometry built from a feature's own buffers with more triangles than this is counted
+/// (`render.ray.over_cap`): the most the plan gives a mesh's ray level. Nothing holds a
+/// geometry to it until the stops have been counted.
+const CAP_TRIANGLES: u32 = 60_000;
+/// The label of the scene's bottom-level structures (wgpu-core labels a compacted copy
+/// "<label> (compacted)"): their memory is read from the allocator's report by it.
+const BLAS_LABEL: &str = "ray scene blas";
+/// Frames the structures must have been left alone before their memory is read, and the
+/// most frames a change waits for its reading while they keep changing (a reading walks every
+/// allocation of the device).
+const MEMORY_SETTLE_FRAMES: u32 = 30;
+const MEMORY_MOST_FRAMES: u32 = 600;
 /// Frames a geometry whose version changed keeps its last structure before it is built
 /// again: a mesh edited every frame is built twice a second at 60 fps, and the rays see its
 /// shape from a moment ago.
@@ -49,6 +65,53 @@ pub(super) const MOVING: usize = 1;
 /// A feature's geometry: the feature's place among the renderer's, and its own name.
 pub(super) type Name = (u16, RayKey);
 
+/// Where a geometry's triangles came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Origin {
+    /// A feature's own buffers (a mesh's ranges of the pool).
+    Buffers,
+    /// A copy a feature made on the CPU (a mesh drawn only as clusters).
+    Copy,
+    /// One of the scene's own shapes.
+    Shape,
+}
+
+/// Standing counts of the geometries held.
+#[derive(Default, Clone, Copy, Debug)]
+pub(super) struct Held {
+    pub triangles: u64,
+    /// From a feature's buffers: their triangles.
+    pub buffer_triangles: u64,
+    /// Of those, the geometries with more than [`CAP_TRIANGLES`], and their triangles.
+    pub over_cap: u32,
+    pub over_cap_triangles: u64,
+    /// From a copy on the CPU, and their triangles.
+    pub copied: u32,
+    pub copied_triangles: u64,
+}
+
+impl Held {
+    /// A geometry of `triangles` from `origin` came (`sign` 1) or went (-1).
+    fn count(&mut self, triangles: u32, origin: Origin, sign: i32) {
+        let t = sign as i64 * triangles as i64;
+        self.triangles = self.triangles.wrapping_add_signed(t);
+        match origin {
+            Origin::Buffers => {
+                self.buffer_triangles = self.buffer_triangles.wrapping_add_signed(t);
+                if triangles > CAP_TRIANGLES {
+                    self.over_cap = self.over_cap.wrapping_add_signed(sign);
+                    self.over_cap_triangles = self.over_cap_triangles.wrapping_add_signed(t);
+                }
+            }
+            Origin::Copy => {
+                self.copied = self.copied.wrapping_add_signed(sign);
+                self.copied_triangles = self.copied_triangles.wrapping_add_signed(t);
+            }
+            Origin::Shape => {}
+        }
+    }
+}
+
 pub(super) struct Geometry {
     name: Name,
     pub version: u64,
@@ -57,6 +120,7 @@ pub(super) struct Geometry {
     /// The frame it was last asked for or had an instance.
     last_used: u64,
     pub triangles: u32,
+    origin: Origin,
     opaque: bool,
     pub blas: wgpu::Blas,
     /// One of the `COMPACT_` states; the callback sets ready or done.
@@ -174,9 +238,12 @@ impl Fence {
 /// `render.ray.*` numbers of the geometries.
 #[derive(Default, Clone, Copy, Debug)]
 pub(super) struct StoreStats {
-    /// Geometries with a structure, and their triangles.
+    /// Geometries with a structure, and their triangles by where they came from.
     pub geometries: u32,
-    pub triangles: u64,
+    pub held: Held,
+    /// Bytes of GPU memory under the structures, as last read (`None`: not read yet, or the
+    /// backend has no report).
+    pub blas_bytes: Option<u64>,
     /// Structures built and their triangles, this frame.
     pub built: u32,
     pub built_triangles: u32,
@@ -237,9 +304,12 @@ pub(super) struct Store {
     /// the slots of their instances point at the one before.
     changed: Vec<u32>,
     pending: Vec<Pending>,
-    /// Structures built in the frame being recorded, asked to compact once it's submitted
-    /// (wgpu can't prepare a compaction before the build is submitted).
+    /// Structures built in the frame being recorded (wgpu can't prepare a compaction before
+    /// the build is submitted).
     built_now: Vec<u32>,
+    /// Large structures built and submitted, by the frame they were built: asked to compact
+    /// once they have served [`COMPACT_AFTER_FRAMES`] (those built again since are dropped).
+    to_compact: std::collections::VecDeque<(u32, u64)>,
     /// Geometries asked to compact whose answer is awaited: all that
     /// [`swap_compacted`](Self::swap_compacted) looks at.
     compacting: Vec<u32>,
@@ -251,8 +321,15 @@ pub(super) struct Store {
     /// was built before. And the one that waited this frame, for the next.
     large_turn: Option<Name>,
     large_next: Option<Name>,
-    /// Triangles of the geometries held.
-    triangles: u64,
+    /// Standing counts of the geometries held.
+    held: Held,
+    /// A structure was made, swapped for its compacted copy or freed since the last
+    /// [`read_memory`](Self::read_memory); frames since the last such change; frames the
+    /// first change no reading has seen yet has waited (0: none).
+    memory_changed: bool,
+    memory_quiet: u32,
+    memory_unread: u32,
+    blas_bytes: Option<u64>,
     /// Compacted copies were swapped in and no call has built a bottom-level structure
     /// since: the next call that builds a top-level one builds the [`Fence`] first.
     swapped: bool,
@@ -281,12 +358,17 @@ impl Store {
             changed: Vec::new(),
             pending: Vec::new(),
             built_now: Vec::new(),
+            to_compact: std::collections::VecDeque::new(),
             compacting: Vec::new(),
             budget_used: 0,
             builds_now: 0,
             large_turn: None,
             large_next: None,
-            triangles: 0,
+            held: Held::default(),
+            memory_changed: false,
+            memory_quiet: 0,
+            memory_unread: 0,
+            blas_bytes: None,
             swapped: false,
             fence: None,
             retired: Vec::new(),
@@ -305,7 +387,8 @@ impl Store {
     pub(super) fn stats(&self) -> StoreStats {
         StoreStats {
             geometries: self.names.len() as u32,
-            triangles: self.triangles,
+            held: self.held,
+            blas_bytes: self.blas_bytes,
             retired: self.retired.len() as u32,
             ..self.stats
         }
@@ -329,6 +412,7 @@ impl Store {
             }
             true
         });
+        self.memory_changed |= freed > 0;
     }
 
     pub(super) fn get(&self, index: u32) -> Option<&Geometry> {
@@ -404,11 +488,11 @@ impl Store {
         };
         // The allowance first, by the most triangles the source can have: a geometry that
         // waits is asked for every frame until it's built.
-        let most = match &source {
-            RaySource::Buffers { index_count, .. } => *index_count / 3,
-            RaySource::Cpu { indices, .. } => (indices.len() / 3) as u32,
-            RaySource::UnitSquare => 2,
-            RaySource::UnitDisc => DISC_TRIANGLES,
+        let (most, origin) = match &source {
+            RaySource::Buffers { index_count, .. } => (*index_count / 3, Origin::Buffers),
+            RaySource::Cpu { indices, .. } => ((indices.len() / 3) as u32, Origin::Copy),
+            RaySource::UnitSquare => (2, Origin::Shape),
+            RaySource::UnitDisc => (DISC_TRIANGLES, Origin::Shape),
         };
         let large = most as usize > BUILD_TRIANGLES_PER_FRAME;
         let its_turn = large && self.large_turn == Some(name);
@@ -520,9 +604,8 @@ impl Store {
                 wgpu::AccelerationStructureGeometryFlags::empty()
             },
         };
-        // Compacted once built: a large geometry's first structure (one built again because
-        // its version changed is likely to be built again soon).
-        let compact = triangles > COMPACT_ABOVE_TRIANGLES && existing.is_none();
+        // Compacted once it has served a while (`after_submit`): a large geometry's.
+        let compact = triangles > COMPACT_ABOVE_TRIANGLES;
         // The rays read the hit triangle's corners (`getCommittedHitVertexPositions`).
         let mut flags = wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE
             | wgpu::AccelerationStructureFlags::ALLOW_RAY_HIT_VERTEX_RETURN;
@@ -531,7 +614,7 @@ impl Store {
         }
         let blas = self.device.create_blas(
             &wgpu::CreateBlasDescriptor {
-                label: Some("ray scene blas"),
+                label: Some(BLAS_LABEL),
                 flags,
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             },
@@ -550,8 +633,10 @@ impl Store {
                 let old = std::mem::replace(&mut g.blas, blas);
                 g.version = version;
                 g.built = frame;
-                self.triangles = self.triangles - g.triangles as u64 + triangles as u64;
+                self.held.count(g.triangles, g.origin, -1);
+                self.held.count(triangles, origin, 1);
                 g.triangles = triangles;
+                g.origin = origin;
                 g.compaction = compaction;
                 let slots = g.slots;
                 self.retire(old, slots);
@@ -567,6 +652,7 @@ impl Store {
                     built: frame,
                     last_used: frame,
                     triangles,
+                    origin,
                     opaque,
                     blas,
                     compaction,
@@ -584,7 +670,7 @@ impl Store {
                     }
                 };
                 self.names.insert(name, i);
-                self.triangles += triangles as u64;
+                self.held.count(triangles, origin, 1);
                 i
             }
         };
@@ -594,6 +680,7 @@ impl Store {
             "a geometry's triangles stop rays or are asked, for good"
         );
         self.refused.remove(&name);
+        self.memory_changed = true;
         self.pending.push(Pending {
             geometry: index_of,
             size,
@@ -640,6 +727,7 @@ impl Store {
             any = true;
             false
         });
+        self.memory_changed |= any;
         self.compacting = compacting;
         if any {
             self.swapped = true;
@@ -711,12 +799,13 @@ impl Store {
         self.encoded = true;
     }
 
-    /// After a submit (`failed`: wgpu rejected it, so none of its work runs): count it, so
-    /// the structures retired before it are freed once the GPU is past it, and ask for the
-    /// compaction of the large structures it built (wgpu answers once the GPU finished
-    /// building them; [`swap_compacted`](Self::swap_compacted) swaps them then). If it held
-    /// builds and failed, what the GPU has of the scene is unknown: the scene is lost.
-    pub(super) fn after_submit(&mut self, queue: &wgpu::Queue, failed: bool) {
+    /// After the submit of frame `frame` (`failed`: wgpu rejected it, so none of its work
+    /// runs): count it, so the structures retired before it are freed once the GPU is past
+    /// it, and ask for the compaction of the large structures that have served
+    /// [`COMPACT_AFTER_FRAMES`] (wgpu answers once the GPU finished building them;
+    /// [`swap_compacted`](Self::swap_compacted) swaps them then). If it held builds and
+    /// failed, what the GPU has of the scene is unknown: the scene is lost.
+    pub(super) fn after_submit(&mut self, queue: &wgpu::Queue, failed: bool, frame: u64) {
         self.submitted += 1;
         let (done, at) = (self.done.clone(), self.submitted);
         queue.on_submitted_work_done(move || {
@@ -728,7 +817,24 @@ impl Store {
             return;
         }
         for i in self.built_now.drain(..) {
-            let Some(g) = self.list.get(i as usize).and_then(Option::as_ref) else {
+            if let Some(g) = self.list.get(i as usize).and_then(Option::as_ref)
+                && g.compaction.load(Ordering::Acquire) == COMPACT_NOT_ASKED
+            {
+                self.to_compact.push_back((i, g.built));
+            }
+        }
+        // Oldest first: those built `COMPACT_AFTER_FRAMES` ago and not built again since.
+        while let Some(&(i, built)) = self.to_compact.front() {
+            if frame < built + COMPACT_AFTER_FRAMES {
+                break;
+            }
+            self.to_compact.pop_front();
+            let Some(g) = self
+                .list
+                .get(i as usize)
+                .and_then(Option::as_ref)
+                .filter(|g| g.built == built)
+            else {
                 continue;
             };
             let state = &g.compaction;
@@ -754,6 +860,39 @@ impl Store {
                 state.store(now, Ordering::Release);
             });
         }
+        self.read_memory();
+    }
+
+    /// After a frame's submit: read the memory under the scene's structures from the
+    /// allocator's report when a change is due its reading ([`MEMORY_SETTLE_FRAMES`] after the
+    /// last change, or [`MEMORY_MOST_FRAMES`] after the first unread one while they keep
+    /// changing). The reading holds the structures as built, their compacted copies, and
+    /// those out of the scene the GPU may still trace.
+    fn read_memory(&mut self) {
+        if std::mem::take(&mut self.memory_changed) {
+            self.memory_quiet = 0;
+            self.memory_unread = self.memory_unread.max(1);
+        } else {
+            self.memory_quiet = self.memory_quiet.saturating_add(1);
+        }
+        if self.memory_unread == 0 {
+            return;
+        }
+        if self.memory_quiet < MEMORY_SETTLE_FRAMES && self.memory_unread < MEMORY_MOST_FRAMES {
+            self.memory_unread += 1;
+            return;
+        }
+        self.memory_unread = 0;
+        if let Some(report) = self.device.generate_allocator_report() {
+            self.blas_bytes = Some(
+                report
+                    .allocations
+                    .iter()
+                    .filter(|a| a.name.starts_with(BLAS_LABEL))
+                    .map(|a| a.size)
+                    .sum(),
+            );
+        }
     }
 
     /// Forget the geometries no instance used for [`KEEP_UNUSED_FRAMES`] and no top-level
@@ -767,7 +906,7 @@ impl Store {
                 continue;
             }
             let g = self.list[i].take().expect("checked above");
-            self.triangles -= g.triangles as u64;
+            self.held.count(g.triangles, g.origin, -1);
             self.names.remove(&g.name);
             self.pending.retain(|p| p.geometry != i as u32);
             self.free.push(i as u32);
