@@ -630,6 +630,7 @@ fn preset_mean_albedos_match_their_maps() {
             .expect("generate");
         let n = maps.base_color.width;
         let mut sum = [0.0f64; 3];
+        let mut metal = 0.0f64;
         for y in 0..n {
             for x in 0..n {
                 let c = maps.base_color.pixel(x, y);
@@ -638,14 +639,22 @@ fn preset_mean_albedos_match_their_maps() {
                 for (i, s) in sum.iter_mut().enumerate() {
                     *s += (srgb_to_linear(c[i]) * diffuse) as f64;
                 }
+                metal += orm[2] as f64 / 255.0;
             }
         }
         let mean = sum.map(|s| (s / (n * n) as f64) as f32);
+        let metal = (metal / (n * n) as f64) as f32;
         let table = preset.mean_albedo();
-        eprintln!("{}: measured {mean:.3?}, table {table:.3?}", preset.name());
-        if (0..3).any(|i| (mean[i] - table[i]).abs() > 0.03 + 0.1 * mean[i]) {
+        let table_metal = preset.mean_metalness();
+        eprintln!(
+            "{}: measured {mean:.3?} metal {metal:.3}, table {table:.3?} metal {table_metal:.3}",
+            preset.name()
+        );
+        if (0..3).any(|i| (mean[i] - table[i]).abs() > 0.03 + 0.1 * mean[i])
+            || (metal - table_metal).abs() > 0.02 + 0.1 * metal
+        {
             failures.push(format!(
-                "{}: maps {mean:.3?}, table {table:.3?}",
+                "{}: maps {mean:.3?} metal {metal:.3}, table {table:.3?} metal {table_metal:.3}",
                 preset.name()
             ));
         }

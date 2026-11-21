@@ -286,6 +286,17 @@ impl MaterialPreset {
         }
     }
 
+    /// The mean of the generated metal map: the share of the surface that is bare metal at
+    /// metallic 1 (a material's metallic scales the map). `tests/materials.rs` checks it
+    /// against the maps.
+    pub fn mean_metalness(self) -> f32 {
+        match self {
+            MaterialPreset::RustySteel => 0.266,
+            MaterialPreset::PaintedMetal => 0.045,
+            _ => 0.0,
+        }
+    }
+
     /// Whether some of the surface is bare metal (metalness 1).
     pub fn has_metal(self) -> bool {
         matches!(

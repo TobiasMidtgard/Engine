@@ -42,12 +42,17 @@ pub(crate) fn image_mean(image: &crate::Image) -> Option<Vec3> {
 /// `texture_mean`: the mean color of its base color texture, when known.
 pub(crate) fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Vec3) {
     let tint = Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2]);
-    let plain = 1.0 - m.metallic.clamp(0.0, 1.0);
+    let metal = m.metallic.clamp(0.0, 1.0);
+    let plain = 1.0 - metal;
     let albedo = match (m.base_color_texture.is_some(), m.preset) {
-        // The colour slot draws its image over a preset's map (`texture_set_for`); a preset's
-        // metallic scales its own map, so it does not darken the colour. Before the image's
-        // mean is known: the preset's.
-        (true, Some(p)) => tint * texture_mean.unwrap_or(Vec3::from(p.mean_albedo())),
+        // The colour slot draws its image over a preset's map (`texture_set_for`), and a
+        // preset's metallic scales its own metal map: of the image, the part over bare metal
+        // is no diffuse colour. Before the image's mean is known: the preset's.
+        (true, Some(p)) => match texture_mean {
+            Some(mean) => tint * mean * (1.0 - metal * p.mean_metalness()),
+            None => tint * Vec3::from(p.mean_albedo()),
+        },
+        // (Measured with the whole metal map, as a preset's material has it.)
         (false, Some(p)) => tint * Vec3::from(p.mean_albedo()),
         // A texture's mean before it is uploaded: about half of the tint.
         (true, None) => tint * texture_mean.unwrap_or(Vec3::splat(0.5)) * plain,
@@ -84,4 +89,44 @@ pub(crate) fn texture_mean(
     };
     means.insert(key, (version, mean));
     mean
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MaterialPreset;
+
+    /// Of an image drawn over a preset, the part over the preset's bare metal (as far as the
+    /// material's metallic lets it be metal) is no diffuse colour; without an image, the
+    /// preset's own mean holds it already.
+    #[test]
+    fn an_image_over_a_metal_preset_is_darkened_by_its_bare_metal() {
+        let mean = Vec3::splat(0.5);
+        let over = |preset, metallic| {
+            let m = StandardMaterial {
+                base_color_texture: Some(Handle::from_index(1)),
+                ..StandardMaterial::preset(preset)
+            }
+            .with_metallic(metallic);
+            material_light(&m, Some(mean)).0
+        };
+        let steel = MaterialPreset::RustySteel;
+        assert!(steel.mean_metalness() > 0.0, "some of rusty steel is bare");
+        let bare = 0.5 * (1.0 - steel.mean_metalness());
+        assert!((over(steel, 1.0) - Vec3::splat(bare)).abs().max_element() < 1e-6);
+        assert!((over(steel, 0.0) - mean).abs().max_element() < 1e-6);
+        // A preset without metal: the image's mean, whatever its metallic.
+        let brick = MaterialPreset::Brick;
+        assert_eq!(brick.mean_metalness(), 0.0);
+        assert!((over(brick, 1.0) - mean).abs().max_element() < 1e-6);
+        // Before the image's mean is known, and without an image: the preset's mean.
+        let preset_mean = Vec3::from(steel.mean_albedo());
+        let m = StandardMaterial {
+            base_color_texture: Some(Handle::from_index(1)),
+            ..StandardMaterial::preset(steel)
+        };
+        assert_eq!(material_light(&m, None).0, preset_mean);
+        let m = StandardMaterial::preset(steel);
+        assert_eq!(material_light(&m, Some(mean)).0, preset_mean);
+    }
 }
