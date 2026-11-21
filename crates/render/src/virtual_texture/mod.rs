@@ -310,6 +310,18 @@ impl VirtualTextures {
         }
     }
 
+    /// The generation of `index`'s registration while it is ready (as [`Self::provider`]).
+    pub(crate) fn ready_generation(&self, index: u32) -> Option<u64> {
+        match self.entries.get(&index) {
+            Some(Registered {
+                state: State::Ready(_),
+                generation,
+                ..
+            }) => Some(*generation),
+            _ => None,
+        }
+    }
+
     /// Whether `index` is registered (ready or not): such images are never treated as ordinary
     /// big images.
     pub(crate) fn is_registered(&self, index: u32) -> bool {

@@ -79,6 +79,9 @@ struct VirtualTex {
     /// The root tile is being loaded.
     root_requested: bool,
     failed: bool,
+    /// Its key stands for the image that holds its index: an image's own, or the registration
+    /// the index has now ([`VirtualTextureSystem::note_registry`]).
+    current: bool,
 }
 
 /// One cache texture.
@@ -998,6 +1001,18 @@ impl VirtualTextureSystem {
         }
     }
 
+    /// Which registrations' textures stand for their image ([`Self::root_tile`]): one whose
+    /// registration was removed or replaced ([`VirtualTextures::remove`], or its index
+    /// registered again) stays in the cache until it is evicted, as nothing draws it, and
+    /// stands for no image meanwhile. Once a frame, before the ray scene is filled.
+    pub(crate) fn note_registry(&mut self, registry: Option<&VirtualTextures>) {
+        for tex in self.textures.iter_mut().flatten() {
+            if let SourceKey::Registered(index, generation) = tex.key.0 {
+                tex.current = registry.and_then(|r| r.ready_generation(index)) == Some(generation);
+            }
+        }
+    }
+
     /// The root tile of the virtual texture that the image at handle index `index` is drawn
     /// through as colour (`srgb`: through the sRGB cache, as `texture_for` gives a colour slot of
     /// an sRGB image): the whole texture at 128 texels or fewer across. The cache texture's
@@ -1021,13 +1036,22 @@ impl VirtualTextureSystem {
                 .as_ref()
                 .map_or(0, |t| t.last_used)
         };
-        // (A registration stands for whatever image holds its index, as it does for drawing.)
+        let current = |id: u8| {
+            self.textures[id as usize - 1]
+                .as_ref()
+                .is_some_and(|t| t.current)
+        };
+        // (The registration an index has stands for whatever image holds it, as it does for
+        // drawing; one removed or replaced stands for none while it waits to be evicted.)
         let (version, id) = self
             .by_key
             .iter()
             .filter_map(|(&(key, view_srgb), &id)| {
                 let (i, shows) = match key {
-                    SourceKey::Registered(i, generation) => (i, generation | (1 << 63)),
+                    SourceKey::Registered(i, generation) if current(id) => {
+                        (i, generation | (1 << 63))
+                    }
+                    SourceKey::Registered(..) => return None,
                     SourceKey::Image(i, shows) if shows == version => (i, shows),
                     SourceKey::Image(..) => return None,
                 };
@@ -1245,6 +1269,7 @@ impl VirtualTextureSystem {
             info_dirty: true,
             root_requested: false,
             failed: false,
+            current: true,
         });
         self.by_key.insert(key, id);
         Some(id)

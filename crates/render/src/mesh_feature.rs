@@ -4045,6 +4045,8 @@ impl RenderFeature for MeshFeature {
             let span = crate::perf::HitchStep::new("virtual textures: begin frame");
             vt.begin_frame(gpu, settings);
             drop(span);
+            // (A ray tile is filled only from a registration the image's index has now.)
+            vt.note_registry(world.get_resource::<VirtualTextures>());
             let generation = vt.bind_generation();
             if world.contains_resource::<VirtualTextureStats>() {
                 let stats = vt.stats().clone();
