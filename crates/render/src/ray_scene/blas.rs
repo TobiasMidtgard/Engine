@@ -135,6 +135,9 @@ pub(super) struct Geometry {
     /// Its triangle records while `blas` is its structure: the header's record, and how
     /// many (`triangles + 1`). `None`: none (not the pool's vertices, or no room).
     pub records: Option<(u32, u32)>,
+    /// The records it was to have and was refused (`triangles + 1`; 0: it has them, or is
+    /// not built from the pool's vertices): counted in [`Store::missing_records`].
+    missing: u32,
 }
 
 /// A structure out of the scene (its geometry built again, compacted or forgotten), kept
@@ -331,6 +334,8 @@ pub(super) struct Store {
     large_next: Option<Name>,
     /// Standing counts of the geometries held.
     held: Held,
+    /// The records the geometries held were refused ([`Geometry::missing`], summed).
+    missing_records: u64,
     /// A structure was made, swapped for its compacted copy or freed since the last
     /// [`read_memory`](Self::read_memory); frames since the last such change; frames the
     /// first change no reading has seen yet has waited (0: none).
@@ -373,6 +378,7 @@ impl Store {
             large_turn: None,
             large_next: None,
             held: Held::default(),
+            missing_records: 0,
             memory_changed: false,
             memory_quiet: 0,
             memory_unread: 0,
@@ -390,6 +396,12 @@ impl Store {
 
     pub(super) fn lost(&self) -> bool {
         self.lost
+    }
+
+    /// The triangle records the geometries held were to have and were refused: what more
+    /// room the records need (`tris::Records::stats`).
+    pub(super) fn missing_records(&self) -> u64 {
+        self.missing_records
     }
 
     pub(super) fn stats(&self) -> StoreStats {
@@ -613,14 +625,17 @@ impl Store {
         self.budget_used += triangles as usize;
         self.builds_now += 1;
         // Its records, from the pool's vertices and `u32` indices only.
-        let range = match records {
+        let (range, missing) = match records {
             Some(records)
                 if vertex_stride == crate::mesh_pool::VERTEX_BYTES
                     && index_format == wgpu::IndexFormat::Uint32 =>
             {
-                records.take(triangles, &vertex, &index)
+                match records.take(triangles, &vertex, &index) {
+                    Some(range) => (Some(range), 0),
+                    None => (None, triangles + 1),
+                }
             }
-            _ => None,
+            _ => (None, 0),
         };
         let size = wgpu::BlasTriangleGeometrySizeDescriptor {
             vertex_format: wgpu::VertexFormat::Float32x3,
@@ -662,6 +677,9 @@ impl Store {
                 let old = std::mem::replace(&mut g.blas, blas);
                 // (The old records go with the old structure: rows that hold it read them.)
                 let old_range = std::mem::replace(&mut g.records, range);
+                self.missing_records -= g.missing as u64;
+                self.missing_records += missing as u64;
+                g.missing = missing;
                 g.version = version;
                 g.built = frame;
                 self.held.count(g.triangles, g.origin, -1);
@@ -690,6 +708,7 @@ impl Store {
                     users: 0,
                     slots: [0; 2],
                     records: range,
+                    missing,
                 };
                 let i = match self.free.pop() {
                     Some(i) => {
@@ -703,6 +722,7 @@ impl Store {
                 };
                 self.names.insert(name, i);
                 self.held.count(triangles, origin, 1);
+                self.missing_records += missing as u64;
                 i
             }
         };
@@ -962,6 +982,7 @@ impl Store {
             }
             let g = self.list[i].take().expect("checked above");
             self.held.count(g.triangles, g.origin, -1);
+            self.missing_records -= g.missing as u64;
             self.names.remove(&g.name);
             self.pending.retain(|p| p.geometry != i as u32);
             self.free.push(i as u32);

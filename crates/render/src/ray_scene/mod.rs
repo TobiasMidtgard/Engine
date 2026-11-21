@@ -143,8 +143,9 @@ pub(crate) struct RayStats {
     /// GPU memory under the bottom-level structures, MiB (`None`: not read yet).
     pub blas_mb: Option<f64>,
     /// Triangle records in use (a header a geometry with records, a record a triangle), the
-    /// records' buffer (MiB), geometries that got none for want of room, and what the records
-    /// in use and the refused would take (MiB).
+    /// records' buffer (MiB), geometries that got none for want of room since the scene was
+    /// made, and what the records in use and those the geometries held were refused would
+    /// take (MiB).
     pub tris: u32,
     pub tris_mb: f32,
     pub tris_refused: u32,
@@ -663,7 +664,8 @@ impl RayScene {
     pub(crate) fn stats(&self) -> RayStats {
         let s = self.store.stats();
         let i = self.instances.stats();
-        let (tris, tris_mb, tris_refused, tris_wanted_mb) = self.tris.stats();
+        let (tris, tris_mb, tris_refused, tris_wanted_mb) =
+            self.tris.stats(self.store.missing_records());
         let tiles = self.tiles.stats();
         RayStats {
             geometries: s.geometries,

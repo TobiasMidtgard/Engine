@@ -51,11 +51,9 @@ pub(super) struct Records {
     wanted: u32,
     most: u32,
     ranges: Ranges,
-    /// Records in ranges, and ranges refused since the scene was made, with the records they
-    /// would have held.
+    /// Records in ranges, and ranges refused since the scene was made.
     used: u32,
     refused: u32,
-    refused_records: u64,
     max_binding: u64,
     pipelines: Option<Pipelines>,
 }
@@ -80,7 +78,6 @@ impl Records {
             ranges: Ranges::new(first),
             used: 0,
             refused: 0,
-            refused_records: 0,
             max_binding,
             pipelines: None,
         }
@@ -102,14 +99,16 @@ impl Records {
     }
 
     /// Records in use, the buffer (MiB), ranges refused so far, and what the records in use
-    /// and those refused take (MiB): the need, which may pass the 48 MB the buffer grows to.
-    pub(super) fn stats(&self) -> (u32, f32, u32, f32) {
+    /// and `missing` more take (MiB): with the records the geometries in the scene were
+    /// refused ([`super::blas::Store::missing_records`]), the need, which may pass the 48 MB
+    /// the buffer grows to.
+    pub(super) fn stats(&self, missing: u64) -> (u32, f32, u32, f32) {
         let mib = |records: u64| (records * RECORD_BYTES) as f32 / (1u64 << 20) as f32;
         (
             self.used,
             mib(self.capacity as u64),
             self.refused,
-            mib(self.used as u64 + self.refused_records),
+            mib(self.used as u64 + missing),
         )
     }
 
@@ -134,7 +133,6 @@ impl Records {
             .filter(|&len| len <= self.most && bindable(vertex) && bindable(index));
         let Some(len) = len else {
             self.refused += 1;
-            self.refused_records += triangles as u64 + 1;
             return None;
         };
         loop {
@@ -144,7 +142,6 @@ impl Records {
             }
             if self.wanted >= self.most {
                 self.refused += 1;
-                self.refused_records += len as u64;
                 return None;
             }
             // Twice the room from this frame's `encode` on. The ranges know it at once: a
@@ -552,7 +549,7 @@ mod tests {
         check_job(&words, &sphere, headers[0]);
         check_job(&words, &quad, headers[1]);
         check_job(&words, &other, headers[2]);
-        let (used, mb, refused, wanted_mb) = records.stats();
+        let (used, mb, refused, wanted_mb) = records.stats(0);
         let triangles = (sphere.indices.len() + quad.indices.len() + other.indices.len()) / 3;
         assert_eq!(used as usize, triangles + 3);
         assert_eq!(refused, 0);
@@ -613,7 +610,7 @@ mod tests {
         check_job(&after, &small, *headers.last().unwrap());
         // Past the most the buffer may hold: refused and counted.
         assert!(records.take(300, &vertex, &index).is_none());
-        assert_eq!(records.stats().2, 1);
+        assert_eq!(records.stats(0).2, 1);
     }
 
     #[test]
@@ -629,7 +626,7 @@ mod tests {
         let mut records = Records::with_room(&gpu.device, 64, 64);
         let a = records.take(9, &vertex, &index).expect("room");
         let b = records.take(19, &vertex, &index).expect("room");
-        assert_eq!(records.stats().0, 30);
+        assert_eq!(records.stats(0).0, 30);
         records.release(a.0, a.1);
         assert_eq!(
             records.take(9, &vertex, &index),
@@ -638,7 +635,7 @@ mod tests {
         );
         records.release(a.0, a.1);
         records.release(b.0, b.1);
-        assert_eq!(records.stats().0, 0);
+        assert_eq!(records.stats(0).0, 0);
         // The whole buffer, then nothing: no growth past the most.
         assert_eq!(records.take(63, &vertex, &index), Some((0, 64)));
         assert!(records.take(0, &vertex, &index).is_none());
@@ -650,9 +647,9 @@ mod tests {
             mapped_at_creation: false,
         });
         assert!(records.take(1, &unbindable, &index).is_none());
-        assert_eq!(records.stats().2, 2);
-        // The need counts what is held (64) and what was refused (1 and 2 records).
-        let need = (64 + 1 + 2) * RECORD_BYTES;
-        assert_eq!(records.stats().3, need as f32 / (1u64 << 20) as f32);
+        assert_eq!(records.stats(0).2, 2);
+        // The need counts what is held (64) and what the scene's geometries miss.
+        let need = (64 + 3) * RECORD_BYTES;
+        assert_eq!(records.stats(3).3, need as f32 / (1u64 << 20) as f32);
     }
 }

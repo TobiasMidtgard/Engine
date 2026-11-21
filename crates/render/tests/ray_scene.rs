@@ -667,6 +667,12 @@ fn a_mirror_shows_a_ball_round_and_a_painted_wall_in_its_paint() {
         triangles + geometries,
         "every geometry here is the mesh pool's: a record a triangle and a header each"
     );
+    // (20 bytes a record.) What the records need is what they hold: none went without.
+    let held_mb = tris * 20.0 / (1u64 << 20) as f64;
+    assert!(
+        (diag(&app, "render.ray.tris_wanted_mb") - held_mb).abs() < 1e-4,
+        "the records' need is what they hold"
+    );
     let image = picture(&mut app, "mirror_records.png");
     // The balls' images: 17.7 pixels in radius around (53.4, 60) and (106.6, 60) (a focal
     // length of 164.8 pixels, 9.3 m away in the mirror). Columns a few pixels off their middles
