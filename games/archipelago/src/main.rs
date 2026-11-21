@@ -58,6 +58,7 @@ mod tools;
 mod tour;
 mod town;
 mod tradelines;
+mod unlocks;
 mod vessels;
 mod walkers;
 mod world;

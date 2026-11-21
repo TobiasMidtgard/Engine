@@ -2630,6 +2630,38 @@ pub fn shelf_view(world: &World) -> Vec<ItemView> {
         .collect()
 }
 
+/// Whether the pedlar is at the quay, and the seconds until he weighs anchor (while he is
+/// here) or calls again (while he is away); None in a game without him. The call is an
+/// estimate from where he is and how fast he sails.
+pub fn pedlar_times(world: &mut World) -> Option<(bool, f32)> {
+    use crate::fleet::{Doing, PEDLAR_AWAY_S, Roam, Vessel};
+    let here = world.resource::<Items>().market_open;
+    let mut q = world.query::<&Vessel>();
+    let v = q
+        .iter(world)
+        .find(|v| matches!(v.roam, Roam::Pedlar { .. }))?;
+    let Roam::Pedlar { quay, away } = v.roam else {
+        return None;
+    };
+    let pace = v.craft.speed().max(1.0) as f64;
+    let at = DVec2::new(v.at.x, v.at.z);
+    let left = (v.lengths.last().copied().unwrap_or(0.0) - v.s).max(0.0);
+    let s = match v.doing {
+        Doing::Moored(t) if here => t as f64,
+        // Lying off the far point: the wait, then the run in.
+        Doing::Lingering(t) | Doing::Moored(t) => t as f64 + (quay - at).length() / pace,
+        Doing::Sailing => {
+            let end = v.path.last().map_or(at, |p| DVec2::new(p.x, p.z));
+            if (end - quay).length() < 30.0 {
+                left / pace
+            } else {
+                left / pace + PEDLAR_AWAY_S as f64 + (quay - away).length() / pace
+            }
+        }
+    };
+    Some((here, s as f32))
+}
+
 /// The pedlar's stock (empty when he is away).
 pub fn offers_view(world: &World) -> Vec<OfferView> {
     let items = world.resource::<Items>();
@@ -2692,9 +2724,12 @@ pub fn state(world: &mut World) -> serde_json::Value {
         .into_iter()
         .filter_map(|e| panel(world, e))
         .collect();
+    let times = pedlar_times(world);
     let econ = world.resource::<Economy>();
     let items = world.resource::<Items>();
     serde_json::json!({
+        "pedlar_leaves_in_s": times.filter(|t| t.0).map(|t| t.1.round()),
+        "pedlar_next_call_s": times.filter(|t| !t.0).map(|t| t.1.round()),
         "renown": renown(econ).round(),
         "allowed_of_each": allowed(econ),
         "next_at_renown": (allowed(econ) < 4).then(|| allowed(econ) as f32 * RENOWN_STEP),

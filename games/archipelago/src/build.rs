@@ -308,6 +308,10 @@ pub fn place(
         }
     }
     if charge {
+        // (What opens with people: a tier's works, the public buildings of its needs.)
+        if let Some(why) = crate::unlocks::refusal(world, kind) {
+            return Err(why);
+        }
         pay(world, kind, isle)?;
     }
     let base_y = grid::base_height(kind, origin, rot);

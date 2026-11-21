@@ -443,7 +443,7 @@ pub enum Roam {
 
 /// Seconds the pedlar lies off the quay with his stock, and stays away.
 pub const PEDLAR_STAYS_S: f32 = 240.0;
-const PEDLAR_AWAY_S: f32 = 45.0;
+pub const PEDLAR_AWAY_S: f32 = 45.0;
 
 fn lengths(path: &[DVec3]) -> Arc<Vec<f64>> {
     let mut out = vec![0.0];

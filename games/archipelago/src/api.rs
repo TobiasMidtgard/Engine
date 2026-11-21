@@ -410,6 +410,9 @@ pub fn register(app: &mut App) {
             Ok(json!({"focus": [cam.goal_focus.x, cam.goal_focus.z], "yaw": cam.goal_yaw, "dist": cam.goal_dist}))
         },
     )
+    .register_api("isle.build.locks", "Every kind of building for the company giving orders: whether it is open yet, what opens it (why, a sentence for a padlock) and how far along that is (progress 0 to 1).", "{}", |world, _| {
+        Ok(serde_json::to_value(crate::unlocks::locks(world)).unwrap_or_default())
+    })
     .register_api("isle.items", "Items: renown and how many of each item building it allows, every Trading Union, Town Hall and Harbour Office with its slots and what each item is doing now, the shelf, and the pedlar's stock while he is moored.", "{}", |world, _| {
         Ok(crate::items::state(world))
     })

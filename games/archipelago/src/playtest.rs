@@ -44,6 +44,8 @@ pub(crate) struct Log {
     pub(crate) seed: u64,
     /// Houses that lacked a service when one was last built for them, per (island, kind).
     lacking: HashMap<(usize, Kind), usize>,
+    /// Works beyond the basics put up this turn ([`crate::brain::Knobs::works`]).
+    works_this_turn: u32,
 }
 
 impl Log {
@@ -310,6 +312,7 @@ pub fn run(mut app: App, minutes: f64, speed: f32, shots: Option<&str>, seed: u6
 /// One turn of the company's (whichever is acting): everything a careful player looks at.
 pub(crate) fn turn(world: &mut World, log: &mut Log) {
     let now = clock(world);
+    log.works_this_turn = 0;
     see_abroad(world);
     let fresh = *world.resource::<StartMode>() == StartMode::Fresh;
     if fresh && !slips(world, 1) {
@@ -1035,6 +1038,14 @@ fn build_within(
     if kind != Kind::House && coins - cost < short * 10.0 {
         return false;
     }
+    // (A weaker captain gets fewer things done in a turn: of what goes beyond the basics.)
+    if !basic && log.works_this_turn >= knobs(world).works {
+        return false;
+    }
+    // (What is not open yet cannot be built anywhere.)
+    if crate::unlocks::refusal(world, kind).is_some() {
+        return false;
+    }
     // Where a kind found no spot that joins the roads lately, leave it be a while (each try
     // places and takes down a building).
     let isle = crate::island::island_at(at.x, at.y).unwrap_or(usize::MAX);
@@ -1068,6 +1079,9 @@ fn build_within(
                                 crate::town::join_to_roads(world, e)
                             };
                             if joined {
+                                if !basic {
+                                    log.works_this_turn += 1;
+                                }
                                 *log.built.entry(kind.def().name).or_default() += 1;
                                 log.line(now, format!("built a {} ({why})", kind.def().name));
                                 return true;
@@ -1199,6 +1213,10 @@ fn makers_via_within(g: Good, i: usize, from: &[usize], depth: u32) -> Vec<Kind>
 
 /// The islands settled so far, whose goods a route can bring.
 fn settled_islands(world: &mut World) -> Vec<usize> {
+    // (A captain who plans one island at a time looks at no other.)
+    if !knobs(world).across {
+        return Vec::new();
+    }
     (0..islands().len())
         .filter(|&i| crate::settle::claimed(world, i))
         .collect()
@@ -1223,6 +1241,7 @@ fn build_chain(
     if !build_for(world, log, now, k, i, at, why) {
         return false;
     }
+    let depth = depth.min(knobs(world).depth);
     if depth == 0 {
         return true;
     }
@@ -1662,7 +1681,7 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                 .map(|(j, _)| j);
             let Some(from) = from else {
                 // Another company has it to spare: buy it there.
-                if !carried_to(g, to) && buy_abroad(world, log, now, g, to) {
+                if knobs(world).abroad && !carried_to(g, to) && buy_abroad(world, log, now, g, to) {
                     return;
                 }
                 if builders {
@@ -1686,6 +1705,7 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                     // (One already there and still starting up: give it time.)
                     .filter(|(j, k)| !standing.contains(&(*j, *k)));
                 if let Some((j, k)) = maker
+                    && knobs(world).across
                     && log
                         .last
                         .get(&(j + 8000, Some(g)))
@@ -2134,6 +2154,9 @@ fn colonise(world: &mut World, log: &mut Log, now: f64) {
     let coins = my_coins(world);
     let home_books = world.resource::<Economy>().islands[h].clone();
     let settled = claimed.iter().filter(|c| **c).count();
+    if settled >= knobs(world).isles {
+        return;
+    }
     // Each new island asks for a bigger home first (less when racing for islands).
     let (need_people, need_coins) = expansion_bar(world, settled);
     if home_books.population.iter().sum::<f32>() < need_people
