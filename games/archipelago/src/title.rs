@@ -3,7 +3,9 @@
 //!
 //! The title opens over a new game that is already set up: the economy stands still
 //! (`Economy::speed` 0), the bars are hidden and the camera drifts beside the company's barque.
-//! New game gives the bars and the clock back; Sandbox town starts the game again with
+//! New game gives the bars and the clock back and sets the rivals picked under it sailing
+//! (Rivals None to 3, Level Deckhand to Admiral; three Captains unless `--rivals` said
+//! otherwise); Sandbox town starts the game again with
 //! `--sandbox` (the finished town of earlier rounds); How to play opens the page; Quit asks
 //! first. In play, Esc opens the menu when it has nothing else to do (no tool in hand, nothing
 //! picked, no book open), and F1 opens the page.
@@ -33,6 +35,7 @@ use engine_ui::text::{DISPLAY_CAPS_FONT, DISPLAY_FONT, HUMANIST_FONT};
 use engine_ui::theme::ClassStyle;
 use engine_ui::toast::{self, ToastKind};
 
+use crate::brain::{Level, RivalSetup};
 use crate::camera::StrategyCam;
 use crate::sim::Economy;
 use crate::tools::{Hand, Tool};
@@ -82,6 +85,47 @@ pub struct Front {
     resume_speed: Option<f32>,
     /// Last frame, nothing but the map wanted Esc.
     esc_free: bool,
+    /// The rivals New game starts with, chosen on the title (three Captains unless the
+    /// run's flags said otherwise).
+    rivals: Option<RivalSetup>,
+    /// The rivals the world was set up with before the title (`--rivals`).
+    began: Option<RivalSetup>,
+}
+
+/// The rivals a new game offers when the flags name none.
+pub const DEFAULT_RIVALS: RivalSetup = RivalSetup {
+    count: 3,
+    level: Level::Captain,
+};
+
+/// What a rival at `level` is like, in a line for the title.
+fn level_note(level: Level) -> &'static str {
+    match level {
+        Level::Deckhand => "slow and forgiving, one island and short chains",
+        Level::Mate => "takes its time, two islands at most",
+        Level::Captain => "a fair match, up to three islands",
+        Level::Commodore => "races you for islands, and one starts in your waters",
+        Level::Admiral => "plays to win, buys abroad, and one starts in your waters",
+    }
+}
+
+/// The line under the rival choice: how many houses, at what level, and what they are like.
+fn rivals_note(r: RivalSetup) -> String {
+    let houses = [
+        "No rival houses",
+        "One rival house",
+        "Two rival houses",
+        "Three rival houses",
+    ];
+    match r.count {
+        0 => "The sea is yours alone: no rival houses.".to_string(),
+        n => format!(
+            "{} at {}: {}.",
+            houses[n.min(3)],
+            r.level.name(),
+            level_note(r.level)
+        ),
+    }
 }
 
 /// Add the front to the game: the title (unless the run is a tour, a playtest, headless or a
@@ -135,7 +179,11 @@ fn front(world: &mut World) {
 fn act(world: &mut World, a: &str) {
     match a {
         "fv.new" => start(world),
-        "fv.sandbox" => relaunch(world, &["--sandbox"]),
+        "fv.restart.now" => {
+            let r = world.get_resource::<RivalSetup>().copied();
+            relaunch(world, &rival_flags(r, true));
+        }
+        "fv.sandbox" => relaunch(world, &["--sandbox".to_string()]),
         "fv.help" => open_help(world),
         "fv.help.close" => {
             screens::hide(world, HELP, false);
@@ -148,7 +196,6 @@ fn act(world: &mut World, a: &str) {
             "New game",
             "fv.restart.now",
         ),
-        "fv.restart.now" => relaunch(world, &["--no-title"]),
         "fv.quit" => confirm(
             world,
             &format!("Quit {NAME}?"),
@@ -166,6 +213,14 @@ fn act(world: &mut World, a: &str) {
             if let Some(then) = a.strip_prefix("fv.confirm.ok:") {
                 screens::hide(world, CONFIRM, true);
                 act(world, then);
+            } else if let Some(n) = a.strip_prefix("fv.rivals:") {
+                let n = n.parse::<usize>().unwrap_or(0).min(3);
+                choose_rivals(world, |r| r.count = n);
+            } else if let Some(l) = a.strip_prefix("fv.level:").and_then(Level::from_name) {
+                choose_rivals(world, |r| {
+                    r.level = l;
+                    r.count = r.count.max(1);
+                });
             }
         }
     }
@@ -220,7 +275,13 @@ fn keys(world: &mut World) {
 /// Put up the title over the new game: the bars hidden, the clock stopped, the view beside
 /// the barque.
 fn open_title(world: &mut World) {
-    world.resource_mut::<Front>().opened = true;
+    let began = world.get_resource::<RivalSetup>().copied();
+    {
+        let mut f = world.resource_mut::<Front>();
+        f.opened = true;
+        f.began = began;
+        f.rivals = Some(began.unwrap_or(DEFAULT_RIVALS));
+    }
     install_classes(world);
     world.resource_mut::<Economy>().speed = 0.0;
     let start = {
@@ -258,7 +319,8 @@ fn open_title(world: &mut World) {
         closable: false,
         ..Default::default()
     };
-    if let Err(e) = screens::spawn_screen(world, screen, &title_el()) {
+    let rivals = world.resource::<Front>().rivals.unwrap_or(DEFAULT_RIVALS);
+    if let Err(e) = screens::spawn_screen(world, screen, &title_el(rivals)) {
         engine::core::log::warn!("{NAME} title: {e}");
     }
 }
@@ -376,6 +438,28 @@ fn drift(world: &mut World) {
 /// New game: the title goes, the bars and the clock come back and the view goes to the
 /// start.
 fn start(world: &mut World) {
+    // The rivals chosen on the title set sail now (the clock has stood still since the
+    // world was made). A world already made with other rivals starts again with these.
+    let (chosen, began) = {
+        let f = world.resource::<Front>();
+        (f.rivals, f.began)
+    };
+    if let Some(r) = chosen {
+        match began {
+            Some(b) if b.count > 0 && (b.count, b.level) != (r.count, r.level) => {
+                relaunch(world, &rival_flags(Some(r), true));
+                return;
+            }
+            Some(b) if b.count > 0 => {}
+            _ => {
+                if r.count > 0 {
+                    crate::brain::start_rivals(world, r.count, r.level);
+                    crate::build::refresh(world);
+                }
+                world.insert_resource(r);
+            }
+        }
+    }
     screens::hide(world, TITLE, false);
     screens::hide(world, HELP, true);
     world.resource_mut::<Front>().stage = Stage::Playing;
@@ -413,11 +497,19 @@ fn start(world: &mut World) {
 
 /// Start this program again with the same options (less the start ones) and `extra`, and
 /// quit this one.
-fn relaunch(world: &mut World, extra: &[&str]) {
-    let keep: Vec<String> = std::env::args()
-        .skip(1)
-        .filter(|a| !matches!(a.as_str(), "--sandbox" | "--title" | "--no-title"))
-        .collect();
+fn relaunch(world: &mut World, extra: &[String]) {
+    let mut keep: Vec<String> = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--sandbox" | "--title" | "--no-title" => {}
+            // A flag and its value: the new start says its own.
+            "--rivals" | "--rival-level" => {
+                args.next();
+            }
+            _ => keep.push(a),
+        }
+    }
     let spawned = std::env::current_exe()
         .map_err(|e| e.to_string())
         .and_then(|exe| {
@@ -432,6 +524,33 @@ fn relaunch(world: &mut World, extra: &[&str]) {
             world.write_message(AppExit::Success);
         }
         Err(e) => toast::notify(world, ToastKind::Bad, "", "Could not start again", &e, 6.0),
+    }
+}
+
+/// The start flags for a new game with rivals `r` (none: no rivals), past the title.
+fn rival_flags(r: Option<RivalSetup>, no_title: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if no_title {
+        out.push("--no-title".to_string());
+    }
+    if let Some(r) = r.filter(|r| r.count > 0) {
+        out.extend([
+            "--rivals".to_string(),
+            r.count.to_string(),
+            "--rival-level".to_string(),
+            r.level.name().to_lowercase(),
+        ]);
+    }
+    out
+}
+
+/// Change the title's rival choice and show it.
+fn choose_rivals(world: &mut World, f: impl FnOnce(&mut RivalSetup)) {
+    let mut r = world.resource::<Front>().rivals.unwrap_or(DEFAULT_RIVALS);
+    f(&mut r);
+    world.resource_mut::<Front>().rivals = Some(r);
+    if let Some(e) = engine_ui::input::find_id(world, "fv_setup") {
+        let _ = engine_ui::el::replace_children(world, e, &setup_rows(r));
     }
 }
 
@@ -477,6 +596,39 @@ fn install_classes(world: &mut World) {
             .transition(0.16)
             .ease(Ease::Out)
     };
+    // The rival choice's chips: a thin brass rim, lit when picked.
+    let chip = StylePatch::default()
+        .padding([4.0, 13.0, 5.0, 13.0])
+        .radius(Corners::all(4.0))
+        .border(1.0, Color::hexa(0xd8ab5850))
+        .background(Fill::Solid(Color::hexa(0x050b1160)))
+        .color(Colors::cream_dim())
+        .font_family(HUMANIST_FONT)
+        .font_weight(700)
+        .font_size(17.0)
+        .transition(0.12)
+        .ease(Ease::Out);
+    let picked = || {
+        StylePatch::default()
+            .background(Fill::vertical(
+                Color::hexa(0xd8ab58a0),
+                Color::hexa(0x8a6a2ca0),
+            ))
+            .border_color(Colors::brass_light())
+            .color(Color::hex(0xfff6dc))
+    };
+    theme.classes.insert(
+        "fv_chip".to_string(),
+        ClassStyle {
+            base: chip,
+            hover: StylePatch::default()
+                .border_color(Colors::brass())
+                .color(Colors::cream()),
+            focused: StylePatch::default().border_color(Colors::brass()),
+            selected: picked(),
+            ..Default::default()
+        },
+    );
     for (name, size) in [("fv_item", 31.0), ("fv_item_small", 22.0)] {
         theme.classes.insert(
             name.to_string(),
@@ -577,7 +729,81 @@ fn hint(k: &str, what: &str) -> El {
         )
 }
 
-fn title_el() -> El {
+/// One chip of the rival choice.
+fn chip(label: &str, action: String, on: bool) -> El {
+    El::new()
+        .class("fv_chip")
+        .on_click(action)
+        .selected(on)
+        .child(
+            El::text(label)
+                .text_style(|t| t.nowrap().shadow())
+                .pick_ignore(),
+        )
+}
+
+/// A row of the rival choice: its name, then its chips.
+fn setup_row(name: &str, chips: Vec<El>) -> El {
+    El::new()
+        .with_style(|s| {
+            s.direction(Direction::Row)
+                .gap(6.0)
+                .align_items(Align::Center)
+        })
+        .child(
+            El::text(name.to_uppercase())
+                .text_style(|t| {
+                    let mut t = t.nowrap().shadow();
+                    t.letter_spacing = 0.16;
+                    t
+                })
+                .with_style(|s| {
+                    s.width(86.0)
+                        .shrink(0.0)
+                        .font_family(DISPLAY_CAPS_FONT)
+                        .font_weight(700)
+                        .font_size(15.0)
+                        .color(Colors::brass())
+                })
+                .pick_ignore(),
+        )
+        .children(chips)
+}
+
+/// The rival choice under New game: how many houses, how well they play, and a line on it.
+fn setup_rows(r: RivalSetup) -> Vec<El> {
+    let counts = ["None", "1", "2", "3"]
+        .iter()
+        .enumerate()
+        .map(|(n, l)| chip(l, format!("fv.rivals:{n}"), r.count == n))
+        .collect();
+    let levels = Level::ALL
+        .iter()
+        .map(|l| {
+            chip(
+                l.name(),
+                format!("fv.level:{}", l.name().to_lowercase()),
+                r.count > 0 && r.level == *l,
+            )
+        })
+        .collect();
+    vec![
+        setup_row("Rivals", counts),
+        setup_row("Level", levels),
+        El::text(rivals_note(r))
+            .text_style(|t| t.nowrap().shadow())
+            .with_style(|s| {
+                s.font_family(HUMANIST_FONT)
+                    .font_weight(500)
+                    .font_size(16.0)
+                    .color(Colors::cream_dim())
+                    .margin([2.0, 0.0, 0.0, 92.0])
+            })
+            .pick_ignore(),
+    ]
+}
+
+fn title_el(rivals: RivalSetup) -> El {
     let caps = El::text("AN ISLAND TRADING COMPANY")
         .text_style(|t| {
             let mut t = t.nowrap().shadow();
@@ -637,6 +863,16 @@ fn title_el() -> El {
             "fv.new",
             "fv_new",
         ))
+        .child(
+            El::new()
+                .id("fv_setup")
+                .with_style(|s| {
+                    s.direction(Direction::Column)
+                        .gap(7.0)
+                        .margin([0.0, 0.0, 12.0, 72.0])
+                })
+                .children(setup_rows(rivals)),
+        )
         .child(item(
             "isle_house",
             "Sandbox town",
@@ -1290,6 +1526,35 @@ mod tests {
 
     fn flat(s: &str) -> String {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The title's rival choice turns into the flags a restart passes on, and its line.
+    #[test]
+    fn the_rival_choice_gives_its_start_flags_and_its_line() {
+        let two = RivalSetup {
+            count: 2,
+            level: Level::Admiral,
+        };
+        assert_eq!(
+            rival_flags(Some(two), true),
+            ["--no-title", "--rivals", "2", "--rival-level", "admiral"]
+        );
+        let none = RivalSetup {
+            count: 0,
+            level: Level::Mate,
+        };
+        assert_eq!(rival_flags(Some(none), true), ["--no-title"]);
+        assert!(rival_flags(None, false).is_empty());
+        // What the flags say, main.rs reads back.
+        assert_eq!(Level::from_name("admiral"), Some(Level::Admiral));
+        assert_eq!(
+            rivals_note(DEFAULT_RIVALS),
+            "Three rival houses at Captain: a fair match, up to three islands."
+        );
+        assert_eq!(
+            rivals_note(none),
+            "The sea is yours alone: no rival houses."
+        );
     }
 
     /// The zip's PLAY.txt says what the in-game page says.
