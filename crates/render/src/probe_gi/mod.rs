@@ -164,7 +164,7 @@ fn shader_source(rays: Rays) -> String {
         ),
         Rays::World => format!(
             "{}\n{}\n{body}",
-            include_str!("../shaders/lib_ray.wgsl"),
+            crate::ray_scene::shader_lib(1),
             include_str!("../shaders/probe_gi_rays.wgsl")
         ),
     }

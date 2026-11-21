@@ -182,7 +182,21 @@ impl RaySceneOut<'_> {
         source: RaySource<'_>,
     ) -> RayGeometryState {
         self.scene
-            .geometry(self.feature, key, version, opaque, source)
+            .geometry(self.feature, key, version, opaque, source, false)
+    }
+
+    /// [`geometry`](Self::geometry) for triangles in the mesh pool's pages (`PoolVertex`,
+    /// `u32` indices): the scene also writes their triangle records, which give hits their
+    /// smooth normal, uv and vertex colour.
+    pub(crate) fn pool_geometry(
+        &mut self,
+        key: RayKey,
+        version: u64,
+        opaque: bool,
+        source: RaySource<'_>,
+    ) -> RayGeometryState {
+        self.scene
+            .geometry(self.feature, key, version, opaque, source, true)
     }
 
     /// Whether geometry `key` is in the scene at `version` already, without its source at

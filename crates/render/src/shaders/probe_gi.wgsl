@@ -130,7 +130,9 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         rays[id.x] = vec4<f32>(sky * PROBE_GI_SCALE, t_max);
         return;
     }
-    let shaded = shade_hit(origin, dir, hit, spacing);
+    // The ray's cone: no width at the probe, then its share of the sphere across (4 pi / rays
+    // steradians: 0.44 rad for the default 64), which reads most textures at their mean.
+    let shaded = shade_hit(origin, dir, hit, spacing, vec2<f32>(0.0, sqrt(4.0 * PI / f32(rays_per_probe))));
     if (shaded.w < 0.0) {
         // The back of a single-sided surface: inside something. DDGI counts these to find
         // probes stuck in walls.
@@ -348,7 +350,11 @@ fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
         let indirect = probe_gi(p, -dir, -dir);
         out = vec4<f32>(VOLUME_WALL_ALBEDO * INV_PI * indirect.rgb * indirect.a, max(wall, 1e-3));
     } else if (hit.instance != 0xffffffffu) {
-        let shaded = shade_hit(origin, dir, hit, spacing);
+        // The traced texel's cone: two pixels across (a half-size texel), a pixel sized at its
+        // depth, widening as much per meter (as wide all along when orthographic).
+        let pixel = 2.0 / (frame.proj[1][1] * frame.viewport.y);
+        let cone = select(vec2<f32>(2.0 * pixel * depth, 2.0 * pixel), vec2<f32>(2.0 * pixel, 0.0), frame.exposure.w > 0.5);
+        let shaded = shade_hit(origin, dir, hit, spacing, cone);
         // The back of a single-sided surface: the ray started inside something, so it
         // reflects nothing of its own.
         if (shaded.w > 0.0) {

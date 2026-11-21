@@ -10,6 +10,12 @@
 // first, then a share of the rest in turn), then the cleared ones.
 @group(2) @binding(18) var<storage, read> updates: array<u32>;
 
+// The last hit `trace_scene` found for a ray that asks what it meets, whole as `ray_whole`
+// gave it: what the shared body's `Hit` has no room for (the triangle, where on it, the turn
+// to its mesh). `shade_hit` shades that hit next (`cs_trace`, `cs_reflect` trace nothing in
+// between); shadow rays leave it as it is.
+var<private> ray_last: RayHit;
+
 // The nearest hit along a camera-relative ray within `t_max` (`instance` all ones: none)
 // among what holds its shape and is 0.3 m or more, as the probes' own scene held it: no face
 // is culled, every triangle is taken whole. `local_n` is the triangle's normal in the scene's
@@ -27,6 +33,7 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
         return hit;
     }
     let found = ray_whole(origin, dir, t_max, RAY_SEES_SHAPES, false);
+    ray_last = found;
     hit.t = found.t;
     hit.instance = found.row;
     hit.local_n = found.n;
@@ -35,16 +42,25 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
 
 // Light leaving the surface a ray from `origin` along `dir` hit (`hit`, not a miss), toward
 // the ray (see `hit_radiance`), and -1 in w for the back of a single-sided surface (inside
-// something), else 1.
-fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32) -> vec4<f32> {
-    let row = ray_rows[hit.instance];
-    var n = normalize(hit.local_n);
-    if (dot(n, dir) > 0.0) {
-        if ((row.flags & RAY_ROW_DOUBLE_SIDED) == 0u) {
-            return vec4<f32>(0.0, 0.0, 0.0, -1.0);
-        }
-        n = -n;
+// something), else 1. `cone`: the ray's width at `origin` and how fast it widens (meters per
+// meter), which pick the level of the hit's texture. The surface is the hit's texture, smooth
+// normal and vertex colour where its row has them (`ray_surface`).
+fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32, cone: vec2<f32>) -> vec4<f32> {
+    var found = ray_last;
+    if (found.row != hit.instance || found.t != hit.t) {
+        // (Not the hit `trace_scene` found last: its face alone, as before the records.)
+        found.t = hit.t;
+        found.row = hit.instance;
+        found.n = hit.local_n;
+        found.primitive = RAY_NONE;
     }
-    let p = origin + dir * hit.t;
-    return vec4<f32>(hit_radiance(p, n, dir, hit.t, spacing, row.albedo.rgb, row.emissive.rgb, u32(ray_scene.lights.x)), 1.0);
+    let s = ray_surface(found, dir, cone);
+    if (s.inside) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    var p = origin + dir * hit.t;
+    if (any(s.n != s.face)) {
+        // `hit_radiance` lifts its shadow rays along `n`: off the face by as much as along a
+        // flat face's normal, however far `n` leans.
+        p += s.face * (max(0.002, hit.t * 1e-4) * (1.0 - dot(s.n, s.face)));
+    }
+    return vec4<f32>(hit_radiance(p, s.n, dir, hit.t, spacing, s.albedo, s.emissive, u32(ray_scene.lights.x)), 1.0);
 }

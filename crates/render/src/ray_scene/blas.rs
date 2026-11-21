@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use wgpu::util::DeviceExt;
 
 use super::hook::{RayGeometryState, RayKey, RaySource};
+use super::tris::{Job, Records};
 
 /// Triangles whose structures may be built a frame. A geometry with more builds as the first
 /// of its frame, or, once it had to wait a frame, in the next whatever was built before it
@@ -131,6 +132,9 @@ pub(super) struct Geometry {
     /// set with one when that top-level structure was last built (which then still holds
     /// it, whatever the slot holds now).
     pub slots: [u32; 2],
+    /// Its triangle records while `blas` is its structure: the header's record, and how
+    /// many (`triangles + 1`). `None`: none (not the pool's vertices, or no room).
+    pub records: Option<(u32, u32)>,
 }
 
 /// A structure out of the scene (its geometry built again, compacted or forgotten), kept
@@ -143,15 +147,19 @@ struct Retired {
     held_by: u8,
     /// The submission after which nothing traces it (0: not known yet).
     gone_after: u64,
+    /// The triangle records written for it (rows that hold it read them): released when it
+    /// is freed.
+    records: Option<(u32, u32)>,
 }
 
 impl Retired {
     /// `slots`: how many slots of each top-level structure hold it now.
-    fn new(blas: wgpu::Blas, slots: [u32; 2]) -> Self {
+    fn new(blas: wgpu::Blas, slots: [u32; 2], records: Option<(u32, u32)>) -> Self {
         Self {
             _blas: blas,
             held_by: (slots[STILL] > 0) as u8 | ((slots[MOVING] > 0) as u8) << MOVING,
             gone_after: 0,
+            records,
         }
     }
 }
@@ -395,8 +403,8 @@ impl Store {
     }
 
     /// Start a frame: the build allowance is whole again, and the structures out of the scene
-    /// that the GPU is past go, [`FREES_PER_FRAME`] at most.
-    pub(super) fn begin_frame(&mut self) {
+    /// that the GPU is past go, [`FREES_PER_FRAME`] at most, with their triangle records.
+    pub(super) fn begin_frame(&mut self, records: &mut Records) {
         self.budget_used = 0;
         self.builds_now = 0;
         self.large_turn = self.large_next.take();
@@ -408,6 +416,9 @@ impl Store {
             let past = r.gone_after != 0 && r.gone_after <= done;
             if past && freed < FREES_PER_FRAME {
                 freed += 1;
+                if let Some((first, len)) = r.records {
+                    records.release(first, len);
+                }
                 return false;
             }
             true
@@ -452,14 +463,16 @@ impl Store {
             .map_or(0, |g| g.users)
     }
 
-    /// Keep `blas` until no top-level structure holds it and the GPU is past the frames that
-    /// may trace it. `slots`: how many slots of each top-level structure hold it now.
-    fn retire(&mut self, blas: wgpu::Blas, slots: [u32; 2]) {
-        self.retired.push(Retired::new(blas, slots));
+    /// Keep `blas` and the triangle records written for it until no top-level structure
+    /// holds it and the GPU is past the frames that may trace it. `slots`: how many slots of
+    /// each top-level structure hold it now.
+    fn retire(&mut self, blas: wgpu::Blas, slots: [u32; 2], records: Option<(u32, u32)>) {
+        self.retired.push(Retired::new(blas, slots, records));
     }
 
     /// Geometry `name` at `version` for an instance read at `frame`: built now if the
-    /// frame's allowance holds it (see [`super::RaySceneOut::geometry`]).
+    /// frame's allowance holds it (see [`super::RaySceneOut::geometry`]). `records`: its
+    /// triangle records are written too, from the pool's vertices `source` names.
     pub(super) fn want(
         &mut self,
         name: Name,
@@ -467,6 +480,7 @@ impl Store {
         opaque: bool,
         source: RaySource<'_>,
         frame: u64,
+        records: Option<&mut Records>,
     ) -> RayGeometryState {
         if self.refused.get(&name) == Some(&version) {
             return RayGeometryState::Refused;
@@ -593,6 +607,16 @@ impl Store {
         }
         self.budget_used += triangles as usize;
         self.builds_now += 1;
+        // Its records, from the pool's vertices and `u32` indices only.
+        let range = match records {
+            Some(records)
+                if vertex_stride == crate::mesh_pool::VERTEX_BYTES
+                    && index_format == wgpu::IndexFormat::Uint32 =>
+            {
+                records.take(triangles, &vertex, &index)
+            }
+            _ => None,
+        };
         let size = wgpu::BlasTriangleGeometrySizeDescriptor {
             vertex_format: wgpu::VertexFormat::Float32x3,
             vertex_count,
@@ -631,6 +655,8 @@ impl Store {
             Some(i) => {
                 let g = self.list[i as usize].as_mut().expect("named geometry");
                 let old = std::mem::replace(&mut g.blas, blas);
+                // (The old records go with the old structure: rows that hold it read them.)
+                let old_range = std::mem::replace(&mut g.records, range);
                 g.version = version;
                 g.built = frame;
                 self.held.count(g.triangles, g.origin, -1);
@@ -639,7 +665,7 @@ impl Store {
                 g.origin = origin;
                 g.compaction = compaction;
                 let slots = g.slots;
-                self.retire(old, slots);
+                self.retire(old, slots, old_range);
                 self.changed.push(i);
                 // One still pending for it gives way to this one.
                 self.pending.retain(|p| p.geometry != i);
@@ -658,6 +684,7 @@ impl Store {
                     compaction,
                     users: 0,
                     slots: [0; 2],
+                    records: range,
                 };
                 let i = match self.free.pop() {
                     Some(i) => {
@@ -721,7 +748,8 @@ impl Store {
             let compacted = queue.compact_blas(&g.blas);
             let full = std::mem::replace(&mut g.blas, compacted);
             g.compaction.store(COMPACT_DONE, Ordering::Release);
-            self.retired.push(Retired::new(full, g.slots));
+            // (The copy has the same triangles in the same order: the records stay.)
+            self.retired.push(Retired::new(full, g.slots, None));
             self.changed.push(i);
             self.stats.compacted += 1;
             any = true;
@@ -739,14 +767,16 @@ impl Store {
     }
 
     /// Record this frame's builds: the geometries' new structures, then the top-level
-    /// structures in `tlas` (wgpu builds structures and those pointing at them in one call).
-    /// `built`: which of the two top-level structures `tlas` holds (bits).
+    /// structures in `tlas` (wgpu builds structures and those pointing at them in one call),
+    /// then the triangle records of what was built. `built`: which of the two top-level
+    /// structures `tlas` holds (bits). True when the records moved to another buffer.
     pub(super) fn encode(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         tlas: &[&wgpu::Tlas],
         built: u8,
-    ) {
+        records: &mut Records,
+    ) -> bool {
         // The top-level structures built here let go of the retired structures their slots
         // held: once the GPU finishes this frame's submission, nothing traces those that no
         // other holds (in a frame that builds nothing, those no structure held).
@@ -758,7 +788,7 @@ impl Store {
             }
         }
         if self.pending.is_empty() && tlas.is_empty() {
-            return;
+            return records.encode(encoder, &mut []);
         }
         let pending = std::mem::take(&mut self.pending);
         let mut entries: Vec<wgpu::BlasBuildEntry> = pending
@@ -795,8 +825,28 @@ impl Store {
         }
         encoder.build_acceleration_structures(entries.iter(), tlas.iter().copied());
         drop(entries);
+        // The records of what was just built, from the ranges its structure was given (a
+        // pending build is always for its geometry's structure as it stands).
+        let mut jobs: Vec<Job<'_>> = pending
+            .iter()
+            .filter_map(|p| {
+                let g = self.list.get(p.geometry as usize)?.as_ref()?;
+                let (header, _) = g.records?;
+                Some(Job {
+                    vertex: &p.vertex,
+                    index: &p.index,
+                    first_vertex: p.first_vertex,
+                    first_index: p.first_index,
+                    triangles: g.triangles,
+                    header,
+                })
+            })
+            .collect();
+        let regroup = records.encode(encoder, &mut jobs);
+        drop(jobs);
         self.built_now.extend(pending.iter().map(|p| p.geometry));
         self.encoded = true;
+        regroup
     }
 
     /// After the submit of frame `frame` (`failed`: wgpu rejected it, so none of its work
@@ -910,7 +960,7 @@ impl Store {
             self.names.remove(&g.name);
             self.pending.retain(|p| p.geometry != i as u32);
             self.free.push(i as u32);
-            self.retire(g.blas, [0; 2]);
+            self.retire(g.blas, [0; 2], g.records);
         }
         if self.refused.len() > 4096 {
             self.refused.clear();

@@ -9,6 +9,8 @@
 //! * [`tlas`]: two top-level structures, one for what holds still (built again every fourth
 //!   frame at most) and a small one for what moves (built again when a member changed), and
 //!   the row a hit reads of its instance.
+//! * [`tris`]: the triangle records a hit reads of its triangle (uv, the corners' normals,
+//!   vertex colour), written on the GPU from the mesh pool's pages as a structure is built.
 //!
 //! The scene exists only on devices with ray queries that take two structures in a stage,
 //! and only while [`crate::settings::trial_cut_more::RAY_WORLD`] is on: off, nothing here is
@@ -16,7 +18,7 @@
 //!
 //! Its bind group (group 1 of every ray pipeline, lib_ray.wgsl): 0 [`RayUniform`], 1 the
 //! still structure, 2 the moving one, 3 the rows, 4 triangle records, 5 the ray tiles, 6 the
-//! ground map (the last three are stand-ins until their steps land). Binding a structure
+//! ground map (the last two are stand-ins until their steps land). Binding a structure
 //! costs the render thread a walk of its instances at submit (0.02 ms a thousand on the
 //! RTX 5080), and again whenever a group before it is set, so a frame's ray dispatches run in
 //! one compute pass with groups 0 and 1 set once.
@@ -25,6 +27,7 @@ mod blas;
 mod hook;
 pub(crate) mod look;
 mod tlas;
+mod tris;
 
 use bevy_ecs::message::{MessageCursor, Messages};
 use bytemuck::{Pod, Zeroable};
@@ -93,6 +96,11 @@ pub(crate) struct RayStats {
     pub copied_triangles: u64,
     /// GPU memory under the bottom-level structures, MiB (`None`: not read yet).
     pub blas_mb: Option<f64>,
+    /// Triangle records in use (a header a geometry with records, a record a triangle), the
+    /// records' buffer (MB), geometries that got none for want of room.
+    pub tris: u32,
+    pub tris_mb: f32,
+    pub tris_refused: u32,
     pub instances: u32,
     pub still: u32,
     pub moving: u32,
@@ -121,6 +129,13 @@ pub(crate) struct RayScene {
     instances: Instances,
     uniform: wgpu::Buffer,
     rows: wgpu::Buffer,
+    tris: tris::Records,
+    /// What the group is made of besides the above (made again when the records move to a
+    /// larger buffer).
+    device: wgpu::Device,
+    layout: wgpu::BindGroupLayout,
+    tiles: wgpu::TextureView,
+    ground: wgpu::TextureView,
     group: wgpu::BindGroup,
     /// This frame (`ViewData::frame_index + 1`, as the mesh scene counts: 0 is never).
     frame: u64,
@@ -137,6 +152,16 @@ pub(crate) struct RayScene {
     started: Option<std::time::Instant>,
     gather_ms: f32,
     anchor_moves: u32,
+}
+
+/// lib_ray.wgsl with its bindings in group `group` (`RAY_GROUP` in the shader): 1 in the
+/// frame's ray pass (`probe_gi::shader_source`). lib_ray reads the frame's `linear_repeat`, so
+/// it is composed with lib_frame.
+pub(crate) fn shader_lib(group: u32) -> String {
+    format!(
+        "const RAY_GROUP: u32 = {group}u;\n{}",
+        include_str!("../shaders/lib_ray.wgsl")
+    )
 }
 
 /// Whether `settings` ask for the ray scene on this device: its switch, with probe GI on
@@ -211,13 +236,8 @@ impl RayScene {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // Stand-ins for what later steps bind: triangle records, the tiles, the ground map.
-        let tris = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ray scene triangle records (none yet)"),
-            size: 16,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
+        let tris = tris::Records::new(device);
+        // Stand-ins for what later steps bind: the tiles, the ground map.
         let stand_in = |label, dimension| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -247,9 +267,51 @@ impl RayScene {
             "ray scene ground map (none yet)",
             wgpu::TextureViewDimension::D2,
         );
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let layout = Self::layout(shared);
+        let group = Self::make_group(
+            device,
+            &layout,
+            [&uniform, &rows, tris.buffer()],
+            &instances,
+            [&tiles, &ground],
+        );
+        Self {
+            queue: shared.queue.clone(),
+            store: Store::new(device),
+            instances,
+            uniform,
+            rows,
+            tris,
+            device: device.clone(),
+            layout,
+            tiles,
+            ground,
+            group,
+            frame: 0,
+            epoch,
+            eye: None,
+            shifts: MessageCursor::default(),
+            shift: None,
+            shifted: 0,
+            building: 0,
+            started: None,
+            gather_ms: 0.0,
+            anchor_moves: 0,
+        }
+    }
+
+    /// The scene's bind group of `buffers` (the uniform, the rows, the triangle records), the
+    /// two structures and `views` (the tiles, the ground map).
+    fn make_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        [uniform, rows, tris]: [&wgpu::Buffer; 3],
+        instances: &Instances,
+        [tiles, ground]: [&wgpu::TextureView; 2],
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ray scene"),
-            layout: &Self::layout(shared),
+            layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -273,32 +335,14 @@ impl RayScene {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&tiles),
+                    resource: wgpu::BindingResource::TextureView(tiles),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&ground),
+                    resource: wgpu::BindingResource::TextureView(ground),
                 },
             ],
-        });
-        Self {
-            queue: shared.queue.clone(),
-            store: Store::new(device),
-            instances,
-            uniform,
-            rows,
-            group,
-            frame: 0,
-            epoch,
-            eye: None,
-            shifts: MessageCursor::default(),
-            shift: None,
-            shifted: 0,
-            building: 0,
-            started: None,
-            gather_ms: 0.0,
-            anchor_moves: 0,
-        }
+        })
     }
 
     /// The scene's bind group (group 1 of the ray pipelines). Valid once a frame's builds
@@ -341,7 +385,7 @@ impl RayScene {
     pub(crate) fn begin(&mut self, view: &ViewData) -> RayView {
         self.started = Some(std::time::Instant::now());
         self.frame = view.frame_index + 1;
-        self.store.begin_frame();
+        self.store.begin_frame(&mut self.tris);
         self.instances.begin_frame();
         if let Some(shift) = self.shift.take() {
             // The world moved to a new frame (a floating-origin move, a jump that re-anchors
@@ -423,7 +467,8 @@ impl RayScene {
     }
 
     /// Record the frame's builds: the geometries' new structures and the top-level
-    /// structures that changed, in one call. Before any pass that binds the scene.
+    /// structures that changed, in one call, and the triangle records of what was built.
+    /// Before any pass that binds the scene, and before [`group`](Self::group) is asked for.
     pub(crate) fn encode_builds(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let building = std::mem::take(&mut self.building);
         let mut tlas: [Option<&wgpu::Tlas>; 2] = [None; 2];
@@ -433,8 +478,17 @@ impl RayScene {
             }
         }
         let tlas: Vec<&wgpu::Tlas> = tlas.into_iter().flatten().collect();
-        self.store.encode(encoder, &tlas, building);
+        let regroup = self.store.encode(encoder, &tlas, building, &mut self.tris);
         self.instances.built(&mut self.store, self.frame);
+        if regroup {
+            self.group = Self::make_group(
+                &self.device,
+                &self.layout,
+                [&self.uniform, &self.rows, self.tris.buffer()],
+                &self.instances,
+                [&self.tiles, &self.ground],
+            );
+        }
     }
 
     /// After the frame's submit (`failed`: wgpu rejected it).
@@ -445,6 +499,7 @@ impl RayScene {
     pub(crate) fn stats(&self) -> RayStats {
         let s = self.store.stats();
         let i = self.instances.stats();
+        let (tris, tris_mb, tris_refused) = self.tris.stats();
         RayStats {
             geometries: s.geometries,
             triangles: s.held.triangles,
@@ -453,6 +508,9 @@ impl RayScene {
             copied: s.held.copied,
             copied_triangles: s.held.copied_triangles,
             blas_mb: s.blas_bytes.map(|b| b as f64 / (1u64 << 20) as f64),
+            tris,
+            tris_mb,
+            tris_refused,
             instances: self.instances.len() as u32,
             still: i.still,
             moving: i.moving,
@@ -500,6 +558,9 @@ impl RayScene {
         if let Some(mb) = s.blas_mb {
             d.set("render.ray.blas_mb", mb);
         }
+        d.set("render.ray.tris", s.tris as f64);
+        d.set("render.ray.tris_mb", s.tris_mb as f64);
+        d.set("render.ray.tris_refused", s.tris_refused as f64);
         d.set("render.ray.instances", s.instances as f64);
         d.set("render.ray.still_instances", s.still as f64);
         d.set("render.ray.moving_instances", s.moving as f64);
@@ -520,6 +581,8 @@ impl RayScene {
 
     // What the hook calls (`RaySceneOut`), each with the feature's number first.
 
+    /// `pool`: `source` is the mesh pool's (`PoolVertex`, `u32` indices), and the scene
+    /// writes the geometry's triangle records too.
     fn geometry(
         &mut self,
         feature: u16,
@@ -527,9 +590,11 @@ impl RayScene {
         version: u64,
         opaque: bool,
         source: RaySource<'_>,
+        pool: bool,
     ) -> RayGeometryState {
+        let records = pool.then_some(&mut self.tris);
         self.store
-            .want((feature, key), version, opaque, source, self.frame)
+            .want((feature, key), version, opaque, source, self.frame, records)
     }
 
     fn has_geometry(&mut self, feature: u16, key: RayKey, version: u64) -> bool {
@@ -587,5 +652,29 @@ impl RayScene {
 
     fn geometry_users(&self, feature: u16, key: RayKey) -> u32 {
         self.store.users((feature, key))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ray_library_takes_its_group_where_it_is_composed() {
+        for group in [1u32, 3] {
+            let src = format!(
+                "{}\n@compute @workgroup_size(1) fn main() {{ _ = ray_scene.counts; }}",
+                shader_lib(group)
+            );
+            let code = crate::features::compose_shader(&src, true);
+            crate::features::validate_wgsl("lib_ray", &code).unwrap();
+            let module = wgpu::naga::front::wgsl::parse_str(&code).unwrap();
+            let at = module
+                .global_variables
+                .iter()
+                .find(|(_, v)| v.name.as_deref() == Some("ray_scene"))
+                .and_then(|(_, v)| v.binding.as_ref().map(|b| b.group));
+            assert_eq!(at, Some(group));
+        }
     }
 }

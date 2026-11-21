@@ -146,14 +146,14 @@ fn grown_bytes(size: u64, needed: u64, limit: u64) -> Option<u64> {
 
 /// Free ranges of a buffer, in elements.
 #[derive(Debug, Default)]
-struct Ranges {
+pub(crate) struct Ranges {
     /// Start -> length of each free range; neighbours are always merged.
     free: BTreeMap<u32, u32>,
     capacity: u32,
 }
 
 impl Ranges {
-    fn new(capacity: u32) -> Self {
+    pub(crate) fn new(capacity: u32) -> Self {
         let mut free = BTreeMap::new();
         if capacity > 0 {
             free.insert(0, capacity);
@@ -162,7 +162,7 @@ impl Ranges {
     }
 
     /// The smallest free range that fits `len`, lowest first among equals.
-    fn alloc(&mut self, len: u32) -> Option<u32> {
+    pub(crate) fn alloc(&mut self, len: u32) -> Option<u32> {
         if len == 0 {
             return Some(0);
         }
@@ -178,7 +178,7 @@ impl Ranges {
         Some(start)
     }
 
-    fn release(&mut self, start: u32, len: u32) {
+    pub(crate) fn release(&mut self, start: u32, len: u32) {
         if len == 0 {
             return;
         }
@@ -209,7 +209,7 @@ impl Ranges {
     }
 
     /// More room at the end: `capacity` elements in all from now on.
-    fn grow(&mut self, capacity: u32) {
+    pub(crate) fn grow(&mut self, capacity: u32) {
         if capacity > self.capacity {
             let (start, len) = (self.capacity, capacity - self.capacity);
             self.capacity = capacity;
@@ -302,7 +302,9 @@ impl Page {
 /// ray queries takes that usage).
 fn ray_input_usage(ray_input: bool) -> wgpu::BufferUsages {
     if ray_input {
-        wgpu::BufferUsages::BLAS_INPUT
+        // Built into ray-tracing structures, and read by the pass that writes their triangle
+        // records (`ray_scene/tris.rs`).
+        wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::STORAGE
     } else {
         wgpu::BufferUsages::empty()
     }

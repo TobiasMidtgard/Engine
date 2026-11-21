@@ -613,7 +613,7 @@ impl Fill<'_> {
                     lod.index_count,
                 ),
             };
-            let state = out.geometry(
+            let state = out.pool_geometry(
                 key,
                 ray_version(gpu_mesh.version, gpu_mesh.ranges, level),
                 true,

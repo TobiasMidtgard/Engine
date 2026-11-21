@@ -37,6 +37,8 @@ const NONE: u32 = u32::MAX;
 
 /// [`RayRow::flags`]: lit from both sides.
 const ROW_DOUBLE_SIDED: u32 = 1 << 8;
+/// [`RayRow::flags`]: `tris` names the triangle records of the structure the slot holds.
+const ROW_HAS_TRIS: u32 = 1 << 9;
 /// [`RayRow::flags`]: `tile` names a layer of the ray tiles.
 const ROW_HAS_TILE: u32 = 1 << 10;
 
@@ -155,6 +157,10 @@ struct Level {
     slots: Vec<u32>,
     /// The geometry each slot of `tlas` was last set with ([`NONE`]: with nothing).
     set_with: Vec<u32>,
+    /// The first triangle record of the structure each slot was last set with ([`NONE`]:
+    /// that structure has no records). Changed only where a slot is set ([`Instances::set_slots`]):
+    /// the built structure holds that structure, whatever the instance's geometry became since.
+    tris: Vec<u32>,
     /// Empty slots an instance may take (the last is taken first).
     free: Vec<u32>,
     /// Slots emptied since the last build: the built structure still holds what was in them
@@ -195,6 +201,7 @@ impl Level {
             capacity,
             slots: vec![NONE; capacity as usize],
             set_with: vec![NONE; capacity as usize],
+            tris: vec![NONE; capacity as usize],
             free: (0..capacity).rev().collect(),
             freed: Vec::new(),
             dirty: Vec::new(),
@@ -398,7 +405,14 @@ impl Instances {
         }
     }
 
-    fn write_row(&mut self, level: usize, slot: u32, row: RayRow) {
+    /// Write `row` (an instance's look) as the row of `level`'s `slot`, with the triangle
+    /// records of the structure the slot holds as built.
+    fn write_row(&mut self, level: usize, slot: u32, mut row: RayRow) {
+        let tris = self.levels[level].tris[slot as usize];
+        if tris != NONE {
+            row.flags |= ROW_HAS_TRIS;
+            row.tris = tris;
+        }
         let at = Self::row_index(level, slot);
         if self.rows[at as usize] == row {
             return;
@@ -731,6 +745,9 @@ impl Instances {
         let anchor = self.anchor;
         let l = &mut self.levels[level];
         let dirty = std::mem::take(&mut l.dirty);
+        // The rows of the slots set, written once the level is let go: their records follow
+        // the structure each slot is set with.
+        let mut looks = Vec::with_capacity(dirty.len());
         for &slot in &dirty {
             l.is_dirty[slot as usize] = false;
             let s = slot as usize;
@@ -743,6 +760,8 @@ impl Instances {
                     let row = Self::row_index(level, slot);
                     Some((
                         inst.geometry,
+                        g.records.map_or(NONE, |(header, _)| header + 1),
+                        inst.row,
                         wgpu::TlasInstance::new(
                             &g.blas,
                             rows_3x4(&inst.to_world, anchor),
@@ -756,13 +775,16 @@ impl Instances {
                 l.released.push(was);
             }
             match now {
-                Some((geometry, instance)) => {
+                Some((geometry, tris, look, instance)) => {
                     store.hold_slot(geometry, level);
                     l.set_with[s] = geometry;
+                    l.tris[s] = tris;
                     l.tlas[s] = Some(instance);
+                    looks.push((slot, look));
                 }
                 None => {
                     l.set_with[s] = NONE;
+                    l.tris[s] = NONE;
                     if was != NONE || l.tlas[s].is_some() {
                         l.tlas[s] = None;
                     }
@@ -774,6 +796,9 @@ impl Instances {
         let mut dirty = dirty;
         dirty.clear();
         l.dirty = dirty;
+        for (slot, look) in looks {
+            self.write_row(level, slot, look);
+        }
     }
 
     /// The structures [`settle`](Self::settle) chose were recorded for building in `frame`'s

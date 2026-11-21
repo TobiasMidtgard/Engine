@@ -2,6 +2,7 @@
 //! hardware every ray of the frame (probe light, world reflections, the sun's measuring rays)
 //! traces one scene that the features fill on the render thread, instead of the scene probe GI
 //! gathers for itself. The same triangles, so each scene of `probe_gi.rs` is lit as before; a
+//! mirror shows a smooth ball round and a wall in its vertex paint (the triangle records); a
 //! thing that moves is in the rays where it went and one that leaves is gone; the sun's rays
 //! are stopped where the shadow falls, by what casts it or by its stand-in, and pass what
 //! casts none; a thing inside its stand-in is not shaded by it; a dense mesh is in the rays at
@@ -548,6 +549,156 @@ fn the_ray_scene_lights_each_scene_as_the_probes_own_scene_does() {
             share * 100.0
         );
     }
+}
+
+/// Brightness (0..255, the mean of the three channels) of the pixels of column `x`, rows `rows`,
+/// each the mean of the column and its two neighbours.
+fn column(image: &image::RgbImage, x: u32, rows: std::ops::Range<u32>) -> Vec<f32> {
+    rows.map(|y| {
+        let mut sum = 0.0;
+        for x in x - 1..=x + 1 {
+            let p = image.get_pixel(x, y);
+            sum += (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0;
+        }
+        sum / 3.0
+    })
+    .collect()
+}
+
+/// The largest second difference along `line`, and how far it spans (most less least).
+fn bends(line: &[f32]) -> (f32, f32) {
+    let bend = line
+        .windows(3)
+        .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs())
+        .fold(0.0, f32::max);
+    let most = line.iter().copied().fold(f32::MIN, f32::max);
+    let least = line.iter().copied().fold(f32::MAX, f32::min);
+    (bend, most - least)
+}
+
+/// Behind the camera, seen only in a mirror (world reflections): a smooth ball and its faceted
+/// twin in the sun, and a white wall painted green in its vertex colour. The rays read the
+/// triangle records: the smooth ball's light runs smoothly over its faces where the faceted
+/// one's steps from face to face, and the wall shows its paint (white without the records).
+#[test]
+fn a_mirror_shows_a_ball_round_and_a_painted_wall_in_its_paint() {
+    let mut app = app(true);
+    let w = &mut app.world;
+    ground(w);
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 1.5, -3.0)),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [5.0, 3.0, 0.1],
+            },
+            StandardMaterial::color(0.95, 0.95, 0.95)
+                .with_metallic(1.0)
+                .with_roughness(0.05),
+        ),
+    ));
+    let ball = Shape::Sphere {
+        radius: 1.0,
+        segments: 12,
+    }
+    .mesh();
+    let mut faceted = ball.clone();
+    faceted.compute_flat_normals();
+    let wall = Shape::Cuboid {
+        size: [8.0, 4.0, 0.3],
+    }
+    .mesh()
+    .with_vertex_color(Vec4::new(0.1, 0.8, 0.1, 1.0));
+    let (ball, faceted, wall) = {
+        let mut meshes = w.resource_mut::<Assets<Mesh>>();
+        (meshes.add(ball), meshes.add(faceted), meshes.add(wall))
+    };
+    let gray = || StandardMaterial::color(0.45, 0.45, 0.45).with_roughness(0.9);
+    // The smooth ball on the left of the mirror's picture, the faceted one on the right.
+    for (mesh, x) in [(ball, -1.5), (faceted, 1.5)] {
+        w.spawn((
+            Transform::from_translation(DVec3::new(x, 1.5, 2.4)),
+            MeshRenderer::new(mesh, gray()),
+        ));
+    }
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 2.0, 4.0)),
+        MeshRenderer::new(
+            wall,
+            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.9),
+        ),
+    ));
+    // From behind the mirror, onto the balls' and the wall's faces toward it.
+    sun(w, 110_000.0, DVec3::new(0.2, -0.8, 0.6));
+    // 40 degrees high: the mirror fills the picture, a ball's image is 35 pixels across.
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(40.0)
+        },
+        Transform::from_translation(DVec3::new(0.0, 1.5, 1.0))
+            .looking_at(DVec3::new(0.0, 1.5, -3.0), Vec3::Y),
+    ));
+    app.update_n(12);
+    if !can_run(&app) {
+        return;
+    }
+    assert_in_ray_scene(&app, "the mirror");
+    let (tris, triangles, geometries) = (
+        diag(&app, "render.ray.tris"),
+        diag(&app, "render.ray.triangles"),
+        diag(&app, "render.ray.geometries"),
+    );
+    assert_eq!(
+        diag(&app, "render.ray.tris_refused"),
+        0.0,
+        "no geometry went without"
+    );
+    assert_eq!(
+        diag(&app, "render.ray.retired"),
+        0.0,
+        "nothing was built again"
+    );
+    assert_eq!(
+        tris,
+        triangles + geometries,
+        "every geometry here is the mesh pool's: a record a triangle and a header each"
+    );
+    let image = picture(&mut app, "mirror_records.png");
+    // The balls' images: 17.7 pixels in radius around (53.4, 60) and (106.6, 60) (a focal
+    // length of 164.8 pixels, 9.3 m away in the mirror). Columns a few pixels off their middles
+    // (which run along an edge between two columns of faces), rows over the lit upper part
+    // (above the terminator, clear of the outline).
+    let rows = 47..65;
+    let (smooth, smooth_span) = bends(&column(&image, 57, rows.clone()));
+    let (stepped, stepped_span) = bends(&column(&image, 110, rows));
+    // The wall between and above the balls.
+    let (mut r, mut g, mut b, mut n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for y in 26..38 {
+        for x in 45..115 {
+            let p = image.get_pixel(x, y);
+            r += p[0] as f32;
+            g += p[1] as f32;
+            b += p[2] as f32;
+            n += 1.0;
+        }
+    }
+    let (r, g, b) = (r / n, g / n, b / n);
+    let green = (g - 0.5 * (r + b)) / g.max(1.0);
+    eprintln!(
+        "records: {tris} for {triangles} triangles in {geometries} geometries; the smooth          ball's largest bend {smooth:.1} over {smooth_span:.0} levels, the faceted one's          {stepped:.1} over {stepped_span:.0}; the wall {r:.0} {g:.0} {b:.0}, green share          {green:.2}"
+    );
+    assert!(
+        smooth_span > 40.0 && stepped_span > 40.0,
+        "both balls are lit across their faces: {smooth_span:.0} and {stepped_span:.0} levels"
+    );
+    assert!(
+        smooth * 3.0 < stepped,
+        "the smooth ball is round in the mirror: its light bends by {smooth:.1} at most, the          faceted one's by {stepped:.1}"
+    );
+    assert!(
+        green > 0.25,
+        "the wall shows its green paint in the mirror: green share {green:.2} ({r:.0} {g:.0} {b:.0})"
+    );
 }
 
 /// A lid over the roof's opening slides aside while the scene runs: it is in the moving

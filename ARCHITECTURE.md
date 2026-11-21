@@ -261,9 +261,13 @@ in turn, never a walk of every slot in one frame; it names a geometry by its mes
 index and that index's generation. The frame's rays run in one compute pass, "rays", which
 binds the scene once (binding a structure costs the render thread a walk of its instances at
 submit); in a frame whose probe grid scrolled, the world reflections run in a second pass,
-after the probes' atlases were copied. Without ray queries, or with the switch off, nothing of
-it is made and the probes gather their own scene as before. `render.ray.*` and
-`render.meshes.ray_*` count it.
+after the probes' atlases were copied. A mesh from the pool is in the rays at its ray level
+(the coarsest of its levels within 3 cm at the largest scale it is placed at, built while the
+whole mesh serves), and a structure built from the pool's pages gets triangle records, written
+on the GPU after the frame's builds (`ray_scene/tris.rs`, `ray_attr.wgsl`): a hit reads its
+smooth normal, uv and vertex colour there (`ray_surface` in lib_ray.wgsl). Without ray
+queries, or with the switch off, nothing of it is made and the probes gather their own scene as
+before. `render.ray.*` and `render.meshes.ray_*` count it.
 
 **GPU skinning** (built; `skinning.rs`): a module that poses a mesh puts `GpuSkin` (per-vertex
 bones and weights in an `Arc<SkinWeights>`, each bone's `SkinBone` dual quaternion from the

@@ -27,8 +27,9 @@ struct Instance {
 
 // Light leaving the surface a ray from `origin` along `dir` hit (`hit`, not a miss), toward
 // the ray (see `hit_radiance`), and -1 in w for the back of a single-sided surface (inside
-// something), else 1.
-fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32) -> vec4<f32> {
+// something), else 1. `cone` (the ray's width where it started, and its widening) picks a
+// texture's level where a hit has one; this scene's hits have none.
+fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32, cone: vec2<f32>) -> vec4<f32> {
     let inst = instances[hit.instance];
     let local_n = hit_normal_local(hit);
     // Normals go through the transposed inverse: the rows of camera-relative -> mesh.
