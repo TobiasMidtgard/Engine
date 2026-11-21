@@ -236,6 +236,75 @@ fn cs_touch(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
+/// A cut-out card: each candidate reads its texture's alpha (`textureSampleLevel`, level 0, from
+/// a layer of an array, as a leaf row reads its tile) inside the loop and is taken where that
+/// is 0.5 or more. A case's `how.x` names the layer.
+const CUT_OUT_SHADER: &str = r#"
+enable wgpu_ray_query;
+enable wgpu_ray_query_vertex_return;
+
+struct Case {
+    origin: vec4<f32>,
+    dir: vec4<f32>,
+    how: vec4<u32>,
+}
+
+@group(1) @binding(0) var ray_still: acceleration_structure<vertex_return>;
+@group(2) @binding(0) var<storage, read> cases: array<Case>;
+@group(2) @binding(1) var<storage, read_write> results: array<f32>;
+@group(2) @binding(2) var cut_out: texture_2d_array<f32>;
+@group(2) @binding(3) var linear_repeat: sampler;
+
+// The card's uv at a candidate, from its triangle and weights: triangle 0 runs through corners
+// 0, 1, 2 and triangle 1 through 0, 2, 3; corner (x, y) has uv ((x + 1) / 2, (y + 1) / 2).
+fn card_uv(c: RayIntersection) -> vec2<f32> {
+    var uv = array<vec2<f32>, 4>(vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 1.0));
+    let b = c.barycentrics;
+    return uv[0] * (1.0 - b.x - b.y) + uv[1u + c.primitive_index] * b.x
+        + uv[2u + c.primitive_index] * b.y;
+}
+
+fn put(i: u32, k: u32, v: f32) {
+    results[i * 32u + k] = v;
+}
+
+@compute @workgroup_size(1)
+fn cs_cut_out(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= arrayLength(&cases) {
+        return;
+    }
+    let c = cases[i];
+    var tests = 0u;
+    var first = vec3<f32>(-1.0);
+    var rq: ray_query<vertex_return>;
+    rayQueryInitialize(&rq, ray_still,
+        RayDesc(c.how.y, c.how.z, c.dir.w, c.origin.w, c.origin.xyz, c.dir.xyz));
+    while (rayQueryProceed(&rq)) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        let uv = card_uv(candidate);
+        let alpha = textureSampleLevel(cut_out, linear_repeat, uv, c.how.x, 0.0).a;
+        if tests == 0u {
+            first = vec3<f32>(alpha, uv);
+        }
+        tests += 1u;
+        if alpha >= 0.5 {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
+    let found = rayQueryGetCommittedIntersection(&rq);
+    put(i, 0u, f32(found.kind));
+    put(i, 1u, found.t);
+    put(i, 2u, f32(found.instance_custom_data));
+    put(i, 3u, f32(found.primitive_index));
+    put(i, 4u, first.x);
+    put(i, 5u, first.y);
+    put(i, 6u, first.z);
+    put(i, 7u, f32(tests));
+}
+"#;
+
 /// A fragment shader asking the same questions: the left half of the target looks through the
 /// card's hole, the right half at its other triangle.
 const FRAGMENT_SHADER: &str = r#"
@@ -684,22 +753,30 @@ impl Lab {
             .collect()
     }
 
-    /// What each ray of `cases` finds: `ROW` floats each.
-    fn trace(&mut self, cases: &[Case]) -> Vec<Vec<f32>> {
+    fn case_buffer(&self, cases: &[Case]) -> wgpu::Buffer {
+        self.gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ray cases"),
+                contents: bytemuck::cast_slice(cases),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+    }
+
+    /// Runs `pipeline` once for each of `count` cases, over `work`, and reads `results` back as
+    /// rows of `ROW` floats. The first run submits the structures' builds in its encoder, ahead
+    /// of the rays, as a frame records them.
+    fn run(
+        &mut self,
+        pipeline: &wgpu::ComputePipeline,
+        work: &wgpu::BindGroup,
+        results: &wgpu::Buffer,
+        count: usize,
+    ) -> Vec<Vec<f32>> {
         let builds = self.builds.take();
-        let device = &self.gpu.device;
-        let case_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ray cases"),
-            contents: bytemuck::cast_slice(cases),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let results = self.results_buffer(cases.len() * ROW);
         let scene = self.scene_group(&self.still);
-        let work = self.work_group(&case_buffer, &results);
-        let pipeline = self.pipeline("cs_trace");
-        // The builds and the rays in one encoder, as a frame records them.
         let mut encoder =
-            builds.unwrap_or_else(|| device.create_command_encoder(&Default::default()));
+            builds.unwrap_or_else(|| self.gpu.device.create_command_encoder(&Default::default()));
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("rays"),
@@ -707,15 +784,139 @@ impl Lab {
             });
             pass.set_bind_group(0, &self.frame_group, &[]);
             pass.set_bind_group(1, &scene, &[]);
-            pass.set_bind_group(2, &work, &[]);
-            pass.set_pipeline(&pipeline);
-            pass.dispatch_workgroups(cases.len() as u32, 1, 1);
+            pass.set_bind_group(2, work, &[]);
+            pass.set_pipeline(pipeline);
+            pass.dispatch_workgroups(count as u32, 1, 1);
         }
         self.gpu.queue.submit([encoder.finish()]);
-        self.read_floats(&results)
+        self.read_floats(results)
             .chunks(ROW)
             .map(|c| c.to_vec())
             .collect()
+    }
+
+    /// What each ray of `cases` finds: `ROW` floats each.
+    fn trace(&mut self, cases: &[Case]) -> Vec<Vec<f32>> {
+        let case_buffer = self.case_buffer(cases);
+        let results = self.results_buffer(cases.len() * ROW);
+        let work = self.work_group(&case_buffer, &results);
+        let pipeline = self.pipeline("cs_trace");
+        self.run(&pipeline, &work, &results, cases.len())
+    }
+
+    /// What each ray of `cases` finds through `CUT_OUT_SHADER`, over a texture array of two
+    /// 8 x 8 layers in four cells of 4 x 4 texels. Layer 1 is clear in cells (1, 0) and (0, 1)
+    /// (u, then v) and layer 0 the other way about; the RGB is white throughout.
+    fn trace_cut_out(&mut self, cases: &[Case]) -> Vec<Vec<f32>> {
+        let device = &self.gpu.device;
+        let mut texels = Vec::new();
+        for layer in 0..2u32 {
+            for v in 0..8u32 {
+                for u in 0..8u32 {
+                    let clear = (u / 4 + v / 4 + layer) % 2 == 0;
+                    texels.extend_from_slice(&[255, 255, 255, if clear { 0 } else { 255 }]);
+                }
+            }
+        }
+        let texture = device.create_texture_with_data(
+            &self.gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("cut-out"),
+                size: wgpu::Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth_or_array_layers: 2,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                // As the rows' tiles are read: an sRGB view, whose alpha stays linear.
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &texels,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear repeat"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let work_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ray work, cut-out"),
+            entries: &[
+                entry(0, wgpu::ShaderStages::COMPUTE, storage(true)),
+                entry(1, wgpu::ShaderStages::COMPUTE, storage(false)),
+                entry(
+                    2,
+                    wgpu::ShaderStages::COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
+                entry(
+                    3,
+                    wgpu::ShaderStages::COMPUTE,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ray facts, cut-out"),
+            source: wgpu::ShaderSource::Wgsl(CUT_OUT_SHADER.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ray facts, cut-out"),
+            bind_group_layouts: &[
+                Some(&self.frame_layout),
+                Some(&self.scene_layout),
+                Some(&work_layout),
+            ],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cs_cut_out"),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some("cs_cut_out"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let case_buffer = self.case_buffer(cases);
+        let results = self.results_buffer(cases.len() * ROW);
+        let work = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray work, cut-out"),
+            layout: &work_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: case_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: results.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        self.run(&pipeline, &work, &results, cases.len())
     }
 }
 
@@ -778,11 +979,75 @@ fn a_ray_passes_what_its_rule_refuses_and_stops_at_what_it_takes() {
     assert_eq!(rows[2][TESTS], 1.0);
     assert_stops(&rows[3], 1.0, 11, "a ray at the card beside its hole");
     assert_eq!(rows[3][PRIMITIVE], 1.0);
+    // A confirmed candidate of a triangle that is not opaque returns its corners as an opaque
+    // hit does: the leaf rows' records and tiles are read from them.
+    assert_eq!(
+        &rows[3][CORNERS..CORNERS + 9],
+        &[-1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0],
+        "a confirmed candidate's corners, in index order"
+    );
+    assert!(
+        near(rows[3][BARY], 0.25) && near(rows[3][BARY + 1], 0.5),
+        "a confirmed candidate's weights of corners 1 and 2: {:?}",
+        &rows[3][BARY..BARY + 2]
+    );
     assert_eq!(
         rows[4][KIND], 0.0,
         "a first-hit ray through the hole that ends before the wall finds nothing"
     );
     assert_stops(&rows[5], 1.0, 11, "a first-hit ray at the card");
+}
+
+/// A candidate reads its texture inside the loop: a cut-out card stops a ray where the texel's
+/// alpha is 0.5 or more and lets it through where the texel is clear, the test a leaf card's
+/// holes take. The uv comes from the candidate's triangle and weights, as a record gives it.
+#[test]
+fn a_candidate_reads_its_texture_inside_the_loop() {
+    let Some(mut lab) = Lab::new() else { return };
+    // Where `CUT_OUT_SHADER` puts the first candidate's alpha and uv.
+    const ALPHA: usize = 4;
+    const UV: usize = 5;
+    let cut = |x: f32, y: f32, layer: u32| down(x, y, layer, FLAG_NONE, ALL);
+    let rows = lab.trace_cut_out(&[
+        // 0, 1: triangle 0 at an opaque cell (uv 0.3, 0.2) and at a clear one (0.8, 0.3).
+        cut(-0.4, -0.6, 1),
+        cut(0.6, -0.4, 1),
+        // 2, 3: triangle 1 at a clear cell (0.2, 0.7) and at an opaque one (0.7, 0.8).
+        cut(-0.6, 0.4, 1),
+        cut(0.4, 0.6, 1),
+        // 4: the first ray again, reading layer 0, where that cell is clear.
+        cut(-0.4, -0.6, 0),
+    ]);
+    assert_stops(&rows[0], 1.0, 11, "an opaque texel of triangle 0");
+    assert_eq!(rows[0][PRIMITIVE], 0.0);
+    assert!(
+        near(rows[0][ALPHA], 1.0) && near(rows[0][UV], 0.3) && near(rows[0][UV + 1], 0.2),
+        "the candidate's alpha and uv: {:?}",
+        &rows[0][ALPHA..UV + 2]
+    );
+    assert_stops(&rows[1], 3.0, 7, "a clear texel of triangle 0");
+    assert!(
+        near(rows[1][ALPHA], 0.0) && near(rows[1][UV], 0.8) && near(rows[1][UV + 1], 0.3),
+        "the clear texel's alpha and uv: {:?}",
+        &rows[1][ALPHA..UV + 2]
+    );
+    assert_stops(&rows[2], 3.0, 7, "a clear texel of triangle 1");
+    assert_stops(&rows[3], 1.0, 11, "an opaque texel of triangle 1");
+    assert_eq!(rows[3][PRIMITIVE], 1.0);
+    assert!(
+        near(rows[3][UV], 0.7) && near(rows[3][UV + 1], 0.8),
+        "triangle 1's uv: {:?}",
+        &rows[3][UV..UV + 2]
+    );
+    assert_stops(
+        &rows[4],
+        3.0,
+        7,
+        "the same texel in a layer where it is clear",
+    );
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row[TESTS], 1.0, "ray {i}: the card was offered once");
+    }
 }
 
 /// A hit's side is told in the mesh's own space, so a mirrored instance does not swap it; and
