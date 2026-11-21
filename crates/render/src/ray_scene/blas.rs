@@ -24,9 +24,14 @@ const BUILDS_PER_FRAME: u32 = 256;
 const FREES_PER_FRAME: u32 = 64;
 /// Geometries with more triangles than this have their structure compacted once it has
 /// served a while (a copy that frees what the build reserved): each that may be compacted
-/// carries a query and a readback for its size, so a patch of ground or a small prop is left
-/// as built.
-const COMPACT_ABOVE_TRIANGLES: u32 = 4_000;
+/// carries a query and a readback for its size, so a small prop is left as built. A patch of
+/// ground (2,304 triangles with its skirts) is compacted: left as built, the ground in the rays
+/// took the plaza's structures from 173 to 263 MB (PC, 21 Nov).
+const COMPACT_ABOVE_TRIANGLES: u32 = 2_000;
+/// Compactions asked for a frame at most (the oldest first): each asks the driver for a size
+/// and, once it is known, makes the copy and a slot change, so a zone's worth of structures
+/// built over a few frames is compacted over some more.
+const COMPACTIONS_PER_FRAME: u32 = 64;
 /// Frames a structure serves before it is compacted: one built again soon after (a mesh's
 /// coarse level after the whole mesh it streamed in as, an edit) is not worth the copy.
 const COMPACT_AFTER_FRAMES: u64 = 120;
@@ -899,8 +904,9 @@ impl Store {
             }
         }
         // Oldest first: those built `COMPACT_AFTER_FRAMES` ago and not built again since.
+        let mut asked = 0;
         while let Some(&(i, built)) = self.to_compact.front() {
-            if frame < built + COMPACT_AFTER_FRAMES {
+            if frame < built + COMPACT_AFTER_FRAMES || asked >= COMPACTIONS_PER_FRAME {
                 break;
             }
             self.to_compact.pop_front();
@@ -925,6 +931,7 @@ impl Store {
                 continue;
             }
             self.compacting.push(i);
+            asked += 1;
             let state = state.clone();
             g.blas.prepare_compaction_async(move |done| {
                 let now = if done.is_ok() {
