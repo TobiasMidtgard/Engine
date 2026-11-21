@@ -293,7 +293,13 @@ fn sunlit_room_on(w: &mut World, ground_y: f64) -> Entity {
 fn picture(app: &mut App, name: &str) -> image::RgbImage {
     let dir = std::env::temp_dir().join("engine-ray-scene");
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(name);
+    // (A file a test: libtest runs the tests side by side, and a picture read back while
+    // another test writes it under the same name is half a file.)
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("main")
+        .replace(':', "_");
+    let path = dir.join(format!("{test}-{name}"));
     capture_now(&mut app.world, &path).expect("screenshot");
     if let Ok(out) = std::env::var("ENGINE_SHOTS") {
         let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
