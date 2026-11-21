@@ -263,7 +263,14 @@ fn setup(world: &mut World) {
     world::spawn_world(world);
     sea::spawn(world);
     match *world.resource::<settle::StartMode>() {
-        settle::StartMode::Sandbox => town::build_start(world),
+        settle::StartMode::Sandbox => {
+            town::build_start(world);
+            if let Some(r) = world.get_resource::<brain::RivalSetup>().copied()
+                && r.count > 0
+            {
+                brain::adopt_far_towns(world, r.count, r.level);
+            }
+        }
         settle::StartMode::Fresh => {
             settle::fresh(world);
             if let Some(r) = world.get_resource::<brain::RivalSetup>().copied()

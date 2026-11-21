@@ -334,6 +334,51 @@ pub fn start_rivals(world: &mut World, count: usize, level: Level) {
     }
 }
 
+/// The sandbox start with rivals (`--rivals N` on a tour or `--sandbox`): the far regions'
+/// towns, already built, go to the houses (Harrowgate the Sarrowmere coast, Gullwick the
+/// Amber Reach, Ostrava the north), each with the start purse and a captain at `level`.
+pub fn adopt_far_towns(world: &mut World, count: usize, level: Level) {
+    world.init_resource::<Charted>();
+    world.init_resource::<Captains>();
+    world.resource_mut::<Charted>().mark(PLAYER, 0);
+    for k in 0..count.min(3) {
+        let c = (k + 1) as Company;
+        let region = match c {
+            1 => 2,
+            2 => 3,
+            _ => 1,
+        };
+        let isles: Vec<usize> = islands()
+            .iter()
+            .enumerate()
+            .filter(|(i, isle)| {
+                isle.region() == region && world.resource::<Economy>().islands[*i].harbours > 0
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let Some(&home) = isles.first() else {
+            continue;
+        };
+        {
+            let mut econ = world.resource_mut::<Economy>();
+            *econ.coins_mut(c) = crate::settle::FIRST_COINS;
+            for &i in &isles {
+                econ.islands[i].owner = c;
+            }
+        }
+        for &i in &isles {
+            world.resource_mut::<Charted>().mark(c, i);
+        }
+        world.resource_mut::<Captains>().0.push(Captain {
+            company: c,
+            level,
+            home,
+            next_s: 3.0 * c as f64,
+            log: Log::for_captain(1 + c as u64),
+        });
+    }
+}
+
 /// One line per company for the playtest's timeline: purse, people and islands.
 pub fn standings(world: &World) -> Vec<serde_json::Value> {
     let econ = world.resource::<Economy>();
