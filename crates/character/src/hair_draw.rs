@@ -97,7 +97,7 @@ pub struct FaceFollow {
 const SCALP_WIDTH: f32 = 1.5;
 
 /// How dark the most buried hair is drawn, against hair in the open (its color's share).
-const BURIED_DARK: f32 = 0.35;
+const BURIED_DARK: f32 = 0.55;
 
 /// How rough the cuticle of scalp hair is, and of brows and beard.
 const SCALP_ROUGHNESS: f32 = 0.33;
