@@ -9,6 +9,10 @@
 //! let tree = SceneryTree::new(&library, "pine", seed).unwrap();
 //! commands.spawn((Transform::from_translation(foot).with_rotation(yaw), tree));
 //! ```
+//!
+//! Woods streamed around a moving camera mark their trees [`StreamedTree`] so they dither in
+//! rather than appear, and take them away with [`RetireTree`] so they dither out rather than
+//! vanish (Brightsund's tree pop-in, note 12 of 11-20).
 
 use engine_core::prelude::*;
 use engine_render::{Camera, MeshRenderer};
@@ -66,6 +70,21 @@ impl SceneryTree {
     }
 }
 
+/// A scenery tree planted while the camera moves on (woods streamed around a strategy
+/// camera): it dithers in over [`crate::lod_fade::FADE_S`] when it first shows, rather than
+/// appear. Just after a camera cut ([`crate::lod_fade::LodFades::cut_m`]) it shows at once, as
+/// part of the new view.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct StreamedTree;
+
+/// Put on a scenery tree to take it away: it dithers out over [`crate::lod_fade::FADE_S`] and
+/// is then despawned with its parts. It goes at once just after a camera cut or when it has
+/// nothing drawn yet. Its level of detail stays as it was while it goes.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct RetireTree {
+    t: f32,
+}
+
 /// The drawn parts of a scenery tree (child entities: base, wood, foliage) and what they show.
 #[derive(Component, Debug, Clone)]
 pub struct SceneryTreeVisual {
@@ -100,13 +119,17 @@ pub fn sync_scenery_trees(
     season: Res<FoliageSeason>,
     render: Option<Res<engine_render::RenderSettings>>,
     cams: Query<(&Camera, &GlobalTransform)>,
-    mut trees: Query<(
-        Entity,
-        Ref<SceneryTree>,
-        Ref<GlobalTransform>,
-        Option<&mut SceneryTreeVisual>,
-        Has<crate::near_woods::NearWoodsTree>,
-    )>,
+    mut trees: Query<
+        (
+            Entity,
+            Ref<SceneryTree>,
+            Ref<GlobalTransform>,
+            Option<&mut SceneryTreeVisual>,
+            Has<crate::near_woods::NearWoodsTree>,
+            Has<StreamedTree>,
+        ),
+        Without<RetireTree>,
+    >,
     mut parts: Query<
         (
             &mut MeshRenderer,
@@ -137,7 +160,8 @@ pub fn sync_scenery_trees(
     // Near woods trees planted while the camera moves on (a new cell coming into range) fade
     // in rather than appear; after a cut they are part of the new view.
     let fade_in = fades.settled();
-    for (entity, tree, global, visual, streamed) in &mut trees {
+    for (entity, tree, global, visual, near, planted) in &mut trees {
+        let streamed = near || planted;
         let fresh = visual.is_none();
         if fresh {
             if out_of_time {
@@ -242,6 +266,61 @@ pub fn sync_scenery_trees(
         }
     }
     loading.bypass_change_detection().trees_waiting = skipped;
+}
+
+/// Dither retiring scenery trees out ([`RetireTree`]) and despawn them once gone. Runs after
+/// [`crate::lod_fade::advance_fades`]: a part still fading in or switching levels stops there
+/// and goes out from what it shows.
+pub fn retire_scenery_trees(
+    mut commands: Commands,
+    time: Res<Time>,
+    fades: Res<crate::lod_fade::LodFades>,
+    mut trees: Query<(Entity, &mut RetireTree, Option<&SceneryTreeVisual>)>,
+    mut parts: Query<(&MeshRenderer, Option<&mut engine_render::DitherFade>), With<PlantPart>>,
+) {
+    let step = time.delta_secs() / crate::lod_fade::FADE_S;
+    for (entity, mut retire, visual) in &mut trees {
+        let Some(visual) = visual else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        if retire.t == 0.0 {
+            let shown = visual
+                .parts
+                .iter()
+                .any(|&p| parts.get(p).is_ok_and(|(r, _)| r.visible));
+            if !shown || !fades.settled() {
+                commands.entity(entity).despawn();
+                continue;
+            }
+            // Out from where a fade in had got to.
+            let hidden = visual
+                .parts
+                .iter()
+                .filter_map(|&p| parts.get(p).ok().and_then(|(_, d)| d.map(|d| d.hidden())))
+                .fold(0.0f32, f32::max);
+            retire.t = hidden.max(1e-3);
+            for &p in &visual.parts {
+                commands.entity(p).remove::<crate::lod_fade::PartFade>();
+            }
+        } else {
+            retire.t += step;
+        }
+        if retire.t >= 1.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let fade = engine_render::DitherFade(retire.t);
+        for &p in &visual.parts {
+            match parts.get_mut(p) {
+                Ok((_, Some(mut d))) => *d = fade,
+                Ok((_, None)) => {
+                    commands.entity(p).insert(fade);
+                }
+                Err(_) => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -538,5 +617,95 @@ mod tests {
                 .iter()
                 .all(|&p| app.world.get::<DitherFade>(p).is_none())
         );
+    }
+
+    /// Brightsund's woods: a tree planted while the camera glides on dithers in, and one taken
+    /// away dithers out and is gone half a second later; right after a cut both happen at once.
+    #[test]
+    fn streamed_trees_fade_in_and_retired_ones_fade_out() {
+        use engine_render::DitherFade;
+        let mut app = app();
+        let library = app.world.resource::<PlantLibrary>().clone();
+        let pine = SceneryTree::new(&library, "pine", 11).unwrap();
+        let cam = app
+            .world
+            .spawn((Camera::default(), Transform::from_translation(DVec3::ZERO)))
+            .id();
+        let glide = |app: &mut App, k: usize| {
+            for _ in 0..k {
+                let x = app.world.get::<Transform>(cam).unwrap().translation.x;
+                app.world.get_mut::<Transform>(cam).unwrap().translation.x = x + 0.5;
+                app.update();
+            }
+        };
+        glide(&mut app, crate::lod_fade::SETTLED_FRAMES as usize + 2);
+        let at = Transform::from_translation(DVec3::new(120.0, 0.0, 0.0));
+        let tree = app.world.spawn((at, pine, StreamedTree)).id();
+        let mut dithered = 0;
+        for _ in 0..8 {
+            glide(&mut app, 1);
+            if let Some(v) = app.world.get::<SceneryTreeVisual>(tree) {
+                dithered += v
+                    .parts
+                    .iter()
+                    .filter(|&&p| app.world.get::<DitherFade>(p).is_some())
+                    .count();
+            }
+        }
+        assert!(dithered > 0, "the planted tree appeared at once");
+        glide(&mut app, 60);
+        app.world.entity_mut(tree).insert(RetireTree::default());
+        glide(&mut app, 2);
+        assert!(app.world.get_entity(tree).is_ok(), "it went at once");
+        let parts = app.world.get::<SceneryTreeVisual>(tree).unwrap().parts;
+        assert!(
+            parts.iter().any(|&p| app
+                .world
+                .get::<DitherFade>(p)
+                .is_some_and(|d| d.hidden() > 0.0)),
+            "it is not fading out"
+        );
+        glide(&mut app, 40);
+        assert!(app.world.get_entity(tree).is_err(), "it never went");
+        assert!(parts.iter().all(|&p| app.world.get_entity(p).is_err()));
+        // After a cut: planted and taken away at once.
+        app.world.get_mut::<Transform>(cam).unwrap().translation.x += 5_000.0;
+        let far = Transform::from_translation(DVec3::new(5_200.0, 0.0, 0.0));
+        let tree = app.world.spawn((far, pine, StreamedTree)).id();
+        app.update_n(3);
+        let parts = app.world.get::<SceneryTreeVisual>(tree).unwrap().parts;
+        assert!(
+            parts
+                .iter()
+                .all(|&p| app.world.get::<DitherFade>(p).is_none())
+        );
+        app.world.entity_mut(tree).insert(RetireTree::default());
+        app.update_n(2);
+        assert!(app.world.get_entity(tree).is_err());
+    }
+
+    /// Brightsund moves the world under its camera every 600 m (a floating origin): that is
+    /// not a cut, so trees planted just after still fade in.
+    #[test]
+    fn a_world_shift_is_not_a_cut() {
+        let mut app = app();
+        let cam = app
+            .world
+            .spawn((Camera::default(), Transform::from_translation(DVec3::ZERO)))
+            .id();
+        for _ in 0..crate::lod_fade::SETTLED_FRAMES + 2 {
+            app.world.get_mut::<Transform>(cam).unwrap().translation.x += 0.5;
+            app.update();
+        }
+        let settled = |app: &App| app.world.resource::<crate::lod_fade::LodFades>().settled();
+        assert!(settled(&app));
+        app.world.write_message(engine_world::WorldShift {
+            translation: DVec3::new(-600.0, 0.0, 0.0),
+            ..engine_world::WorldShift::IDENTITY
+        });
+        app.update_n(3);
+        let x = app.world.get::<Transform>(cam).unwrap().translation.x;
+        assert!(x < -500.0, "the camera did not move with the world: {x}");
+        assert!(settled(&app), "the shift read as a cut");
     }
 }

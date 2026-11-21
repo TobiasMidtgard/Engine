@@ -54,6 +54,10 @@ pub struct FadeGhost;
 pub struct LodFades {
     /// Cross-fade (true) or switch at once (for comparisons).
     pub enabled: bool,
+    /// The camera moving further than this in a frame is a cut, meters ([`JUMP_M`] unless a
+    /// game says otherwise: a strategy camera high over the land moves further than that in a
+    /// frame of a smooth zoom or pan, and raises it with its height).
+    pub cut_m: f64,
     started: usize,
     cut: bool,
     camera: Option<DVec3>,
@@ -65,6 +69,7 @@ impl Default for LodFades {
     fn default() -> Self {
         Self {
             enabled: true,
+            cut_m: JUMP_M,
             started: 0,
             cut: false,
             camera: None,
@@ -85,8 +90,16 @@ impl LodFades {
 
     /// Whether what streams in or out now should fade: fades are on and the camera has moved
     /// smoothly for [`SETTLED_FRAMES`] (what lands just after a cut is part of the new view).
-    pub(crate) fn settled(&self) -> bool {
+    pub fn settled(&self) -> bool {
         self.enabled && self.since_cut >= SETTLED_FRAMES
+    }
+}
+
+/// A world shift (a floating origin moving under the camera) is not a cut: the camera's last
+/// place moves with the world.
+impl engine_world::FollowsWorldShift for LodFades {
+    fn follow(&mut self, shift: &engine_world::WorldShift) {
+        self.camera = self.camera.map(|c| shift.point(c));
     }
 }
 
@@ -164,7 +177,7 @@ pub fn overlapped(t: f32) -> (DitherFade, DitherFade) {
 pub fn begin_fades(mut fades: ResMut<LodFades>, cams: Query<(&Camera, &GlobalTransform)>) {
     let at = crate::visuals::camera_position(&cams);
     fades.cut = match (fades.camera, at) {
-        (Some(a), Some(b)) => a.distance(b) > JUMP_M,
+        (Some(a), Some(b)) => a.distance(b) > fades.cut_m.max(JUMP_M),
         _ => true,
     };
     fades.camera = at;

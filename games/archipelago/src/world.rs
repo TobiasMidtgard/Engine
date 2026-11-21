@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use engine::prelude::*;
-use engine_foliage::{PlantLibrary, SceneryTree};
+use engine_foliage::lod_fade::LodFades;
+use engine_foliage::{PlantLibrary, RetireTree, SceneryTree, StreamedTree};
 use engine_terrain::{HeightOverlay, PlanetTerrain};
 
 use crate::build::Forest;
@@ -130,16 +131,47 @@ pub fn follow_air(
 
 /// Side of a woods tile, meters.
 const WOODS_TILE_M: f64 = 128.0;
-/// Within this distance of where the camera looks every tree stands; out to `THIN_M` one in
-/// four, and beyond that one in sixteen (the dark floor of the woods carries the rest). The
-/// distances count from further out the higher the camera is.
-const DENSE_M: f64 = 600.0;
-const THIN_M: f64 = 1_400.0;
-/// Beyond this one in sixty-four, and beyond `FEW_M` one in 256, drawn larger.
-const SPARSE_M: f64 = 3_000.0;
-const FEW_M: f64 = 5_000.0;
+/// How far the woods are thinned by distance from where the camera looks: (distance m, k),
+/// where a tree stands while its lot is under `0.25^k` (k 0 every tree, 1 one in four, 2 one in
+/// sixteen, and so on: the dark floor of the woods carries the rest). Between the marks it
+/// thins smoothly, a quarter step at a time, so a wood loses or gains a few trees at once
+/// rather than a whole tile of them (Brightsund note 12, tree pop-in). The distances count
+/// from further out the higher the camera is.
+const THINNING: [(f64, f32); 5] = [
+    (450.0, 0.0),
+    (950.0, 1.0),
+    (2_050.0, 2.0),
+    (3_950.0, 3.0),
+    (5_950.0, 4.0),
+];
+/// A stand is thinned or thickened in steps of this (a quarter step keeps 71% of the trees or
+/// adds 41%), and only once the wanted thinning has moved this much past the half step (no
+/// flicker on the edge).
+const THIN_STEP: f32 = 0.25;
+const THIN_HYSTERESIS: f32 = 0.05;
 /// Above this camera distance trees are too small to see and none are kept.
 const NO_TREES_ABOVE_M: f32 = 12_000.0;
+
+/// The thinning wanted at a distance (meters, from where the camera looks plus its lift).
+fn thinning(d: f64) -> f32 {
+    let (d0, _) = THINNING[0];
+    if d <= d0 {
+        return 0.0;
+    }
+    for w in THINNING.windows(2) {
+        let ((a, ka), (b, kb)) = (w[0], w[1]);
+        if d < b {
+            return ka + (kb - ka) * ((d - a) / (b - a)) as f32;
+        }
+    }
+    THINNING[THINNING.len() - 1].1
+}
+
+/// The scale the trees of a stand thinned by `k` are drawn at: the few standing for a whole
+/// wood from far above are drawn larger, growing with the thinning (no jump).
+fn far_scale(k: f32) -> f32 {
+    1.0 + 0.7 * (k - 2.0).clamp(0.0, 1.0) + 0.6 * (k - 3.0).clamp(0.0, 1.0)
+}
 
 /// The woods standing now: trees are planted around where the camera looks and taken up
 /// again far from it (four continents hold a few million).
@@ -151,9 +183,10 @@ pub struct Woods {
 }
 
 struct Stand {
-    /// 0 every tree, 1 one in four, 2 one in sixteen.
-    thin: u8,
-    trees: Vec<(IVec2, Entity)>,
+    /// How far it is thinned (see [`THINNING`]), a whole number of [`THIN_STEP`]s.
+    k: f32,
+    /// Its trees: cell, entity, lot.
+    trees: Vec<(IVec2, Entity, f64)>,
 }
 
 fn hash(x: i64, z: i64, k: u64) -> f64 {
@@ -218,9 +251,10 @@ fn species(isle: &island::Island, h: f64, i: i64, j: i64) -> &'static str {
     }
 }
 
-/// The trees of one woods tile. A thinned tile keeps one tree in four or in sixteen, the
-/// largest ones.
-fn seedlings(tile: IVec2, thin: u8, spacing: f64) -> Vec<Seedling> {
+/// The trees of one woods tile whose lot lies in `lots` (a stand thinned by k keeps the lots
+/// under `0.25^k`: the largest trees, so a tree kept at one thinning is kept at every lighter
+/// one, and the size of each never changes with the thinning).
+fn seedlings(tile: IVec2, lots: std::ops::Range<f64>, spacing: f64) -> Vec<(Seedling, f64)> {
     let (x0, z0) = (tile.x as f64 * WOODS_TILE_M, tile.y as f64 * WOODS_TILE_M);
     let mid = DVec2::new(x0 + WOODS_TILE_M * 0.5, z0 + WOODS_TILE_M * 0.5);
     // Only tiles on or beside land.
@@ -228,7 +262,7 @@ fn seedlings(tile: IVec2, thin: u8, spacing: f64) -> Vec<Seedling> {
         .iter()
         .any(|isle| (mid - isle.center).length() < isle.radius * 1.5 + WOODS_TILE_M);
     let mut out = Vec::new();
-    if !near_land {
+    if !near_land || lots.is_empty() {
         return out;
     }
     let (i0, j0) = ((x0 / spacing).ceil() as i64, (z0 / spacing).ceil() as i64);
@@ -238,9 +272,9 @@ fn seedlings(tile: IVec2, thin: u8, spacing: f64) -> Vec<Seedling> {
     );
     for j in j0..j1 {
         for i in i0..i1 {
-            // (By lot, not every so-manieth: rows of trees would show from above. A tree
-            // kept at one thinning is kept at every lighter one.)
-            if thin > 0 && hash(i, j, 9) >= 0.25f64.powi(thin as i32) {
+            // (By lot, not every so-manieth: rows of trees would show from above.)
+            let lot = hash(i, j, 9);
+            if !lots.contains(&lot) {
                 continue;
             }
             let x = (i as f64 + (hash(i, j, 1) - 0.5) * 0.9) * spacing;
@@ -256,31 +290,55 @@ fn seedlings(tile: IVec2, thin: u8, spacing: f64) -> Vec<Seedling> {
                 continue;
             };
             let h = island::height(x, z);
-            let mut size = 0.65 + 0.5 * hash(i, j, 7) as f32;
-            if thin > 0 {
-                size = (size * (1.0 + 0.2 * thin as f32)).min(1.3);
-            }
+            // The trees kept furthest out are the big ones of the wood (a fifth larger for
+            // each thinning they outlast).
+            let outlasts = (-lot.max(1e-9).log(4.0)).floor().clamp(0.0, 4.0) as f32;
+            let size = ((0.65 + 0.5 * hash(i, j, 7) as f32) * (1.0 + 0.2 * outlasts)).min(1.3);
             out.push((
-                DVec3::new(x, h - 0.1, z),
-                species(isle, h, i, j),
-                (i as u64) << 20 ^ (j as u64 & 0xF_FFFF) ^ isle.seed << 40,
-                size,
-                hash(i, j, 8) as f32,
+                (
+                    DVec3::new(x, h - 0.1, z),
+                    species(isle, h, i, j),
+                    (i as u64) << 20 ^ (j as u64 & 0xF_FFFF) ^ isle.seed << 40,
+                    size,
+                    hash(i, j, 8) as f32,
+                ),
+                lot,
             ));
         }
     }
     out
 }
 
-/// Plant the woods around where the camera looks and take up the ones far from it.
+/// The lots a stand thinned by `k` keeps.
+fn kept(k: f32) -> f64 {
+    0.25f64.powf(k as f64)
+}
+
+/// Plant the woods around where the camera looks and take up the ones far from it. A stand
+/// that thins or thickens as the view moves takes up or plants only the trees that change,
+/// and they dither out and in (the engine's `StreamedTree` and `RetireTree`).
 pub fn tend_woods(world: &mut World) {
     let Some(library) = world.get_resource::<PlantLibrary>().cloned() else {
         return;
     };
     let mut q = world.query::<&StrategyCam>();
-    let Some((focus, dist)) = q.iter(world).next().map(|c| (c.goal_focus, c.goal_dist)) else {
+    // Plant where the view is headed, but thin by the nearer of where it is and where it is
+    // going (zooming out, the woods thin as the camera climbs, not before).
+    let Some((focus, dist)) = q
+        .iter(world)
+        .next()
+        .map(|c| (c.goal_focus, c.dist.min(c.goal_dist)))
+    else {
         return;
     };
+    // A smooth zoom or pan high over the land moves the camera further in a frame than the
+    // engine's cut distance: only a jump counts as a cut (then trees appear at once).
+    if let Some(mut fades) = world.get_resource_mut::<LodFades>() {
+        let cut = (dist as f64 * 0.12).max(engine_foliage::lod_fade::JUMP_M);
+        if fades.cut_m != cut {
+            fades.cut_m = cut;
+        }
+    }
     let density = world
         .get_resource::<WoodsDensity>()
         .map_or(1.0, |d| d.0)
@@ -291,7 +349,7 @@ pub fn tend_woods(world: &mut World) {
     } else {
         (dist as f64 * 1.3 + 500.0).clamp(700.0, 7_000.0)
     };
-    // From high up no tree is near: the bands count from further out.
+    // From high up no tree is near: the thinning counts from further out.
     let lift = (dist as f64 - 500.0).max(0.0) * 0.5;
     let mut woods = world.remove_resource::<Woods>().unwrap_or_default();
     let at = DVec2::new(focus.x, focus.z);
@@ -309,15 +367,17 @@ pub fn tend_woods(world: &mut World) {
         .filter(|t| (mid(*t) - at).length() > reach * 1.25 + WOODS_TILE_M)
         .collect();
     for t in far {
-        take_up(world, &mut woods, t);
+        if let Some(stand) = woods.tiles.remove(&t) {
+            retire(world, stand.trees);
+        }
     }
-    // What should stand, nearest first.
+    // What should change, nearest first.
     let n = (reach / WOODS_TILE_M).ceil() as i32;
     let c = IVec2::new(
         (at.x / WOODS_TILE_M).floor() as i32,
         (at.y / WOODS_TILE_M).floor() as i32,
     );
-    let mut want: Vec<(f64, IVec2, u8)> = Vec::new();
+    let mut want: Vec<(f64, IVec2, f32)> = Vec::new();
     if reach > 0.0 {
         for dz in -n..=n {
             for dx in -n..=n {
@@ -326,24 +386,12 @@ pub fn tend_woods(world: &mut World) {
                 if d > reach {
                     continue;
                 }
-                // Thin out a little further than where thicker planting starts, for the
-                // same reason.
-                let had = woods.tiles.get(&t).map(|s| s.thin);
-                let band =
-                    |edge: f64, inner: bool| d + lift < if inner { edge * 1.2 } else { edge };
-                let thin = if band(DENSE_M, had == Some(0)) {
-                    0
-                } else if band(THIN_M, had.is_some_and(|h| h <= 1)) {
-                    1
-                } else if band(SPARSE_M, had.is_some_and(|h| h <= 2)) {
-                    2
-                } else if band(FEW_M, had.is_some_and(|h| h <= 3)) {
-                    3
-                } else {
-                    4
-                };
-                if had != Some(thin) {
-                    want.push((d, t, thin));
+                let k = thinning(d + lift);
+                let step = (k / THIN_STEP).round() * THIN_STEP;
+                match woods.tiles.get(&t) {
+                    Some(s) if s.k == step => {}
+                    Some(s) if (k - s.k).abs() < THIN_STEP * 0.5 + THIN_HYSTERESIS => {}
+                    _ => want.push((d, t, step)),
                 }
             }
         }
@@ -352,13 +400,27 @@ pub fn tend_woods(world: &mut World) {
     let unhurried = woods.started && !world.resource::<EngineConfig>().headless;
     let started = std::time::Instant::now();
     let frame = *world.resource::<Frame>();
-    for (_, t, thin) in want {
+    for (_, t, k) in want {
         if unhurried && started.elapsed().as_secs_f64() > 0.004 {
             break;
         }
-        take_up(world, &mut woods, t);
-        let mut trees = Vec::new();
-        for (p, name, seed, size, yaw) in seedlings(t, thin, spacing) {
+        let mut stand = woods.tiles.remove(&t).unwrap_or(Stand {
+            k: f32::INFINITY,
+            trees: Vec::new(),
+        });
+        // Thinner: the trees past the new thinning go.
+        let keep = kept(k);
+        let (stay, gone): (Vec<_>, Vec<_>) = stand.trees.into_iter().partition(|x| x.2 < keep);
+        retire(world, gone);
+        stand.trees = stay;
+        // Thicker: plant the lots between the old thinning and the new.
+        let had = if stand.k.is_finite() {
+            kept(stand.k)
+        } else {
+            0.0
+        };
+        let scale = far_scale(k);
+        for ((p, name, seed, size, yaw), lot) in seedlings(t, had..keep, spacing) {
             let cell = grid::cell_of(p.x, p.z);
             if world.resource::<Forest>().cleared.contains(&cell) {
                 continue;
@@ -367,32 +429,36 @@ pub fn tend_woods(world: &mut World) {
                 continue;
             };
             tree.size = size;
-            let mut at = frame.stand(p, yaw * std::f32::consts::TAU);
-            if thin >= 3 {
-                // The few that stand for a whole wood from far above.
-                at.scale = Vec3::splat(if thin == 3 { 1.7 } else { 2.3 });
-            }
-            let e = world.spawn((at, tree)).id();
+            let at = frame
+                .stand(p, yaw * std::f32::consts::TAU)
+                .with_scale(Vec3::splat(scale));
+            let e = world.spawn((at, tree, StreamedTree)).id();
             world
                 .resource_mut::<Forest>()
                 .by_cell
                 .entry(cell)
                 .or_default()
                 .push(e);
-            trees.push((cell, e));
+            stand.trees.push((cell, e, lot));
         }
-        woods.tiles.insert(t, Stand { thin, trees });
+        // The ones that stay grow or shrink to the new thinning's scale.
+        if stand.k.is_finite() && far_scale(stand.k) != scale {
+            for (_, e, _) in &stand.trees {
+                if let Some(mut tf) = world.get_mut::<Transform>(*e) {
+                    tf.scale = Vec3::splat(scale);
+                }
+            }
+        }
+        stand.k = k;
+        woods.tiles.insert(t, stand);
     }
     woods.started = true;
     world.insert_resource(woods);
 }
 
-/// Remove a tile's trees.
-fn take_up(world: &mut World, woods: &mut Woods, tile: IVec2) {
-    let Some(stand) = woods.tiles.remove(&tile) else {
-        return;
-    };
-    for (cell, e) in stand.trees {
+/// Take trees away (they dither out), unless a building cleared them already.
+fn retire(world: &mut World, trees: Vec<(IVec2, Entity, f64)>) {
+    for (cell, e, _) in trees {
         let mut forest = world.resource_mut::<Forest>();
         let mut standing = false;
         if let Some(v) = forest.by_cell.get_mut(&cell) {
@@ -405,8 +471,31 @@ fn take_up(world: &mut World, woods: &mut Woods, tile: IVec2) {
             }
         }
         // Trees a building cleared are gone already.
-        if standing {
-            world.despawn(e);
+        if standing && let Ok(mut tree) = world.get_entity_mut(e) {
+            tree.insert(RetireTree::default());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The woods thin smoothly with distance (no step a whole tile of trees would jump at),
+    /// every tree near the view, one in 256 far out; the far trees grow without a jump.
+    #[test]
+    fn the_woods_thin_without_steps() {
+        assert_eq!(thinning(0.0), 0.0);
+        assert_eq!(thinning(20_000.0), 4.0);
+        let mut last = 0.0;
+        for i in 1..8_000 {
+            let k = thinning(i as f64);
+            assert!(k >= last && k - last < 0.01, "jump at {i} m: {last} to {k}");
+            let (a, b) = (far_scale(last), far_scale(k));
+            assert!(b >= a && b - a < 0.01, "scale jumps at {i} m");
+            last = k;
+        }
+        // A tree kept at a heavier thinning is kept at every lighter one.
+        assert!(kept(1.0) > kept(1.25) && kept(1.25) > kept(2.0));
     }
 }

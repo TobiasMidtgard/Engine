@@ -49,7 +49,7 @@ pub use plant::{
     Disturbance, EcologyRegion, EcologySettings, FelledLog, Genes, Plant, PlantStage,
     RegionHistory, ResourceSource,
 };
-pub use scenery_tree::SceneryTree;
+pub use scenery_tree::{RetireTree, SceneryTree, StreamedTree};
 pub use season::FoliageSeason;
 pub use species::{Glow, Layer, Need, PlantForm, PlantLibrary, PlantSpecies, SpeciesId, Tolerance};
 
@@ -78,6 +78,7 @@ impl Plugin for FoliagePlugin {
             .init_resource::<hand_felling::HandFelling>()
             .init_resource::<hand_felling::ChoppedSpots>()
             .shift_resource::<hand_felling::ChoppedSpots>()
+            .shift_resource::<lod_fade::LodFades>()
             .add_message::<engine_world::DamageEvent>()
             .add_message::<engine_world::WorldImpulse>()
             .add_message::<engine_world::NoiseEvent>()
@@ -262,6 +263,7 @@ impl Plugin for FoliagePlugin {
                         growth::grow_plants,
                         scenery_tree::sync_scenery_trees,
                         lod_fade::advance_fades,
+                        scenery_tree::retire_scenery_trees,
                         far_woods::stream_far_woods,
                         far_woods::fade_far_cells,
                         near_woods::stream_near_woods,
