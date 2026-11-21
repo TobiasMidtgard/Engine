@@ -587,6 +587,9 @@ var<workgroup> seg_cb: array<vec4<f32>, 64>;
 var<workgroup> seg_motion: array<vec4<f32>, 64>;
 var<workgroup> seg_root: array<u32, 64>;
 var<workgroup> seg_rows: array<vec2<u32>, 64>;
+// The screen tangents at each end, between this segment's direction and its neighbour's:
+// the joints' cut lines (`joint_tangent`).
+var<workgroup> seg_cut: array<vec4<f32>, 64>;
 
 // The pixels of the 8x8 tile at `corner` whose centers the segment can cover, a bit a pixel
 // and a byte a row (rows 0 to 3 in x, 4 to 7 in y). Every pixel `cs_raster` finds coverage
@@ -630,6 +633,22 @@ fn segment_rows(a: vec4<f32>, b: vec4<f32>, corner: vec2<f32>) -> vec2<u32> {
         }
     }
     return rows;
+}
+
+// The cut line at a joint: across the strand along the mean of the directions into and out of
+// it (`into` and `out`, on screen), so the pixels about a bend go to one segment or the other
+// by which side of it they are, and the outside of the bend is filled out to a miter. (Cut
+// square to each segment, the outside of every bend fell to neither: the strand showed a notch
+// at every point, and where its segments were shorter than it is wide, a staircase of blocks.)
+fn joint_tangent(back: vec2<f32>, onward: vec2<f32>) -> vec2<f32> {
+    let o = onward / max(length(onward), 1e-6);
+    let i = back / max(length(back), 1e-6);
+    let m = i + o;
+    // (A hairpin, or a neighbour that isn't on screen: square to this segment.)
+    if (dot(m, m) < 0.25 || dot(back, back) < 1e-8) {
+        return o;
+    }
+    return normalize(m);
 }
 
 fn unpack_color(s: vec4<u32>) -> vec4<f32> {
@@ -694,6 +713,18 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
                 rows = segment_rows(a.pos, b.pos, vec2<f32>(corner));
             }
             seg_rows[lid] = rows;
+            let ab = b.pos.xy - a.pos.xy;
+            var back = vec2<f32>(0.0);
+            if ((a.shade.w & STRAND_ROOT) == 0u) {
+                let p = lit[r - 1u].pos;
+                back = select(vec2<f32>(0.0), a.pos.xy - p.xy, p.w >= 0.0);
+            }
+            var onward = vec2<f32>(0.0);
+            if ((b.shade.w & STRAND_LAST) == 0u) {
+                let n = lit[r + 2u].pos;
+                onward = select(vec2<f32>(0.0), n.xy - b.pos.xy, n.w >= 0.0);
+            }
+            seg_cut[lid] = vec4<f32>(joint_tangent(back, ab), joint_tangent(ab, select(ab, onward, dot(onward, onward) > 1e-8)));
         }
         workgroupBarrier();
         let n = min(64u, count - base);
@@ -712,15 +743,29 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
                 if (len2 > 1e-8) {
                     t = dot(pc - a.xy, ab) / len2;
                 }
-                // Each segment covers the pixels beside it, not those past its ends (the
-                // neighbouring segment's): each joint once, not twice. The strand's own ends get
-                // round caps.
-                if ((t < 0.0 && (seg_root[i] & STRAND_ROOT) == 0u) || (t >= 1.0 && (seg_root[i] & STRAND_LAST) == 0u)) {
+                // Each segment covers the pixels between the cut lines at its joints, the
+                // neighbouring segments those beyond (`joint_tangent`): each joint once, not
+                // twice, mitered round a bend. The strand's own ends get round caps.
+                let root = (seg_root[i] & STRAND_ROOT) != 0u;
+                let tip = (seg_root[i] & STRAND_LAST) != 0u;
+                let cut = seg_cut[i];
+                if ((!root && dot(pc - a.xy, cut.xy) < 0.0) || (!tip && dot(pc - b.xy, cut.zw) >= 0.0)) {
                     continue;
                 }
+                // Past a joint (the outside of a bend), the distance from the segment's line;
+                // past the strand's ends, from the end (a cap).
+                var along = t;
+                if ((root && t < 0.0) || (tip && t > 1.0)) {
+                    along = saturate(t);
+                }
                 t = saturate(t);
-                let d = length(pc - (a.xy + ab * t));
+                let d = length(pc - (a.xy + ab * along));
                 let w = mix(a.w, b.w, t);
+                // (A miter no longer than twice the strand's width: the far reach of a sharp
+                // bend's point is left out.)
+                if (length(pc - (a.xy + ab * t)) > 2.0 * w + 1.0) {
+                    continue;
+                }
                 // A box-filtered line w either side of its axis, d from the pixel's center.
                 let cov = max(0.0, min(d + w, 0.5) - max(d - w, -0.5));
                 if (cov <= 0.0) {

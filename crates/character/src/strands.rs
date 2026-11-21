@@ -32,6 +32,17 @@ use crate::mesh::{
 /// times too thick and too few merge into sheets with hard edges, the look of a wig.
 const HAIR_WIDTH: f32 = 1.0;
 
+/// Hanging hair is drawn as strands that each stand for a few hairs lying together, as film
+/// and game grooms do (GTA VI's among them): a fraction of the hairs, each drawn this much
+/// wider. A real head's hundred thousand hairs drawn one by one at their own width let the
+/// light and the shirt through between them and read thin; drawn as bunches it holds
+/// together as a mass of hair, at fewer strands to draw.
+const BUNCHED_DENSITY: f32 = 0.6;
+const BUNCHED_RADIUS: f32 = 0.00016;
+
+/// Passes of smoothing along every scalp hair after it is kept out of the skin and face.
+const SMOOTH_PASSES: usize = 3;
+
 /// Which kind of hair a set holds (the shader colors and shades each its own way).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StrandKind {
@@ -686,23 +697,23 @@ fn grow_scalp(
         HairStyle::Medium => Groom {
             length: 0.2 * k,
             points: 18,
-            density: 170.0,
+            density: BUNCHED_DENSITY * 170.0,
             gravity: 1.0,
             loft: 0.022,
             clump: 0.6,
-            root_radius: 0.00006,
+            root_radius: BUNCHED_RADIUS,
             bun: Vec3::ZERO,
         },
         HairStyle::Long => Groom {
             length: 0.42 * k,
             points: 32,
-            density: 190.0,
+            density: BUNCHED_DENSITY * 190.0,
             gravity: 1.0,
             // (Standing off the scalp as much as a real head of long hair does: at 1.2 cm it
             // lay flat as a wig on the head.)
             loft: 0.018,
             clump: 0.75,
-            root_radius: 0.00006,
+            root_radius: BUNCHED_RADIUS,
             bun: Vec3::ZERO,
         },
         HairStyle::Bun => Groom {
@@ -746,7 +757,11 @@ fn grow_scalp(
     let mut set = StrandSet::new(StrandKind::Scalp, g.points);
     // Guides first: one per clump, grown in full; then the hairs that follow them.
     // Long hair gathers into fewer, bigger locks.
-    let per_guide = if g.gravity > 0.5 { 125 } else { 65 };
+    let per_guide = if g.gravity > 0.5 {
+        (125.0 * BUNCHED_DENSITY) as usize
+    } else {
+        65
+    };
     let guides_n = if g.clump > 0.0 {
         (total / per_guide).clamp(60, 1500)
     } else {
@@ -915,7 +930,7 @@ fn grow_scalp(
             // A shorter hair follows its lock only as far as it reaches.
             let reach = scale.min(1.0);
             let end = if g.gravity > 0.5 {
-                let e = Vec3::new(r.normal(), r.normal() * 0.3, r.normal()) * 0.035;
+                let e = Vec3::new(r.normal(), r.normal() * 0.3, r.normal()) * 0.02;
                 e - sp.n * e.dot(sp.n) * 0.5
             } else {
                 Vec3::ZERO
@@ -939,7 +954,7 @@ fn grow_scalp(
                 // Hanging hair takes its lock's shape all along (its own wander would cross
                 // its neighbors' and look like straw); short hair only toward the tip.
                 let w = if g.gravity > 0.5 {
-                    (0.9 + 0.1 * t).min(1.0)
+                    (0.97 + 0.03 * t).min(1.0)
                 } else {
                     (c * 1.2 * t.sqrt()).min(1.0)
                 };
@@ -1041,6 +1056,24 @@ fn grow_scalp(
             let mid = (pts[k - 1] + pts[k + 1]) * 0.5;
             if (pts[k] - mid).length() > 0.012 {
                 pts[k] = mid;
+            }
+        }
+        // Smoothed along its length, and kept out of the skin again: the pushes above move each
+        // point on its own (out of the skin, up off the forehead, back from the face), and
+        // where one point was moved and the next wasn't the hair kinked. Down a lock of long
+        // hair the kinks read as wire bent at every point, and across the front of the crown,
+        // where the forehead's floor lifts some points and not their neighbours, as a glittering
+        // staircase.
+        if g.points > 5 {
+            for _ in 0..SMOOTH_PASSES {
+                let before = pts.clone();
+                for k in 2..last {
+                    pts[k] = before[k] * 0.5 + (before[k - 1] + before[k + 1]) * 0.25;
+                }
+            }
+            for (k, p) in pts.iter_mut().enumerate().skip(2) {
+                let t = k as f32 / last as f32;
+                *p = collider.push_out(*p, 0.0008 + loft * t.min(0.4) / 0.4 * 0.6 * tuck(a, t));
             }
         }
         // Scalp hair is cut, so it keeps its width almost to the end and tapers only over its
