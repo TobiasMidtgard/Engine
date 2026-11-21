@@ -163,7 +163,9 @@ impl<S> Book<S> {
     /// of a texture it holds, else a free one, else the one no row has named the longest (for
     /// `IDLE_FRAMES` at least). An ask whose pixels are a place in a cache is filled only in
     /// the frame it was found in (the cache may give that place to another texture after),
-    /// else at its next ask, where they are then. `users`: the rows that name a layer now.
+    /// else at its next ask, where they are then; meanwhile the layer it would take is kept
+    /// from farther asks, so that a near texture in a cache does not lose its layer to a far
+    /// one of its own while every layer is taken. `users`: the rows that name a layer now.
     pub(super) fn settle(&mut self, users: impl Fn(u16) -> u32, frame: u64) -> Vec<(u16, S)> {
         self.asks.retain(|_, ask| ask.asked + ASK_FRAMES > frame);
         for (i, layer) in self.layers.iter_mut().enumerate() {
@@ -176,24 +178,29 @@ impl<S> Book<S> {
         let mut order: Vec<(f32, Name)> = self
             .asks
             .iter()
-            .filter(|(_, ask)| ask.lasting || ask.asked == frame)
             .map(|(&name, ask)| (ask.distance, name))
             .collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut fills = Vec::new();
         // No layer is free for a new texture this frame (refills go on).
         let mut full = false;
+        // Layers kept for places in a cache found in an earlier frame.
+        let mut kept = Vec::new();
         for (_, name) in order {
             if fills.len() == FILLS_PER_FRAME {
                 break;
             }
-            let refill = self.asks[&name]
+            let ask = &self.asks[&name];
+            // (Its pixels may be another texture's by now.)
+            let stale = !ask.lasting && ask.asked != frame;
+            let refill = ask
                 .refill
                 .filter(|&layer| self.named.get(&name) == Some(&layer));
             let layer = match refill {
+                Some(_) if stale => continue,
                 Some(layer) => layer,
                 None if full => continue,
-                None => match self.free_layer(&users, frame) {
+                None => match self.free_layer(&users, frame, &kept) {
                     Some(layer) => layer,
                     None => {
                         full = true;
@@ -201,6 +208,10 @@ impl<S> Book<S> {
                     }
                 },
             };
+            if stale {
+                kept.push(layer);
+                continue;
+            }
             let ask = self.asks.remove(&name).expect("asked");
             let now = Layer {
                 name,
@@ -220,8 +231,10 @@ impl<S> Book<S> {
         fills
     }
 
-    fn free_layer(&mut self, users: &impl Fn(u16) -> u32, frame: u64) -> Option<u16> {
-        if let Some(i) = self.layers.iter().position(Option::is_none) {
+    /// A layer for a new texture, other than those `kept`.
+    fn free_layer(&mut self, users: &impl Fn(u16) -> u32, frame: u64, kept: &[u16]) -> Option<u16> {
+        let open = |i: usize| !kept.contains(&(i as u16));
+        if let Some(i) = (0..self.layers.len()).find(|&i| self.layers[i].is_none() && open(i)) {
             return Some(i as u16);
         }
         if self.layers.len() < self.most as usize {
@@ -231,6 +244,7 @@ impl<S> Book<S> {
         self.layers
             .iter()
             .enumerate()
+            .filter(|&(i, _)| open(i))
             .filter_map(|(i, layer)| Some((i as u16, layer.as_ref()?)))
             .filter(|&(i, layer)| users(i) == 0 && frame >= layer.used + IDLE_FRAMES)
             .min_by_key(|&(_, layer)| layer.used)
@@ -624,14 +638,44 @@ mod tests {
             assert_eq!(book.ask(name(n), 1.0 + n as f32, 1, || found), None);
         }
         assert_eq!(book.settle(none, 1), [(0, 0), (1, 1), (2, 2), (3, 3)]);
-        // Not asked at frame 2: the one of its own is filled, the cached one waits.
-        assert_eq!(book.settle(none, 2), [(4, 5)]);
+        // Not asked at frame 2: the one of its own is filled, the cached one waits, and the
+        // layer it would take (4) is kept for it.
+        assert_eq!(book.settle(none, 2), [(5, 5)]);
         assert_eq!(book.counts(), (5, 1));
         assert!(book.settle(none, 3).is_empty());
         // Asked again, from where its pixels are now.
         assert_eq!(book.ask(name(4), 5.0, 4, || cached(40, 0)), None);
-        assert_eq!(book.settle(none, 4), [(5, 40)]);
+        assert_eq!(book.settle(none, 4), [(4, 40)]);
         assert_eq!(book.counts(), (6, 0));
+    }
+
+    /// While every layer is taken, the layer that falls idle goes to the nearest ask, also one
+    /// whose pixels are a place in a cache and that was not asked in that frame: it is kept
+    /// from a farther texture of its own, and filled at the cached one's next ask.
+    #[test]
+    fn a_near_place_in_a_cache_keeps_the_layer_that_falls_idle() {
+        let mut book: Book<u64> = Book::new(1);
+        let none = |_: u16| 0u32;
+        assert_eq!(book.ask(name(0), 1.0, 1, || own(0, 0)), None);
+        assert_eq!(book.settle(none, 1), [(0, 0)]);
+        // A near texture in a cache and a far one of its own wait for the one layer, which
+        // no row names from frame 2 on: idle at frame 1 + IDLE_FRAMES.
+        assert_eq!(book.ask(name(1), 2.0, 10, || cached(1, 0)), None);
+        assert!(book.settle(none, 10).is_empty());
+        for frame in [20, 84] {
+            assert_eq!(book.ask(name(2), 300.0, frame, || own(2, 0)), None);
+            assert!(book.settle(none, frame).is_empty());
+        }
+        let idle = 1 + IDLE_FRAMES;
+        assert_eq!(book.ask(name(1), 2.0, idle - 1, || cached(10, 0)), None);
+        assert!(book.settle(none, idle - 1).is_empty(), "not idle yet");
+        assert!(
+            book.settle(none, idle).is_empty(),
+            "the far texture does not take the layer kept for the near one"
+        );
+        assert_eq!(book.ask(name(1), 2.0, idle + 1, || cached(11, 0)), None);
+        assert_eq!(book.settle(none, idle + 1), [(0, 11)]);
+        assert_eq!(book.evicted, 1);
     }
 
     /// New pixels of a texture a layer holds that wait for their fill are looked for again at
