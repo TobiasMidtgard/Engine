@@ -15,9 +15,11 @@
 //! rest; a mirror keeps up while the probe grid scrolls; the switch can be thrown while the
 //! game runs; a mirror shows the wall behind a cut-out card through the card's holes; each
 //! kind of thing is in the rays as its class; the reaches are settings; each row of a
-//! `MeshInstances` slot is an instance of its own; and the measuring fill fills both
-//! structures to their caps. Needs a GPU with ray queries (lavapipe has them); passes with a
-//! note without.
+//! `MeshInstances` slot is an instance of its own; the measuring fill fills both
+//! structures to their caps; and a ground another feature brings through the hook stops the
+//! probes' rays at its front, is lit from above, hides the sky where it rises, and lets the
+//! sun's rays out through its back. Needs a GPU with ray queries (lavapipe has them); passes
+//! with a note without.
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
@@ -25,7 +27,10 @@ use engine_render::prelude::*;
 use engine_render::rock::rock;
 use engine_render::settings::shade_skip;
 use engine_render::settings::trial_cut_more::RAY_WORLD;
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{
+    GpuShared, RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere,
+    RayView, RenderDisabled, capture_now,
+};
 
 const W: u32 = 160;
 const H: u32 = 120;
@@ -2669,4 +2674,184 @@ fn the_ray_scene_fills_to_its_caps_for_a_measurement() {
     assert_eq!(diag(&app, "render.ray.copies"), 0.0);
     assert_eq!(counts(&app), (2.0, 0.0, 0.0), "the copies are gone");
     assert_in_ray_scene(&app, "the copies gone");
+}
+
+/// A ground another feature brings through the hook as `RayClass::Ground`, as the terrain
+/// brings its patches: unit squares (`RaySource::UnitSquare`, facing up) scaled and turned into
+/// place, each with its albedo. Drawn in no view: only the rays see it.
+struct HookedGround(Vec<(DAffine3, [f32; 3])>);
+
+impl RenderFeature for HookedGround {
+    fn name(&self) -> &str {
+        "hooked ground"
+    }
+
+    fn ray_scene(&mut self, _gpu: &GpuShared, _view: &RayView, out: &mut RaySceneOut<'_>) {
+        let square = RayKey(0, 0);
+        let state = out.geometry(square, 1, RayClass::Ground.opaque(), RaySource::UnitSquare);
+        if !matches!(state, RayGeometryState::Ready | RayGeometryState::Older) {
+            return;
+        }
+        for (i, (to_world, albedo)) in self.0.iter().enumerate() {
+            let m = to_world.matrix3;
+            let sphere = RaySphere {
+                center: to_world.translation,
+                radius: (m.x_axis.length() + m.z_axis.length()) as f32,
+            };
+            let look = RayLook {
+                albedo: *albedo,
+                ..Default::default()
+            };
+            let id = RayKey(1, i as u64);
+            out.place(id, square, to_world, sphere, RayClass::Ground, 0, &look);
+        }
+    }
+}
+
+/// A square of hooked ground `size` m across its x and z, turned by `rotation` (its front, up
+/// before the turn), its middle at `center`.
+fn hooked_square(
+    size: [f64; 2],
+    rotation: DQuat,
+    center: DVec3,
+    albedo: [f32; 3],
+) -> (DAffine3, [f32; 3]) {
+    let scale = DVec3::new(size[0] * 0.5, 1.0, size[1] * 0.5);
+    (
+        DAffine3::from_scale_rotation_translation(scale, rotation, center),
+        albedo,
+    )
+}
+
+/// A white wall 3 m wide and 2 m high standing on y = 0, its front toward -z; the camera 4 m in
+/// front of it; the sun near the zenith, so that no vertical face takes it; and `squares` of
+/// hooked ground. Nothing but the wall is drawn.
+fn hooked_ground_app(squares: Vec<(DAffine3, [f32; 3])>) -> App {
+    let mut app = app(true);
+    app.add_render_feature(HookedGround(squares));
+    let w = &mut app.world;
+    slab(w, DVec3::new(0.0, 1.0, 0.0), DVec3::new(3.0, 2.0, 0.2), 0.8);
+    sun(w, 110_000.0, DVec3::new(0.1, -1.0, 0.0));
+    camera(
+        w,
+        DVec3::new(0.0, 1.0, -4.0),
+        DVec3::new(0.0, 1.0, 0.0),
+        12.0,
+    );
+    app
+}
+
+/// The wall's front in [`hooked_ground_app`]'s pictures, pixels `[x0, y0, x1, y1)`.
+const HOOKED_WALL: [u32; 4] = [56, 42, 104, 78];
+
+/// Mean of channel `c` (0..255) over pixels `[x0, y0, x1, y1)`.
+fn channel_mean(image: &image::RgbImage, [x0, y0, x1, y1]: [u32; 4], c: usize) -> f32 {
+    let mut sum = 0.0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            sum += image.get_pixel(x, y)[c] as f32;
+        }
+    }
+    sum / ((x1 - x0) * (y1 - y0)) as f32
+}
+
+/// A ground in the rays through the hook (`RayClass::Ground`, as the terrain brings its
+/// patches, step 5 of the ray-traced lighting round): its front stops the probes' rays and is
+/// lit by the sun from above, so a white wall standing on a red ground takes red light from
+/// it, where without it the rays below the horizon saw the sky's ground colour; a cliff of it
+/// behind the camera, stood on end facing the wall and lit by no sun, hides the sky the wall
+/// faces, so less of the sky's blue reaches the wall. And the sun's rays leave through its
+/// back: a pixel drawn a little below it is lit (a footprint, a patch that morphs), while its
+/// front, turned down over the ground as a roof, stops them.
+#[test]
+fn a_hooked_ground_blocks_the_sky_and_is_lit_from_above() {
+    let level = DQuat::IDENTITY;
+    let red_ground = hooked_square([200.0, 200.0], level, DVec3::ZERO, [0.8, 0.1, 0.1]);
+    // 30 m wide and 20 m high, 8 m in front of the wall (4 m behind the camera), facing it.
+    let cliff = hooked_square(
+        [30.0, 20.0],
+        DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2),
+        DVec3::new(0.0, 9.5, -8.0),
+        [0.3, 0.3, 0.3],
+    );
+    let runs = [
+        ("none", vec![]),
+        ("ground", vec![red_ground]),
+        ("cliff", vec![red_ground, cliff]),
+    ];
+    let mut shots = Vec::new();
+    for (name, squares) in runs {
+        let count = squares.len() as f64;
+        let mut app = hooked_ground_app(squares);
+        app.update_n(3);
+        if !can_run(&app) {
+            return;
+        }
+        app.update_n(30);
+        assert_in_ray_scene(&app, name);
+        assert_eq!(
+            diag(&app, "render.ray.class_ground"),
+            count,
+            "{name}: the hooked squares are in the rays as ground"
+        );
+        shots.push(picture(&mut app, &format!("hooked_{name}.png")));
+    }
+    let red: Vec<f32> = shots.iter().map(|s| share(s, HOOKED_WALL, 0)).collect();
+    let blue: Vec<f32> = shots
+        .iter()
+        .map(|s| channel_mean(s, HOOKED_WALL, 2))
+        .collect();
+    eprintln!("the wall's red share {red:?}, its blue {blue:?} (none, ground, cliff)");
+    assert!(
+        red[1] > red[0] + 0.1,
+        "the sunlit red ground lights the wall red: red share {:.3} against {:.3} without it",
+        red[1],
+        red[0]
+    );
+    assert!(
+        blue[2] < blue[1] * 0.85,
+        "the cliff hides the sky the wall faces: blue {:.1} against {:.1} without it",
+        blue[2],
+        blue[1]
+    );
+
+    // The sun's rays: the ground drawn 5 cm under a hooked one is lit (none stopped), and a
+    // hooked one turned down 2 m over it, as a roof, stops those its shadow falls on.
+    let turned_down = DQuat::from_rotation_x(std::f64::consts::PI);
+    let hooked = [
+        (
+            "under",
+            hooked_square(
+                [200.0, 200.0],
+                level,
+                DVec3::new(0.0, -THICK + 0.05, 0.0),
+                [0.3; 3],
+            ),
+        ),
+        (
+            "roof",
+            hooked_square([3.0, 3.0], turned_down, DVec3::new(0.0, 2.0, 0.0), [0.3; 3]),
+        ),
+    ];
+    let mut stopped = Vec::new();
+    for (name, square) in hooked {
+        let mut app = under_the_sun(false);
+        app.add_render_feature(HookedGround(vec![square]));
+        app.update_n(8);
+        assert_in_ray_scene(&app, name);
+        let (rays, hits) = sun_counts(&mut app);
+        eprintln!("{name}: {hits} of {rays} sun rays stopped");
+        assert!(rays > 1000, "{name}: the sun's rays were shot ({rays})");
+        stopped.push(hits as f32 / rays as f32);
+    }
+    assert!(
+        stopped[0] < 0.001,
+        "the ground under a hooked one is lit: {:.4} of the sun's rays stopped",
+        stopped[0]
+    );
+    assert!(
+        stopped[1] > 0.01,
+        "a hooked ground's front stops the sun's rays: {:.4} stopped under the roof",
+        stopped[1]
+    );
 }

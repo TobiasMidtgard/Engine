@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::math::{DQuat, DVec3, IVec2, Mat3, UVec2, Vec3};
+use engine_core::math::{DAffine3, DQuat, DVec3, IVec2, Mat3, UVec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
@@ -15,6 +15,9 @@ use engine_render::features::{
 use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
 use engine_render::shadows::{FAR_SHADOW_MAP, ShadowTiles};
+use engine_render::{
+    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere, RayView,
+};
 use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 
 use crate::chunk::{
@@ -53,6 +56,17 @@ const MIN_UPLOADS_PER_FRAME: usize = 8;
 const SURFACE_UPLOAD_FRAMES: u32 = 6;
 /// Patches a planet keeps queued for the workers at most (the most urgent).
 const MAX_QUEUED: usize = 256;
+/// A terrain that moved goes on in the ray scene's moving structure until it has held still
+/// this many frames (as the mesh feature's things do).
+const RAY_STILL_FRAMES: u64 = 90;
+/// The rays' ground keeps the view's own detail (what the cascades' still images draw) within
+/// this distance of the camera, meters: the 80 m within which pixels are to trace the sun and
+/// the 64 m of such a ray (plan-corrected.md of the ray-traced lighting round, step 5).
+const RAY_FINE_REACH_M: f64 = 144.0;
+/// Beyond [`RAY_FINE_REACH_M`] the rays' ground splits only while closer than this many patch
+/// sizes, so no patch there is smaller than a third of its distance: what lies that far is met
+/// only by rays that go far, and the whole far reach fits under the cap on patches.
+const RAY_FAR_SPLIT: f64 = 1.5;
 
 /// The `TERRAIN_OFF` parts extra views leave out (a lake's mirror is drawn at half resolution
 /// and rippled; Unreal's reflection captures and HDRP's planar probes strip the same way):
@@ -733,6 +747,9 @@ struct SlotPool {
     pages: Vec<wgpu::Buffer>,
     free: Vec<u32>,
     capacity: u32,
+    /// The frame's ray scene builds the ground's structures straight from the pages
+    /// (`BufferUsages::BLAS_INPUT`, which a device without ray queries refuses).
+    blas: bool,
 }
 
 impl SlotPool {
@@ -755,7 +772,13 @@ impl SlotPool {
                 size: (SLOTS_PER_PAGE as usize
                     * VERTS_PER_CHUNK
                     * std::mem::size_of::<TerrainVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | if self.blas {
+                        wgpu::BufferUsages::BLAS_INPUT
+                    } else {
+                        wgpu::BufferUsages::empty()
+                    },
                 mapped_at_creation: false,
             }));
         self.capacity += SLOTS_PER_PAGE;
@@ -840,6 +863,85 @@ pub struct TerrainFeature {
     /// paths take their dirty tiles): the maps so far, whether the bind group must be made
     /// again, and the steps timed.
     serial: Option<(MapsGpu, bool, Steps)>,
+    /// The ground in the frame's ray scene ([`RenderFeature::ray_scene`]).
+    rays: GroundRays,
+}
+
+/// The ground in the frame's ray scene (`engine_render::ray_scene`, while it is on): each patch
+/// a structure of its own, built straight from its slot of a vertex page with the shared index
+/// list (its grid and skirts), and one instance of it of class `Ground`. Which patches: the
+/// view's walk again without the frustum, within the rays' far reach of the camera
+/// (`RenderSettings::ray_far_reach`), at the view's own detail, which is what the cascades'
+/// still images draw, within `RAY_FINE_REACH_M` (144 m, where the sun's rays from the traced
+/// pixels are to run), and no patch smaller than a third of its distance past it
+/// (`RAY_FAR_SPLIT`); the nearest [`RayView::ground_patches`] of all terrains. That
+/// walk asks the workers for what it lacks after every other, so the ground behind the camera
+/// is built too, and its patches count as seen and stay. A hit takes the air's ground colour
+/// (`Atmosphere::ground_color`, what the sky gave for the ground before) until the ground
+/// draws a colour map for the rays.
+#[derive(Default)]
+struct GroundRays {
+    /// This frame's patches, nearest first (the main view's, while the scene is wanted).
+    patches: Vec<RayPatch>,
+    /// The patches placed in the scene, to take out those that leave.
+    placed: HashSet<RayKey>,
+    /// Each terrain's place when last seen and the frame it last moved (0: never), counted as
+    /// [`RayView::frame`].
+    poses: HashMap<Entity, (DVec3, DQuat, u64)>,
+    /// What a hit on the ground reflects (linear).
+    albedo: [f32; 3],
+}
+
+/// A patch for the ray scene this frame.
+struct RayPatch {
+    key: RayKey,
+    version: u64,
+    slot: u32,
+    to_world: DAffine3,
+    sphere: RaySphere,
+    /// From the camera to the patch's bounding sphere, meters.
+    distance: f64,
+    /// The frame its terrain last moved (0: never).
+    moved: u64,
+}
+
+impl GroundRays {
+    /// Terrain `e` stands at `pos`, `rot` in frame `frame`: the frame it last moved.
+    fn moved(&mut self, e: Entity, pos: DVec3, rot: DQuat, frame: u64) -> u64 {
+        let last = self.poses.entry(e).or_insert((pos, rot, 0));
+        if last.0 != pos || last.1 != rot {
+            *last = (pos, rot, frame);
+        }
+        last.2
+    }
+}
+
+/// The ray scene's name for patch `key` of terrain `e` (as geometry and as instance).
+fn ray_key(e: Entity, key: NodeKey) -> RayKey {
+    let node = ((key.level as u64) << 56)
+        | ((key.face as u64) << 48)
+        | ((key.x as u64 & 0xff_ffff) << 24)
+        | (key.y as u64 & 0xff_ffff);
+    RayKey(e.to_bits(), node)
+}
+
+/// The version of a patch's triangles for the ray scene: a new one at each upload (`stamp`),
+/// and another for the same stamp of a terrain's next version (its patches' stamps start
+/// again).
+fn ray_version(terrain_version: u64, stamp: u32) -> u64 {
+    terrain_version.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ stamp as u64
+}
+
+/// The frame from which a patch of a terrain that last moved in frame `moved` holds still (0:
+/// it never moves), as the mesh feature has it: what moved only with a world shift the scene
+/// followed (`shifted`) holds still, unless the scene has it already (`placed`), which tells a
+/// move of the terrain's own from the shift's.
+fn ray_still_from(moved: u64, shifted: u64, placed: bool) -> u64 {
+    if moved == 0 || (moved == shifted && !placed) {
+        0
+    } else {
+        moved + RAY_STILL_FRAMES
+    }
 }
 
 /// How wet and snowy the ground is beyond the weather's grid around the player: like the open
@@ -1769,6 +1871,8 @@ impl RenderFeature for TerrainFeature {
 
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
+        // (The frame's ray scene builds from the pages and the index list.)
+        self.pool.blas = gpu.ray_queries();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("terrain"),
             entries: &[
@@ -2218,7 +2322,13 @@ impl RenderFeature for TerrainFeature {
         let index = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("terrain indices"),
             size: (indices.len() * 2).next_multiple_of(4) as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::INDEX
+                | wgpu::BufferUsages::COPY_DST
+                | if gpu.ray_queries() {
+                    wgpu::BufferUsages::BLAS_INPUT
+                } else {
+                    wgpu::BufferUsages::empty()
+                },
             mapped_at_creation: false,
         });
         let mut bytes: Vec<u8> = bytemuck::cast_slice(&indices).to_vec();
@@ -2440,6 +2550,16 @@ impl RenderFeature for TerrainFeature {
         let atmosphere = world.get_resource::<engine_render::Atmosphere>().cloned();
         let fog = world.get_resource::<engine_render::FogSettings>().copied();
         let (atmosphere, fog) = (atmosphere.as_ref(), fog.as_ref());
+        // The ground for the frame's ray scene, while it is on (the main view's walk).
+        let ray_walk = !mirror && engine_render::ray_scene::wanted(render_settings, gpu_shared);
+        let ray_frame = view.frame_index + 1;
+        if !mirror {
+            self.rays.patches.clear();
+            self.rays.albedo = atmosphere.map_or_else(
+                || engine_render::Atmosphere::default().ground_color,
+                |a| a.ground_color,
+            );
+        }
         let city = world.get_resource::<CityLights>();
 
         // Looks from afar, uploaded to a layer of the map array as their planets are drawn.
@@ -2460,6 +2580,8 @@ impl RenderFeature for TerrainFeature {
         // Patches the view lacks, and those on their way.
         let mut missing_total = 0usize;
         let mut building_total = 0usize;
+        // Patches the rays' walk lacks (`GroundRays`).
+        let mut ray_missing_total = 0usize;
         let mut latency_ms = 0.0f64;
         let mut max_boost = 1.0f64;
         let max_slots = settings.max_patches as u32;
@@ -2801,6 +2923,54 @@ impl RenderFeature for TerrainFeature {
                     }
                 }
             }
+            // The ground for the frame's rays (`GroundRays`): the view's walk again without the
+            // frustum, within the rays' far reach, coarser past `RAY_FINE_REACH_M`
+            // (`RAY_FAR_SPLIT`), its missing patches asked for last.
+            if ray_walk && t.config.cast_shadows {
+                let reach = render_settings.ray_far_reach as f64;
+                let near = |c: DVec3, r: f64| (pos + rot * c - origin).length() - r <= reach;
+                let far_detail = (RAY_FAR_SPLIT / split).min(1.0);
+                let ray_detail = |dist: f64, center: DVec3| {
+                    let d = haze_detail.map_or(1.0, |h| h(dist, center));
+                    if dist > RAY_FINE_REACH_M {
+                        d.min(far_detail)
+                    } else {
+                        d
+                    }
+                };
+                let ray_sel = state.lod.walk(&SelectInput {
+                    camera: cam_local,
+                    split_factor: split,
+                    merge_factor: None,
+                    visible: &near,
+                    min_size: 0.0,
+                    detail: Some(&ray_detail),
+                });
+                for &(dist, k) in &ray_sel.missing {
+                    wants.push((urgency(dist, k) + 2.5, k, false));
+                }
+                ray_missing_total += ray_sel.missing.len();
+                let moved = self.rays.moved(*e, pos, rot, ray_frame);
+                for k in &ray_sel.draw {
+                    let Some(c) = state.chunks.get(k) else {
+                        continue;
+                    };
+                    let center = pos + rot * c.center;
+                    self.rays.patches.push(RayPatch {
+                        key: ray_key(*e, *k),
+                        version: ray_version(state.version, c.stamp),
+                        slot: c.slot,
+                        to_world: DAffine3::from_rotation_translation(rot, pos + rot * c.origin),
+                        sphere: RaySphere {
+                            center,
+                            radius: c.radius as f32,
+                        },
+                        distance: ((center - origin).length() - c.radius).max(0.0),
+                        moved,
+                    });
+                }
+            }
+            steps.mark("patches: rays");
             if !mirror {
                 // Each patch once, at its most urgent; at most a few hundred (after a jump the
                 // nearest go first and the rest are asked for again as those land).
@@ -3157,6 +3327,14 @@ impl RenderFeature for TerrainFeature {
         out.set("terrain.patches_building", building_total as f64);
         out.set("terrain.patch_latency_ms", latency_ms);
         out.set("terrain.detail_boost", max_boost);
+        if !mirror {
+            // Nearest first, for the scene's cap on the ground (`RayView::ground_patches`).
+            self.rays
+                .patches
+                .sort_by(|a, b| a.distance.total_cmp(&b.distance));
+            out.set("terrain.ray_patches", self.rays.patches.len() as f64);
+            out.set("terrain.ray_patches_missing", ray_missing_total as f64);
+        }
         if let Some(gpu) = &self.gpu {
             // The hand-made ground's paint map is still baking: until it lands, that ground
             // is painted from its patches' vertices only (a loading screen waits for it).
@@ -3403,6 +3581,66 @@ impl RenderFeature for TerrainFeature {
 
     fn shadow_static_changed(&self, map: usize) -> bool {
         still_of(map).is_some_and(|i| self.stills[i].ask)
+    }
+
+    /// The ground's patches this frame's walk found ([`GroundRays`]), the nearest
+    /// `view.ground_patches`: each built from its slot as it is now (a patch built again is a
+    /// new version), placed as `Ground`, and taken out once it leaves. Everything is placed
+    /// every frame (a patch as it stands costs a lookup), so a new epoch needs nothing more.
+    fn ray_scene(&mut self, _gpu: &GpuShared, view: &RayView, out: &mut RaySceneOut<'_>) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        // The whole grid and its skirts: a ray can't slip between two patches of different
+        // levels where the skirts hang.
+        let (first_index, index_count) = gpu.index_lists[0];
+        let look = RayLook {
+            albedo: self.rays.albedo,
+            roughness: 0.9,
+            double_sided: false,
+            ..Default::default()
+        };
+        let mut placed = HashSet::with_capacity(self.rays.placed.len());
+        for p in self.rays.patches.iter().take(view.ground_patches as usize) {
+            let Some(page) = self.pool.pages.get((p.slot / SLOTS_PER_PAGE) as usize) else {
+                continue;
+            };
+            let source = RaySource::Buffers {
+                vertex: page,
+                first_vertex: (p.slot % SLOTS_PER_PAGE) * VERTS_PER_CHUNK as u32,
+                vertex_count: VERTS_PER_CHUNK as u32,
+                vertex_stride: std::mem::size_of::<TerrainVertex>() as u32,
+                index: &gpu.index,
+                index_format: wgpu::IndexFormat::Uint16,
+                first_index,
+                index_count,
+            };
+            match out.geometry(p.key, p.version, RayClass::Ground.opaque(), source) {
+                RayGeometryState::Ready | RayGeometryState::Older => {
+                    let still_from = ray_still_from(p.moved, view.shifted, out.has(p.key));
+                    out.place(
+                        p.key,
+                        p.key,
+                        &p.to_world,
+                        p.sphere,
+                        RayClass::Ground,
+                        still_from,
+                        &look,
+                    );
+                    placed.insert(p.key);
+                }
+                // (What the scene holds of it stays meanwhile.)
+                RayGeometryState::Building | RayGeometryState::Refused => {
+                    if out.has(p.key) {
+                        placed.insert(p.key);
+                    }
+                }
+            }
+        }
+        for gone in self.rays.placed.difference(&placed) {
+            out.remove(*gone);
+        }
+        self.rays.placed = placed;
     }
 
     fn stats(&self) -> FeatureStats {
@@ -3973,6 +4211,39 @@ fn melt_latitude(c: &crate::shape::Climate) -> f32 {
 mod tests {
     use super::*;
     use engine_render::features::{compose_shader, validate_wgsl};
+
+    /// The ray scene names each patch apart (its terrain, level, face and place), takes a patch
+    /// built again for a new version also when a terrain's stamps start again, and keeps a
+    /// terrain that never moved, or moved only with a world shift, in the still structure.
+    #[test]
+    fn each_patch_of_ground_is_a_geometry_of_its_own_in_the_rays() {
+        let e = |i| Entity::from_raw_u32(i).expect("an entity");
+        let node = |face, level, x, y| NodeKey { face, level, x, y };
+        let keys = [
+            ray_key(e(1), node(0, 3, 1, 2)),
+            ray_key(e(1), node(0, 3, 2, 1)),
+            ray_key(e(1), node(1, 3, 1, 2)),
+            ray_key(e(1), node(0, 4, 1, 2)),
+            ray_key(e(2), node(0, 3, 1, 2)),
+            ray_key(e(1), node(0, 20, 1 << 20, (1 << 20) - 1)),
+        ];
+        let unique: HashSet<RayKey> = keys.iter().copied().collect();
+        assert_eq!(unique.len(), keys.len());
+        assert_ne!(ray_version(1, 5), ray_version(1, 6));
+        assert_ne!(ray_version(1, 5), ray_version(2, 5));
+        // Where a terrain moved.
+        let mut rays = GroundRays::default();
+        let (p, q) = (DVec3::new(1.0, 2.0, 3.0), DQuat::IDENTITY);
+        assert_eq!(rays.moved(e(1), p, q, 10), 0);
+        assert_eq!(rays.moved(e(1), p, q, 11), 0);
+        assert_eq!(rays.moved(e(1), p + DVec3::X, q, 12), 12);
+        assert_eq!(rays.moved(e(1), p + DVec3::X, q, 13), 12);
+        assert_eq!(ray_still_from(0, 0, true), 0);
+        assert_eq!(ray_still_from(12, 0, true), 12 + RAY_STILL_FRAMES);
+        // Moved with the world: still, unless the scene has it already.
+        assert_eq!(ray_still_from(12, 12, false), 0);
+        assert_eq!(ray_still_from(12, 12, true), 12 + RAY_STILL_FRAMES);
+    }
 
     #[test]
     fn an_image_drawn_while_the_ground_loads_is_drawn_again_when_it_is_there() {

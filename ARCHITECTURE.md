@@ -230,8 +230,8 @@ the sun and the nearest point lights through shadow rays, glowing materials and 
 probes. `probe_gi` in lib_frame.wgsl (frame binding 23, the atlas) gives every lit surface
 the probes' irradiance where the grid covers it, so other modules' shaders that call
 `shade_surface` get it too; their reflected sky dims with it. Terrain, foliage, water and
-skinned meshes are not in the rays' scene yet, extra views go without, and rays that miss see
-the environment map. Textured surfaces show to the rays in their texture's mean color. The same
+skinned meshes are not in this scene (the frame's ray scene, below, holds the first three),
+extra views go without, and rays that miss see the environment map. Textured surfaces show to the rays in their texture's mean color. The same
 scene gives **world reflections** (`RenderSettings::world_reflections`, engine-design/
 lighting-round-reflections.md): `cs_reflect` traces one ray a texel at half resolution along
 each smooth surface's reflection, lights the hit like a probe ray's, and ssr.wgsl blends it,
@@ -287,8 +287,15 @@ material projects its RGBA8 base colour image (or preset) by uv also gets a tile
 array (22 MB, made at the first fill), filled on the GPU from the texture the raster draws
 with, four a frame nearest first, and given to another texture only after 128 frames in which
 no instance named it; a hit reads it at the level its ray's footprint asks and divides by the
-tile's mean, so the row's colour stays the average. Without ray queries, or with the switch
-off, nothing of it is made and the probes gather their own scene as before. `render.ray.*` and
+tile's mean, so the row's colour stays the average. Other features bring what they draw: water
+each body as a disc or a square at its still surface, foliage its rocks of 0.3 m or more, cave
+chambers and forest floors, and the terrain the patches a walk of its own picks whichever way
+the camera looks, at the view's detail within 144 m and none smaller than a third of its
+distance beyond, out to `ray_far_reach` (the nearest 512, `RayView::ground_patches`, of
+its terrains that cast), each built from its slot of the vertex pages with its skirts and
+placed as `Ground` in the `Atmosphere`'s ground colour;
+`ray_scene::wanted` tells a feature in its main view's prepare whether the scene will ask.
+Without ray queries, or with the switch off, nothing of it is made and the probes gather their own scene as before. `render.ray.*` and
 `render.meshes.ray_*` count it.
 
 **GPU skinning** (built; `skinning.rs`): a module that poses a mesh puts `GpuSkin` (per-vertex
@@ -419,7 +426,7 @@ reflections traced every texel around a pixel against the frame's ray scene with
 that met nothing saw open sky, ssr.wgsl writes that pixel's cover negative, and `shade_surface`
 then takes the cover overhead alone (`screen_reflection_traced`), so the edges of a thing seen in
 a mirror don't pick up the coarse map's dark texels (what draws into the map without a place in
-the rays yet, such as the foliage's rocks, cloth and characters, then doesn't dim that sky).
+the rays yet, such as cloth, characters and rocks under 0.3 m, then doesn't dim that sky).
 `RenderSettings::debug_view = SkyVisibility` shows the result.
 
 **Ground weather** (built): `SurfaceLayers` (the weather's 512 m grid of 1 m cells around the

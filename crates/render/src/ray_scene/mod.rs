@@ -321,8 +321,9 @@ pub(crate) fn shader_lib(group: u32) -> String {
 /// Whether `settings` ask for the ray scene on this device: its switch, with probe GI on
 /// ray-tracing hardware, where the device can hold it, unless the renderer gave it up for
 /// the run (lost too often, `GpuShared::ray_scene_given_up`). The renderer makes the scene
-/// by this, and the features that fill it prepare for it by this.
-pub(crate) fn wanted(settings: &crate::RenderSettings, shared: &GpuShared) -> bool {
+/// by this, and the features that fill it prepare for it by this (in their main view's
+/// prepare, by its settings: what [`crate::RenderFeature::ray_scene`] will be asked for).
+pub fn wanted(settings: &crate::RenderSettings, shared: &GpuShared) -> bool {
     settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_WORLD != 0
         && settings.probe_gi
         && settings.gi_hardware_rays
