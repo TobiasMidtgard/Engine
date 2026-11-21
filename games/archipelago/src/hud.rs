@@ -17,7 +17,7 @@ use engine_ui::input::UiEvent;
 use engine_ui::kit::brass::{self, Colors};
 use engine_ui::node::{Interaction, Node, Screen};
 use engine_ui::screens;
-use engine_ui::style::{Align, Direction, Ease, Enter, Justify, Pick, Position, pct};
+use engine_ui::style::{Align, Direction, Ease, Enter, Fill, Justify, Pick, Position, pct};
 
 use crate::camera;
 use crate::defs::{Category, Good, Kind, Tier};
@@ -82,9 +82,8 @@ const SPEEDS: [(f32, &str, &str); 4] = [
     ),
 ];
 
-#[allow(dead_code)] // tools.rs keys the tabs from it (Brightsund thread)
 /// The build bar's tabs in shown order, each with its tiles in shown order for the island
-/// in view (tools.rs keys tab `i` to F2 + i, and steps through a tab's tiles in this order).
+/// in view (tools.rs keys tab `i` to F4 + i, and steps through a tab's tiles in this order).
 pub fn bar_tabs(world: &World) -> Vec<(String, Vec<Kind>)> {
     let by_type = world
         .get_resource::<plan::Plan>()
@@ -97,7 +96,6 @@ pub fn bar_tabs(world: &World) -> Vec<(String, Vec<Kind>)> {
         .collect()
 }
 
-#[allow(dead_code)] // tools.rs opens a tab from its key (Brightsund thread)
 /// Show build tab `i` (clamped), as its key picks from it.
 pub fn open_tab(world: &mut World, i: usize) {
     if !world.contains_resource::<Hud>() {
@@ -227,6 +225,7 @@ fn item_tile(k: Kind, selected: bool, i: usize, compact: bool, grows: Option<&st
     tile(kind_icon(k), d.name, price, action, selected, i, compact)
         .id(format!("isle.build:{k:?}"))
         .child(plan::padlock(plan::lock_id(k), 36.0, 2.0, 2.0))
+        .child(plan::tile_keycap(k))
         .with_style(move |s| s.opacity(if grows.is_some() { 0.48 } else { 1.0 }))
 }
 
@@ -291,17 +290,57 @@ fn tab_len(category: usize, by_type: bool, isle: usize) -> usize {
         .count()
 }
 
-/// The tab medallions and the sort switch.
+/// A key cap in the bar's corner of a medallion or tile: "F4", "X", "⇧N".
+fn keycap(text: &str, top: Option<f32>, bottom: Option<f32>) -> El {
+    El::text(text.to_string())
+        .text_style(|t| t.nowrap().bold().size(11.5).center())
+        .with_style(move |s| {
+            let s = s
+                .position(Position::Absolute)
+                .right(-8.0)
+                .min_width(22.0)
+                .padding([1.0, 5.0])
+                .radius(4.0)
+                .background(Fill::vertical(
+                    Colors::lacquer_top().lerp(Colors::brass_dark(), 0.25),
+                    Colors::lacquer_bottom(),
+                ))
+                .border(1.0, Colors::brass().with_alpha(0.8))
+                .color(Colors::cream())
+                .pick(Pick::Ignore);
+            match (top, bottom) {
+                (Some(t), _) => s.top(t),
+                (_, Some(b)) => s.bottom(b),
+                _ => s,
+            }
+        })
+        .pick_ignore()
+}
+
+/// One of the planning medallions beside the tabs: blueprints and stamps (tools.rs).
+fn plan_medal(icon: &str, action: &str, key: &str, title: &str, tip: &str) -> El {
+    brass::medallion(icon, 40.0, action)
+        .id(action.to_string())
+        .tooltip(title, format!("{tip}\n[b]Key[/b]  {key}"))
+        .child(keycap(key, None, Some(-8.0)))
+}
+
+/// The tab medallions, the sort switch, Demolish, and the blueprint and stamp tools.
 fn tab_row(category: usize, by_type: bool, demolish: bool) -> Vec<El> {
     plan::tabs(by_type)
         .iter()
         .enumerate()
         .map(|(i, t)| {
+            let key = crate::tools::tab_key(i);
             brass::medallion(t.icon, 52.0, &format!("isle.cat:{i}"))
                 .id(format!("isle.cat:{i}"))
                 .selected(i == category)
-                .tooltip(t.name, "")
+                .tooltip(
+                    t.name,
+                    format!("[b]Key[/b]  {key}, again to step through its buildings"),
+                )
                 .child(plan::padlock(plan::tab_lock_id(i), 26.0, -6.0, -6.0))
+                .child(keycap(&key, None, Some(-8.0)))
         })
         .chain([
             El::new().with_style(|s| s.width(10.0)),
@@ -312,7 +351,42 @@ fn tab_row(category: usize, by_type: bool, demolish: bool) -> Vec<El> {
                 .tooltip(
                     "Demolish",
                     "Click a building or a road to clear it. Nothing is refunded.\n[b]Key[/b]  X or Delete",
-                ),
+                )
+                .child(keycap("X", None, Some(-8.0))),
+            El::new().with_style(|s| {
+                s.width(2.0)
+                    .height(40.0)
+                    .background(Colors::cream_dim().fade(0.35))
+                    .pick(Pick::Ignore)
+            }),
+            plan_medal(
+                "isle_blueprint",
+                "isle.blueprint",
+                "N",
+                "Blueprints",
+                "Lay plans instead of building: they cost nothing until built, and keep their ground. Click again to build for real.",
+            ),
+            plan_medal(
+                "isle_build_all",
+                "isle.blueprint.build_all",
+                "⇧N",
+                "Build the plans",
+                "Build every blueprint the company can pay for, oldest first.",
+            ),
+            plan_medal(
+                "isle_stamp_copy",
+                "isle.stamp.copy",
+                "O",
+                "Copy a stamp",
+                "Drag round buildings and roads to keep them in the stamp book; C copies the building under the pointer.",
+            ),
+            plan_medal(
+                "isle_stamp",
+                "isle.stamp.last",
+                "⇧O",
+                "Stamps",
+                "Take up the last stamp from the book; [ and ] turn its pages, R turns it.",
+            ),
         ])
         .collect()
 }
@@ -985,6 +1059,16 @@ fn refresh_items(world: &mut World) {
         set_selected(world, &format!("isle.cat:{i}"), i == cat);
     }
     set_selected(world, "isle.tool:demolish", tool == Tool::Demolish);
+    refresh_planning(world);
+}
+
+/// Light the blueprint and stamp medallions while their tool or mode is on.
+fn refresh_planning(world: &mut World) {
+    let tool = *world.resource::<Tool>();
+    let blue = crate::blueprint::mode(world);
+    set_selected(world, "isle.blueprint", blue);
+    set_selected(world, "isle.stamp.copy", tool == Tool::Copy);
+    set_selected(world, "isle.stamp.last", matches!(tool, Tool::Stamp { .. }));
 }
 
 /// Rebuild the tab medallions (after the sort changes).
@@ -1240,6 +1324,7 @@ pub fn update_data(world: &mut World) {
             let kinds = plan::tab_kinds(by_type, cat, isle);
             plan::refresh_prices(world, &kinds, isle);
         }
+        refresh_planning(world);
         ledger::update(world);
         map::update(world, 0.2);
         shelf::update(world);

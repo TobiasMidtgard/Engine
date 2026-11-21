@@ -10,7 +10,7 @@ use engine_ui::data::UiData;
 use engine_ui::el::El;
 use engine_ui::kit::brass::{self, Colors};
 use engine_ui::node::{Interaction, Node};
-use engine_ui::style::{Align, Direction, Enter, Justify, Pick, Position};
+use engine_ui::style::{Align, Direction, Enter, Fill, Justify, Pick, Position};
 
 use crate::defs::{Category, DEFS, Good, Kind, Need, Tier};
 use crate::sim::Economy;
@@ -45,6 +45,30 @@ pub struct Plan {
 /// The pad-lock over tile `k` (shown while the building is not open yet).
 pub fn lock_id(k: Kind) -> String {
     format!("isle.lock.{k:?}")
+}
+
+/// The key cap in a build tile's top-left corner: the keys that take it up (tools.rs),
+/// written in by [`refresh_prices`].
+pub fn tile_keycap(k: Kind) -> El {
+    El::text(format!("{{isle.key.{k:?}}}"))
+        .id(format!("isle.keycap.{k:?}"))
+        .text_style(|t| t.nowrap().bold().size(11.0))
+        .with_style(|s| {
+            s.position(Position::Absolute)
+                .top(4.0)
+                .left(4.0)
+                .padding([0.0, 4.0])
+                .radius(3.0)
+                .background(Fill::vertical(
+                    Colors::lacquer_top(),
+                    Colors::lacquer_bottom(),
+                ))
+                .border(1.0, Colors::brass().with_alpha(0.7))
+                .color(Colors::cream())
+                .opacity(0.0)
+                .pick(Pick::Ignore)
+        })
+        .pick_ignore()
 }
 
 /// The pad-lock over tab `i`.
@@ -273,6 +297,24 @@ pub fn refresh_prices(world: &mut World, kinds: &[Kind], isle: usize) {
         }
     }
     let locked: Vec<bool> = locks(world, kinds).iter().map(|l| l.locked).collect();
+    // The key caps.
+    let keys: Vec<(Kind, Option<String>)> = kinds
+        .iter()
+        .map(|k| (*k, crate::tools::hotkey(world, *k)))
+        .collect();
+    for (k, key) in keys {
+        let id = format!("isle.key.{k:?}");
+        let text = key.clone().unwrap_or_default();
+        {
+            let mut data = world.resource_mut::<UiData>();
+            if data.get_str(&id) != Some(text.as_str()) {
+                data.set(&id, text);
+            }
+        }
+        if let Some(e) = engine_ui::input::find_id(world, &format!("isle.keycap.{k:?}")) {
+            set_opacity(world, e, if key.is_some() { 1.0 } else { 0.0 });
+        }
+    }
     let tiles = world.resource::<Plan>().tiles.clone();
     for (k, e) in tiles {
         let Some(at) = faded.iter().position(|(x, _)| *x == k) else {

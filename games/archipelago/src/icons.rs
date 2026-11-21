@@ -448,7 +448,7 @@ const RELATIONS: &[(&str, &str)] = &[
     ("isle_gift", include_str!("../assets/icons/isle_gift.svg")),
 ];
 
-/// The build bar's tier tabs and pad-lock and the pedlar's stall, painted by
+/// The build bar's tier tabs, pad-lock and planning tools, and the pedlar's stall, painted by
 /// `assets/icons/make_build_icons.py`.
 const TIERS: &[(&str, &str)] = &[
     (
@@ -470,6 +470,19 @@ const TIERS: &[(&str, &str)] = &[
     (
         "isle_padlock",
         include_str!("../assets/icons/isle_padlock.svg"),
+    ),
+    (
+        "isle_blueprint",
+        include_str!("../assets/icons/isle_blueprint.svg"),
+    ),
+    (
+        "isle_build_all",
+        include_str!("../assets/icons/isle_build_all.svg"),
+    ),
+    ("isle_stamp", include_str!("../assets/icons/isle_stamp.svg")),
+    (
+        "isle_stamp_copy",
+        include_str!("../assets/icons/isle_stamp_copy.svg"),
     ),
 ];
 

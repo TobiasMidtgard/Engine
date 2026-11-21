@@ -2,7 +2,9 @@
 # fisher's oilskin sou'wester (isle_tier_fisherfolk), a labourer's flat cap over a hammer
 # (isle_tier_labourers) and a burgher's top hat (isle_tier_burghers); and the pedlar's stall
 # (isle_pedlar): a striped awning over an open chest of wares; and a padlock for buildings
-# not open yet (isle_padlock).
+# not open yet (isle_padlock); and the planning tools beside the build tabs: a rolled blueprint
+# (isle_blueprint), a blueprint under a hammer (isle_build_all), a rubber stamp (isle_stamp) and a
+# stamp over a dashed frame (isle_stamp_copy).
 # Usage: python3 make_build_icons.py <out dir>
 import os, sys
 def o(w):
@@ -71,6 +73,44 @@ I['isle_padlock'] = svg(IRON + lg('br', (0, '#ffe7a0'), (.5, '#d0a040'), (1, '#6
     '<rect x="11" y="28" width="42" height="29" rx="5" fill="url(#br)"/></g>'
     '<path d="M32 36 C29 36 27.5 38 27.5 40.5 C27.5 42.5 28.6 43.8 30 44.4 L29 51 L35 51 L34 44.4 C35.4 43.8 36.5 42.5 36.5 40.5 C36.5 38 35 36 32 36 Z" fill="#2a1708"/>'
     '<path d="M15 33 L15 46" stroke="#fff" stroke-width="2.4" opacity=".55" stroke-linecap="round"/>')
+
+BLUE = lg('bp', (0, '#8ac8ff'), (.55, '#2f78c8'), (1, '#123a72'))
+PAPER_ROLL = lg('rl', (0, '#cfe8ff'), (1, '#5a90c8'))
+GRID = ''.join(f'<path d="M{x} 14 L{x} 50" stroke="#cfe6ff" stroke-width=".8" opacity=".55"/>' for x in (18, 26, 34, 42)) + \
+       ''.join(f'<path d="M10 {y} L50 {y}" stroke="#cfe6ff" stroke-width=".8" opacity=".55"/>' for y in (22, 30, 38, 46))
+# A blueprint sheet curling into a roll on the right, with a house drawn in white.
+I['isle_blueprint'] = svg(BLUE + PAPER_ROLL,
+    shadow(32, 58, 24, 3.5) +
+    f'<g {o(2.4)}><path d="M8 12 L50 12 L50 52 L8 52 Z" fill="url(#bp)"/></g>' + GRID +
+    '<path d="M18 44 L18 32 L28 24 L38 32 L38 44 Z M25 44 L25 37 L31 37 L31 44" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>'
+    f'<g {o(2.4)}><path d="M48 10 C54 10 58 13 58 18 L58 54 C58 58 54 60 50 58 L48 56 Z" fill="url(#rl)"/></g>'
+    f'<g {o(1.6)} fill="none"><path d="M50 14 C54 14 55 16 55 18 L55 52"/></g>')
+# The blueprint under a claw hammer: build the plans.
+I['isle_build_all'] = svg(BLUE + WOOD + IRON,
+    shadow(32, 58, 24, 3.5) +
+    f'<g {o(2.4)}><path d="M6 16 L46 16 L46 54 L6 54 Z" fill="url(#bp)"/></g>' +
+    ''.join(f'<path d="M{x} 18 L{x} 52" stroke="#cfe6ff" stroke-width=".8" opacity=".5"/>' for x in (16, 26, 36)) +
+    '<path d="M14 46 L14 36 L22 29 L30 36 L30 46 Z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>'
+    f'<g {o(2.4)}><path d="M28 58 L52 22 L57 25 L33 61 Z" fill="url(#wd)"/>'
+    '<path d="M44 14 L56 4 C59 6 61 9 62 12 L52 24 Z" fill="url(#ir)"/></g>')
+# A rubber stamp: a turned wooden handle on a brass collar over a red pad.
+STAMP = (f'<g {o(2.4)}><path d="M26 8 C26 4 38 4 38 8 C38 14 35 16 35 22 L29 22 C29 16 26 14 26 8 Z" fill="url(#wd)"/>'
+    '<path d="M22 22 L42 22 L44 30 L20 30 Z" fill="url(#br)"/>'
+    '<path d="M14 30 L50 30 L50 40 L14 40 Z" fill="url(#wd)"/>'
+    '<path d="M16 40 L48 40 L48 45 L16 45 Z" fill="url(#rd)"/></g>'
+    '<path d="M29 8 C29 6 31 5 33 5" stroke="#fff" stroke-width="1.8" opacity=".6" fill="none" stroke-linecap="round"/>')
+RED_PAD = lg('rd', (0, '#ff6a50'), (1, '#8a1a0c'))
+BRASS = lg('br', (0, '#ffe7a0'), (.5, '#d0a040'), (1, '#6a4410'))
+I['isle_stamp'] = svg(WOOD + RED_PAD + BRASS,
+    shadow(32, 58, 22, 3.5) + STAMP +
+    '<path d="M14 50 L50 50 L50 56 L14 56 Z" fill="#c8321e" opacity=".85" stroke="#2a1708" stroke-width="1.6"/>'
+    '<path d="M22 53 L42 53" stroke="#ffd8c8" stroke-width="1.6" opacity=".8"/>')
+# The stamp over a dashed frame: copy a piece of town into the book.
+I['isle_stamp_copy'] = svg(WOOD + RED_PAD + BRASS,
+    shadow(32, 58, 24, 3.5) +
+    '<rect x="6" y="34" width="52" height="24" rx="2" fill="#f6ecd2" fill-opacity=".35" stroke="#fff6dc" stroke-width="2.6" stroke-dasharray="5 4"/>'
+    '<rect x="6" y="34" width="52" height="24" rx="2" fill="none" stroke="#2a1708" stroke-width="1" stroke-dasharray="5 4" stroke-dashoffset="1" opacity=".6"/>' +
+    '<g transform="translate(0,-4)">' + STAMP + '</g>')
 
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)

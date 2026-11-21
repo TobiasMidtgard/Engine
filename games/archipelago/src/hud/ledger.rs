@@ -784,6 +784,23 @@ pub fn update(world: &mut World) {
         .iter()
         .map(|g| books.made_per_min[g.index()].max(books.used_per_min[g.index()]))
         .fold(1.0f32, f32::max);
+    // What the fleet's wages go to: the company's own craft by kind, most first
+    // ("Barque 8, Cutter 2").
+    let craft_line = {
+        let mut n: Vec<(crate::vessels::Craft, u32)> = Vec::new();
+        let mut q = world.query::<&crate::fleet::Vessel>();
+        for v in q.iter(world).filter(|v| v.commanded()) {
+            match n.iter_mut().find(|(c, _)| *c == v.craft) {
+                Some((_, k)) => *k += 1,
+                None => n.push((v.craft, 1)),
+            }
+        }
+        n.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        n.iter()
+            .map(|(c, k)| format!("{} {k}", c.name()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     {
         let mut d = world.resource_mut::<UiData>();
         d.set("isle.led.goods_title", format!("Goods of {name}"));
@@ -803,7 +820,12 @@ pub fn update(world: &mut World) {
                 let fleet = econ.fleet_upkeep as f64;
                 let ashore = (econ.upkeep_per_min - fleet).max(0.0);
                 let fleet_part = if fleet >= 0.5 {
-                    format!(" · fleet [color=#9a2f1c]−{fleet:.0}[/color]")
+                    let crafts = if craft_line.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({craft_line})")
+                    };
+                    format!(" · fleet{crafts} [color=#9a2f1c]−{fleet:.0}[/color]")
                 } else {
                     String::new()
                 };
