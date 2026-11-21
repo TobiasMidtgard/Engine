@@ -86,6 +86,39 @@ const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
     }
 }
 
+// SCRATCH (not for commit): ARCH_SEA_VIEWS="key,shiftx,shiftz,yaw,dist,pitch;..." round the harbour.
+fn scratch_views() -> Vec<View> {
+    let Ok(spec) = std::env::var("ARCH_SEA_VIEWS") else {
+        return Vec::new();
+    };
+    spec.split(';')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let f: Vec<&str> = s.split(',').collect();
+            let n = |i: usize| f[i].parse::<f32>().unwrap();
+            let key: &'static str = Box::leak(f[0].to_string().into_boxed_str());
+            View {
+                clean: true,
+                fog: false,
+                shift: (n(1).into(), n(2).into()),
+                pitch_deg: Some(n(5)),
+                ..v(
+                    key,
+                    if f.len() > 6 && f[6] == "s" {
+                        Aim::Ship(crate::settle::FIRST_SHIP)
+                    } else if f.len() > 6 {
+                        Aim::Island(f[6].parse().unwrap())
+                    } else {
+                        Aim::Kind(crate::defs::Kind::Harbour, 0)
+                    },
+                    n(3),
+                    n(4),
+                )
+            }
+        })
+        .collect()
+}
+
 fn views() -> Vec<View> {
     use crate::defs::{Kind as K, Tier as T};
     vec![
@@ -664,6 +697,9 @@ fn views() -> Vec<View> {
             ..v("ruin", Aim::Front(K::Weaver, 0), 0.6, 36.0)
         },
     ]
+    .into_iter()
+    .chain(scratch_views())
+    .collect()
 }
 
 /// Start a view's incident near `at`: at the nearest house (riots, sickness) or the nearest
@@ -920,6 +956,15 @@ pub fn run(mut app: App, only: Option<&str>) {
 
 /// Take the tour's pictures (all, or the views named in `only`) into `out`.
 pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
+    // SCRATCH (not for commit): ARCH_CUTS_OFF=<mask> clears those RenderSettings::trial_cuts bits.
+    if let Some(m) = std::env::var("ARCH_CUTS_OFF")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        let mut rs = app.world.resource_mut::<engine::render::RenderSettings>();
+        rs.trial_cuts &= !m;
+        engine::core::log::info!("tour: trial cuts now {:#x}", rs.trial_cuts);
+    }
     let keys: Option<Vec<&str>> = only.map(|s| s.split(',').collect());
     for view in views() {
         if keys.as_ref().is_some_and(|k| !k.contains(&view.key)) {
