@@ -215,14 +215,20 @@ fn strand_capsule_light(rel: vec3<f32>, l: vec3<f32>, dist: f32) -> f32 {
     return vis;
 }
 
-fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, base: vec3<f32>, random: f32, rough_in: f32, along: f32) -> vec3<f32> {
+fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, base: vec3<f32>, random: f32, rough_in: f32, along: f32, bend: f32) -> vec3<f32> {
     let fur = inst.more.y == 1u;
     let v = normalize(-rel);
     let nc = normalize(v - t * dot(v, t) + vec3<f32>(0.0, 1e-5, 0.0));
     // (Combed head hair shines; coarser beard and brow hair, rougher, much less.)
     let shine = mix(HUMAN_SHINE, 0.8, smoothstep(0.35, 0.42, rough_in));
     let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(shine, 1.0, fur));
-    let rough = rough_in * (0.85 + 0.3 * fract(random * 37.3));
+    // The light is worked out at the points only, and the segments blend it: a highlight
+    // narrower than the turn of the hair from one point to the next (`bend`, rad) caught one
+    // point of a hair and missed the next, and over the crown, where the hair curves round the
+    // head, it glittered in dashes. So the lobes widen to the turn they stand for (their
+    // width squared, Karis's beta, summed in quadrature with half the turn).
+    let rough0 = rough_in * (0.85 + 0.3 * fract(random * 37.3));
+    let rough = sqrt(sqrt(sq(rough0 * rough0) + sq(0.5 * bend)));
     // No fibre runs quite straight: each leans its own way, and its highlight with it.
     let b = normalize(cross(t, nc));
     // ...and wavers a few degrees along its length, so a lock's highlight breaks into streaks
@@ -356,6 +362,13 @@ fn cs_shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let mp = posed[slot - select(0u, 1u, j > 0u)].xyz;
     let mn = posed[slot + select(0u, 1u, j + 1u < per)].xyz;
     let t = normalize(strand_model_dir(inst, mn - mp) + vec3<f32>(1e-7, 0.0, 0.0));
+    // How far the hair turns at this point (rad; none at its ends).
+    var bend = 0.0;
+    if (j > 0u && j + 1u < per) {
+        let d0 = m - mp;
+        let d1 = mn - m;
+        bend = acos(clamp(dot(d0, d1) * inverseSqrt(max(dot(d0, d0) * dot(d1, d1), 1e-20)), -1.0, 1.0));
+    }
 
     let c = info[inst.first.y + s].color;
     let root = vec4<f32>(unpack2x16float(c.x), unpack2x16float(c.y));
@@ -364,7 +377,7 @@ fn cs_shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let base = max(mix(root.rgb, tip.rgb, along) * inst.tint.rgb, vec3<f32>(1e-4));
     var color = pre_expose(base * frame.ambient.rgb);
     if (!shade_skip(SKIP_STRAND_LIGHT)) {
-        color = strand_shade(inst, m, rel, t, base, root.w, tip.w, along);
+        color = strand_shade(inst, m, rel, t, base, root.w, tip.w, along, bend);
     }
     let opacity = select(params.screen.z, params.screen.w, inst.more.y == 1u);
     lit[slot].shade.x = pack2x16float(color.rg);
@@ -387,6 +400,22 @@ struct Segment {
 };
 
 // The tiles segment `slot`..`slot + 1` may touch.
+// The middle of the segment from `a` to `b` on the curve through the strand's points (a
+// Catmull-Rom spline on screen; `back` is `a` less the point before it and `onward` the point
+// after `b` less `b`, zero at the strand's ends). Each segment is drawn as two halves through
+// it: straight from point to point, a wavy hair seen end-on, at the edge of the head, showed
+// as a polygon of sharp corners (a coiled wire), its points a centimetre apart.
+fn curve_mid(a: vec2<f32>, b: vec2<f32>, back: vec2<f32>, onward: vec2<f32>) -> vec2<f32> {
+    let ab = b - a;
+    let ta = select(ab, (ab + back) * 0.5, dot(back, back) > 1e-8);
+    let tb = select(ab, (ab + onward) * 0.5, dot(onward, onward) > 1e-8);
+    // (The Hermite curve at its middle; its bulge kept within a quarter of the segment, so a
+    // hairpin seen on screen doesn't swing out a loop.)
+    let bulge = (ta - tb) * 0.125;
+    let most = 0.25 * length(ab);
+    return (a + b) * 0.5 + bulge * min(1.0, most / max(length(bulge), 1e-6));
+}
+
 fn strand_segment(id: vec3<u32>) -> Segment {
     var seg: Segment;
     seg.ok = false;
@@ -407,7 +436,19 @@ fn strand_segment(id: vec3<u32>) -> Segment {
     }
     seg.a = a;
     seg.b = b;
-    seg.reach = max(a.w, b.w) + 0.75;
+    // (Room for the bulge of the curve through the points, `curve_mid`.)
+    var back = vec2<f32>(0.0);
+    if (id.x % per != 0u) {
+        let p = lit[slot - 1u].pos;
+        back = select(vec2<f32>(0.0), a.xy - p.xy, p.w >= 0.0);
+    }
+    var onward = vec2<f32>(0.0);
+    if (id.x % per + 2u < per) {
+        let n = lit[slot + 2u].pos;
+        onward = select(vec2<f32>(0.0), n.xy - b.xy, n.w >= 0.0);
+    }
+    let bulge = length(curve_mid(a.xy, b.xy, back, onward) - (a.xy + b.xy) * 0.5);
+    seg.reach = max(a.w, b.w) + 0.75 + bulge;
     seg.near = max(a.z, b.z) * 1.000001;
     let size = frame.viewport.xy;
     let lo = min(a.xy, b.xy) - seg.reach;
@@ -590,6 +631,8 @@ var<workgroup> seg_rows: array<vec2<u32>, 64>;
 // The screen tangents at each end, between this segment's direction and its neighbour's:
 // the joints' cut lines (`joint_tangent`).
 var<workgroup> seg_cut: array<vec4<f32>, 64>;
+// The middle of each segment's curve (`curve_mid`).
+var<workgroup> seg_mid: array<vec2<f32>, 64>;
 
 // The pixels of the 8x8 tile at `corner` whose centers the segment can cover, a bit a pixel
 // and a byte a row (rows 0 to 3 in x, 4 to 7 in y). Every pixel `cs_raster` finds coverage
@@ -597,8 +640,8 @@ var<workgroup> seg_cut: array<vec4<f32>, 64>;
 // the axis; the 0.01 is room for rounding), and it passes over the rest without working out
 // their distance. That is most of the work it had: each of a tile's 64 threads walks the
 // tile's whole list, and a segment of fur far away covers two or three of the 64 pixels.
-fn segment_rows(a: vec4<f32>, b: vec4<f32>, corner: vec2<f32>) -> vec2<u32> {
-    let reach = max(a.w, b.w) + 0.51;
+fn segment_rows(a: vec4<f32>, b: vec4<f32>, corner: vec2<f32>, bulge: f32) -> vec2<u32> {
+    let reach = max(a.w, b.w) + 0.51 + bulge;
     let ab = b.xy - a.xy;
     var rows = vec2<u32>(0u);
     for (var y = 0u; y < STRAND_TILE; y++) {
@@ -708,11 +751,6 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
             seg_motion[lid] = vec4<f32>(unpack2x16float(a.shade.z), unpack2x16float(b.shade.z));
             // Root segment: covers its root's cap; tip segment: its tip's.
             seg_root[lid] = (a.shade.w & STRAND_ROOT) | select(0u, STRAND_LAST, (b.shade.w & STRAND_LAST) != 0u);
-            var rows = vec2<u32>(0xffffffffu);
-            if (!all_rows) {
-                rows = segment_rows(a.pos, b.pos, vec2<f32>(corner));
-            }
-            seg_rows[lid] = rows;
             let ab = b.pos.xy - a.pos.xy;
             var back = vec2<f32>(0.0);
             if ((a.shade.w & STRAND_ROOT) == 0u) {
@@ -725,6 +763,13 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
                 onward = select(vec2<f32>(0.0), n.xy - b.pos.xy, n.w >= 0.0);
             }
             seg_cut[lid] = vec4<f32>(joint_tangent(back, ab), joint_tangent(ab, select(ab, onward, dot(onward, onward) > 1e-8)));
+            let mid = curve_mid(a.pos.xy, b.pos.xy, back, onward);
+            seg_mid[lid] = mid;
+            var rows = vec2<u32>(0xffffffffu);
+            if (!all_rows) {
+                rows = segment_rows(a.pos, b.pos, vec2<f32>(corner), length(mid - (a.pos.xy + b.pos.xy) * 0.5));
+            }
+            seg_rows[lid] = rows;
         }
         workgroupBarrier();
         let n = min(64u, count - base);
@@ -737,12 +782,7 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
                 }
                 let a = seg_a[i];
                 let b = seg_b[i];
-                let ab = b.xy - a.xy;
-                let len2 = dot(ab, ab);
-                var t = 0.0;
-                if (len2 > 1e-8) {
-                    t = dot(pc - a.xy, ab) / len2;
-                }
+                let m = seg_mid[i];
                 // Each segment covers the pixels between the cut lines at its joints, the
                 // neighbouring segments those beyond (`joint_tangent`): each joint once, not
                 // twice, mitered round a bend. The strand's own ends get round caps.
@@ -752,18 +792,26 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
                 if ((!root && dot(pc - a.xy, cut.xy) < 0.0) || (!tip && dot(pc - b.xy, cut.zw) >= 0.0)) {
                     continue;
                 }
-                // Past a joint (the outside of a bend), the distance from the segment's line;
+                // Two halves, a to the curve's middle and on to b (`curve_mid`), joined round.
+                // Past a joint (the outside of a bend), the distance from the end half's line;
                 // past the strand's ends, from the end (a cap).
-                var along = t;
-                if ((root && t < 0.0) || (tip && t > 1.0)) {
-                    along = saturate(t);
-                }
-                t = saturate(t);
-                let d = length(pc - (a.xy + ab * along));
+                let am = m - a.xy;
+                let mb = b.xy - m;
+                let u1 = dot(pc - a.xy, am) / max(dot(am, am), 1e-8);
+                let u2 = dot(pc - m, mb) / max(dot(mb, mb), 1e-8);
+                let s1 = saturate(u1);
+                let s2 = saturate(u2);
+                let e1 = length(pc - (a.xy + am * s1));
+                let e2 = length(pc - (m + mb * s2));
+                let d1 = length(pc - (a.xy + am * select(min(u1, 1.0), s1, root)));
+                let d2 = length(pc - (m + mb * select(max(u2, 0.0), s2, tip)));
+                let first = d1 <= d2;
+                let d = select(d2, d1, first);
+                let t = select(0.5 + 0.5 * s2, 0.5 * s1, first);
                 let w = mix(a.w, b.w, t);
                 // (A miter no longer than twice the strand's width: the far reach of a sharp
                 // bend's point is left out.)
-                if (length(pc - (a.xy + ab * t)) > 2.0 * w + 1.0) {
+                if (min(e1, e2) > 2.0 * w + 1.0) {
                     continue;
                 }
                 // A box-filtered line w either side of its axis, d from the pixel's center.

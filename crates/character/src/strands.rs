@@ -40,6 +40,17 @@ const HAIR_WIDTH: f32 = 1.0;
 const BUNCHED_DENSITY: f32 = 0.6;
 const BUNCHED_RADIUS: f32 = 0.00016;
 
+/// Hanging hair: hairs per simulated guide (each guide is one lock and one rope in the hair
+/// sim; 125 cost 4.7 ms a step for one long-haired person on an RTX 5080).
+const HANGING_PER_GUIDE: f32 = 250.0;
+/// Hanging locks gather in chunks of neighboring locks rooted within about this span (m), as
+/// real long hair falls in a few wavy hanks rather than an even sheet.
+const CHUNK_CELL: f32 = 0.035;
+/// How far a lock is drawn toward its chunk's mean shape below the crown (0..1).
+const CHUNK_GATHER: f32 = 0.6;
+/// How far each hanging hair waves on its own about its lock (m, a 5.6 mm child wave in
+/// Tobias's gta-hair-sim).
+const CHILD_WAVE: f32 = 0.005;
 /// Passes of smoothing along every scalp hair after it is kept out of the skin and face.
 const SMOOTH_PASSES: usize = 3;
 
@@ -758,7 +769,7 @@ fn grow_scalp(
     // Guides first: one per clump, grown in full; then the hairs that follow them.
     // Long hair gathers into fewer, bigger locks.
     let per_guide = if g.gravity > 0.5 {
-        (125.0 * BUNCHED_DENSITY) as usize
+        (HANGING_PER_GUIDE * BUNCHED_DENSITY) as usize
     } else {
         65
     };
@@ -785,7 +796,7 @@ fn grow_scalp(
             let phase = around * 1.5 + (sp.rest.y - rest.head.y) * 20.0 + gr.range(-0.9, 0.9);
             let wavelength = (0.2 - 0.13 * curl) * gr.range(0.9, 1.1);
             let waves = g.length / wavelength;
-            let amp = gr.range(0.003, 0.008) + 0.02 * curl;
+            let amp = gr.range(0.005, 0.011) + 0.025 * curl;
             // Mostly toward and away from the head (which turns the lock's highlight), a
             // little sideways.
             let out = (sp.p - lm.head).normalize_or(Vec3::Z);
@@ -806,6 +817,41 @@ fn grow_scalp(
     // its hairs join the locks beside it.
     if g.gravity > 0.5 {
         guides.retain(|(_, pts)| !pts.iter().skip(2).any(|p| over_forehead(*p, lm)));
+    }
+    // Hanging locks gather into chunks: each lock is drawn toward the mean shape of the locks
+    // rooted near it (on its own side of the part), down from the crown and loosening a little
+    // at the ends, so the hair falls in hanks with gaps between them.
+    if g.gravity > 0.5 && CHUNK_GATHER > 0.0 {
+        let parted = matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long);
+        let mut chunks: HashMap<([i32; 3], bool), Vec<usize>> = HashMap::new();
+        for (i, (sp, _)) in guides.iter().enumerate() {
+            let d = sp.rest - head;
+            let side = parted && d.z > PART_END_Z && d.x > PART_X;
+            let key = (strand_center(sp.rest, CHUNK_CELL) * 1000.0)
+                .as_ivec3()
+                .to_array();
+            chunks.entry((key, side)).or_default().push(i);
+        }
+        for members in chunks.values().filter(|m| m.len() >= 2) {
+            let n = guides[members[0]].1.len();
+            let mut mean = vec![Vec3::ZERO; n];
+            for &i in members {
+                for (m, p) in mean.iter_mut().zip(&guides[i].1) {
+                    *m += *p / members.len() as f32;
+                }
+            }
+            for &i in members {
+                let pts = &mut guides[i].1;
+                let last = (pts.len() - 1).max(1);
+                for (k, p) in pts.iter_mut().enumerate() {
+                    let t = k as f32 / last as f32;
+                    let w = CHUNK_GATHER
+                        * smoothstep(0.1, 0.5, t)
+                        * (1.0 - 0.3 * smoothstep(0.8, 1.0, t));
+                    *p += (mean[k] - *p) * w;
+                }
+            }
+        }
     }
     let guide_grid = GuideGrid::new(&guides);
     // A hair takes its shape (and its motion) only from guides on its own side of the part:
@@ -960,6 +1006,23 @@ fn grow_scalp(
                 };
                 *p = *p + (follow - *p) * w;
             }
+            // Each hanging hair also waves a little on its own (child waves), out of step with
+            // its neighbors: following its lock exactly, every hair of a lock was a copy of
+            // the next, and at the edge of the hair they stacked as parallel wires.
+            if g.gravity > 0.5 && g.points > 5 {
+                let last = pts.len() - 1;
+                let axis = (pts[last] - pts[0]).normalize_or(Vec3::NEG_Y);
+                let d = Vec3::new(r.normal(), r.normal(), r.normal());
+                let dir = (d - axis * d.dot(axis)).normalize_or(Vec3::X);
+                let amp = CHILD_WAVE * r.range(0.6, 1.4);
+                let waves = 2.35 * r.range(0.85, 1.2) * (g.length / 0.45).max(0.5);
+                let phase = r.range(0.0, std::f32::consts::TAU);
+                for (k, p) in pts.iter_mut().enumerate() {
+                    let t = k as f32 / last as f32;
+                    let env = smoothstep(0.1, 0.45, t);
+                    *p += dir * (amp * env * (phase + t * waves * std::f32::consts::TAU).sin());
+                }
+            }
         }
         if broken {
             // Standing off the hair over it, more toward the tip.
@@ -989,7 +1052,10 @@ fn grow_scalp(
         // at least eight points a turn: a coarser helix zigzags, and the zigzags of
         // neighboring hairs cross like straw (slightly wavy short hair had two turns on ten
         // points).
-        if curl > 0.02 && g.points > 4 {
+        // (Not on hanging hair, which waves with its lock and on its own above: a coil of a
+        // couple of millimetres turning every eight points drew loops where the hair is seen
+        // end-on, at the edge of the head against the sky, like a coiled wire.)
+        if curl > 0.02 && g.points > 4 && g.gravity <= 0.5 {
             let hanging = g.gravity > 0.5;
             let mut radius = (0.002 + 0.01 * curl) * (g.length / 0.05).min(1.0);
             let mut turns = 2.0 + 10.0 * curl * (g.length / 0.2).min(2.0);
