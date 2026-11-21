@@ -65,6 +65,14 @@ struct View {
     ruin: bool,
     /// Game seconds to run (not drawn) after starting the incident: crews on their way.
     wait_s: f32,
+    /// A tool in the hand with the cursor in the middle of the screen. A building moves the
+    /// view to the nearest spot by the aim where it fits (beside a road, on land).
+    hold: Option<crate::tools::Tool>,
+    /// For the road tool: where the drag began, in cells from the cursor's.
+    drag_from: Option<(i32, i32)>,
+    /// Set the scene up round the cell in the middle of the view (blueprints, a stamp), and
+    /// perhaps move the view to another cell.
+    prep: Option<fn(&mut World, IVec2) -> Option<IVec2>>,
 }
 
 const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
@@ -83,11 +91,15 @@ const fn v(key: &'static str, aim: Aim, yaw: f32, dist: f32) -> View {
         trouble: None,
         ruin: false,
         wait_s: 0.0,
+        hold: None,
+        drag_from: None,
+        prep: None,
     }
 }
 
 fn views() -> Vec<View> {
     use crate::defs::{Kind as K, Tier as T};
+    use crate::tools::Tool;
     vec![
         View {
             pitch_deg: Some(52.0),
@@ -663,7 +675,108 @@ fn views() -> Vec<View> {
             ruin: true,
             ..v("ruin", Aim::Front(K::Weaver, 0), 0.6, 36.0)
         },
+        // Building: what the hand shows while placing (the cursor in the middle).
+        View {
+            hold: Some(Tool::Build {
+                kind: K::House,
+                rot: 0,
+            }),
+            // Out at the edge of the town, where the streets meet open land.
+            shift: (-200.0, -40.0),
+            ..v("build_house", Aim::Town, 0.6, 170.0)
+        },
+        View {
+            hold: Some(Tool::Build {
+                kind: K::Market,
+                rot: 0,
+            }),
+            ..v("build_market", Aim::Town, 0.6, 300.0)
+        },
+        View {
+            hold: Some(Tool::Build {
+                kind: K::SheepFarm,
+                rot: 0,
+            }),
+            ..v("build_sheep", Aim::Kind(K::SheepFarm, 0), 4.0, 220.0)
+        },
+        View {
+            fog: false,
+            hold: Some(Tool::Build {
+                kind: K::Harbour,
+                rot: 0,
+            }),
+            ..v("build_harbour", Aim::Island(4), 0.9, 650.0)
+        },
+        View {
+            hold: Some(Tool::Road),
+            drag_from: Some((-26, 22)),
+            shift: (-120.0, -60.0),
+            ..v("build_road", Aim::Town, 0.6, 220.0)
+        },
+        // Blueprints: a row of houses, a market and their road planned, a house in the hand.
+        View {
+            hold: Some(Tool::Build {
+                kind: K::House,
+                rot: 0,
+            }),
+            shift: (-200.0, -40.0),
+            prep: Some(prep_blueprints),
+            ..v("build_blueprint", Aim::Town, 0.6, 200.0)
+        },
+        // A stamp of the town's middle in the hand, over open ground beside it.
+        View {
+            hold: Some(Tool::Stamp { index: 0, rot: 1 }),
+            prep: Some(prep_stamp),
+            ..v("build_stamp", Aim::Town, 0.6, 300.0)
+        },
     ]
+}
+
+/// The blueprints view: blueprint mode on and a row of plans beside the house in the hand.
+fn prep_blueprints(world: &mut World, c: IVec2) -> Option<IVec2> {
+    world.resource_mut::<crate::blueprint::Blueprints>().on = true;
+    let n = crate::blueprint::tour_lay(world, c + IVec2::new(-9, 5));
+    engine::core::log::info!("tour: {n} blueprints laid");
+    None
+}
+
+/// The stamp view: the town round the market nearest the aim kept as a stamp, and the view
+/// moved to open ground near it where most of it fits (turned as the view holds it).
+fn prep_stamp(world: &mut World, c: IVec2) -> Option<IVec2> {
+    let m = world
+        .query::<&crate::sim::Building>()
+        .iter(world)
+        .filter(|b| b.kind == crate::defs::Kind::Market)
+        .min_by_key(|b| (b.origin - c).as_i64vec2().length_squared())?
+        .origin;
+    let i = crate::stamps::tour_copy(world, m, 18)?;
+    let s = world.resource::<crate::stamps::Book>().stamps[i].clone();
+    let n = s.buildings.len().max(1);
+    let fit_at = |w: &World, at: IVec2| {
+        let (bs, _) = crate::stamps::members(&s, 1, at);
+        bs.iter()
+            .filter(|(k, o, r)| crate::stamps::fits(w, *k, *o, *r).is_ok())
+            .count()
+    };
+    // Out on open ground, clear of the town (it should not read as part of it).
+    let spot = (16..90i32)
+        .flat_map(|r| {
+            (0..24).map(move |k| {
+                let a = k as f64 / 24.0 * std::f64::consts::TAU;
+                m + IVec2::new(
+                    (a.cos() * r as f64 * 2.0) as i32,
+                    (a.sin() * r as f64 * 2.0) as i32,
+                )
+            })
+        })
+        .find(|at| fit_at(world, *at) == n);
+    engine::core::log::info!(
+        "tour: stamp {:?} ({} buildings, {} roads) at {spot:?}",
+        s.name,
+        s.buildings.len(),
+        s.roads.len()
+    );
+    spot
 }
 
 /// Start a view's incident near `at`: at the nearest house (riots, sickness) or the nearest
@@ -925,10 +1038,60 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
         if keys.as_ref().is_some_and(|k| !k.contains(&view.key)) {
             continue;
         }
-        let Some(p) = aim_point(&mut app.world, &view.aim) else {
+        let Some(mut p) = aim_point(&mut app.world, &view.aim) else {
             engine::core::log::warn!("tour: nothing to aim {} at", view.key);
             continue;
         };
+        if let Some(crate::tools::Tool::Build { kind, rot }) = view.hold {
+            // Look for room by the shifted aim, then aim so the view centres on it.
+            let near = DVec2::new(p.x + view.shift.0, p.z + view.shift.1);
+            match fitting_spot(&app.world, kind, rot, near) {
+                Some(c) => {
+                    let y = crate::island::height(c.x, c.y).max(0.0);
+                    p = DVec3::new(c.x - view.shift.0, y, c.y - view.shift.1);
+                }
+                None => engine::core::log::warn!("tour: no room for a {kind:?} by {}", view.key),
+            }
+        }
+        // A road drag: both ends on open ground near the shifted aim and the drag's start.
+        let mut drag_from = view.drag_from.map(|(x, z)| IVec2::new(x, z));
+        if matches!(
+            view.hold,
+            Some(crate::tools::Tool::Road | crate::tools::Tool::Paving)
+        ) {
+            let near = DVec2::new(p.x + view.shift.0, p.z + view.shift.1);
+            let b = open_cell(&app.world, crate::grid::cell_of(near.x, near.y));
+            // The drag's start: the open cell nearest the wanted one with a way through.
+            let a = drag_from.zip(b).and_then(|(d, b)| {
+                let g = app.world.resource::<crate::grid::Grid>();
+                (0..12i32)
+                    .flat_map(|r| {
+                        (-r..=r)
+                            .flat_map(move |x| (-r..=r).map(move |z| IVec2::new(x, z)))
+                            .filter(move |o| o.x.abs().max(o.y.abs()) == r)
+                    })
+                    .map(|o| b + d + o)
+                    .filter(|c| g.is_free(*c) && crate::grid::cell_roadable(*c))
+                    .take(40)
+                    .find(|a| crate::placing::road_path(g, *a, b).is_some())
+            });
+            drag_from = None;
+            if let (Some(a), Some(b)) = (a, b) {
+                let c = crate::grid::cell_center(b);
+                p = DVec3::new(c.x - view.shift.0, p.y, c.y - view.shift.1);
+                drag_from = Some(a);
+            } else {
+                engine::core::log::warn!("tour: no road drag fits by {}", view.key);
+            }
+        }
+        if let Some(prep) = view.prep {
+            let near = DVec2::new(p.x + view.shift.0, p.z + view.shift.1);
+            if let Some(c) = prep(&mut app.world, crate::grid::cell_of(near.x, near.y)) {
+                let at = crate::grid::cell_center(c);
+                let y = crate::island::height(at.x, at.y).max(0.0);
+                p = DVec3::new(at.x - view.shift.0, y, at.y - view.shift.1);
+            }
+        }
         let heading = craft_heading(&mut app.world, &view.aim);
         {
             let mut q = app.world.query::<&mut StrategyCam>();
@@ -992,6 +1155,15 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
                 cam.snap();
             }
         }
+        if let Some(tool) = view.hold {
+            let (w, h) = {
+                let win = app.world.resource::<engine::core::window::Window>();
+                (win.width as f32, win.height as f32)
+            };
+            app.world.resource_mut::<engine::input::Mouse>().position =
+                Some(Vec2::new(w * 0.5, h * 0.5));
+            crate::tools::stage(&mut app.world, tool, drag_from);
+        }
         let t0 = std::time::Instant::now();
         // (A software renderer at 1440p needs longer: ARCH_TOUR_SETTLE_S.)
         let cap = std::env::var("ARCH_TOUR_SETTLE_S")
@@ -1045,6 +1217,16 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
             Ok(_) => engine::core::log::info!("tour: {path} ({:.1} s)", t0.elapsed().as_secs_f32()),
             Err(e) => engine::core::log::warn!("tour: {path}: {e}"),
         }
+        if view.hold.is_some() {
+            app.world.resource_mut::<engine::input::Mouse>().position = None;
+            crate::tools::stage(&mut app.world, crate::tools::Tool::Select, None);
+        }
+        if view.prep.is_some() {
+            let mut bp = app.world.resource_mut::<crate::blueprint::Blueprints>();
+            bp.on = false;
+            bp.prints.clear();
+            bp.roads.clear();
+        }
         if let Some(h) = hour_was {
             let _ = engine::core::registry::call_api(
                 &mut app.world,
@@ -1053,6 +1235,51 @@ pub fn shoot(app: &mut App, only: Option<&str>, out: &str) {
             );
         }
     }
+}
+
+/// The middle of the nearest footprint to `near` where `kind` turned `rot` fits: on land
+/// beside a road, or (a quay) anywhere it may stand.
+fn fitting_spot(world: &World, kind: crate::defs::Kind, rot: u8, near: DVec2) -> Option<DVec2> {
+    use crate::grid;
+    let g = world.resource::<crate::grid::Grid>();
+    let c0 = grid::cell_of(near.x, near.y);
+    let (w, d) = kind.footprint(rot);
+    let coast = kind.def().site == crate::defs::Site::Coast;
+    let mut best: Option<(i32, IVec2)> = None;
+    for r in 0..90i32 {
+        if best.is_some_and(|b| b.0 < r * r) {
+            break;
+        }
+        for z in -r..=r {
+            for x in -r..=r {
+                if x.abs().max(z.abs()) != r {
+                    continue;
+                }
+                let o = c0 + IVec2::new(x, z) - IVec2::new(w / 2, d / 2);
+                let d2 = x * x + z * z;
+                if best.is_some_and(|b| b.0 <= d2) || grid::check(g, kind, o, rot).is_err() {
+                    continue;
+                }
+                if !coast && !grid::ring(kind, o, rot).iter().any(|c| g.is_road(*c)) {
+                    continue;
+                }
+                best = Some((d2, o));
+            }
+        }
+    }
+    best.map(|(_, o)| grid::footprint_center(kind, o, rot))
+}
+
+/// The open cell (a road may go there) nearest `c`.
+fn open_cell(world: &World, c: IVec2) -> Option<IVec2> {
+    let g = world.resource::<crate::grid::Grid>();
+    (0..40i32).find_map(|r| {
+        (-r..=r)
+            .flat_map(|x| (-r..=r).map(move |z| IVec2::new(x, z)))
+            .filter(|d| d.x.abs().max(d.y.abs()) == r)
+            .map(|d| c + d)
+            .find(|c| g.is_free(*c) && crate::grid::cell_roadable(*c))
+    })
 }
 
 /// Show or hide the game's bars.

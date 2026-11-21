@@ -324,6 +324,10 @@ fn risk(b: &Building, house: Option<&House>, crowd: u32, paved: bool, ships: f32
     [fire, riot, sick]
 }
 
+/// How much further than its radius a fire watch, watch house or infirmary covers along the
+/// streets from its door.
+pub const STATION_STREET_REACH: f32 = 1.35;
+
 /// Mark the cover stale (anything built or pulled down).
 pub fn touch(world: &mut World) {
     if let Some(mut i) = world.get_resource_mut::<Incidents>() {
@@ -478,7 +482,7 @@ fn refresh_cover(world: &mut World) {
             .into_iter()
             .find(|t| t.answered_by() == st.kind)
             .unwrap_or(Trouble::Fire);
-        let budget = st.kind.def().reach as f32 * 1.35;
+        let budget = st.kind.def().reach as f32 * STATION_STREET_REACH;
         let by_road = reach_roads(st, &roads, &paved, budget);
         for (e, b) in &all {
             if covers(st, b, &by_road) {

@@ -16,6 +16,7 @@
 
 mod api;
 mod art;
+mod blueprint;
 mod brain;
 mod build;
 mod burgher;
@@ -44,6 +45,7 @@ mod logistics;
 mod looks;
 mod market;
 mod orders;
+mod placing;
 mod playtest;
 mod regional;
 mod reports;
@@ -52,6 +54,7 @@ mod sea;
 mod settle;
 mod shipyard;
 mod sim;
+mod stamps;
 mod streets;
 mod title;
 mod tools;

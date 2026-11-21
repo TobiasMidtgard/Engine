@@ -1,9 +1,9 @@
-//! Farm fields: every farm claims the free, flat land round its farmyard as wheat fields, hop
-//! gardens or sheep paddocks, hedged or fenced at the edge. A farm makes goods in proportion
+//! Farm fields: every farm claims a rectangle of free, flat land round its farmyard ([`plot`],
+//! shown before it is placed) as wheat fields, hop gardens or sheep paddocks, hedged or
+//! fenced at the edge. A farm makes goods in proportion
 //! to the fields it has; a road laid across a field takes that strip back.
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::HashSet;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::sync::Arc;
 
@@ -37,65 +37,81 @@ pub fn is_farm(kind: Kind) -> bool {
     wanted(kind) > 0
 }
 
-/// How far from its yard's middle a farm may reach for fields, in cells.
-const REACH: i32 = 11;
-
 /// Flat, dry ground a field can lie on.
 fn cell_fieldable(c: IVec2) -> bool {
     let (lo, hi) = grid::cell_range(c);
     lo > 1.2 && hi < 70.0 && hi - lo < 1.4
 }
 
-/// Cells `b` could take as fields now, nearest first (a square-ish block round the yard that
-/// never reaches past the yard's front, where its road comes in).
-fn candidates(g: &Grid, b: &Building, n: usize) -> Vec<IVec2> {
-    let yard: HashSet<IVec2> = grid::footprint(b.kind, b.origin, b.rot)
-        .into_iter()
-        .collect();
-    let front = grid::front_dir(b.rot);
-    let edge = yard.iter().map(|c| c.dot(front)).max().unwrap_or(0);
-    let mid = grid::footprint_center(b.kind, b.origin, b.rot);
-    let mid_c = grid::cell_of(mid.x, mid.y);
-    let ok = |c: IVec2| {
-        let d = c - mid_c;
-        d.x.abs().max(d.y.abs()) <= REACH
-            && c.dot(front) <= edge
-            && g.is_free(c)
-            && cell_fieldable(c)
-            && {
-                let p = grid::cell_center(c);
-                island::island_at(p.x, p.y) == Some(b.island)
-            }
-    };
-    let key = |c: IVec2| {
-        let d = c - mid_c;
-        (d.x.abs().max(d.y.abs()), d.x * d.x + d.y * d.y, c.x, c.y)
-    };
-    let mut heap = BinaryHeap::new();
-    let mut seen: HashSet<IVec2> = yard.clone();
-    for &c in &yard {
-        for d in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
-            let nc = c + d;
-            if seen.insert(nc) && ok(nc) {
-                heap.push(Reverse(key(nc)));
-            }
-        }
+/// The rectangle of fields a farm keeps round its yard, in the yard's own cells (x along its
+/// right, z toward its front; the yard is `0..w` by `0..d`): as wide again as the yard, half
+/// of it to each side, and deep enough behind it for [`wanted`] cells. Nothing lies in front
+/// of the yard, where its road comes in.
+fn plot_size(kind: Kind) -> Option<(i32, i32)> {
+    let want = wanted(kind) as i32;
+    if want == 0 {
+        return None;
     }
+    let (w, d) = kind.footprint(0);
+    let side = (w + 1) / 2;
+    let width = w + 2 * side;
+    let back = ((want + w * d) + width - 1) / width - d;
+    Some((side, back.max(1)))
+}
+
+/// The cells of a farm's field plot (not its yard) for the farm turned `rot` at `origin`.
+pub fn plot(kind: Kind, origin: IVec2, rot: u8) -> Vec<IVec2> {
+    let Some((side, back)) = plot_size(kind) else {
+        return Vec::new();
+    };
+    let (w, d) = kind.footprint(0);
+    let mid = grid::footprint_center(kind, origin, rot);
+    let turn = |x: f64, z: f64| match rot % 4 {
+        0 => (x, z),
+        1 => (z, -x),
+        2 => (-x, -z),
+        _ => (-z, x),
+    };
     let mut out = Vec::new();
-    while let Some(Reverse((_, _, x, z))) = heap.pop() {
-        let c = IVec2::new(x, z);
-        out.push(c);
-        if out.len() >= n {
-            break;
-        }
-        for d in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
-            let nc = c + d;
-            if seen.insert(nc) && ok(nc) {
-                heap.push(Reverse(key(nc)));
+    for z in -back..d {
+        for x in -side..w + side {
+            if (0..w).contains(&x) && (0..d).contains(&z) {
+                continue;
             }
+            // The cell's middle from the yard's middle, in the yard's space, then turned.
+            let (lx, lz) = (
+                x as f64 + 0.5 - w as f64 * 0.5,
+                z as f64 + 0.5 - d as f64 * 0.5,
+            );
+            let (dx, dz) = turn(lx, lz);
+            out.push(grid::cell_of(mid.x + dx * CELL_M, mid.y + dz * CELL_M));
         }
     }
     out
+}
+
+/// Whether a plot cell can be sown now (free, flat, on the farm's island).
+fn can_sow(g: &Grid, isle: usize, c: IVec2) -> bool {
+    g.is_free(c) && cell_fieldable(c) && {
+        let p = grid::cell_center(c);
+        island::island_at(p.x, p.y) == Some(isle)
+    }
+}
+
+/// A farm about to be placed: each cell of its plot and whether a field will lie there.
+pub fn preview(g: &Grid, kind: Kind, origin: IVec2, rot: u8, isle: usize) -> Vec<(IVec2, bool)> {
+    plot(kind, origin, rot)
+        .into_iter()
+        .map(|c| (c, can_sow(g, isle, c)))
+        .collect()
+}
+
+/// Cells `b` takes as fields now: the free ones of its plot.
+fn candidates(g: &Grid, b: &Building) -> Vec<IVec2> {
+    plot(b.kind, b.origin, b.rot)
+        .into_iter()
+        .filter(|c| can_sow(g, b.island, *c))
+        .collect()
 }
 
 /// Give a farm just placed its fields.
@@ -106,7 +122,7 @@ pub fn claim(world: &mut World, farm: Entity) {
     if !is_farm(b.kind) {
         return;
     }
-    let cells = candidates(world.resource::<Grid>(), &b, wanted(b.kind));
+    let cells = candidates(world.resource::<Grid>(), &b);
     {
         let mut g = world.resource_mut::<Grid>();
         for &c in &cells {
@@ -153,11 +169,15 @@ pub fn release_all(world: &mut World, farm: Entity) {
 
 /// Share of a farm's wanted fields it has, 0..1.
 pub fn share(kind: Kind, fields: Option<&Fields>) -> f32 {
+    share_of(kind, fields.map_or(0, |f| f.0.len()))
+}
+
+/// Share of full output a farm makes with `have` field cells, 0..1.
+pub fn share_of(kind: Kind, have: usize) -> f32 {
     let want = wanted(kind);
     if want == 0 {
         return 1.0;
     }
-    let have = fields.map_or(0, |f| f.0.len());
     (have as f32 / (want as f32 * 0.8)).min(1.0)
 }
 
@@ -319,6 +339,48 @@ pub fn field_pieces(b: &Building, cells: &[IVec2]) -> Vec<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_farms_plot_is_a_rectangle_beside_and_behind_its_yard() {
+        let o = IVec2::new(40, -20);
+        for kind in [
+            Kind::SheepFarm,
+            Kind::GrainFarm,
+            Kind::HopFarm,
+            Kind::DateGrove,
+            Kind::SaltWorks,
+            Kind::CanePlantation,
+        ] {
+            for rot in 0..4 {
+                let plot = plot(kind, o, rot);
+                assert!(plot.len() >= wanted(kind), "{kind:?} {rot}: {}", plot.len());
+                let yard: HashSet<IVec2> = grid::footprint(kind, o, rot).into_iter().collect();
+                let cells: HashSet<IVec2> = plot.iter().copied().collect();
+                assert_eq!(cells.len(), plot.len(), "{kind:?} {rot}: a cell twice");
+                assert!(
+                    cells.is_disjoint(&yard),
+                    "{kind:?} {rot}: a field on the yard"
+                );
+                // Yard and fields together fill their bounding box.
+                let all: Vec<IVec2> = yard.iter().chain(cells.iter()).copied().collect();
+                let lo = all.iter().fold(IVec2::MAX, |a, b| a.min(*b));
+                let hi = all.iter().fold(IVec2::MIN, |a, b| a.max(*b));
+                let area = (hi.x - lo.x + 1) * (hi.y - lo.y + 1);
+                assert_eq!(area as usize, all.len(), "{kind:?} {rot}: not a rectangle");
+                // Nothing in front of the yard, and as much to its left as to its right.
+                let f = grid::front_dir(rot);
+                let edge = yard.iter().map(|c| c.dot(f)).max().unwrap();
+                assert!(cells.iter().all(|c| c.dot(f) <= edge), "{kind:?} {rot}");
+                assert_eq!(
+                    grid::footprint_center(kind, o, rot).dot(f.perp().as_dvec2()),
+                    (lo.as_dvec2() + hi.as_dvec2() + DVec2::ONE).dot(f.perp().as_dvec2())
+                        * 0.5
+                        * CELL_M,
+                    "{kind:?} {rot}: off centre"
+                );
+            }
+        }
+    }
 
     #[test]
     fn farms_take_fields_behind_their_yard_and_give_them_back() {

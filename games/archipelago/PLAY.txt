@@ -40,24 +40,25 @@ Good to know
   - The game is not saved yet: a game lasts until you quit.
 
 Camera
-  W A S D           Pan (arrows too; Shift is faster)
-  Right drag        Pan with the ground
+  W A S D           Pan (arrows, right drag; Shift is faster)
   Q  E              Turn (or middle drag)
   Wheel             Zoom, from a street to the whole planet
   H                 Back to the home island
 
 Building
-  Left click        Place, or pick a building
-  Drag              Lay a road with the road tool
-  R                 Turn the building
-  U                 Move the picked house up a tier
-  Shift+U           Move up every ready house the works can spare
+  Left click        Place, or pick a building; drag for a row
+  R  Shift+R        Turn the building
+  Z                 Road (again: paved); a drag finds its way
+  X  Delete         Demolish
+  C                 Take up the building under the cursor
+  F4–F9             Build tabs (again: the tab's next building)
+  N  Shift+N        Blueprint mode (Shift: build the blueprints)
+  O  Shift+O        Copy a stamp (Shift: the last one; [ ] page)
+  U  Shift+U        Move the picked house up (Shift: all ready)
   Right click       Put the tool down (Esc too)
-  Delete            Demolish
 
 Company
-  Space             Pause
-  1  2  3           Speed: normal, double, four times
+  Space  +  −       Pause; speed normal, double, four times
   L  T              Ledger, trade routes
   G  I              Fleet, items
   F1  Esc           This page, the menu

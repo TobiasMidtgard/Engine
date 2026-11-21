@@ -39,6 +39,20 @@ pub fn by_id(world: &mut World, id: u32) -> Option<Entity> {
 }
 
 fn pay(world: &mut World, kind: Kind, isle: usize) -> Result<(), String> {
+    can_pay(world, kind, isle)?;
+    let def = kind.def();
+    let me = crate::sim::acting(world);
+    let mut econ = world.resource_mut::<Economy>();
+    *econ.coins_mut(me) -= def.coins as f64;
+    for (g, n) in def.cost {
+        econ.islands[isle].take(*g, *n as f64);
+    }
+    Ok(())
+}
+
+/// Whether the company giving orders could pay for `kind` on island `isle` now, and if not,
+/// what it lacks.
+pub fn can_pay(world: &World, kind: Kind, isle: usize) -> Result<(), String> {
     let def = kind.def();
     let me = crate::sim::acting(world);
     let econ = world.resource::<Economy>();
@@ -67,11 +81,6 @@ fn pay(world: &mut World, kind: Kind, isle: usize) -> Result<(), String> {
                 books.get(*g)
             ));
         }
-    }
-    let mut econ = world.resource_mut::<Economy>();
-    *econ.coins_mut(me) -= def.coins as f64;
-    for (g, n) in def.cost {
-        econ.islands[isle].take(*g, *n as f64);
     }
     Ok(())
 }
@@ -738,7 +747,7 @@ pub struct StallKit(pub engine_ui::demo::art::stall::StallMats);
 pub const SERVICES: [Kind; MAX_SERVICES] = [Kind::Market, Kind::Chapel, Kind::School, Kind::Tavern];
 
 /// How much further than its radius a public building reaches along a dirt road.
-const STREET_REACH: f32 = 1.25;
+pub const STREET_REACH: f32 = 1.25;
 
 /// The road cells a public building serves along the streets from its door: its reach in
 /// cells times [`STREET_REACH`], a paved cell costing [`PAVED_REACH_COST`] of a dirt one.
