@@ -1051,10 +1051,24 @@ impl RenderAppExt for App {
     }
 }
 
-/// Past this size [`GrowBuffer::grow_keeping`] grows by a quarter instead of doubling.
+/// Past this size a [`GrowBuffer`] grows by a quarter instead of doubling.
 const GROW_STEP_FROM: u64 = 64 << 20;
 
-/// A GPU buffer that grows (to the next power of two) when data doesn't fit.
+/// What a buffer of `capacity` bytes grows to for `size` bytes (more than it holds): the next
+/// power of two up to [`GROW_STEP_FROM`], then what is asked or a quarter more than it holds,
+/// whichever is more, in whole MiB, so a large buffer isn't mostly empty (a power of two past
+/// 256 MB can leave half of it so); no more than `most` unless `size` is.
+fn grown_capacity(capacity: u64, size: u64, most: u64) -> u64 {
+    let grown = if size > GROW_STEP_FROM {
+        const MIB: u64 = 1 << 20;
+        size.max(capacity + capacity / 4).div_ceil(MIB) * MIB
+    } else {
+        size.max(256).next_power_of_two()
+    };
+    grown.min(most.max(size))
+}
+
+/// A GPU buffer that grows when data doesn't fit ([`grown_capacity`]).
 pub struct GrowBuffer {
     pub buffer: wgpu::Buffer,
     capacity: u64,
@@ -1069,7 +1083,7 @@ impl GrowBuffer {
         usage: wgpu::BufferUsages,
         capacity: u64,
     ) -> Self {
-        Self::exact(device, label, usage, capacity.max(256).next_power_of_two())
+        Self::exact(device, label, usage, grown_capacity(0, capacity, u64::MAX))
     }
 
     fn exact(
@@ -1093,13 +1107,19 @@ impl GrowBuffer {
         }
     }
 
+    /// What the buffer grows to for `size` bytes, more than it holds ([`grown_capacity`]),
+    /// still bindable whole (as storage) where the size allows.
+    fn grown_capacity(&self, device: &wgpu::Device, size: u64) -> u64 {
+        let limits = device.limits();
+        let most = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size);
+        grown_capacity(self.capacity, size, most)
+    }
+
     /// Upload `data`; returns true when the buffer was recreated (rebuild bind groups).
     pub fn write(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[u8]) -> bool {
-        let mut grown = false;
-        if data.len() as u64 > self.capacity {
-            *self = Self::new(device, self.label, self.usage, data.len() as u64);
-            grown = true;
-        }
+        let grown = self.reserve(device, data.len() as u64);
         if !data.is_empty() {
             queue.write_buffer(&self.buffer, 0, data);
         }
@@ -1112,7 +1132,8 @@ impl GrowBuffer {
     pub fn reserve(&mut self, device: &wgpu::Device, size: u64) -> bool {
         let grown = size > self.capacity;
         if grown {
-            *self = Self::new(device, self.label, self.usage, size);
+            let capacity = self.grown_capacity(device, size);
+            *self = Self::exact(device, self.label, self.usage, capacity);
         }
         grown
     }
@@ -1123,9 +1144,7 @@ impl GrowBuffer {
 
     /// Make room for `size` bytes keeping the first `kept`: a grown buffer gets them by a copy
     /// on the GPU (submitted here), so only new data crosses from the CPU. Needs `COPY_SRC` in
-    /// the usage (else what was kept is lost). Doubles up to [`GROW_STEP_FROM`], then grows a
-    /// quarter at a time (in whole MiB), so a large buffer isn't mostly empty. Returns true when
-    /// the buffer was recreated.
+    /// the usage (else what was kept is lost). Returns true when the buffer was recreated.
     pub fn grow_keeping(
         &mut self,
         device: &wgpu::Device,
@@ -1136,18 +1155,7 @@ impl GrowBuffer {
         if size <= self.capacity {
             return false;
         }
-        let capacity = if size > GROW_STEP_FROM {
-            const MIB: u64 = 1 << 20;
-            size.max(self.capacity + self.capacity / 4).div_ceil(MIB) * MIB
-        } else {
-            size.max(256).next_power_of_two()
-        };
-        // Still bindable whole (as storage) where the size allows.
-        let limits = device.limits();
-        let most = limits
-            .max_buffer_size
-            .min(limits.max_storage_buffer_binding_size);
-        let capacity = capacity.min(most.max(size));
+        let capacity = self.grown_capacity(device, size);
         let grown = Self::exact(device, self.label, self.usage, capacity);
         let old = std::mem::replace(self, grown);
         let kept = kept.min(old.capacity) & !(wgpu::COPY_BUFFER_ALIGNMENT - 1);
@@ -1159,6 +1167,30 @@ impl GrowBuffer {
             queue.submit([encoder.finish()]);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod grow_buffer_tests {
+    use super::grown_capacity;
+
+    const MB: u64 = 1 << 20;
+
+    #[test]
+    fn a_large_buffer_grows_a_quarter_at_a_time() {
+        let most = u64::MAX;
+        // Small ones double, to the next power of two.
+        assert_eq!(grown_capacity(256, 1000, most), 1024);
+        assert_eq!(grown_capacity(0, 10, most), 256);
+        assert_eq!(grown_capacity(32 * MB, 64 * MB, most), 64 * MB);
+        // Past 64 MB: what is asked or a quarter more, in whole MiB.
+        assert_eq!(grown_capacity(64 * MB, 65 * MB, most), 80 * MB);
+        assert_eq!(grown_capacity(64 * MB, 300 * MB + 5, most), 301 * MB);
+        // A 300 MB ask is not rounded up to 512 MB.
+        assert_eq!(grown_capacity(MB, 300 * MB, most), 300 * MB);
+        // No more than the device binds whole, unless the ask itself is more.
+        assert_eq!(grown_capacity(200 * MB, 210 * MB, 220 * MB), 220 * MB);
+        assert_eq!(grown_capacity(200 * MB, 230 * MB, 220 * MB), 230 * MB);
     }
 }
 
