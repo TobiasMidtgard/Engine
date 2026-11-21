@@ -234,7 +234,11 @@ fn skin_material() -> StandardMaterial {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.7),
-        detail_scale: 11.0,
+        detail_scale: std::env::var("ARCH_SEA_SKIN_SCALE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(11.0),
+        detail_in_world: std::env::var_os("ARCH_SEA_SKIN_WORLD").is_some(),
         receives_wetness: false,
         ..Default::default()
     }
