@@ -13,6 +13,8 @@
 //!   vertex colour), written on the GPU from the mesh pool's pages as a structure is built.
 //! * [`tiles`]: the ray tiles, a layer of a texture array a material's base colour each at
 //!   128 texels down to its mean, filled on the GPU from what the raster draws with.
+//! * [`sun`]: the sun's trace (`trial_cut_more::RAY_SUN`), a ray toward the sun's disc from
+//!   the prepass's pixels against the still structure, a dispatch of the frame's ray pass.
 //!
 //! The scene exists only on devices with ray queries that take two structures in a stage,
 //! and only while [`crate::settings::trial_cut_more::RAY_WORLD`] is on: off, nothing here is
@@ -29,6 +31,7 @@
 mod blas;
 mod hook;
 pub(crate) mod look;
+mod sun;
 mod tiles;
 mod tlas;
 mod tris;
@@ -124,8 +127,11 @@ struct RayUniform {
     /// Shadow stand-ins in the still structure, in the moving one; w: the scene's flags
     /// ([`FLAG_LEAVES_SOLID`]).
     stand_ins: [u32; 4],
-    /// The sun's rays: reach of the pixels that get one, length (meters). Zeros until the
-    /// sun's own rays read them (the measuring rays have a length of their own).
+    /// The sun's trace ([`sun`]): the reach of the pixels that get a ray, the rays' length,
+    /// the distance from which they meet the swaying plants (meters: the end of the last
+    /// cascade that draws them moving, `shadows::sway_moves`; 0 when none does, `f32::MAX`
+    /// when all do), the tangent of the sun's disc's radius as the shadow maps size it. (The
+    /// measuring rays have a length of their own.) Filled every frame, traced or not.
     sun: [f32; 4],
     /// Caster reach, far reach (meters), the cut.
     reach: [f32; 4],
@@ -198,6 +204,9 @@ pub(crate) struct RayStats {
     pub gather_ms: f32,
     pub anchor_moves: u32,
     pub epoch: u32,
+    /// The sun's trace as last read back: rays, rays stopped, "missed", "false" (ray_sun.wgsl;
+    /// `None`: not counted, or no trace).
+    pub sun: Option<[u32; 4]>,
 }
 
 /// The frame's ray scene.
@@ -236,6 +245,8 @@ pub(crate) struct RayScene {
     /// A shut valve waits until this frame: a jump of the camera and a change of a reach
     /// start a fill again ([`VALVE_SETTLE_FRAMES`]).
     settle_until: u64,
+    /// The sun's trace, while `trial_cut_more::RAY_SUN` is on.
+    sun: Option<sun::SunTrace>,
 }
 
 /// The valve: while what belongs in the still structure is past its cap, once that set has
@@ -456,6 +467,7 @@ impl RayScene {
             reach: None,
             valve: Valve::default(),
             settle_until: 0,
+            sun: None,
         }
     }
 
@@ -642,11 +654,34 @@ impl RayScene {
             0
         };
         let [caster_reach, far_reach] = self.reach.unwrap_or_default();
+        // The plants are left to the shadow maps where they draw them moving: out to the end
+        // of the last cascade fine enough for that (the cascades grow coarser outward). Where
+        // every cascade draws them moving, none holds them at rest and the rays never meet
+        // them; where none does, the rays meet them at every distance.
+        let cascades = &view.cascades;
+        let count = (cascades.count as usize).min(crate::shadows::MAX_CASCADES);
+        let swaying = (0..count)
+            .take_while(|&c| {
+                crate::shadows::sway_moves(
+                    2.0 * cascades.half_extent[c] / cascades.map_size.max(1) as f32,
+                )
+            })
+            .count();
+        let plants_from = match swaying {
+            0 => 0.0,
+            n if n == count => f32::MAX,
+            n => cascades.splits[n - 1],
+        };
         let uniform = RayUniform {
             anchor: [anchor.x, anchor.y, anchor.z, 0.0],
             counts: [still, moving, self.frame as u32, self.epoch],
             stand_ins: [still_stand_ins, moving_stand_ins, 0, flags],
-            sun: [0.0; 4],
+            sun: [
+                settings.ray_sun_reach.max(0.0),
+                sun::RAY_LENGTH,
+                plants_from,
+                view.sun_angular_radius.tan() * settings.sun_penumbra_scale.max(0.0),
+            ],
             reach: [caster_reach, far_reach, self.cut(), 0.0],
             lights: [settings.gi_shadowed_lights as f32, 0.0, 0.0, 0.0],
             ground: [0.0; 4],
@@ -693,6 +728,50 @@ impl RayScene {
                 &self.instances,
                 [self.tiles.view(), &self.ground],
             );
+        }
+    }
+
+    /// Before the frame's ray pass, after [`encode_builds`](Self::encode_builds): what the
+    /// sun's trace binds this frame when `on` (`trial_cut_more::RAY_SUN`), or nothing, its
+    /// output dropped, when not. `still_images`: the shadow maps' still images as one array
+    /// (`None`: the view has none); `count`: count its rays (`shade_skip::COUNT_MESH_RUNS`).
+    /// Whether the pass holds the trace ([`dispatch_sun`](Self::dispatch_sun)).
+    pub(crate) fn begin_sun(
+        &mut self,
+        shared: &GpuShared,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &crate::targets::Targets,
+        still_images: Option<&wgpu::TextureView>,
+        on: bool,
+        count: bool,
+    ) -> bool {
+        if !on {
+            self.sun = None;
+            return false;
+        }
+        let layout = &self.layout;
+        self.sun
+            .get_or_insert_with(|| sun::SunTrace::new(shared, layout))
+            .begin(&shared.device, encoder, targets, still_images, count);
+        true
+    }
+
+    /// In the frame's ray pass (the frame's group and [`group`](Self::group) set): the sun's
+    /// trace, when [`begin_sun`](Self::begin_sun) said so.
+    pub(crate) fn dispatch_sun(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        targets: &crate::targets::Targets,
+    ) {
+        if let Some(sun) = &self.sun {
+            sun.dispatch(pass, targets);
+        }
+    }
+
+    /// After the frame's ray pass: the trace's counts copied out.
+    pub(crate) fn end_sun(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(sun) = &mut self.sun {
+            sun.end(encoder);
         }
     }
 
@@ -747,6 +826,7 @@ impl RayScene {
             gather_ms: self.gather_ms,
             anchor_moves: self.anchor_moves,
             epoch: self.epoch,
+            sun: self.sun.as_ref().and_then(|s| s.counts()),
         }
     }
 
@@ -812,6 +892,15 @@ impl RayScene {
         d.set("render.ray.ms_gather", s.gather_ms as f64);
         d.set("render.ray.anchor_moves", s.anchor_moves as f64);
         d.set("render.ray.epoch", s.epoch as f64);
+        // The sun's trace in the latest frame read back (-1: not counted): its rays, those
+        // stopped, and where a ray toward the sun's center and the shadow maps' still image
+        // disagree with the image sure of its verdict: "missed" (the image holds a caster
+        // within the ray's length, the ray reached the sun), "false" (the reverse).
+        let [rays, hits, missed, wrong] = s.sun.map_or([-1.0; 4], |n| n.map(f64::from));
+        d.set("render.ray.sun_rays", rays);
+        d.set("render.ray.sun_hits", hits);
+        d.set("render.ray.sun_missed", missed);
+        d.set("render.ray.sun_false", wrong);
     }
 
     // What the hook calls (`RaySceneOut`), each with the feature's number first.

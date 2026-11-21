@@ -43,9 +43,8 @@ mod bvh;
 mod rt;
 mod schedule;
 
+use crate::gpu_counts::GpuCounts;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use bevy_ecs::change_detection::Tick;
 use bevy_ecs::entity::{EntityHashMap, EntityHashSet};
@@ -74,8 +73,6 @@ const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// What the sun's rays found, a texel a pixel (`cs_sun`'s `sun_out`): a format a compute pass
 /// may write on every GPU.
 const SUN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// A [`GpuCounts`]' four counters (`cs_sun`'s `sun_counts`, `cs_update`'s `probe_counts`).
-const COUNTS_BYTES: u64 = 16;
 /// `trial_cut_more::RAY_PROBES` where the rays trace on ray-tracing hardware: the most probes
 /// a frame and the GPU time they may take, times these (8,192 of the default 2,048 within
 /// 2.4 ms of 1.5).
@@ -660,100 +657,6 @@ struct SunRays {
     /// The rays shot and those stopped, counted by the pass while
     /// `shade_skip::COUNT_MESH_RUNS` is set.
     counts: GpuCounts,
-}
-
-/// Four counters a pass adds to on the GPU, and their copy for the CPU to read some frames
-/// later: cleared before the pass, copied out after it, mapped once the copy was submitted.
-struct GpuCounts {
-    counts: wgpu::Buffer,
-    read: wgpu::Buffer,
-    /// `COUNTS_*`.
-    state: Arc<AtomicU8>,
-    /// This frame's commands copy the counts out: map the copy once they are submitted.
-    copied: bool,
-    /// The latest counts read.
-    latest: Option<[u32; 4]>,
-}
-
-const COUNTS_FREE: u8 = 0;
-const COUNTS_MAPPING: u8 = 1;
-const COUNTS_MAPPED: u8 = 2;
-const COUNTS_FAILED: u8 = 3;
-
-impl GpuCounts {
-    fn new(device: &wgpu::Device, label: &str) -> Self {
-        let buffer = |label: &str, usage| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: COUNTS_BYTES,
-                usage,
-                mapped_at_creation: false,
-            })
-        };
-        Self {
-            counts: buffer(
-                label,
-                wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-            ),
-            read: buffer(
-                &format!("{label} readback"),
-                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            ),
-            state: Default::default(),
-            copied: false,
-            latest: None,
-        }
-    }
-
-    /// Before the pass that counts: start from zero.
-    fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.clear_buffer(&self.counts, 0, None);
-    }
-
-    /// After the pass: copy the counts out for the CPU, when they were counted and no earlier
-    /// copy is still on its way.
-    fn copy(&mut self, encoder: &mut wgpu::CommandEncoder, count: bool) {
-        if count && !self.copied && self.state.load(Ordering::Acquire) == COUNTS_FREE {
-            encoder.copy_buffer_to_buffer(&self.counts, 0, &self.read, 0, COUNTS_BYTES);
-            self.copied = true;
-        }
-    }
-
-    /// Take in the counts that arrived, and ask for those last frame's commands copied out
-    /// (they are submitted by now).
-    fn take(&mut self) {
-        if std::mem::take(&mut self.copied) {
-            self.state.store(COUNTS_MAPPING, Ordering::Release);
-            let state = self.state.clone();
-            self.read
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |r| {
-                    let to = if r.is_ok() {
-                        COUNTS_MAPPED
-                    } else {
-                        COUNTS_FAILED
-                    };
-                    state.store(to, Ordering::Release);
-                });
-        }
-        match self.state.load(Ordering::Acquire) {
-            COUNTS_MAPPED => {
-                if let Ok(view) = self.read.slice(..).get_mapped_range() {
-                    let n = |at: usize| u32::from_le_bytes([0, 1, 2, 3].map(|b| view[at * 4 + b]));
-                    self.latest = Some([n(0), n(1), n(2), n(3)]);
-                }
-                self.read.unmap();
-                self.state.store(COUNTS_FREE, Ordering::Release);
-            }
-            COUNTS_FAILED => {
-                self.read.unmap();
-                self.state.store(COUNTS_FREE, Ordering::Release);
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Probe GI's state, owned by the renderer for the main view (extra views go without).
@@ -2662,6 +2565,16 @@ impl ProbeGi {
             ],
         });
         Some(inputs)
+    }
+
+    /// The sun's measuring rays are not shot this frame (neither [`begin_rays`](Self::begin_rays)
+    /// nor [`encode_sun`](Self::encode_sun) took them): `render.gi.sun_rays` and `sun_hits`
+    /// read -1, not the last frame that shot them, and a copy still on its way is let go.
+    pub fn forget_sun_counts(&mut self) {
+        if let Some(sun) = self.active.as_mut().and_then(|a| a.sun.as_mut()) {
+            sun.counts.take();
+            sun.counts.latest = None;
+        }
     }
 
     /// Shoot one ray toward the sun from every pixel the prepass drew

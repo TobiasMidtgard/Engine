@@ -1314,14 +1314,18 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
     }
     let kept = dither_keeps(in.fade, in.clip.xy);
     let mat = materials[in.material];
+    // (A swaying mesh marks its pixels for the sun's rays: `prepass_sway_mark`.)
+    let sways = mat.params2.y > 0.0;
     if (shade_skip(SKIP_MESH_PREPASS_MATERIAL) && (mat.flags.x & 15u) == 0u) {
         if (!kept) {
             discard;
         }
+        var quick = prepass_output(normalize(in.normal), 0.6, in.motion_now, in.motion_prev);
         if (material_is_thin(mat.flags.x)) {
-            return prepass_output_thin(normalize(in.normal), 0.6, in.motion_now, in.motion_prev);
+            quick.normal.w = PREPASS_THIN;
         }
-        return prepass_output(normalize(in.normal), 0.6, in.motion_now, in.motion_prev);
+        quick.normal.w = prepass_sway_mark(quick.normal.w, sways);
+        return quick;
     }
     vt_feedback_on = vt_feedback_pixel(in.clip.xy);
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
@@ -1330,10 +1334,12 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
     if (!kept || ((mat.flags.x & 15u) == 1u && m.base.a < mat.params.w)) {
         discard;
     }
+    var out = prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
     if (m.thin) {
-        return prepass_output_thin(m.normal, m.roughness, in.motion_now, in.motion_prev);
+        out.normal.w = PREPASS_THIN;
     }
-    return prepass_output(m.normal, m.roughness, in.motion_now, in.motion_prev);
+    out.normal.w = prepass_sway_mark(out.normal.w, sways);
+    return out;
 }
 
 // ---------------------------------------------------------------- the material once a pixel
@@ -1466,6 +1472,7 @@ fn once_fragment(in: OnceVertexOut, front: bool, holes: bool) -> OnceOutput {
     if (m.thin) {
         basic.normal.w = PREPASS_THIN;
     }
+    basic.normal.w = prepass_sway_mark(basic.normal.w, mat.params2.y > 0.0);
     var out: OnceOutput;
     out.normal = basic.normal;
     out.motion = basic.motion;

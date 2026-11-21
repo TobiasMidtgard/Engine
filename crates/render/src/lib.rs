@@ -79,6 +79,7 @@ pub mod frame;
 pub mod gltf_loader;
 pub mod gpu;
 mod gpu_cache;
+mod gpu_counts;
 pub mod grass;
 pub mod image_cache;
 mod impostor;

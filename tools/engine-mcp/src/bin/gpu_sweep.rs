@@ -376,6 +376,24 @@ fn variants() -> Vec<Variant> {
             "ray_world with ray_probes: four times the probes' rays through the frame's ray scene (read `probe gi` and `probe gi copies` against ray_world)",
         ),
         v(
+            "ray_sun_trace",
+            r,
+            json!({"trial_cuts_more": 144, "gi_hardware_rays": true}),
+            "ray_world with the sun's trace (in place of the measuring rays): a ray toward the sun's disc from each pixel within 80 m that faces the sun and does not sway, 64 m long, against the still structure (pass `ray shadows`, read against ray_world_sun; nothing reads what the rays find yet)",
+        ),
+        v(
+            "ray_sun_trace_leaves_solid",
+            r,
+            json!({"trial_cuts_more": 144, "gi_hardware_rays": true, "debug_skip": 536_870_912}),
+            "ray_sun_trace with every cut-out card's candidate kept unread: `ray shadows` against ray_sun_trace is what reading the leaves' texture costs",
+        ),
+        v(
+            "count_ray_sun_trace",
+            r,
+            json!({"trial_cuts_more": 144, "gi_hardware_rays": true, "debug_skip": 262_144}),
+            "a count of the sun's trace (render.ray.sun_rays, sun_hits, and sun_missed and sun_false: where the shadow maps' still images, sure of a pixel, and a ray toward the sun's center disagree)",
+        ),
+        v(
             "skip_lighting",
             r,
             json!({"debug_skip": 128}),

@@ -209,8 +209,9 @@ pub mod shade_skip {
     /// in the prepass and the scene pass of the main view (mesh_counts.rs; `render.stats`, the
     /// meshes' `mesh_runs` and the grass's `grass_runs`; needs pipeline statistics queries),
     /// the fog's froxels lit (volumetrics.rs) and the sun's rays and those stopped
-    /// (`RenderSettings::ray_sun_shadows`; `render.gi.sun_rays`, `render.gi.sun_hits`; the one
-    /// reader of this bit in a shader, probe_gi.wgsl `cs_sun`).
+    /// (`RenderSettings::ray_sun_shadows`; `render.gi.sun_rays`, `render.gi.sun_hits`; read in
+    /// probe_gi.wgsl `cs_sun`), and the sun's trace against the still shadow images
+    /// (`trial_cut_more::RAY_SUN`; `render.ray.sun_*`; read in ray_sun.wgsl).
     pub const COUNT_MESH_RUNS: u32 = 262144;
     /// Skinned meshes are not posed (they freeze where they are; a new one stays in its bind
     /// pose): what posing them on the GPU costs in `compute meshes`.
@@ -471,6 +472,20 @@ pub mod trial_cut_more {
     /// budget held back), `probes_traced` and `probes_awake`. Off by default until its
     /// pictures and timings are in. The software walk does as before.
     pub const RAY_PROBES: u32 = 32;
+    /// The sun's rays from the prepass's pixels, with [`RAY_WORLD`] (ray_scene/sun.rs,
+    /// ray_sun.wgsl; pass "ray shadows", in the frame's ray pass after the probes; `gpu_sweep`
+    /// rows `ray_sun_trace`, `count_ray_sun_trace`): one ray a pixel within
+    /// `RenderSettings::ray_sun_reach` that is not sky, faces the sun (a thin sheet and skin
+    /// whatever they face) and is not of a swaying mesh, toward a point of the sun's disc,
+    /// against the still structure, 64 m long. Within the cascades that draw plants swaying
+    /// it passes trunks, branches and leaves (the maps draw them moving); beyond, it meets
+    /// them. Each pixel's answer is kept in a texture nothing reads yet; the join with the
+    /// shadow maps is the round's next step. With `shade_skip::COUNT_MESH_RUNS` the rays are
+    /// counted against the still shadow images (`render.ray.sun_rays`, `sun_hits`,
+    /// `sun_missed`, `sun_false`). While it is on, swaying meshes mark their prepass pixels
+    /// (`prepass_sway_mark` in lib_frame.wgsl), and the sun's measuring rays
+    /// (`RenderSettings::ray_sun_shadows`) give way to it. Off by default.
+    pub const RAY_SUN: u32 = 128;
 }
 
 /// What the screen shows.
@@ -654,7 +669,11 @@ pub struct RenderSettings {
     /// against the rays' scene on the hardware path (pass "ray shadows", `gpu_sweep` row
     /// `ray_sun`; with `shade_skip::COUNT_MESH_RUNS` the rays and their hits are counted,
     /// `render.gi.sun_rays` and `render.gi.sun_hits`). Nothing reads what the rays find yet.
+    /// Under `trial_cut_more::RAY_SUN` the sun's trace runs in their place.
     pub ray_sun_shadows: bool,
+    /// Meters from the camera within which a pixel gets a ray toward the sun under
+    /// `trial_cut_more::RAY_SUN` (80 by default); farther ones keep the shadow maps.
+    pub ray_sun_reach: f32,
     /// How far light spreads under skin, meters at full strength (screen-space subsurface
     /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
     /// 0 = off.
@@ -958,6 +977,7 @@ impl Default for RenderSettings {
             ray_caster_reach: 160.0,
             ray_far_reach: 384.0,
             ray_sun_shadows: false,
+            ray_sun_reach: 80.0,
             subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,

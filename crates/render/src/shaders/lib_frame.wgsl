@@ -18,7 +18,7 @@
 // Screen-space results of the depth prepass (see `RenderFeature::draw_prepass`). In the prepass
 // itself and in passes that write them, these hold neutral 1x1 stand-ins.
 @group(0) @binding(10) var ao_map: texture_2d<f32>;          // ambient occlusion (R, 1 = open)
-@group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written (1..2: subsurface strength + 1, 3: a thin sheet)
+@group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written (1..2: subsurface strength + 1, 3: a thin sheet, 0.75: the ground's own pass; 0.9 and 3.9: a swaying mesh under `CUT_RAY_SUN`, `prepass_sway_mark`)
 @group(0) @binding(12) var prepass_depth: texture_depth_2d;  // depth after the prepass (reverse-Z, 0 = nothing)
 // Atmosphere look-up tables (see lib_atmosphere.wgsl).
 @group(0) @binding(13) var transmittance_lut: texture_2d<f32>; // sunlight transmittance to the top of the atmosphere
@@ -291,6 +291,25 @@ fn prepass_output_thin(normal: vec3<f32>, roughness: f32, clip_now: vec4<f32>, c
     return out;
 }
 
+// The normal's w of a swaying mesh's pixel while the sun's rays trace (`CUT_RAY_SUN`): 0.9 in
+// place of 1, 3.9 in place of `PREPASS_THIN`. Every other reader of w takes them as it takes
+// 1 and 3 (written, not the ground's 0.75, not skin, thin or not), and the sun's rays leave
+// the pixel to the shadow maps, which draw it swaying (`prepass_sways`).
+const PREPASS_SWAY: f32 = 0.9;
+const PREPASS_THIN_SWAY: f32 = 3.9;
+
+// `w` (1 or `PREPASS_THIN`, as the prepass wrote it) marked as swaying where `sways` and the
+// sun's rays trace.
+fn prepass_sway_mark(w: f32, sways: bool) -> f32 {
+    if (!sways || !trial_cut_more(CUT_RAY_SUN)) { return w; }
+    return select(PREPASS_SWAY, PREPASS_THIN_SWAY, w > PREPASS_THIN - 0.5);
+}
+
+// Whether a prepass normal's w marks a swaying mesh (`prepass_sway_mark`).
+fn prepass_sways(w: f32) -> bool {
+    return abs(w - PREPASS_SWAY) < 0.05 || abs(w - PREPASS_THIN_SWAY) < 0.05;
+}
+
 // `prepass_output` for a surface whose diffuse light scatters under it (skin): the subsurface
 // pass (subsurface.rs) blurs its diffuse light with the skin's profile, `strength` (0..1) of
 // the profile's reach. Its scene pass must write its specular light (pre-exposed, in the same
@@ -389,7 +408,7 @@ const SKIP_SHOW_GROUND_ONCE: u32 = 65536u;
 // With `CUT_MESHES_ONCE`: the pixels lit from the stored material are drawn magenta.
 const SKIP_SHOW_MESHES_ONCE: u32 = 131072u;
 // (262144 to 2097152 are read on the CPU: settings.rs `shade_skip`. 262144, the counts, is
-// also read by probe_gi.wgsl's `cs_sun`.)
+// also read by probe_gi.wgsl's `cs_sun` and ray_sun.wgsl's `cs_sun_trace`.)
 // Hair and fur points take a flat color instead of their light (strands_raster.wgsl): what
 // lighting them costs, apart from placing, sorting and drawing them.
 const SKIP_STRAND_LIGHT: u32 = 4194304u;
@@ -438,6 +457,9 @@ fn trial_cut(bit: u32) -> bool {
 // `RenderSettings::trial_cuts_more` (the first set of 24 is full).
 // The haze table's atmosphere carried on from slice to slice (aerial.wgsl).
 const CUT_AERIAL_STEPWISE: u32 = 1u;
+// `trial_cut_more::RAY_SUN`: the sun's rays from the prepass's pixels (ray_sun.wgsl), and the
+// prepass's mark of what sways (`prepass_sway_mark`).
+const CUT_RAY_SUN: u32 = 128u;
 
 fn trial_cut_more(bit: u32) -> bool {
     return (u32(frame.sun_camera.w) & bit) != 0u;

@@ -254,6 +254,8 @@ struct StaticShadows {
     /// The same layers as `ShadowResources::texture`.
     texture: wgpu::Texture,
     layers: Vec<wgpu::TextureView>,
+    /// Every layer as one array: what the sun's trace compares its rays with (ray_sun.wgsl).
+    array: wgpu::TextureView,
     occlusion: (wgpu::Texture, wgpu::TextureView),
     occlusion_size: u32,
     /// Draws parts of an image into its map (`shadow_restore.wgsl`, [`restore_tiles`]).
@@ -283,6 +285,11 @@ impl StaticShadows {
             view_formats: &[],
         });
         let layers = layer_views(&texture);
+        let array = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("shadow static images"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let occlusion =
             create_occlusion_target(shared, occlusion_size, wgpu::TextureUsages::COPY_SRC);
         let layout = restore_layout(shared);
@@ -330,6 +337,7 @@ impl StaticShadows {
             restore,
             texture,
             layers,
+            array,
             occlusion,
             occlusion_size,
         }
@@ -3406,15 +3414,20 @@ impl Renderer {
         // The frame's rays, while they trace the ray scene: its structures built first (the
         // geometries' new ones, the two of the instances when they changed), then every ray of
         // the frame in one compute pass, the frame's group and the scene's set once (binding
-        // a structure costs the submit a walk of its instances): the probes', one toward the
-        // sun from every pixel of the prepass's depth, world reflections. Reflections are lit
-        // by the probes as the frame before left them: the atlas rows this pass's probes
-        // wrote are copied after it. Except in a frame whose probe grid scrolled (once a
-        // probe spacing travelled): the atlas then still holds, in the slots of the probes
-        // that came in, those that left at the far side, so that frame's reflections wait
-        // for the copies, in a pass of their own.
+        // a structure costs the submit a walk of its instances): the probes', the sun's trace
+        // (`trial_cut_more::RAY_SUN`: a ray toward the sun's disc from the prepass's pixels
+        // that want one; else, with `ray_sun_shadows`, the measuring rays, one toward the sun
+        // from every pixel of the prepass's depth), world reflections. Reflections are lit by
+        // the probes as the frame before left them: the atlas rows this pass's probes wrote
+        // are copied after it. Except in a frame whose probe grid scrolled (once a probe
+        // spacing travelled): the atlas then still holds, in the slots of the probes that came
+        // in, those that left at the far side, so that frame's reflections wait for the
+        // copies, in a pass of their own.
         let mut ray_work = crate::probe_gi::RayWork::default();
         let count_sun = settings.debug_skip & crate::settings::shade_skip::COUNT_MESH_RUNS != 0;
+        let sun_trace = settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_SUN != 0;
+        // (The sun's trace takes the measuring rays' place: never both in one frame.)
+        let mut traced_sun = false;
         if !extra && let Some(ray) = &mut self.ray_scene {
             self.perf.pass(&mut cpu, &mut encoder, "ray scene build");
             ray.encode_builds(&mut encoder);
@@ -3428,9 +3441,18 @@ impl Renderer {
                 &mut encoder,
                 &self.targets,
                 (ssr && settings.world_reflections).then_some(alternate),
-                settings.ray_sun_shadows.then_some(count_sun),
+                (settings.ray_sun_shadows && !sun_trace).then_some(count_sun),
             );
-            if ray_work.any() {
+            let traces_sun = ray.begin_sun(
+                &self.shared,
+                &mut encoder,
+                &self.targets,
+                self.shadow.statics.as_ref().map(|s| &s.array),
+                sun_trace,
+                count_sun,
+            );
+            traced_sun = traces_sun;
+            if ray_work.any() || traces_sun {
                 let reflections_last = ray_work.reflections && ray_work.scrolled;
                 self.perf.pass(&mut cpu, &mut encoder, "probe gi");
                 {
@@ -3443,7 +3465,11 @@ impl Renderer {
                     if ray_work.probes {
                         self.probe_gi.dispatch_probes(&mut pass);
                     }
-                    if ray_work.sun {
+                    // (The trace and the measuring rays never run in one frame: one mark.)
+                    if traces_sun {
+                        self.perf.pass_inside(&mut cpu, &mut pass, "ray shadows");
+                        ray.dispatch_sun(&mut pass, &self.targets);
+                    } else if ray_work.sun {
                         self.perf.pass_inside(&mut cpu, &mut pass, "ray shadows");
                         self.probe_gi.dispatch_sun(&mut pass, &self.targets);
                     }
@@ -3453,8 +3479,11 @@ impl Renderer {
                         self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
                     }
                 }
-                self.perf.pass(&mut cpu, &mut encoder, "probe gi copies");
-                self.probe_gi.end_rays(&mut encoder);
+                if ray_work.any() {
+                    self.perf.pass(&mut cpu, &mut encoder, "probe gi copies");
+                    self.probe_gi.end_rays(&mut encoder);
+                }
+                ray.end_sun(&mut encoder);
                 if reflections_last {
                     self.perf.pass(&mut cpu, &mut encoder, "world reflections");
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -3469,15 +3498,19 @@ impl Renderer {
         }
         // One ray toward the sun from every pixel of that depth (a measurement for now:
         // `RenderSettings::ray_sun_shadows`), against the probes' own scene.
-        if !extra && settings.ray_sun_shadows && !self.probe_gi.traces_ray_world() {
+        let mut measured_sun = ray_work.sun;
+        if !extra && settings.ray_sun_shadows && !traced_sun && !self.probe_gi.traces_ray_world() {
             self.perf.pass(&mut cpu, &mut encoder, "ray shadows");
-            self.probe_gi.encode_sun(
+            measured_sun = self.probe_gi.encode_sun(
                 &self.shared.device,
                 &mut encoder,
                 frame_group,
                 &self.targets,
                 count_sun,
             );
+        }
+        if !extra && !measured_sun {
+            self.probe_gi.forget_sun_counts();
         }
         // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
         // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass

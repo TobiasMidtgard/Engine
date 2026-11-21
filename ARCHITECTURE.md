@@ -299,7 +299,16 @@ its terrains that cast), each built from its slot of the vertex pages with its s
 placed as `Ground` in the `Atmosphere`'s ground colour;
 `ray_scene::wanted` tells a feature in its main view's prepare whether the scene will ask.
 Without ray queries, or with the switch off, nothing of it is made and the probes gather their own scene as before. `render.ray.*` and
-`render.meshes.ray_*` count it.
+`render.meshes.ray_*` count it. With `trial_cut_more::RAY_SUN` as well (off by default;
+`ray_scene/sun.rs`, `ray_sun.wgsl`), the sun's trace takes the measuring rays' place in that
+pass: a ray toward a point of the sun's disc from each prepass pixel within
+`RenderSettings::ray_sun_reach` (80 m) that faces the sun (thin sheets and skin whichever way
+they face), 64 m long, against the still structure alone, past the swaying plants where the
+shadow maps draw them moving (`RayUniform.sun`), its answer in a texture of its own that
+nothing reads yet. A swaying mesh's pixels are left to the maps: while the bit is on the
+prepass writes 0.9 (3.9 for a thin sheet) in place of 1 (3) in the normal's w
+(`prepass_sway_mark` in lib_frame.wgsl), which every other reader takes as before. Counted, the
+trace is compared with the shadow maps' still images (`render.ray.sun_missed`, `sun_false`).
 
 **GPU skinning** (built; `skinning.rs`): a module that poses a mesh puts `GpuSkin` (per-vertex
 bones and weights in an `Arc<SkinWeights>`, each bone's `SkinBone` dual quaternion from the

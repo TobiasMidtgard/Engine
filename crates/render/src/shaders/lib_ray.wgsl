@@ -20,8 +20,10 @@ struct RayUniform {
     // shadow stand-ins in the still structure, in the moving one; z: 0; w: the measuring
     // rungs (`RAY_SCENE_LEAVES_SOLID`)
     stand_ins: vec4<u32>,
-    // the sun's rays: reach of the pixels that get one, length (meters); zeros until the
-    // sun's own rays read them (the measuring rays have a length of their own)
+    // the sun's trace (ray_sun.wgsl; filled whether or not it runs): the reach of the pixels
+    // that get a ray, the rays' length (meters), the distance from which they meet swaying
+    // plants (meters; 0 at every distance, the largest float never), the tangent of the sun's
+    // disc's radius (the measuring rays have a length of their own)
     sun: vec4<f32>,
     // caster reach, far reach (meters), the cut
     reach: vec4<f32>,
@@ -117,7 +119,7 @@ const RULE_LEAF_TEXTURE: u32 = 2u;
 // A cut-out card stops a ray by chance: as often as its texture covers the card (the row's
 // coverage), the same draw for the same candidate within a frame.
 const RULE_LEAF_CHANCE: u32 = 4u;
-// `ray_first`: only the still structure is asked.
+// `ray_first`, `ray_stopped`: only the still structure is asked.
 const RULE_STILL_ONLY: u32 = 8u;
 // A cut-out card stops a ray wherever the ray meets it, as if its texture covered it: what
 // `ray_rules` asks in place of the two leaf rules under the measuring rung `ray_leaves_solid`.
@@ -155,6 +157,22 @@ fn ray_chance(c: RayIntersection) -> f32 {
     h = ray_hash(h ^ c.primitive_index);
     h = ray_hash(h ^ bitcast<u32>(c.barycentrics.x));
     h = ray_hash(h ^ bitcast<u32>(c.barycentrics.y));
+    return f32(h >> 8u) * (1.0 / 16777216.0);
+}
+
+// A draw in [0, 1) for pixel `pixel` this frame, the `k`th of the pixel's: the first is
+// interleaved gradient noise moved along by the frame (pixels side by side differ, so a filter
+// over a few of them averages it, and each frame differs for 64 frames), the others a hash of
+// the pixel, the frame and `k` (they do not follow the first). The first runs across the
+// pixels' rows and columns swapped: the noise of `frame_noise` moved along by any amount is
+// the same pattern shifted by a constant, so a choice made by `frame_noise` (the cascades'
+// dither) would take the draws of one arc alone.
+fn ray_noise(pixel: vec2<u32>, k: u32) -> f32 {
+    let frame_number = ray_scene.counts.z;
+    if (k == 0u) {
+        return interleaved_gradient_noise(vec2<f32>(pixel.yx) + 5.588238 * f32(frame_number % 64u));
+    }
+    let h = ray_hash(ray_hash(ray_hash(pixel.x ^ (k * 0x9e3779b9u)) ^ pixel.y) ^ frame_number);
     return f32(h >> 8u) * (1.0 / 16777216.0);
 }
 
@@ -299,7 +317,7 @@ fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32) -> Ray
 // has none.) What a shadow ray meets is what the shadow maps draw, but for the classes the
 // caller leaves out (`classes`: a hit's shadow rays pass what is under 0.3 m, and take the
 // canopy map's leaves in place of the cards at a probe's hit). A structure with no stand-in is
-// not asked for them.
+// not asked for them, nor the moving one with `RULE_STILL_ONLY`.
 fn ray_stopped(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules: u32) -> u32 {
     var still: ray_query<vertex_return>;
     var moving: ray_query<vertex_return>;
@@ -314,7 +332,7 @@ fn ray_stopped(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rule
         let hit = rayQueryGetCommittedIntersection(&still);
         if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
     }
-    if (ray_scene.stand_ins.y > 0u) {
+    if (ray_scene.stand_ins.y > 0u && (rules & RULE_STILL_ONLY) == 0u) {
         rayQueryInitialize(&moving, ray_moving, RayDesc(flags, RAY_SHADOW_ONLY, RAY_T_MIN, t_end, o, dir));
         while (rayQueryProceed(&moving)) {}
         let hit = rayQueryGetCommittedIntersection(&moving);
