@@ -442,6 +442,17 @@ pub mod trial_cut_more {
     /// walls and trunks, as it was until 12 Nov. A froxel that comes into reach starts
     /// without history, as one that enters at the screen's edge does.
     pub const FOG_REACH: u32 = 8;
+    /// Every ray of the frame traces one scene (ray_scene/mod.rs) on ray-tracing hardware:
+    /// probe light, world reflections and the sun's measuring rays, in one compute pass after
+    /// the prepass. The features fill the scene on the render thread
+    /// (`RenderFeature::ray_scene`): what holds still in one structure built at most every
+    /// fourth frame, what moves in a small one built when a member changed, where probe GI
+    /// gathered a scene of its own on the main thread and built one structure of everything
+    /// whenever anything changed. Off by default until its pictures and timings are in: the
+    /// rays then trace the probes' own scene as before. Needs `probe_gi` with
+    /// `gi_hardware_rays` on a device with ray queries that takes two structures in a
+    /// shader stage; without, nothing changes.
+    pub const RAY_WORLD: u32 = 16;
 }
 
 /// What the screen shows.

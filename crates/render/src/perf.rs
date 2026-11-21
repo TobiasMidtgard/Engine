@@ -89,6 +89,9 @@ pub(crate) struct GpuTimer {
     pending: Option<usize>,
     /// Nanoseconds per timestamp tick.
     period_ns: f32,
+    /// Timestamps can be written between the dispatches of a pass
+    /// (`TIMESTAMP_QUERY_INSIDE_PASSES`).
+    inside: bool,
 }
 
 /// One finished frame's GPU times, milliseconds.
@@ -134,6 +137,9 @@ impl GpuTimer {
             slots,
             pending: None,
             period_ns: queue.get_timestamp_period(),
+            inside: device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
         })
     }
 
@@ -183,6 +189,22 @@ impl GpuTimer {
             return;
         }
         self.stamp(encoder, (i * MAX_MARKS + n) as u32);
+        self.slots[i].labels.push(label);
+    }
+
+    /// Pass `label` starts here, between two dispatches of the compute pass being recorded:
+    /// what the pass did so far counts towards the label before. Where the device cannot
+    /// write timestamps inside a pass nothing is marked, and the label before keeps the rest
+    /// of the pass.
+    fn mark_inside(&mut self, pass: &mut wgpu::ComputePass<'_>, label: Label) {
+        let Some(i) = self.pending else {
+            return;
+        };
+        let n = self.slots[i].labels.len();
+        if !self.inside || n + 1 >= MAX_MARKS {
+            return;
+        }
+        pass.write_timestamp(&self.queries, (i * MAX_MARKS + n) as u32);
         self.slots[i].labels.push(label);
     }
 
@@ -654,6 +676,23 @@ impl PerfLog {
         cpu.step(name);
     }
 
+    /// Pass `name` starts here, inside a compute pass that holds several (the frame's rays
+    /// share one pass, see `ray_scene`): a new CPU step and a GPU timestamp between two
+    /// dispatches. Where the device writes no timestamps inside a pass, the pass reports
+    /// their sum under its first name.
+    pub fn pass_inside(
+        &mut self,
+        cpu: &mut CpuSteps,
+        pass: &mut wgpu::ComputePass<'_>,
+        name: impl Into<Label>,
+    ) {
+        let name = name.into();
+        if let Some(t) = &mut self.timer {
+            t.mark_inside(pass, name.clone());
+        }
+        cpu.step(name);
+    }
+
     /// Call with the frame's last commands, before `finish`.
     pub fn end(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if let Some(t) = &mut self.timer {
@@ -941,6 +980,11 @@ impl PerfLog {
             d.set(gone, 0.0);
         }
         self.published = now;
+        // Whether a pass that holds several ([`pass_inside`](Self::pass_inside)) reports each
+        // one's GPU time: a reader of the rows can tell a device that cannot from a row lost.
+        if let Some(t) = &self.timer {
+            d.set("render.gpu_times_inside_passes", t.inside as u8 as f64);
+        }
     }
 }
 

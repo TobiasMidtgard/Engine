@@ -44,6 +44,7 @@ use crate::cloud_shadows::{CloudShadowRequest, CloudShadowTarget};
 use crate::frame::ViewData;
 use crate::image_cache::{ImageCache, ImageTexture};
 use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
+use crate::ray_scene::{RaySceneOut, RayView};
 use crate::settings::RenderSettings;
 use crate::shadows::ShadowTiles;
 use crate::texture::Image;
@@ -127,6 +128,9 @@ pub struct GpuShared {
     pub(crate) cache: crate::gpu_cache::GpuCache,
     /// The canopy map (frame binding 26): the meshes set its crowns, the renderer binds it.
     pub(crate) canopy: crate::canopy::CanopyMap,
+    /// The renderer gave the frame's ray scene up for the rest of the run
+    /// ([`GpuShared::ray_scene_given_up`]).
+    pub(crate) ray_scene_off: std::sync::atomic::AtomicBool,
 }
 
 impl GpuShared {
@@ -136,6 +140,14 @@ impl GpuShared {
     /// reflections trace their rays that way when they can (`probe_gi/rt.rs`).
     pub fn ray_queries(&self) -> bool {
         self.features.contains(crate::gpu::RAY_QUERY_FEATURES)
+    }
+
+    /// Whether the renderer gave the frame's ray scene up for the rest of the run: its
+    /// builds failed too often, so the rays keep to the probes' own scene and no feature is
+    /// asked for its part any more (`ray_scene::wanted`).
+    pub fn ray_scene_given_up(&self) -> bool {
+        self.ray_scene_off
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -778,6 +790,15 @@ pub trait RenderFeature: Send + Sync + 'static {
         diagnostics: &mut Diagnostics,
     ) {
     }
+
+    /// Tell the ray scene what this feature has for rays to hit: its geometries
+    /// ([`RaySceneOut::geometry`]) and where they stand ([`RaySceneOut::place`]), and what
+    /// left ([`RaySceneOut::remove`]). Called once a frame after every feature's
+    /// [`prepare_frame`](Self::prepare_frame), on the render thread, without the world; only
+    /// on devices that trace rays on their own hardware ([`GpuShared::ray_queries`]) and
+    /// while the ray scene is on. The scene keeps what it was told: a feature says what
+    /// changed, and looks at everything again when `view.epoch` changes.
+    fn ray_scene(&mut self, _gpu: &GpuShared, _view: &RayView, _out: &mut RaySceneOut<'_>) {}
 
     /// Record compute or offscreen work before the scene is drawn.
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}

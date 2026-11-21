@@ -57,6 +57,7 @@ use crate::features::{GpuShared, GrowBuffer};
 use crate::frame::{FrameUniform, ViewData};
 use crate::material::{AlphaMode, StandardMaterial};
 use crate::mesh::Mesh;
+use crate::ray_scene::look::{material_light, texture_mean};
 use crate::settings::RenderSettings;
 use engine_assets::{Assets, Handle};
 use engine_world::WorldShift;
@@ -136,16 +137,37 @@ const UPLOAD_BYTES_PER_FRAME: usize = 4 << 20;
 /// differently).
 const UNMOVED: f64 = 1e-6;
 
-/// probe_gi.wgsl after the rays' walk it uses: ray queries on the hardware path
-/// (probe_gi_trace_hw.wgsl), the software walk of the hierarchies elsewhere
-/// (probe_gi_trace_sw.wgsl).
-fn shader_source(hardware: bool) -> String {
-    let walk = if hardware {
-        include_str!("../shaders/probe_gi_trace_hw.wgsl")
-    } else {
-        include_str!("../shaders/probe_gi_trace_sw.wgsl")
-    };
-    format!("{walk}\n{}", include_str!("../shaders/probe_gi.wgsl"))
+/// What the probes' rays, the world reflections' and the sun's trace.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Rays {
+    /// The probes' own scene, walked in software (GPUs without ray queries).
+    Software,
+    /// The probes' own scene in acceleration structures of its own (`rt.rs`).
+    Hardware,
+    /// The frame's ray scene, which every feature fills ([`crate::ray_scene`]): the probes
+    /// gather nothing themselves.
+    World,
+}
+
+/// probe_gi.wgsl after the scene its rays trace (see the head of probe_gi.wgsl).
+fn shader_source(rays: Rays) -> String {
+    let body = include_str!("../shaders/probe_gi.wgsl");
+    let own = include_str!("../shaders/probe_gi_scene_old.wgsl");
+    match rays {
+        Rays::Software => format!(
+            "{}\n{own}\n{body}",
+            include_str!("../shaders/probe_gi_trace_sw.wgsl")
+        ),
+        Rays::Hardware => format!(
+            "{}\n{own}\n{body}",
+            include_str!("../shaders/probe_gi_trace_hw.wgsl")
+        ),
+        Rays::World => format!(
+            "{}\n{}\n{body}",
+            include_str!("../shaders/lib_ray.wgsl"),
+            include_str!("../shaders/probe_gi_rays.wgsl")
+        ),
+    }
 }
 
 /// `GiPass` in probe_gi.wgsl.
@@ -159,7 +181,7 @@ struct GiPass {
     anchor: [f32; 4],
 }
 
-/// `Instance` in probe_gi.wgsl.
+/// `Instance` in probe_gi_scene_old.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuInstance {
@@ -518,11 +540,39 @@ impl Grid {
     }
 }
 
+/// What gathering the probes' own scene found ([`ProbeGi::gather`]); all zero while the rays
+/// trace the frame's ray scene.
+#[derive(Default)]
+struct Gathered {
+    /// A buffer of the scene's group was made again.
+    regroup: bool,
+    instances: u32,
+    /// The instances' anchor (absolute).
+    anchor: DVec3,
+    /// The instances on the GPU changed; every instance was read again; their hierarchy
+    /// was built again.
+    gathered: bool,
+    full: bool,
+    rebuilt: bool,
+    /// Triangles of the hierarchies built.
+    built: u32,
+    /// Entities read, and mesh entities whose change ticks moved.
+    read: u32,
+    changed: u32,
+    shifted: u32,
+    unchanged: u32,
+    build_ms: f32,
+    parts: [f32; PARTS.len()],
+}
+
 /// What `encode` records this frame.
 struct Work {
     probes: u32,
     /// Probes written empty after the traced ones (they scrolled in and wait for a trace).
     cleared: u32,
+    /// Probes scrolled into the grid this frame: until this frame's rows are copied, the
+    /// atlas holds in their slots the probes that left at the far side.
+    scrolled: bool,
     rays: u32,
     /// Atlas tile rows written, as (first, count) ranges.
     rows: Vec<(u32, u32)>,
@@ -530,6 +580,8 @@ struct Work {
 
 /// GPU resources, made when probe GI first turns on.
 struct Active {
+    /// What the rays trace; the pipelines and `layout` are made for it.
+    rays_trace: Rays,
     trace: wgpu::ComputePipeline,
     update: wgpu::ComputePipeline,
     /// World reflections (`cs_reflect`) and their inputs and output (group 2).
@@ -551,8 +603,36 @@ struct Active {
     group: Option<wgpu::BindGroup>,
     /// The rays' scene in the GPU's acceleration structures, on the hardware path.
     hw: Option<rt::HwScene>,
-    /// The sun's rays (`RenderSettings::ray_sun_shadows`), on the hardware path.
+    /// The sun's rays (`RenderSettings::ray_sun_shadows`), on ray-tracing hardware.
     sun: Option<SunRays>,
+    /// This frame's inputs of the world reflections and of the sun's rays (group 2), made by
+    /// [`ProbeGi::begin_rays`] for the dispatches in the frame's ray pass.
+    reflect_inputs: Option<wgpu::BindGroup>,
+    sun_inputs: Option<wgpu::BindGroup>,
+    /// This frame's sun rays are counted.
+    sun_counted: bool,
+}
+
+/// What the frame's ray pass holds of the probes' ([`ProbeGi::begin_rays`]).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct RayWork {
+    /// The probes' trace and update.
+    pub probes: bool,
+    /// World reflections into `targets.world_reflection`.
+    pub reflections: bool,
+    /// The sun's rays.
+    pub sun: bool,
+    /// The probe grid scrolled this frame: the reflections must not read the atlas before
+    /// this frame's rows are copied into it ([`ProbeGi::end_rays`]), or a hit at the grid's
+    /// leading edge is lit by the probes that left at the far side.
+    pub scrolled: bool,
+}
+
+impl RayWork {
+    /// Whether the pass holds anything.
+    pub fn any(&self) -> bool {
+        self.probes || self.reflections || self.sun
+    }
 }
 
 /// One ray toward the sun from every pixel (`cs_sun`, a measurement for now): its program, its
@@ -582,6 +662,15 @@ const SUN_COUNT_MAPPED: u8 = 2;
 const SUN_COUNT_FAILED: u8 = 3;
 
 impl SunRays {
+    /// After the pass that shot the rays: copy their counts out for the CPU, when they were
+    /// counted and no earlier copy is still on its way.
+    fn copy_counts(&mut self, encoder: &mut wgpu::CommandEncoder, count: bool) {
+        if count && !self.copied && self.state.load(Ordering::Acquire) == SUN_COUNT_FREE {
+            encoder.copy_buffer_to_buffer(&self.counts, 0, &self.read, 0, SUN_COUNTS_BYTES);
+            self.copied = true;
+        }
+    }
+
     /// Take in the counts that arrived, and ask for those last frame's commands copied out
     /// (they are submitted by now).
     fn take_counts(&mut self) {
@@ -729,6 +818,43 @@ fn atlas_texture(device: &wgpu::Device, size: u32, usage: wgpu::TextureUsages) -
     })
 }
 
+/// Copy the tile rows `rows` (first, count) the update wrote from `next` into the atlas the
+/// frame samples.
+fn copy_atlas_rows(
+    encoder: &mut wgpu::CommandEncoder,
+    next: &wgpu::Texture,
+    atlas: &wgpu::Texture,
+    rows: &[(u32, u32)],
+) {
+    let size = TEXELS * TILES_X;
+    for &(first, n) in rows {
+        let origin = wgpu::Origin3d {
+            x: 0,
+            y: first * TEXELS,
+            z: 0,
+        };
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: next,
+                mip_level: 0,
+                origin,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: atlas,
+                mip_level: 0,
+                origin,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: n * TEXELS,
+                depth_or_array_layers: 2,
+            },
+        );
+    }
+}
+
 fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
     texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -750,51 +876,6 @@ fn light_jumped(last: (Vec3, f32), now: (Vec3, f32)) -> bool {
         return true;
     }
     a.max(b) > LIT_LUX && last.0.normalize_or_zero().dot(now.0.normalize_or_zero()) < TURN_COS
-}
-
-/// An RGBA8 image's mean color, linear, from about 4096 of its pixels (as the image cache
-/// measures it).
-fn image_mean(image: &crate::Image) -> Option<Vec3> {
-    if image.format != crate::PixelFormat::Rgba8 || image.data.len() < 4 {
-        return None;
-    }
-    let pixels = image.data.len() / 4;
-    let step = (pixels / 4096).max(1);
-    let decode = |c: u8| {
-        let c = c as f32 / 255.0;
-        if !image.srgb {
-            c
-        } else if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let mut sum = [0.0f64; 3];
-    let mut n = 0.0f64;
-    for p in image.data.as_chunks::<4>().0.iter().step_by(step) {
-        for c in 0..3 {
-            sum[c] += decode(p[c]) as f64;
-        }
-        n += 1.0;
-    }
-    Some(Vec3::from(sum.map(|s| (s / n) as f32)))
-}
-
-/// Diffuse albedo and glow (cd/m², not pre-exposed) of a material as the probes' rays see it;
-/// `texture_mean`: the mean color of its base color texture, when known.
-fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Vec3) {
-    let tint = Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2]);
-    let albedo = match m.preset {
-        Some(p) => tint * Vec3::from(p.mean_albedo()),
-        // A texture's mean before it is uploaded: about half of the tint.
-        None if m.base_color_texture.is_some() => {
-            tint * texture_mean.unwrap_or(Vec3::splat(0.5)) * (1.0 - m.metallic.clamp(0.0, 1.0))
-        }
-        None => tint * (1.0 - m.metallic.clamp(0.0, 1.0)),
-    };
-    let emissive = Vec3::from(m.emissive) * m.emissive_strength;
-    (albedo.min(Vec3::splat(0.95)), emissive)
 }
 
 /// The world box of a mesh's local box under `affine`, relative to `origin`.
@@ -907,9 +988,10 @@ impl ProbeGi {
         &self.atlas_view
     }
 
-    /// Make the GPU resources: for the hardware path's rays (`hardware`, the device has ray
-    /// queries) or the software walk's.
-    fn activate(&mut self, shared: &GpuShared, hardware: bool) {
+    /// Make the GPU resources for rays that trace `rays`.
+    fn activate(&mut self, shared: &GpuShared, rays: Rays) {
+        let hardware = rays == Rays::Hardware;
+        let world = rays == Rays::World;
         let device = &shared.device;
         let size = TEXELS * TILES_X;
         self.atlas = atlas_texture(
@@ -931,31 +1013,40 @@ impl ProbeGi {
             has_dynamic_offset: false,
             min_binding_size: None,
         };
-        let mut entries = vec![
-            layout_entry(
-                0,
-                S::COMPUTE,
-                wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-            ),
-            layout_entry(2, S::COMPUTE, storage(true)),
-            layout_entry(5, S::COMPUTE, storage(false)),
-            layout_entry(6, S::COMPUTE, storage(false)),
-            layout_entry(
-                7,
-                S::COMPUTE,
-                wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: ATLAS_FORMAT,
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                },
-            ),
-            layout_entry(8, S::COMPUTE, storage(true)),
-        ];
-        if hardware {
+        let uniform = wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let atlas_out = wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: ATLAS_FORMAT,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+        };
+        // The pass, the instances (the probes' own scene only), the rays, the probes' state,
+        // the atlas written and the slots updated: group 1 with the probes' own scene
+        // (probe_gi_scene_old.wgsl), group 2 behind the ray scene (probe_gi_rays.wgsl).
+        let mut entries = if world {
+            vec![
+                layout_entry(10, S::COMPUTE, uniform),
+                layout_entry(15, S::COMPUTE, storage(false)),
+                layout_entry(16, S::COMPUTE, storage(false)),
+                layout_entry(17, S::COMPUTE, atlas_out),
+                layout_entry(18, S::COMPUTE, storage(true)),
+            ]
+        } else {
+            vec![
+                layout_entry(0, S::COMPUTE, uniform),
+                layout_entry(2, S::COMPUTE, storage(true)),
+                layout_entry(5, S::COMPUTE, storage(false)),
+                layout_entry(6, S::COMPUTE, storage(false)),
+                layout_entry(7, S::COMPUTE, atlas_out),
+                layout_entry(8, S::COMPUTE, storage(true)),
+            ]
+        };
+        if world {
+            // (The scene is the ray scene's group.)
+        } else if hardware {
             // The instances' acceleration structure (probe_gi_trace_hw.wgsl `scene`).
             entries.push(layout_entry(
                 1,
@@ -1027,14 +1118,29 @@ impl ProbeGi {
                 ),
             ],
         });
-        let module = if hardware {
-            shared.shader("probe gi rt", &shader_source(true), true)
-        } else {
-            shared.shader("probe gi", &shader_source(false), true)
+        let module = match rays {
+            Rays::World => shared.shader("probe gi rays", &shader_source(rays), true),
+            Rays::Hardware => shared.shader("probe gi rt", &shader_source(rays), true),
+            Rays::Software => shared.shader("probe gi", &shader_source(rays), true),
         };
+        // Group 1 is what the rays trace: the ray scene, or the probes' own scene with their
+        // buffers. Every pipeline of the frame's ray pass carries the ray scene's layout
+        // there, also `cs_update`, which traces nothing: a pipeline with another layout at
+        // group 1 would have wgpu walk the scene's instances again for the next one.
+        let ray_layout = world.then(|| crate::ray_scene::RayScene::layout(shared));
+        let scene_layout = ray_layout.as_ref().unwrap_or(&layout);
+        let own_groups = [
+            Some(&shared.frame_layout),
+            Some(scene_layout),
+            Some(&layout),
+        ];
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("probe gi"),
-            bind_group_layouts: &[Some(&shared.frame_layout), Some(&layout)],
+            bind_group_layouts: if world {
+                &own_groups[..]
+            } else {
+                &own_groups[..2]
+            },
             immediate_size: 0,
         });
         let reflect_pipeline_layout =
@@ -1042,7 +1148,7 @@ impl ProbeGi {
                 label: Some("world reflections"),
                 bind_group_layouts: &[
                     Some(&shared.frame_layout),
-                    Some(&layout),
+                    Some(scene_layout),
                     Some(&reflect_layout),
                 ],
                 immediate_size: 0,
@@ -1059,7 +1165,7 @@ impl ProbeGi {
         };
         // The sun's rays: the prepass's normals and depth as the reflections read them, what
         // the rays found, and their count.
-        let sun = hardware.then(|| {
+        let sun = (rays != Rays::Software).then(|| {
             let inputs = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ray shadow inputs"),
                 entries: &[
@@ -1095,7 +1201,11 @@ impl ProbeGi {
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("ray shadows"),
-                bind_group_layouts: &[Some(&shared.frame_layout), Some(&layout), Some(&inputs)],
+                bind_group_layouts: &[
+                    Some(&shared.frame_layout),
+                    Some(scene_layout),
+                    Some(&inputs),
+                ],
                 immediate_size: 0,
             });
             let counts = |label, usage| {
@@ -1128,6 +1238,7 @@ impl ProbeGi {
         let usage = wgpu::BufferUsages::STORAGE;
         let grow_usage = usage | wgpu::BufferUsages::COPY_SRC;
         self.active = Some(Active {
+            rays_trace: rays,
             trace: pipeline("cs_trace", &pipeline_layout),
             update: pipeline("cs_update", &pipeline_layout),
             reflect: pipeline("cs_reflect", &reflect_pipeline_layout),
@@ -1157,6 +1268,9 @@ impl ProbeGi {
             group: None,
             hw: hardware.then(|| rt::HwScene::new(device)),
             sun,
+            reflect_inputs: None,
+            sun_inputs: None,
+            sun_counted: false,
         });
         // The new buffers hold nothing yet.
         self.store.gpu_nodes = 0;
@@ -1229,35 +1343,6 @@ impl ProbeGi {
             }
         };
         (!local.0.cmpgt(local.1).any()).then_some(local)
-    }
-
-    /// The mean color of base color image `handle`: from its pixels, or (released after
-    /// upload) the image cache's.
-    fn texture_mean(
-        means: &mut HashMap<u32, (u64, Option<Vec3>)>,
-        shared: &GpuShared,
-        images: &Assets<crate::Image>,
-        handle: Handle<crate::Image>,
-    ) -> Option<Vec3> {
-        let handle = images.canonical(handle);
-        let key = handle.index();
-        let version = images.version(handle);
-        if let Some(&(v, mean)) = means.get(&key)
-            && v == version
-        {
-            return mean;
-        }
-        let image = images.get(handle)?;
-        let mean = if image.is_released() {
-            // Known once it was uploaded; asked again until then.
-            let mean = shared.images.mean_color(images, handle).map(Vec3::from);
-            mean?;
-            mean
-        } else {
-            image_mean(image)
-        };
-        means.insert(key, (version, mean));
-        mean
     }
 
     /// Bring `entity`'s cache entry up to date (or drop it, gone or hidden). True when its box
@@ -1570,7 +1655,7 @@ impl ProbeGi {
         rel.translation -= look.anchor;
         let texture_mean = match (&material.base_color_texture, look.images) {
             (Some(handle), Some(images)) => {
-                Self::texture_mean(&mut self.texture_means, look.shared, images, *handle)
+                texture_mean(&mut self.texture_means, look.shared, images, *handle)
             }
             _ => None,
         };
@@ -1674,116 +1759,21 @@ impl ProbeGi {
         }
     }
 
-    /// Reads the world shared, so it runs beside the features' shared prepares; call
-    /// [`ensure_query`](Self::ensure_query) first.
-    pub fn extract(
+    /// Gather the probes' own scene (the software walk's, or the hardware structures of
+    /// `rt.rs`): read the mesh entities that changed around `grid`, build what their meshes
+    /// need and place their instances. Not while the rays trace the frame's ray scene.
+    #[allow(clippy::too_many_arguments)]
+    fn gather(
         &mut self,
         world: &World,
         shared: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
-        uniform: &mut FrameUniform,
-    ) -> bool {
-        self.work = None;
-        self.frame += 1;
-        let lost = self
-            .active
-            .as_ref()
-            .and_then(|a| a.hw.as_ref())
-            .is_some_and(|hw| hw.lost());
-        let losses = self.hw_losses + lost as u32;
-        if lost {
-            tracing::warn!(
-                "probe GI: a submission holding the ray-tracing structures' builds failed; \
-                 starting the scene over{}",
-                if losses >= HW_LOSSES_MAX {
-                    " in software for the rest of the run"
-                } else {
-                    ""
-                }
-            );
-        }
-        if !settings.probe_gi {
-            if self.active.is_some() {
-                // Off: free the GPU memory, keep a one-tile stand-in (and the count of losses,
-                // which holds for the rest of the run).
-                *self = Self::new(&shared.device);
-                self.hw_losses = losses;
-                return true;
-            }
-            return false;
-        }
-        let started = std::time::Instant::now();
-        let mut recreated = false;
-        let hardware = settings.gi_hardware_rays && shared.ray_queries() && losses < HW_LOSSES_MAX;
-        if lost
-            || self
-                .active
-                .as_ref()
-                .is_some_and(|a| a.hw.is_some() != hardware)
-        {
-            // The rays switched paths, or the GPU's copy of the scene is unknown: start over.
-            let frame = self.frame;
-            *self = Self::new(&shared.device);
-            self.frame = frame;
-        }
-        self.hw_losses = losses;
-        if self.active.is_none() {
-            self.activate(shared, hardware);
-            recreated = true;
-        }
-        if let Some(hw) = self.active.as_mut().and_then(|a| a.hw.as_mut()) {
-            hw.begin_frame();
-        }
-
-        // The grid, centered on the camera and snapped to whole probes.
-        let spacing = settings.gi_probe_spacing.max(0.1) as f64;
-        let mut dims = UVec3::from(settings.gi_probe_grid).max(UVec3::splat(2));
-        while dims.x * dims.y * dims.z > MAX_PROBES {
-            dims = (dims / 2).max(UVec3::splat(2));
-        }
-        let center = (view.origin / spacing).floor();
-        let origin = center.as_ivec3() - (dims / 2).as_ivec3();
-        let grid = Grid {
-            dims,
-            spacing,
-            origin,
-        };
-        let count = grid.count();
-        let share = world
-            .get_resource::<crate::FramePacing>()
-            .map_or(1.0, |p| p.share);
-        let per_frame = self.probes_this_frame(shared, settings, count, share);
-        let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS);
-
-        // Probes that scrolled in go first, then the rest in turn; those that scrolled in and
-        // wait are cleared after them.
-        static QUEUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let queue = *QUEUE.get_or_init(|| {
-            !matches!(
-                std::env::var("ENGINE_GI_SCROLL_QUEUE").as_deref(),
-                Ok("off" | "0")
-            )
-        });
-        // A jump in the light (the clock set from day to night, a scene's sun switched) voids
-        // every probe's history: blended a tenth a trace, and the asleep ones tracing one turn in
-        // eight, the old light lingered for hundreds of frames (the market at 22:00 lit at
-        // 400 lux by the sky the probes saw when it was still day, 10 Nov).
-        let light = (
-            view.sun_dir,
-            view.sun_color.dot(Vec3::new(0.2126, 0.7152, 0.0722)),
-        );
-        if self.light.is_some_and(|last| light_jumped(last, light)) {
-            self.schedule.relight();
-        }
-        self.light = Some(light);
-        let plan = self.schedule.plan(self.grid, grid, per_frame, queue);
-        self.grid = Some(grid);
-        let traced = plan.traced.len() as u32;
-        let cleared = plan.cleared.len() as u32;
-        let mut updates = plan.traced;
-        updates.extend_from_slice(&plan.cleared);
-
+        grid: &Grid,
+        started: std::time::Instant,
+        recreated: bool,
+    ) -> Gathered {
+        let (spacing, dims, origin) = (grid.spacing, grid.dims, grid.origin);
         // Hierarchies the workers finished: the entities waiting on them are pending.
         let limit = shared.device.limits().max_storage_buffer_binding_size;
         self.collect_builds(limit);
@@ -1792,10 +1782,7 @@ impl ProbeGi {
         // region snapped outward, so a moving camera changes neither most frames.
         let anchor_cell = (view.origin / ANCHOR_CELL).floor();
         let anchor = anchor_cell * ANCHOR_CELL;
-        // Probes sit between whole multiples of the spacing: level design snaps walls and floors
-        // to whole meters, and a probe on a surface sees through it along its plane.
         let first_probe = (origin.as_dvec3() + 0.5) * spacing;
-        let rel_origin = first_probe - view.origin;
         let margin = spacing * 16.0;
         let lo = ((first_probe - margin) / REGION_SNAP).floor();
         let hi = ((first_probe + (dims - 1).as_dvec3() * spacing + margin) / REGION_SNAP).ceil();
@@ -2032,11 +2019,11 @@ impl ProbeGi {
         self.query = Some(query);
         let build_ms = build_started.elapsed().as_secs_f32() * 1000.0;
 
-        let active = self.active.as_mut().expect("activated above");
+        let active = self.active.as_mut().expect("activated before the gather");
         let device = &shared.device;
         let queue = &shared.queue;
         let hardware = active.hw.is_some();
-        let mut regroup = recreated || active.group.is_none();
+        let mut regroup = false;
         if !hardware {
             regroup |= self.store.upload(active, device, queue);
         }
@@ -2131,7 +2118,159 @@ impl ProbeGi {
             }
         }
         part(6);
-        let instance_count = placed.instances.len() as u32;
+        // (A recreated scene's group is made by the caller.)
+        let _ = recreated;
+        Gathered {
+            regroup,
+            instances: placed.instances.len() as u32,
+            anchor,
+            gathered,
+            full,
+            rebuilt: rebuild,
+            built: built as u32,
+            read: dirty.len() as u32,
+            changed: changed.len() as u32,
+            shifted,
+            unchanged,
+            build_ms,
+            parts,
+        }
+    }
+
+    /// Reads the world shared, so it runs beside the features' shared prepares; call
+    /// [`ensure_query`](Self::ensure_query) first. `ray_world`: the frame's ray scene is on
+    /// (the renderer made it), so the rays trace that and the probes gather nothing
+    /// themselves.
+    pub fn extract(
+        &mut self,
+        world: &World,
+        shared: &GpuShared,
+        view: &ViewData,
+        settings: &RenderSettings,
+        uniform: &mut FrameUniform,
+        ray_world: bool,
+    ) -> bool {
+        self.work = None;
+        self.frame += 1;
+        let lost = self
+            .active
+            .as_ref()
+            .and_then(|a| a.hw.as_ref())
+            .is_some_and(|hw| hw.lost());
+        let losses = self.hw_losses + lost as u32;
+        if lost {
+            tracing::warn!(
+                "probe GI: a submission holding the ray-tracing structures' builds failed; \
+                 starting the scene over{}",
+                if losses >= HW_LOSSES_MAX {
+                    " in software for the rest of the run"
+                } else {
+                    ""
+                }
+            );
+        }
+        if !settings.probe_gi {
+            if self.active.is_some() {
+                // Off: free the GPU memory, keep a one-tile stand-in (and the count of losses,
+                // which holds for the rest of the run).
+                *self = Self::new(&shared.device);
+                self.hw_losses = losses;
+                return true;
+            }
+            return false;
+        }
+        let started = std::time::Instant::now();
+        let mut recreated = false;
+        let rays_trace = if ray_world {
+            Rays::World
+        } else if settings.gi_hardware_rays && shared.ray_queries() && losses < HW_LOSSES_MAX {
+            Rays::Hardware
+        } else {
+            Rays::Software
+        };
+        if lost
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.rays_trace != rays_trace)
+        {
+            // The rays switched paths, or the GPU's copy of the scene is unknown: start over.
+            let frame = self.frame;
+            *self = Self::new(&shared.device);
+            self.frame = frame;
+        }
+        self.hw_losses = losses;
+        if self.active.is_none() {
+            self.activate(shared, rays_trace);
+            recreated = true;
+        }
+        if let Some(hw) = self.active.as_mut().and_then(|a| a.hw.as_mut()) {
+            hw.begin_frame();
+        }
+
+        // The grid, centered on the camera and snapped to whole probes.
+        let spacing = settings.gi_probe_spacing.max(0.1) as f64;
+        let mut dims = UVec3::from(settings.gi_probe_grid).max(UVec3::splat(2));
+        while dims.x * dims.y * dims.z > MAX_PROBES {
+            dims = (dims / 2).max(UVec3::splat(2));
+        }
+        let center = (view.origin / spacing).floor();
+        let origin = center.as_ivec3() - (dims / 2).as_ivec3();
+        let grid = Grid {
+            dims,
+            spacing,
+            origin,
+        };
+        let count = grid.count();
+        let share = world
+            .get_resource::<crate::FramePacing>()
+            .map_or(1.0, |p| p.share);
+        let per_frame = self.probes_this_frame(shared, settings, count, share);
+        let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS);
+
+        // Probes that scrolled in go first, then the rest in turn; those that scrolled in and
+        // wait are cleared after them.
+        static QUEUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let queue = *QUEUE.get_or_init(|| {
+            !matches!(
+                std::env::var("ENGINE_GI_SCROLL_QUEUE").as_deref(),
+                Ok("off" | "0")
+            )
+        });
+        // A jump in the light (the clock set from day to night, a scene's sun switched) voids
+        // every probe's history: blended a tenth a trace, and the asleep ones tracing one turn in
+        // eight, the old light lingered for hundreds of frames (the market at 22:00 lit at
+        // 400 lux by the sky the probes saw when it was still day, 10 Nov).
+        let light = (
+            view.sun_dir,
+            view.sun_color.dot(Vec3::new(0.2126, 0.7152, 0.0722)),
+        );
+        if self.light.is_some_and(|last| light_jumped(last, light)) {
+            self.schedule.relight();
+        }
+        self.light = Some(light);
+        let plan = self.schedule.plan(self.grid, grid, per_frame, queue);
+        self.grid = Some(grid);
+        let traced = plan.traced.len() as u32;
+        let cleared = plan.cleared.len() as u32;
+        let mut updates = plan.traced;
+        updates.extend_from_slice(&plan.cleared);
+
+        // Probes sit between whole multiples of the spacing: level design snaps walls and floors
+        // to whole meters, and a probe on a surface sees through it along its plane.
+        let first_probe = (origin.as_dvec3() + 0.5) * spacing;
+        let rel_origin = first_probe - view.origin;
+        // The probes' own scene, unless the rays trace the frame's ray scene.
+        let own = if rays_trace == Rays::World {
+            Gathered::default()
+        } else {
+            self.gather(world, shared, view, settings, &grid, started, recreated)
+        };
+        let active = self.active.as_mut().expect("activated above");
+        let device = &shared.device;
+        let queue = &shared.queue;
+        let mut regroup = own.regroup || recreated || active.group.is_none();
+        let instance_count = own.instances;
         regroup |= active
             .updates
             .write(device, queue, bytemuck::cast_slice(&updates));
@@ -2149,7 +2288,7 @@ impl ProbeGi {
                 settings.gi_shadowed_lights as f32,
             ],
             world_origin: origin.extend(0).to_array(),
-            anchor: (anchor - view.origin).as_vec3().extend(0.0).to_array(),
+            anchor: (own.anchor - view.origin).as_vec3().extend(0.0).to_array(),
         };
         queue.write_buffer(&active.uniform, 0, bytemuck::bytes_of(&pass));
         if regroup {
@@ -2162,17 +2301,28 @@ impl ProbeGi {
             ) -> wgpu::BindGroupEntry<'_> {
                 wgpu::BindGroupEntry { binding, resource }
             }
-            let mut entries = vec![
-                entry(0, buffer(&active.uniform)),
-                entry(2, buffer(&active.instances.buffer)),
-                entry(5, buffer(&active.rays.buffer)),
-                entry(6, buffer(&active.probe_state)),
-                entry(7, wgpu::BindingResource::TextureView(&active.next_view)),
-                entry(8, buffer(&active.updates.buffer)),
-            ];
-            match &active.hw {
-                Some(hw) => entries.push(entry(1, hw.binding())),
-                None => entries.extend([
+            let mut entries = if active.rays_trace == Rays::World {
+                vec![
+                    entry(10, buffer(&active.uniform)),
+                    entry(15, buffer(&active.rays.buffer)),
+                    entry(16, buffer(&active.probe_state)),
+                    entry(17, wgpu::BindingResource::TextureView(&active.next_view)),
+                    entry(18, buffer(&active.updates.buffer)),
+                ]
+            } else {
+                vec![
+                    entry(0, buffer(&active.uniform)),
+                    entry(2, buffer(&active.instances.buffer)),
+                    entry(5, buffer(&active.rays.buffer)),
+                    entry(6, buffer(&active.probe_state)),
+                    entry(7, wgpu::BindingResource::TextureView(&active.next_view)),
+                    entry(8, buffer(&active.updates.buffer)),
+                ]
+            };
+            match (&active.hw, active.rays_trace) {
+                (Some(hw), _) => entries.push(entry(1, hw.binding())),
+                (None, Rays::World) => {}
+                (None, _) => entries.extend([
                     entry(1, buffer(&active.tlas.buffer)),
                     entry(3, buffer(&active.blas.buffer)),
                     entry(4, buffer(&active.triangles.buffer)),
@@ -2200,6 +2350,7 @@ impl ProbeGi {
         self.work = Some(Work {
             probes: traced,
             cleared,
+            scrolled: plan.scrolled_in > 0,
             rays,
             rows: ranges,
         });
@@ -2226,17 +2377,17 @@ impl ProbeGi {
             cleared,
             instances: instance_count,
             meshes: hw.map_or(self.meshes.len(), |hw| hw.len()) as u32,
-            built_triangles: hw.map_or(built as u32, |hw| hw.stats().built_triangles),
+            built_triangles: hw.map_or(own.built, |hw| hw.stats().built_triangles),
             building: self.jobs.len() as u32,
-            gathered,
-            full,
-            read: dirty.len() as u32,
-            changed: changed.len() as u32,
-            shifted,
-            unchanged,
-            rebuilt: rebuild,
-            build_ms,
-            parts,
+            gathered: own.gathered,
+            full: own.full,
+            read: own.read,
+            changed: own.changed,
+            shifted: own.shifted,
+            unchanged: own.unchanged,
+            rebuilt: own.rebuilt,
+            build_ms: own.build_ms,
+            parts: own.parts,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
         };
         if self.stats.extract_ms > SLOW_EXTRACT_MS {
@@ -2297,12 +2448,28 @@ impl ProbeGi {
 
     /// Whether the rays trace on the GPU's ray-tracing hardware.
     pub fn hardware_rays(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.hw.is_some())
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.rays_trace != Rays::Software)
+    }
+
+    /// Whether the rays trace the frame's ray scene (as the last extract was told): they are
+    /// then recorded by [`begin_rays`](Self::begin_rays), the three `dispatch_` calls and
+    /// [`end_rays`](Self::end_rays) in the frame's one ray pass, and [`encode`](Self::encode),
+    /// [`encode_reflections`](Self::encode_reflections) and [`encode_sun`](Self::encode_sun)
+    /// record nothing.
+    pub fn traces_ray_world(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.rays_trace == Rays::World)
     }
 
     /// Trace and update this frame's probes (after the environment map, before anything shades
     /// with them). `frame_group`: the view's scene group (it binds the atlas being read).
     pub fn encode(&mut self, encoder: &mut wgpu::CommandEncoder, frame_group: &wgpu::BindGroup) {
+        if self.traces_ray_world() {
+            return;
+        }
         let (Some(work), Some(active)) = (self.work.take(), self.active.as_ref()) else {
             return;
         };
@@ -2321,33 +2488,7 @@ impl ProbeGi {
             pass.set_pipeline(&active.update);
             pass.dispatch_workgroups(work.probes + work.cleared, 1, 1);
         }
-        let size = TEXELS * TILES_X;
-        for (first, n) in work.rows {
-            let origin = wgpu::Origin3d {
-                x: 0,
-                y: first * TEXELS,
-                z: 0,
-            };
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &active.next,
-                    mip_level: 0,
-                    origin,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas,
-                    mip_level: 0,
-                    origin,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: size,
-                    height: n * TEXELS,
-                    depth_or_array_layers: 2,
-                },
-            );
-        }
+        copy_atlas_rows(encoder, &active.next, &self.atlas, &work.rows);
     }
 
     /// Trace world reflections into `targets.world_reflection` from the prepass (after it, before
@@ -2363,12 +2504,43 @@ impl ProbeGi {
         targets: &crate::targets::Targets,
         alternate: bool,
     ) -> bool {
+        if self.traces_ray_world() {
+            return false;
+        }
+        let Some(inputs) = self.reflection_inputs(device, encoder, targets, alternate) else {
+            return false;
+        };
         let Some(active) = self.active.as_ref() else {
             return false;
         };
         let Some(group) = &active.group else {
             return false;
         };
+        let size = targets.world_reflection.texture.size();
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("world reflections"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&active.reflect);
+        pass.set_bind_group(0, frame_group, &[]);
+        pass.set_bind_group(1, group, &[]);
+        pass.set_bind_group(2, &inputs, &[]);
+        pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        true
+    }
+
+    /// The world reflections' inputs and output for this frame (group 2 of `cs_reflect`), and
+    /// last frame's reflections copied aside when `alternate` asks for them. `None` before
+    /// the probes have a scene.
+    fn reflection_inputs(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &crate::targets::Targets,
+        alternate: bool,
+    ) -> Option<wgpu::BindGroup> {
+        let active = self.active.as_ref()?;
+        active.group.as_ref()?;
         let now = &targets.world_reflection;
         if !alternate {
             self.reflect_last = None;
@@ -2421,17 +2593,7 @@ impl ProbeGi {
                 },
             ],
         });
-        let size = targets.world_reflection.texture.size();
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("world reflections"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&active.reflect);
-        pass.set_bind_group(0, frame_group, &[]);
-        pass.set_bind_group(1, group, &[]);
-        pass.set_bind_group(2, &inputs, &[]);
-        pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
-        true
+        Some(inputs)
     }
 
     /// Shoot one ray toward the sun from every pixel the prepass drew
@@ -2447,12 +2609,46 @@ impl ProbeGi {
         targets: &crate::targets::Targets,
         count: bool,
     ) -> bool {
+        if self.traces_ray_world() {
+            return false;
+        }
+        let Some(inputs) = self.sun_inputs(device, encoder, targets, count) else {
+            return false;
+        };
         let Some(active) = self.active.as_mut() else {
             return false;
         };
         let (Some(group), Some(sun)) = (&active.group, active.sun.as_mut()) else {
             return false;
         };
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ray shadows"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&sun.pipeline);
+            pass.set_bind_group(0, frame_group, &[]);
+            pass.set_bind_group(1, group, &[]);
+            pass.set_bind_group(2, &inputs, &[]);
+            pass.dispatch_workgroups(targets.width.div_ceil(8), targets.height.div_ceil(8), 1);
+        }
+        sun.copy_counts(encoder, count);
+        true
+    }
+
+    /// The sun's rays' inputs and output for this frame (group 2 of `cs_sun`), with the
+    /// counts that arrived taken in and this frame's cleared when `count` asks for them.
+    /// `None` off ray-tracing hardware or before the probes have a scene.
+    fn sun_inputs(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &crate::targets::Targets,
+        count: bool,
+    ) -> Option<wgpu::BindGroup> {
+        let active = self.active.as_mut()?;
+        active.group.as_ref()?;
+        let sun = active.sun.as_mut()?;
         sun.take_counts();
         if !count {
             sun.latest = None;
@@ -2494,22 +2690,114 @@ impl ProbeGi {
         if count {
             encoder.clear_buffer(&sun.counts, 0, None);
         }
+        Some(inputs)
+    }
+
+    /// Before the frame's ray pass, while the rays trace the frame's ray scene: make what
+    /// its dispatches bind. `reflections`: trace world reflections into
+    /// `targets.world_reflection` (its value: `trial_cut::REFLECTIONS_ALTERNATE`); `sun`:
+    /// shoot the sun's rays (its value: count them), see [`encode_sun`](Self::encode_sun).
+    /// Says which of the three the pass holds.
+    pub fn begin_rays(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &crate::targets::Targets,
+        reflections: Option<bool>,
+        sun: Option<bool>,
+    ) -> RayWork {
+        let mut work = RayWork::default();
+        if !self.traces_ray_world() || self.active.as_ref().is_none_or(|a| a.group.is_none()) {
+            return work;
+        }
+        work.probes = self.work.is_some();
+        work.scrolled = self.work.as_ref().is_some_and(|w| w.scrolled);
+        let reflect_inputs = reflections
+            .and_then(|alternate| self.reflection_inputs(device, encoder, targets, alternate));
+        let sun_inputs = sun.and_then(|count| self.sun_inputs(device, encoder, targets, count));
+        work.reflections = reflect_inputs.is_some();
+        work.sun = sun_inputs.is_some();
+        if let Some(active) = self.active.as_mut() {
+            active.reflect_inputs = reflect_inputs;
+            active.sun_inputs = sun_inputs;
+            active.sun_counted = sun == Some(true);
+        }
+        work
+    }
+
+    /// In the frame's ray pass (the frame's group and the ray scene's are set): trace and
+    /// update this frame's probes.
+    pub fn dispatch_probes(&self, pass: &mut wgpu::ComputePass<'_>) {
+        let (Some(work), Some(active)) = (&self.work, &self.active) else {
+            return;
+        };
+        let Some(group) = &active.group else {
+            return;
+        };
+        pass.set_bind_group(2, group, &[]);
+        pass.set_pipeline(&active.trace);
+        pass.dispatch_workgroups((work.probes * work.rays).div_ceil(64), 1, 1);
+        pass.set_pipeline(&active.update);
+        pass.dispatch_workgroups(work.probes + work.cleared, 1, 1);
+    }
+
+    /// In the frame's ray pass: the sun's rays ([`begin_rays`](Self::begin_rays) said so).
+    pub fn dispatch_sun(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        targets: &crate::targets::Targets,
+    ) {
+        let Some(active) = &self.active else {
+            return;
+        };
+        let (Some(sun), Some(inputs)) = (&active.sun, &active.sun_inputs) else {
+            return;
+        };
+        pass.set_bind_group(2, inputs, &[]);
+        pass.set_pipeline(&sun.pipeline);
+        pass.dispatch_workgroups(targets.width.div_ceil(8), targets.height.div_ceil(8), 1);
+    }
+
+    /// World reflections ([`begin_rays`](Self::begin_rays) said so), once a frame: in the
+    /// frame's ray pass, or, in a frame whose probe grid scrolled, in a pass of their own
+    /// after [`end_rays`](Self::end_rays) (the frame's group and the ray scene's set there
+    /// too). Takes what `begin_rays` made for them.
+    pub fn dispatch_reflections(
+        &mut self,
+        pass: &mut wgpu::ComputePass<'_>,
+        targets: &crate::targets::Targets,
+    ) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let Some(inputs) = active.reflect_inputs.take() else {
+            return;
+        };
+        let size = targets.world_reflection.texture.size();
+        pass.set_bind_group(2, &inputs, &[]);
+        pass.set_pipeline(&active.reflect);
+        pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+    }
+
+    /// After the frame's ray pass: copy the atlas rows the probes' update wrote into the
+    /// atlas the frame samples, and the sun's counts out. (The reflections' inputs stay for
+    /// a pass that follows these copies: [`dispatch_reflections`](Self::dispatch_reflections)
+    /// takes them.)
+    pub fn end_rays(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let work = self.work.take();
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if let Some(work) = work
+            && active.group.is_some()
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ray shadows"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&sun.pipeline);
-            pass.set_bind_group(0, frame_group, &[]);
-            pass.set_bind_group(1, group, &[]);
-            pass.set_bind_group(2, &inputs, &[]);
-            pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);
+            copy_atlas_rows(encoder, &active.next, &self.atlas, &work.rows);
         }
-        if count && !sun.copied && sun.state.load(Ordering::Acquire) == SUN_COUNT_FREE {
-            encoder.copy_buffer_to_buffer(&sun.counts, 0, &sun.read, 0, SUN_COUNTS_BYTES);
-            sun.copied = true;
+        if active.sun_inputs.take().is_some()
+            && let Some(sun) = active.sun.as_mut()
+        {
+            sun.copy_counts(encoder, active.sun_counted);
         }
-        true
     }
 
     /// `render.gi.*` diagnostics.
@@ -2547,7 +2835,8 @@ impl ProbeGi {
         }
         d.set("render.gi.extract_ms", s.extract_ms as f64);
         let hw = self.active.as_ref().and_then(|a| a.hw.as_ref());
-        d.set("render.gi.hardware_rays", hw.is_some() as u8 as f64);
+        d.set("render.gi.hardware_rays", self.hardware_rays() as u8 as f64);
+        d.set("render.gi.ray_world", self.traces_ray_world() as u8 as f64);
         if let Some(hw) = hw {
             let h = hw.stats();
             d.set("render.gi.rt_triangles", h.triangles as f64);
@@ -2557,6 +2846,20 @@ impl ProbeGi {
             d.set("render.gi.rt_compacted", hw.compacted() as f64);
             d.set("render.gi.rt_retired", hw.retired() as f64);
             d.set("render.gi.rt_fences", hw.fences() as f64);
+        } else {
+            // No structures of the probes' own (the rays trace the frame's ray scene, or
+            // walk in software): the rows of an earlier scene would stand otherwise.
+            for row in [
+                "triangles",
+                "built",
+                "instances",
+                "tlas_built",
+                "compacted",
+                "retired",
+                "fences",
+            ] {
+                d.set(&format!("render.gi.rt_{row}"), 0.0);
+            }
         }
         d.set("render.gi.rt_losses", self.hw_losses as f64);
         // The sun's rays counted in the latest frame read back (-1: not counted now).
@@ -2603,10 +2906,9 @@ mod tests {
 
     #[test]
     fn shader_validates() {
-        for hardware in [false, true] {
-            let code = crate::features::compose_shader(&shader_source(hardware), true);
-            crate::features::validate_wgsl(&format!("probe gi (hardware {hardware})"), &code)
-                .unwrap();
+        for rays in [Rays::Software, Rays::Hardware, Rays::World] {
+            let code = crate::features::compose_shader(&shader_source(rays), true);
+            crate::features::validate_wgsl(&format!("probe gi ({rays:?})"), &code).unwrap();
         }
     }
 

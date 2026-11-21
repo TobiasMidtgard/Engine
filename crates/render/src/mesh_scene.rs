@@ -220,6 +220,68 @@ type SceneQuery = (
 /// Entities' slots, by entity index (an array lookup instead of a hash).
 const NO_SLOT: u32 = u32::MAX;
 
+/// Most entities a [`SlotLog`] keeps of each kind: with more it is lost, and its reader looks
+/// at every slot instead.
+const SLOT_LOG_MOST: usize = 16_384;
+
+/// What the syncs did since the log was last taken, by entity: for the frame's ray scene
+/// (mesh_feature/rays.rs), which follows the slots from the render thread, where slot
+/// numbers of an earlier sync mean nothing. Kept only while asked for (`on`).
+#[derive(Default)]
+pub(crate) struct SlotLog {
+    /// Kept at all.
+    pub on: bool,
+    /// Entities whose slot was written, moved, or given another number.
+    pub touched: Vec<Entity>,
+    /// Entities whose slot was dropped.
+    pub gone: Vec<Entity>,
+    /// More happened than the log keeps: every slot must be looked at.
+    pub lost: bool,
+}
+
+impl SlotLog {
+    fn note(&mut self, entity: Entity, gone: bool) {
+        if !self.on || self.lost {
+            return;
+        }
+        let list = if gone {
+            &mut self.gone
+        } else {
+            &mut self.touched
+        };
+        if list.len() >= SLOT_LOG_MOST {
+            self.lost = true;
+            self.touched.clear();
+            self.gone.clear();
+        } else {
+            list.push(entity);
+        }
+    }
+
+    /// Keep the log from now on (`on`), or stop and forget it. A log that starts is lost:
+    /// its reader has seen nothing yet.
+    pub fn keep(&mut self, on: bool) {
+        if on != self.on {
+            self.on = on;
+            self.lost = on;
+            self.touched.clear();
+            self.gone.clear();
+        }
+    }
+
+    /// What happened since the last call, into `touched` and `gone` (their old contents go;
+    /// the log keeps their allocations for the next): the entities touched, those gone (read
+    /// gone first: an entity in both is gone unless it has a slot now). True when more
+    /// happened than was kept, and the lists are then empty.
+    pub fn take(&mut self, touched: &mut Vec<Entity>, gone: &mut Vec<Entity>) -> bool {
+        touched.clear();
+        gone.clear();
+        std::mem::swap(&mut self.touched, touched);
+        std::mem::swap(&mut self.gone, gone);
+        std::mem::take(&mut self.lost)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct MeshScene {
     pub hot: Vec<Hot>,
@@ -258,6 +320,8 @@ pub(crate) struct MeshScene {
     /// their mesh, material, flags, fade or rows changed; not those that only moved), whose
     /// path may have changed, and slots dropped (the last slot moving into the gap).
     pub events: Vec<SlotEvent>,
+    /// The same by entity, and the slots that only moved, across syncs until taken.
+    pub log: SlotLog,
 }
 
 /// One of [`MeshScene::events`].
@@ -402,7 +466,7 @@ impl MeshScene {
     }
 
     /// The slot of `entity` (not of another entity on its index).
-    fn slot_of_entity(&self, entity: Entity) -> Option<usize> {
+    pub(crate) fn slot_of_entity(&self, entity: Entity) -> Option<usize> {
         match self.slot_of.get(entity.index_u32() as usize) {
             Some(&(e, s)) if e == entity && s != NO_SLOT => Some(s as usize),
             _ => None,
@@ -424,6 +488,7 @@ impl MeshScene {
         self.release(s);
         self.note_change(s);
         let entity = self.cold[s].entity;
+        self.log.note(entity, true);
         if let Some(e) = self.slot_of.get_mut(entity.index_u32() as usize)
             && e.0 == entity
         {
@@ -441,6 +506,9 @@ impl MeshScene {
             {
                 e.1 = s as u32;
             }
+            // (Its number changed: whoever walks the slots over several frames may have
+            // passed number `s` already.)
+            self.log.note(moved, false);
         }
     }
 
@@ -571,6 +639,7 @@ impl MeshScene {
                     cold.transform = *transform;
                     self.hot[s].center += delta;
                     self.dirty += 1;
+                    self.log.note(entity, false);
                     return;
                 }
                 self.release(s);
@@ -657,6 +726,7 @@ impl MeshScene {
         count(&mut self.mesh_users, resolved.mesh.index(), 1);
         count(&mut self.material_users, resolved.material.index(), 1);
         self.events.push(SlotEvent::Written(s as u32));
+        self.log.note(entity, false);
     }
 
     /// Remember slot `s` as it is, before it is rewritten or dropped (if it was ever placed).
@@ -946,6 +1016,86 @@ mod tests {
             (hot.mesh, hot.mesh_version, hot.lod),
             (5, u64::MAX, LOD_UNSET)
         );
+    }
+
+    /// The log kept for the frame's ray scene: one that starts is lost (its reader has seen
+    /// nothing); then each sync notes the entities whose slot it wrote or moved, the entity
+    /// whose slot it dropped as gone, and the one whose slot took the dropped one's number;
+    /// a transform written without change is not noted; more than the log keeps loses it.
+    #[test]
+    fn the_log_names_the_entities_that_changed() {
+        let mut world = World::new();
+        let entities: Vec<Entity> = (0..4)
+            .map(|i| spawn(&mut world, i as f64, i % 2, 7))
+            .collect();
+        let mut scene = MeshScene::default();
+        scene.ensure_query(&mut world);
+        let (mut touched, mut gone) = (Vec::new(), Vec::new());
+        // Off: nothing is kept.
+        scene.sync(&world, 1);
+        assert!(!scene.log.take(&mut touched, &mut gone));
+        assert!(touched.is_empty() && gone.is_empty());
+        // On: lost at first.
+        scene.log.keep(true);
+        scene.sync(&world, 2);
+        assert!(scene.log.take(&mut touched, &mut gone));
+        assert!(touched.is_empty() && gone.is_empty());
+        // A move is noted; a transform written without change is not.
+        world
+            .get_mut::<GlobalTransform>(entities[1])
+            .unwrap()
+            .0
+            .translation
+            .y += 1.0;
+        world
+            .get_mut::<GlobalTransform>(entities[2])
+            .unwrap()
+            .set_changed();
+        scene.sync(&world, 3);
+        assert!(!scene.log.take(&mut touched, &mut gone));
+        assert_eq!(touched, [entities[1]]);
+        assert!(gone.is_empty());
+        // A slot goes: its entity is gone, and the entity of the last slot, which takes its
+        // number, is touched (a reader walking the slots may have passed that number).
+        let (first, last) = (scene.cold[0].entity, scene.cold[3].entity);
+        world.despawn(first);
+        scene.sync(&world, 4);
+        assert!(!scene.log.take(&mut touched, &mut gone));
+        assert_eq!(gone, [first]);
+        assert_eq!(touched, [last]);
+        assert_eq!(scene.slot_of_entity(last), Some(0));
+        assert_eq!(scene.slot_of_entity(first), None);
+        // A new entity is touched; a sync of nothing notes nothing.
+        let new = spawn(&mut world, 9.0, 3, 7);
+        scene.sync(&world, 5);
+        assert!(!scene.log.take(&mut touched, &mut gone));
+        assert_eq!(touched, [new]);
+        assert!(gone.is_empty());
+        scene.sync(&world, 6);
+        assert!(!scene.log.take(&mut touched, &mut gone));
+        assert!(touched.is_empty() && gone.is_empty());
+        // More than it keeps: lost, and empty. Once taken it starts again.
+        for i in 0..=SLOT_LOG_MOST {
+            spawn(&mut world, i as f64, 0, 7);
+        }
+        scene.sync(&world, 7);
+        assert!(scene.log.take(&mut touched, &mut gone));
+        assert!(touched.is_empty() && gone.is_empty());
+        world
+            .get_mut::<GlobalTransform>(new)
+            .unwrap()
+            .0
+            .translation
+            .y += 1.0;
+        scene.sync(&world, 8);
+        assert!(!scene.log.take(&mut touched, &mut gone));
+        assert_eq!(touched, [new]);
+        // Off: forgotten, and nothing more is kept.
+        world.despawn(new);
+        scene.log.keep(false);
+        scene.sync(&world, 9);
+        assert!(!scene.log.take(&mut touched, &mut gone));
+        assert!(touched.is_empty() && gone.is_empty());
     }
 
     #[test]

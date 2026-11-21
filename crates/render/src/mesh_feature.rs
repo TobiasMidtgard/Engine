@@ -47,6 +47,8 @@ type FastSet<K> = bevy_platform::collections::HashSet<K>;
 const SKIN_EVICT_FRAMES: u64 = 600;
 use std::sync::Arc;
 
+mod rays;
+
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use engine_assets::{Assets, Handle};
@@ -225,6 +227,10 @@ struct GpuMesh {
     lod_vertices: Option<(u32, u32)>,
     /// Once its levels are built: `mesh_lod::movable_shares` (1 without profiling).
     movable: Option<[f32; 3]>,
+    /// Every index names one of its own vertices (checked while the frame's ray scene is
+    /// on: it builds a structure straight from the mesh's ranges of the pool, and an index
+    /// past them would have the GPU read whatever lies there).
+    ray_ok: bool,
 }
 
 /// One level of detail of a [`GpuMesh`]: fewer triangles over the mesh's vertices and those
@@ -547,6 +553,13 @@ struct MaterialFrame {
     /// The share of its base color's texels an alpha test keeps (leaf cards: how much of a card
     /// is leaf, for the canopy map); 1 without a base color texture.
     coverage: f32,
+    /// `StandardMaterial::unlit`: the frame's rays pass it.
+    unlit: bool,
+    /// What a ray's hit reads of it (`RayLook`), filled while the frame's ray scene is on:
+    /// its mean diffuse colour, its glow (cd/m²), and roughness, metallic, alpha cutoff.
+    ray_albedo: [f32; 3],
+    ray_emissive: [f32; 3],
+    ray_surface: [f32; 3],
     /// Its material slot and texture set this frame, once something drawn uses it.
     slot: Option<(u32, u32)>,
     /// Which impostors show it: the handle index, the material's GPU values and its images'
@@ -1692,6 +1705,8 @@ pub struct MeshFeature {
     stats: FeatureStats,
     /// When the profiler's mesh report was last logged (`--profile`).
     last_report: Option<std::time::Instant>,
+    /// Its part of the frame's ray scene (mesh_feature/rays.rs).
+    rays: rays::MeshRays,
 }
 
 const PIPE_DOUBLE: u8 = 1;
@@ -2283,9 +2298,13 @@ impl MeshFeature {
                 lods: Vec::new(),
                 lod_vertices: None,
                 movable: None,
+                ray_ok: self.rays.on() && rays::indices_in_range(mesh),
             },
         );
         self.unusable.remove(&index);
+        if edit {
+            self.rays.edited(index);
+        }
         true
     }
 
@@ -3723,6 +3742,9 @@ impl RenderFeature for MeshFeature {
 
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
+        // Where the device traces rays, the frame's ray scene builds its structures straight
+        // from the pool's pages.
+        self.pool.set_ray_input(gpu.ray_queries());
         let storage = |binding, visibility| wgpu::BindGroupLayoutEntry {
             binding,
             visibility,
@@ -3919,6 +3941,25 @@ impl RenderFeature for MeshFeature {
         // Every view of a frame shares its number, so a slot moved this frame keeps its
         // previous transform (motion vectors) in the main view after a mirror's view synced it.
         self.frame = view.frame_index + 1;
+        // The frame's ray scene is the main view's: its settings say whether the meshes
+        // prepare for it. The tables carry the materials' looks for it, so they are built
+        // again when it starts, whatever an earlier view of this frame built.
+        if !view.extra_view {
+            let on = crate::ray_scene::wanted(settings, gpu);
+            if self.rays.set_on(on) {
+                self.tables = None;
+                // The meshes uploaded while it was off were not checked for it.
+                if on && let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
+                    for (&index, gpu_mesh) in &mut self.meshes {
+                        let handle = Handle::<Mesh>::from_index(index);
+                        gpu_mesh.ray_ok = meshes
+                            .get(handle)
+                            .filter(|_| meshes.version(handle) == gpu_mesh.version)
+                            .is_some_and(rays::indices_in_range);
+                    }
+                }
+            }
+        }
         let min_triangles = (settings.virtual_geometry_min_triangles as usize).max(1);
         let new_tables = self.tables != Some((self.frame, min_triangles));
         // Until this view's batches are ready for it.
@@ -3958,6 +3999,7 @@ impl RenderFeature for MeshFeature {
         self.clustered.clear();
         let frame = self.frame;
         let mut scene = std::mem::take(&mut self.scene);
+        scene.log.keep(self.rays.on());
         if new_tables {
             scene.sync(world, frame);
             self.shadow_changes.extend_from_slice(&scene.changes);
@@ -4018,6 +4060,8 @@ impl RenderFeature for MeshFeature {
         let lod_pixels = settings.mesh_lod_pixels.max(0.0);
         if new_tables && let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
             self.collect_lods(&gpu.device, &gpu.queue, meshes);
+            self.rays.follow_assets(meshes);
+            self.rays.copy_wanted(meshes, frame);
         }
 
         // This view's camera position last frame (each view has its own).
@@ -4117,7 +4161,10 @@ impl RenderFeature for MeshFeature {
                 }
                 match note_class(&mut self.mesh_class, i, entry.class()) {
                     // Its slots are checked again (`MeshScene::slots_of_mesh`).
-                    ClassChange::Other => self.class_meshes.push(raw),
+                    ClassChange::Other => {
+                        self.class_meshes.push(raw);
+                        self.rays.mesh_changed(raw);
+                    }
                     change => self.class_changed = self.class_changed.max(change),
                 }
                 self.mesh_frames[i] = entry;
@@ -4144,6 +4191,7 @@ impl RenderFeature for MeshFeature {
                 if i >= self.material_frames.len() {
                     self.material_frames.resize(i + 1, MaterialFrame::default());
                 }
+                let (ray_albedo, ray_emissive) = self.rays.light(gpu, material, image_assets);
                 let entry = MaterialFrame {
                     index: handle.index(),
                     blend: material.alpha_mode == AlphaMode::Blend,
@@ -4165,6 +4213,17 @@ impl RenderFeature for MeshFeature {
                     },
                     slot: None,
                     impostor_key,
+                    unlit: material.unlit,
+                    ray_albedo,
+                    ray_emissive,
+                    ray_surface: [
+                        material.perceptual_roughness,
+                        material.metallic,
+                        match material.alpha_mode {
+                            AlphaMode::Mask(cutoff) => cutoff,
+                            _ => 0.5,
+                        },
+                    ],
                 };
                 let change = note_class(&mut self.material_class, i, entry.class());
                 // A material has no `Ready` change.
@@ -4565,6 +4624,7 @@ impl RenderFeature for MeshFeature {
         if !self.clustered.is_empty() {
             let clustered = &self.clustered;
             let pool = &mut self.pool;
+            let rays = &mut self.rays;
             self.meshes.retain(|m, g| {
                 // Used as instances lately (the cull may run on the render thread): a mesh
                 // whose instances come and go from the instanced path (a fade, a mirror, a
@@ -4572,6 +4632,8 @@ impl RenderFeature for MeshFeature {
                 let keep =
                     g.last_used + INSTANCED_COPY_KEEP_FRAMES >= frame || !clustered.contains(m);
                 if !keep {
+                    // (The frame's rays go on telling its size by the bounds this copy had.)
+                    rays.keep_bounds(*m, g.version, g.center, g.half_extents.length());
                     g.free(pool);
                 }
                 keep
@@ -5310,6 +5372,7 @@ impl RenderFeature for MeshFeature {
             d.set("render.meshes.batches", batches as f64);
             // Meshes skinned on the GPU in the last frame (a pose that didn't change isn't).
             d.set("render.meshes.skinned", self.skins.skinned as f64);
+            self.rays.publish(d);
             d.set("render.meshes.skins", self.skins.skins.len() as f64);
             d.set("render.meshes.pool_mb", reserved as f64 / (1 << 20) as f64);
             d.set("render.meshes.pool_used_mb", used as f64 / (1 << 20) as f64);
@@ -5339,6 +5402,15 @@ impl RenderFeature for MeshFeature {
             d.set("render.meshes.resident", self.meshes.len() as f64);
         }
         steps.publish(Some(diagnostics), gpu);
+    }
+
+    fn ray_scene(
+        &mut self,
+        _gpu: &GpuShared,
+        view: &crate::RayView,
+        out: &mut crate::RaySceneOut<'_>,
+    ) {
+        self.fill_ray_scene(view, out);
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {

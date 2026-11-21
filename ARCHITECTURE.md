@@ -238,6 +238,33 @@ each smooth surface's reflection, lights the hit like a probe ray's, and ssr.wgs
 blurred over the reflection lobe, under its own reflection wherever the screen can't see what
 the surface reflects.
 
+**The frame's ray scene** (a trial switch, off by default; `ray_scene/`, engine-design/
+rt-lighting-round.md): with `trial_cut_more::RAY_WORLD` on a GPU with ray queries, every ray of
+the main view's frame (probe light, world reflections, `RenderSettings::ray_sun_shadows`)
+traces one scene instead of the one the probes gather. Features fill it on the render thread
+through `RenderFeature::ray_scene`, after the main view's `prepare_frame`: geometries (triangle
+ranges of the feature's own GPU buffers, which then carry `BLAS_INPUT`, or triangles on the
+CPU) and instances (a geometry, a place, a `RayClass` and a `RayLook`). Each geometry gets a
+bottom-level structure, built within a frame's allowance and compacted; what holds still is in
+one top-level structure (16,384 instances, built again when a member changed and every fourth
+frame at most), what moves in a small one (2,048, built again in every frame a member moved).
+Both are placed around an anchor, put on a 64 m grid whenever the camera leaves its reach and
+carried along by a world shift, so a shift without a turn builds nothing (one that happens
+while rendering is paused is not followed: everything is then seen to move). A ray names the
+classes it sees: one that asks what it meets (probe light, reflections) sees what casts, what
+does not, ground and water; a shadow ray only what the shadow maps draw: what casts, and the
+`ShadowOnly` stand-ins that cast for things that do not (a stand-in stops light where it goes
+in, not where it leaves, so the thing inside one is not shaded by it). The mesh feature brings its
+`MeshRenderer`s whose bounding sphere has a radius of 0.3 m or more (casters within 160 m,
+larger things to 384 m) from the mesh scene's log of changed slots plus a share of all slots
+in turn, never a walk of every slot in one frame; it names a geometry by its mesh's handle
+index and that index's generation. The frame's rays run in one compute pass, "rays", which
+binds the scene once (binding a structure costs the render thread a walk of its instances at
+submit); in a frame whose probe grid scrolled, the world reflections run in a second pass,
+after the probes' atlases were copied. Without ray queries, or with the switch off, nothing of
+it is made and the probes gather their own scene as before. `render.ray.*` and
+`render.meshes.ray_*` count it.
+
 **GPU skinning** (built; `skinning.rs`): a module that poses a mesh puts `GpuSkin` (per-vertex
 bones and weights in an `Arc<SkinWeights>`, each bone's `SkinBone` dual quaternion from the
 bind pose to now, `SkinBlend::DualQuaternion` or `Linear`) on the entity with its

@@ -204,6 +204,9 @@ fn try_create(
         | wgpu::Features::FLOAT32_FILTERABLE
         | wgpu::Features::RG11B10UFLOAT_RENDERABLE
         | wgpu::Features::TIMESTAMP_QUERY
+        // Timestamps between the dispatches of one pass: the frame's rays share a pass, and
+        // the profile still tells probes, sun shadows and reflections apart.
+        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
         | wgpu::Features::PIPELINE_STATISTICS_QUERY
         | wgpu::Features::SHADER_EARLY_DEPTH_TEST
         | wgpu::Features::TEXTURE_COMPRESSION_BC
@@ -259,13 +262,19 @@ fn try_create(
     }
     let experimental_features = if ray_queries {
         // SAFETY: wgpu marks its ray queries experimental: a misuse may be undefined behavior
-        // rather than a validation error. Only probe GI's hardware path uses them
-        // (probe_gi/rt.rs), with every structure opaque, built before any query reads it, and
+        // rather than a validation error. Two places use them: probe GI's hardware path
+        // (probe_gi/rt.rs) and the frame's ray scene (ray_scene/blas.rs and tlas.rs, traced
+        // by lib_ray.wgsl). In both every structure is built before any query reads it (a
+        // top-level one in the frame's commands before the pass that binds it, the
+        // bottom-level ones it points at in the same call or an earlier submission) and
         // kept until the GPU has finished every frame that may trace it (wgpu frees a
         // structure with its last handle, though a top-level structure the GPU is still
-        // tracing points at it); its scene starts over when a submission holding its builds
-        // fails, and its tests hold its pictures to the software path's on lavapipe's ray
-        // queries.
+        // tracing points at it: `Retired` and `Drop for Store` there); a geometry is built
+        // only from ranges whose indices were checked against its vertices; the scene
+        // starts over when a submission holding its builds fails. Every query forces its
+        // triangles opaque, so no shader is run for a candidate. Their tests hold the
+        // pictures to the software path's, and the ray scene's to the probes' own, on
+        // lavapipe's ray queries (tests/probe_gi.rs, ray_queries.rs, ray_scene.rs).
         unsafe { wgpu::ExperimentalFeatures::enabled() }
     } else {
         wgpu::ExperimentalFeatures::disabled()

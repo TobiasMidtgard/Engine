@@ -1,13 +1,17 @@
 // Probe GI (probe_gi/mod.rs): DDGI (Majercik et al. 2019) traced against the meshes around the
 // grid. `cs_trace` shoots each updated probe's rays and lights what they hit; `cs_update` blends
 // them into the probe's irradiance and distance maps, which `probe_gi` in lib_frame.wgsl samples.
-// Positions are camera-relative, as everywhere, except the instances: those are relative to an
-// anchor that moves in 64 m steps (`GiPass::anchor`), so they stay put while the camera moves.
+// Positions are camera-relative, as everywhere.
 //
-// The rays' walk comes first, in one of two files composed before this one: on ray-tracing
-// hardware probe_gi_trace_hw.wgsl (ray queries against the GPU's acceleration structures,
-// probe_gi/rt.rs), elsewhere probe_gi_trace_sw.wgsl (a software walk of the meshes'
-// hierarchies, probe_gi/bvh.rs). Both give `trace_scene` and `hit_normal_local`.
+// What the rays trace comes first, composed before this file, one of three ways
+// (`probe_gi::shader_source`). All give the probes' buffers (`pass_`, `rays`, `probe_state`,
+// `atlas_out`, `updates`), `trace_scene` and `shade_hit`:
+// * the frame's ray scene: lib_ray.wgsl and probe_gi_rays.wgsl (ray queries against the scene
+//   every feature fills, ray_scene/mod.rs);
+// * the probes' own scene on ray-tracing hardware: probe_gi_trace_hw.wgsl and
+//   probe_gi_scene_old.wgsl (ray queries against the structures of probe_gi/rt.rs);
+// * the probes' own scene elsewhere: probe_gi_trace_sw.wgsl and probe_gi_scene_old.wgsl (a
+//   software walk of the meshes' hierarchies, probe_gi/bvh.rs).
 //
 // Probes with nothing within `SLEEP_REACH` probe spacings sleep (Majercik et al. 2021, section
 // 6): they light no surface, so they trace one turn in `SLEEP_TURNS` and keep their light the
@@ -25,30 +29,9 @@ struct GiPass {
     params: vec4<f32>,
     // world probe index of the grid's first probe (its lowest corner)
     world_origin: vec4<i32>,
-    // the instances' anchor, camera-relative
+    // the probes' own instances' anchor, camera-relative
     anchor: vec4<f32>,
 };
-
-struct Instance {
-    // rows of the anchor-relative -> mesh transform
-    to_local_x: vec4<f32>,
-    to_local_y: vec4<f32>,
-    to_local_z: vec4<f32>,
-    // the software walk's first node and first triangle of the mesh, flags (1: double sided),
-    // the mesh's index
-    mesh: vec4<u32>,
-    albedo: vec4<f32>,
-    emissive: vec4<f32>,
-};
-
-@group(1) @binding(0) var<uniform> pass_: GiPass;
-@group(1) @binding(2) var<storage, read> instances: array<Instance>;
-@group(1) @binding(5) var<storage, read_write> rays: array<vec4<f32>>;
-@group(1) @binding(6) var<storage, read_write> probe_state: array<vec4<i32>>;
-@group(1) @binding(7) var atlas_out: texture_storage_2d_array<rgba16float, write>;
-// The storage slots updated this frame: the traced ones (probes that scrolled into the grid
-// first, then a share of the rest in turn), then the cleared ones.
-@group(1) @binding(8) var<storage, read> updates: array<u32>;
 
 const NO_HIT: f32 = 1e30;
 const MAX_RAYS: u32 = 256u;
@@ -60,11 +43,13 @@ const SLEEP_TURNS: i32 = 8;
 
 struct Hit {
     t: f32,
+    // The instance's row (all ones: the ray hit nothing).
     instance: u32,
     // The triangle (the software walk's index, `hit_normal_local` reads its corners).
     triangle: u32,
-    // The triangle's normal in the mesh's space, unnormalized (the hardware path's: the
-    // software walk leaves it zero and `hit_normal_local` works it out).
+    // The triangle's normal, unnormalized: in the mesh's space on the probes' own hardware
+    // scene, in the scene's space on the ray scene (the software walk leaves it zero and
+    // `hit_normal_local` works it out).
     local_n: vec3<f32>,
 };
 
@@ -170,24 +155,13 @@ fn probe_ray_firefly(c: vec3<f32>) -> vec3<f32> {
     return c * min(1.0, most / max(l, 1e-12));
 }
 
-// Light leaving the surface a ray from `origin` along `dir` hit (`hit`, not a miss), toward the
-// ray: radiance (cd/m^2, not pre-exposed), and -1 in w for the back of a single-sided surface
-// (inside something), else 1. Lit by the sun and the nearest point lights through shadow rays,
-// its emissive, and last frame's probes (light bounced more than once). `spacing` is the
-// probes' spacing, which sizes how far shadow rays look.
-fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32) -> vec4<f32> {
-    let inst = instances[hit.instance];
-    let local_n = hit_normal_local(hit);
-    // Normals go through the transposed inverse: the rows of camera-relative -> mesh.
-    var n = normalize(local_n.x * inst.to_local_x.xyz + local_n.y * inst.to_local_y.xyz + local_n.z * inst.to_local_z.xyz);
-    if (dot(n, dir) > 0.0) {
-        if ((inst.mesh.z & 1u) == 0u) {
-            return vec4<f32>(0.0, 0.0, 0.0, -1.0);
-        }
-        n = -n;
-    }
-    let p = origin + dir * hit.t;
-    let lift = p + n * max(0.002, hit.t * 1e-4);
+// Light leaving the surface point `p` a ray along `dir` hit at distance `t`, toward the ray:
+// radiance (cd/m^2, not pre-exposed). `n`: the surface's normal on the ray's side; `albedo`
+// and `emissive`: the instance's. Lit by the sun and the nearest `lights_most` point lights
+// through shadow rays, its emissive, and last frame's probes (light bounced more than once).
+// `spacing` is the probes' spacing, which sizes how far shadow rays look.
+fn hit_radiance(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>, t: f32, spacing: f32, albedo: vec3<f32>, emissive: vec3<f32>, lights_most: u32) -> vec3<f32> {
+    let lift = p + n * max(0.002, t * 1e-4);
     var light = vec3<f32>(0.0);
     // Sun, through a shadow ray, and through the leaves above: leaf cards are not in the
     // probes' scene when the canopy map is on, so without them every hit under the crowns read
@@ -204,7 +178,7 @@ fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32) -> vec4<
         }
     }
     // Point lights, the nearest few through shadow rays.
-    let lights = min(frame.counts.x, u32(pass_.params.w));
+    let lights = min(frame.counts.x, lights_most);
     for (var i = 0u; i < lights; i++) {
         let pl = point_lights[i];
         let to_light = pl.position_range.xyz - p;
@@ -220,7 +194,7 @@ fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32) -> vec4<
     // Last frame's probes: light bounced more than once.
     let indirect = probe_gi(p, n, -dir);
     light += indirect.rgb * indirect.a;
-    return vec4<f32>(inst.albedo.rgb * INV_PI * light + inst.emissive.rgb, 1.0);
+    return albedo * INV_PI * light + emissive;
 }
 
 var<workgroup> shared_rays: array<vec4<f32>, MAX_RAYS>;

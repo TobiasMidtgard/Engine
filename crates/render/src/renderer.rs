@@ -42,6 +42,9 @@ use crate::texture::Image;
 
 /// Index of the far shadow map's view buffer and bind group (after the sky occlusion map's).
 const FAR_SHADOW_VIEW: usize = FAR_SHADOW_MAP;
+/// Ray scenes lost to a failed submission before the rays keep to the probes' own scene for
+/// the rest of the run.
+const RAY_LOSSES_MOST: u32 = 3;
 use crate::targets::{Targets, Tex};
 
 /// Set when the renderer could not start (no GPU); rendering is skipped. With the environment
@@ -638,6 +641,11 @@ pub struct Renderer {
     surface: Option<SurfaceState>,
     pub targets: Targets,
     features: Vec<Box<dyn RenderFeature>>,
+    /// Per feature (same order): its number, which stays its own when later features sort in
+    /// before it (the ray scene names a feature's geometries and instances by it).
+    feature_numbers: Vec<u16>,
+    /// Features added so far.
+    features_added: u16,
     /// Per feature (same order): whether it prepares shared this frame, what its shared prepare
     /// left for the world, and its time last frame (`crate::prepare`).
     prepare_shared: Vec<bool>,
@@ -725,6 +733,17 @@ pub struct Renderer {
     probe_gi: crate::probe_gi::ProbeGi,
     /// The main view's world reflections target holds a trace (clear it when they stop).
     world_reflection_written: bool,
+    /// The frame's ray scene (ray_scene/mod.rs): the main view's, while
+    /// `trial_cut_more::RAY_WORLD` is on, probe GI traces on ray-tracing hardware and the
+    /// device takes the scene's two structures.
+    ray_scene: Option<crate::ray_scene::RayScene>,
+    /// The last epoch a ray scene told the features (a new scene starts past it), and the
+    /// scenes lost to a submission that failed: after [`RAY_LOSSES_MOST`] the rays keep to
+    /// the probes' own scene.
+    ray_epoch: u32,
+    ray_losses: u32,
+    /// A ray scene's numbers stand in the diagnostics (`render.ray.*`).
+    ray_published: bool,
     /// Shadow maps whose static image a feature asked to draw again (`shadow_static_changed`
     /// after the main view's `prepare_frame`), for the next frame.
     static_requests: [bool; SHADOW_MAPS],
@@ -1495,6 +1514,7 @@ impl Renderer {
             mips: Default::default(),
             cache: Default::default(),
             canopy: crate::canopy::CanopyMap::new(&device),
+            ray_scene_off: std::sync::atomic::AtomicBool::new(false),
         };
 
         if shared.warm_pipelines {
@@ -1525,6 +1545,8 @@ impl Renderer {
             surface,
             targets: view.targets,
             features: Vec::new(),
+            feature_numbers: Vec::new(),
+            features_added: 0,
             prepare_shared: Vec::new(),
             prepare_outs: Vec::new(),
             prepare_ms: Vec::new(),
@@ -1577,6 +1599,10 @@ impl Renderer {
             moving_tiles: Vec::new(),
             finisher: crate::finish::Finisher::new(crate::finish::THREADS),
             world_reflection_written: false,
+            ray_scene: None,
+            ray_epoch: 0,
+            ray_losses: 0,
+            ray_published: false,
         })
     }
 
@@ -1670,8 +1696,16 @@ impl Renderer {
         for (feature, ms) in started {
             times.push((feature.name().to_string(), ms));
             self.features.push(feature);
+            self.feature_numbers.push(self.features_added);
+            self.features_added += 1;
         }
-        self.features.sort_by_key(|f| f.order());
+        // (Stable, so features of one order stay as they were added; each keeps its number.)
+        let mut numbered: Vec<_> = std::mem::take(&mut self.features)
+            .into_iter()
+            .zip(std::mem::take(&mut self.feature_numbers))
+            .collect();
+        numbered.sort_by_key(|(f, _)| f.order());
+        (self.features, self.feature_numbers) = numbered.into_iter().unzip();
         // Times by index no longer match: they come back after a frame.
         self.prepare_ms.clear();
         self.prepare_ms.resize(self.features.len(), 0.0);
@@ -2429,12 +2463,15 @@ impl Renderer {
         // gather (`crate::prepare`); the others prepare after the frame's uniforms, as before.
         cpu.step("prepare serial");
         if !is_extra && let Some(ms) = self.perf.fresh_gpu_pass("probe gi") {
-            self.probe_gi.measured(ms);
+            // (In the frame's one ray pass the probes' atlas copies follow the other rays.)
+            let copies = self.perf.fresh_gpu_pass("probe gi copies").unwrap_or(0.0);
+            self.probe_gi.measured(ms + copies);
         }
         if !is_extra {
             self.probe_gi.ensure_query(world);
             // Here, as no other thread submits until the prepare threads start.
             self.probe_gi.swap_compacted(&self.shared.queue);
+            self.extract_ray_scene(world, &settings);
         }
         self.prepare_shared.clear();
         self.prepare_shared
@@ -2460,6 +2497,7 @@ impl Renderer {
                 gi: &mut self.probe_gi,
                 uniform: &mut uniform,
                 last_ms: self.gi_ms,
+                ray_world: self.ray_scene.is_some(),
             }),
             borrowed.is_none().then_some(crate::prepare::SurfaceJob {
                 map: &mut self.surface_weather,
@@ -2697,6 +2735,55 @@ impl Renderer {
         }
     }
 
+    /// The main view's ray scene for this frame, on the main thread: made while its switch is
+    /// on and the device can hold it (probe GI on ray-tracing hardware asks for it), dropped
+    /// when not, started over after a submission that held its builds failed; then its part
+    /// of the extract. Only while no other thread submits (`RayScene::extract`).
+    fn extract_ray_scene(&mut self, world: &World, settings: &RenderSettings) {
+        if self.ray_scene.as_ref().is_some_and(|ray| ray.lost()) {
+            self.drop_ray_scene();
+            self.ray_losses += 1;
+            let given_up = self.ray_losses >= RAY_LOSSES_MOST;
+            if given_up {
+                // (The features stop preparing for it by the same word.)
+                self.shared
+                    .ray_scene_off
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            tracing::warn!(
+                "ray scene: a submission holding its builds failed; starting it over{}",
+                if given_up {
+                    " as the probes' own scene for the rest of the run"
+                } else {
+                    ""
+                }
+            );
+        }
+        if !crate::ray_scene::wanted(settings, &self.shared) {
+            self.drop_ray_scene();
+            return;
+        }
+        if self.ray_scene.is_none() {
+            // Past every epoch the last scene told the features (it raised its own at
+            // every camera jump), so that they start over with this one.
+            self.ray_epoch = self.ray_epoch.wrapping_add(1);
+            self.ray_scene = Some(crate::ray_scene::RayScene::new(
+                &self.shared,
+                self.ray_epoch,
+            ));
+        }
+        if let Some(ray) = &mut self.ray_scene {
+            ray.extract(world);
+        }
+    }
+
+    /// Drop the frame's ray scene, keeping the last epoch it told the features.
+    fn drop_ray_scene(&mut self) {
+        if let Some(ray) = self.ray_scene.take() {
+            self.ray_epoch = ray.epoch();
+        }
+    }
+
     /// What the shared prepares left (`crate::prepare`), applied in feature order: their
     /// `PrepareOut`s, and each one's time as `render.cpu.prepare <name>` (`render.cpu.probe gi`
     /// for the probe GI's gather, `gi_ms`) and as an inner step of "prepare side by side",
@@ -2773,6 +2860,15 @@ impl Renderer {
         let mut feature_diagnostics = Diagnostics::default();
         for f in &mut self.features {
             f.prepare_frame(&self.shared, &view, &settings, &mut feature_diagnostics);
+        }
+        // What the frame's rays trace: each feature says its part, the scene settles it.
+        if !extra && let Some(ray) = &mut self.ray_scene {
+            cpu.step("ray scene");
+            let ray_view = ray.begin(&view);
+            for (f, number) in self.features.iter_mut().zip(&self.feature_numbers) {
+                f.ray_scene(&self.shared, &ray_view, &mut ray.out(*number));
+            }
+            ray.finish(&view, settings.gi_shadowed_lights);
         }
         // The canopy map as the meshes left it this frame (other views read the main view's).
         {
@@ -3188,7 +3284,9 @@ impl Renderer {
                 .hand_off(device, &mut encoder, &mut part, "prepass");
         }
         self.sky_camera.encode(&mut encoder);
-        if !extra {
+        // (While the rays trace the frame's ray scene, the probes' are in the one ray pass
+        // after the prepass.)
+        if !extra && !self.probe_gi.traces_ray_world() {
             // On ray-tracing hardware, the GPU builds the rays' structures first (the meshes'
             // new ones, the instances' when they changed).
             if self.probe_gi.hardware_rays() {
@@ -3305,16 +3403,80 @@ impl Renderer {
             self.finisher
                 .hand_off(device, &mut encoder, &mut part, "lighting");
         }
+        // The frame's rays, while they trace the ray scene: its structures built first (the
+        // geometries' new ones, the two of the instances when they changed), then every ray of
+        // the frame in one compute pass, the frame's group and the scene's set once (binding
+        // a structure costs the submit a walk of its instances): the probes', one toward the
+        // sun from every pixel of the prepass's depth, world reflections. Reflections are lit
+        // by the probes as the frame before left them: the atlas rows this pass's probes
+        // wrote are copied after it. Except in a frame whose probe grid scrolled (once a
+        // probe spacing travelled): the atlas then still holds, in the slots of the probes
+        // that came in, those that left at the far side, so that frame's reflections wait
+        // for the copies, in a pass of their own.
+        let mut ray_work = crate::probe_gi::RayWork::default();
+        let count_sun = settings.debug_skip & crate::settings::shade_skip::COUNT_MESH_RUNS != 0;
+        if !extra && let Some(ray) = &mut self.ray_scene {
+            self.perf.pass(&mut cpu, &mut encoder, "ray scene build");
+            ray.encode_builds(&mut encoder);
+            // (What the rays' dispatches bind: the reflections' copy of last frame's and the
+            // clearing of the sun's count are timed apart from the builds.)
+            self.perf.pass(&mut cpu, &mut encoder, "ray inputs");
+            let alternate =
+                settings.trial_cuts & crate::settings::trial_cut::REFLECTIONS_ALTERNATE != 0;
+            ray_work = self.probe_gi.begin_rays(
+                &self.shared.device,
+                &mut encoder,
+                &self.targets,
+                (ssr && settings.world_reflections).then_some(alternate),
+                settings.ray_sun_shadows.then_some(count_sun),
+            );
+            if ray_work.any() {
+                let reflections_last = ray_work.reflections && ray_work.scrolled;
+                self.perf.pass(&mut cpu, &mut encoder, "probe gi");
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("rays"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_bind_group(0, frame_group, &[]);
+                    pass.set_bind_group(1, ray.group(), &[]);
+                    if ray_work.probes {
+                        self.probe_gi.dispatch_probes(&mut pass);
+                    }
+                    if ray_work.sun {
+                        self.perf.pass_inside(&mut cpu, &mut pass, "ray shadows");
+                        self.probe_gi.dispatch_sun(&mut pass, &self.targets);
+                    }
+                    if ray_work.reflections && !reflections_last {
+                        self.perf
+                            .pass_inside(&mut cpu, &mut pass, "world reflections");
+                        self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
+                    }
+                }
+                self.perf.pass(&mut cpu, &mut encoder, "probe gi copies");
+                self.probe_gi.end_rays(&mut encoder);
+                if reflections_last {
+                    self.perf.pass(&mut cpu, &mut encoder, "world reflections");
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("rays after the probes"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_bind_group(0, frame_group, &[]);
+                    pass.set_bind_group(1, ray.group(), &[]);
+                    self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
+                }
+            }
+        }
         // One ray toward the sun from every pixel of that depth (a measurement for now:
-        // `RenderSettings::ray_sun_shadows`).
-        if !extra && settings.ray_sun_shadows {
+        // `RenderSettings::ray_sun_shadows`), against the probes' own scene.
+        if !extra && settings.ray_sun_shadows && !self.probe_gi.traces_ray_world() {
             self.perf.pass(&mut cpu, &mut encoder, "ray shadows");
             self.probe_gi.encode_sun(
                 &self.shared.device,
                 &mut encoder,
                 frame_group,
                 &self.targets,
-                settings.debug_skip & crate::settings::shade_skip::COUNT_MESH_RUNS != 0,
+                count_sun,
             );
         }
         // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
@@ -3349,19 +3511,24 @@ impl Renderer {
                 .encode_lamp_tiles(&mut encoder, &self.targets, &self.light_group);
         }
         if ssr {
-            // What screen-space reflections can't see, traced against probe GI's scene.
+            // What screen-space reflections can't see, traced against probe GI's scene (in
+            // the frame's ray pass above while the rays trace the ray scene).
             if !extra {
-                self.perf.pass(&mut cpu, &mut encoder, "world reflections");
-                if settings.world_reflections
-                    && self.probe_gi.encode_reflections(
-                        &self.shared.device,
-                        &mut encoder,
-                        frame_group,
-                        &self.targets,
-                        settings.trial_cuts & crate::settings::trial_cut::REFLECTIONS_ALTERNATE
-                            != 0,
-                    )
-                {
+                let traced = if self.probe_gi.traces_ray_world() {
+                    ray_work.reflections
+                } else {
+                    self.perf.pass(&mut cpu, &mut encoder, "world reflections");
+                    settings.world_reflections
+                        && self.probe_gi.encode_reflections(
+                            &self.shared.device,
+                            &mut encoder,
+                            frame_group,
+                            &self.targets,
+                            settings.trial_cuts & crate::settings::trial_cut::REFLECTIONS_ALTERNATE
+                                != 0,
+                        )
+                };
+                if traced {
                     self.world_reflection_written = true;
                 } else if self.world_reflection_written {
                     self.world_reflection_written = false;
@@ -3769,6 +3936,10 @@ impl Renderer {
         self.lens.after_submit();
         self.probe_gi
             .after_submit(&self.shared.queue, submit_failed);
+        // (The scene's builds are in the main view's submission.)
+        if !extra && let Some(ray) = &mut self.ray_scene {
+            ray.after_submit(submit_failed);
+        }
         let mut present_ms = 0.0;
         if let Some(t) = surface_texture {
             cpu.step("present");
@@ -3827,6 +3998,19 @@ impl Renderer {
             self.perf.publish(d);
             if !extra {
                 self.probe_gi.publish(d);
+                d.set("render.ray.on", self.ray_scene.is_some() as u8 as f64);
+                d.set("render.ray.losses", self.ray_losses as f64);
+                match &self.ray_scene {
+                    Some(ray) => {
+                        ray.publish(d);
+                        self.ray_published = true;
+                    }
+                    // Once after a scene went: its rows read zero from then on.
+                    None if std::mem::take(&mut self.ray_published) => {
+                        crate::ray_scene::RayScene::publish_none(d);
+                    }
+                    None => {}
+                }
             }
             // Main thread: wait (for the frame in flight, set by render_system) and extract.
             // Render thread (or inline), all of it as record_total: record (recording the
@@ -3865,6 +4049,11 @@ impl Renderer {
             // Whether the device has ray queries (what probe GI's hardware rays need), so a
             // test can tell a device without them from rays that fell back to software.
             d.set("render.ray_queries", self.shared.ray_queries() as u8 as f64);
+            // And whether it can hold the frame's ray scene (`trial_cut_more::RAY_WORLD`).
+            d.set(
+                "render.ray.supported",
+                crate::ray_scene::RayScene::supported(&self.shared) as u8 as f64,
+            );
             d.set("render.cpu_ms", stats.cpu_ms as f64);
             d.set("render.frame_ms", self.perf.frame_ms as f64);
             d.set("render.acquire_ms", self.perf.acquire_ms as f64);

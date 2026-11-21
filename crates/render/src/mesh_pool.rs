@@ -237,6 +237,8 @@ struct Page {
     index_limit: u64,
     /// Times its vertex buffer was replaced by a larger one.
     generation: u32,
+    /// Its buffers may be read to build ray-tracing structures ([`MeshPool::set_ray_input`]).
+    ray_input: bool,
 }
 
 impl Page {
@@ -255,7 +257,7 @@ impl Page {
         }
         let needed = count.saturating_sub(self.vertices.free_tail()) as u64 * VERTEX_BYTES;
         let size = grown_bytes(self.vertex.size(), needed, self.vertex_limit)?;
-        let larger = vertex_buffer(device, size);
+        let larger = vertex_buffer(device, size, self.ray_input);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mesh pool vertices"),
         });
@@ -283,7 +285,7 @@ impl Page {
         }
         let needed = count.saturating_sub(self.indices.free_tail()) as u64 * 4;
         let size = grown_bytes(self.index.size(), needed, self.index_limit)?;
-        let larger = index_buffer(device, size);
+        let larger = index_buffer(device, size, self.ray_input);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mesh pool indices"),
         });
@@ -296,7 +298,17 @@ impl Page {
     }
 }
 
-fn vertex_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+/// `ray_input`: the buffer may be read to build ray-tracing structures (only a device with
+/// ray queries takes that usage).
+fn ray_input_usage(ray_input: bool) -> wgpu::BufferUsages {
+    if ray_input {
+        wgpu::BufferUsages::BLAS_INPUT
+    } else {
+        wgpu::BufferUsages::empty()
+    }
+}
+
+fn vertex_buffer(device: &wgpu::Device, size: u64, ray_input: bool) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("mesh pool vertices"),
         size,
@@ -304,18 +316,20 @@ fn vertex_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::VERTEX
             | wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
+            | wgpu::BufferUsages::COPY_DST
+            | ray_input_usage(ray_input),
         mapped_at_creation: false,
     })
 }
 
-fn index_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+fn index_buffer(device: &wgpu::Device, size: u64, ray_input: bool) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("mesh pool indices"),
         size,
         usage: wgpu::BufferUsages::INDEX
             | wgpu::BufferUsages::COPY_DST
-            | wgpu::BufferUsages::COPY_SRC,
+            | wgpu::BufferUsages::COPY_SRC
+            | ray_input_usage(ray_input),
         mapped_at_creation: false,
     })
 }
@@ -344,9 +358,19 @@ pub(crate) struct MeshPool {
     pub vertex_growths: u32,
     /// The mesh being uploaded, packed (kept for its allocation).
     packed: Vec<PoolVertex>,
+    /// Pages made from now on may be read to build ray-tracing structures.
+    ray_input: bool,
 }
 
 impl MeshPool {
+    /// Whether the pages made from now on may be read to build ray-tracing structures
+    /// (`BufferUsages::BLAS_INPUT`: the frame's ray scene builds a mesh's structure from its
+    /// ranges of a page, no copy made). Only where the device has ray queries; set before
+    /// the first mesh is added.
+    pub fn set_ray_input(&mut self, on: bool) {
+        self.ray_input = on;
+    }
+
     /// Upload a mesh into a page with room for it (a new one when none has). `None` when it is
     /// larger than the device allows one buffer to be.
     pub fn add(
@@ -578,13 +602,14 @@ impl MeshPool {
         let vertex_size = first_vertex_bytes(vertex_limit, vertex_share(), vertex_bytes);
         self.next_bytes = (size * 2).min(MAX_PAGE_BYTES);
         let page = Page {
-            vertex: vertex_buffer(device, vertex_size),
-            index: index_buffer(device, index_size),
+            vertex: vertex_buffer(device, vertex_size, self.ray_input),
+            index: index_buffer(device, index_size, self.ray_input),
             vertices: Ranges::new((vertex_size / VERTEX_BYTES) as u32),
             indices: Ranges::new((index_size / 4) as u32),
             vertex_limit,
             index_limit: limit,
             generation: 0,
+            ray_input: self.ray_input,
         };
         match self.pages.iter().position(Option::is_none) {
             Some(n) => {

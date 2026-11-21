@@ -69,6 +69,8 @@ pub(crate) struct GiJob<'a> {
     pub uniform: &'a mut FrameUniform,
     /// Its time last frame (ms), to order the jobs.
     pub last_ms: f32,
+    /// The frame's ray scene is on (`ProbeGi::extract`).
+    pub ray_world: bool,
 }
 
 /// The ground's weather map upload (`surface_weather`), run beside the features' shared
@@ -135,6 +137,7 @@ pub(crate) fn run(
             gi,
             uniform,
             last_ms,
+            ray_world,
         }) = gi
         {
             let done = &mut gi_done;
@@ -145,7 +148,8 @@ pub(crate) fn run(
                     let _span =
                         tracing::info_span!(target: "engine_render", "render_step", name = "probe gi")
                             .entered();
-                    done.atlas_moved = gi.extract(world, gpu, view, settings, uniform);
+                    done.atlas_moved =
+                        gi.extract(world, gpu, view, settings, uniform, ray_world);
                     done.ms = started.elapsed().as_secs_f32() * 1000.0;
                 }),
             ));

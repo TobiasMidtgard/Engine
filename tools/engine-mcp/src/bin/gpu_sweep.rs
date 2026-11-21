@@ -40,7 +40,9 @@
 //! with the profiler on or off) and keeps the soft bodies' numbers (`softbody.*`) in the JSON.
 //! `--call a.method,b.method` calls those bridge methods once at each stop, after its baseline,
 //! and keeps what they answer under the stop's `calls` (`--call softbody.list`: what every
-//! cloth and rope costs there).
+//! cloth and rope costs there). `--stats prefix.,other.` keeps the game's numbers under those
+//! prefixes (`engine.stats`), as means over half a second, under the stop's `stats` (as the
+//! baseline has them) and under each row's `stats` (as they are while the row is on).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -337,6 +339,29 @@ fn variants() -> Vec<Variant> {
             r,
             json!({"ray_sun_shadows": true, "ray_scene_stress": 40_000, "debug_skip": 262_144}),
             "the count through the scene of ray_scene_40k",
+        ),
+        v(
+            "ray_world",
+            r,
+            json!({"trial_cuts_more": 16, "gi_hardware_rays": true}),
+            "every ray of the frame traces one scene the features fill on the render thread (what holds still in one structure, what moves in a small one), in one pass after the prepass: read `ray scene build`, `ray inputs`, `probe gi`, `world reflections` and `probe gi copies` against the baseline's `probe gi build`, `probe gi` and `world reflections`; `--stats render.ray.,render.meshes.ray_` keeps what the scene holds while the row is on (under the row's `stats`)",
+        ),
+        v(
+            "ray_world_sun",
+            r,
+            json!({"trial_cuts_more": 16, "gi_hardware_rays": true, "ray_sun_shadows": true}),
+            "ray_world with the sun's measuring rays in its pass (`ray shadows`; read against ray_sun)",
+        ),
+        v(
+            "count_ray_world_sun",
+            r,
+            json!({
+                "trial_cuts_more": 16,
+                "gi_hardware_rays": true,
+                "ray_sun_shadows": true,
+                "debug_skip": 262_144
+            }),
+            "the count of the sun's rays through the frame's ray scene (against count_ray_sun)",
         ),
         v(
             "skip_lighting",
@@ -1098,20 +1123,21 @@ fn gi_and_memory(bridge: &mut Bridge) -> Option<Value> {
     Some(Value::Object(kept))
 }
 
-/// The main thread's own time a frame at a stop: its work through the schedules
-/// (`frame.main_ms`), of that the fixed steps (`frame.main_fixed_ms`), and its wait for the
-/// render thread (`frame.main_wait_ms`; engine_core's `frame_cost`, measured with the profiler
-/// on or off), as means over the distinct frames of `secs`. `None` from a game that does not
-/// report them.
-fn main_thread(bridge: &mut Bridge, secs: f32) -> Option<Value> {
-    const KEYS: [&str; 3] = ["frame.main_ms", "frame.main_fixed_ms", "frame.main_wait_ms"];
-    let mut sums = [0.0f64; 3];
+/// The game's numbers under `prefix` (`engine.stats`), each as its mean over the distinct
+/// frames of `secs` seconds, and how many frames that was. `None` when the game does not
+/// answer or holds none.
+fn mean_numbers(
+    bridge: &mut Bridge,
+    prefix: &str,
+    secs: f32,
+) -> Option<(u32, BTreeMap<String, f64>)> {
+    let mut sums: BTreeMap<String, f64> = BTreeMap::new();
     let mut frames = 0u32;
     let start = Instant::now();
     let mut last_frame = u64::MAX;
     while start.elapsed().as_secs_f32() < secs || frames == 0 {
         let stats = bridge
-            .call("engine.stats", json!({"prefix": "frame."}))
+            .call("engine.stats", json!({"prefix": prefix}))
             .ok()?;
         let frame = stats.get("frame").and_then(Value::as_u64).unwrap_or(0);
         if frame == last_frame {
@@ -1122,26 +1148,56 @@ fn main_thread(bridge: &mut Bridge, secs: f32) -> Option<Value> {
             continue;
         }
         last_frame = frame;
-        let metrics = stats.get("metrics")?;
-        for (sum, key) in sums.iter_mut().zip(KEYS) {
-            *sum += metrics.get(key)?.as_f64()?;
+        for (key, value) in stats.get("metrics")?.as_object()? {
+            if let Some(value) = value.as_f64() {
+                *sums.entry(key.clone()).or_default() += value;
+            }
         }
         frames += 1;
     }
-    let mean = |sum: f64| round3(sum / f64::from(frames));
+    if sums.is_empty() {
+        return None;
+    }
+    for sum in sums.values_mut() {
+        *sum = round3(*sum / f64::from(frames));
+    }
+    Some((frames, sums))
+}
+
+/// The game's numbers under each of `prefixes` (`--stats`), as means over half a second, by
+/// prefix. `None` when none was asked for or the game holds none; `at` names the stop or row
+/// in the note about a prefix without numbers.
+fn asked_stats(bridge: &mut Bridge, prefixes: &[String], at: &str) -> Option<Value> {
+    let mut asked = Map::new();
+    for prefix in prefixes {
+        if let Some((frames, means)) = mean_numbers(bridge, prefix, 0.5) {
+            asked.insert(prefix.clone(), json!({"frames": frames, "means": means}));
+        } else {
+            eprintln!("{at}: no numbers under {prefix}");
+        }
+    }
+    (!asked.is_empty()).then_some(Value::Object(asked))
+}
+
+/// The main thread's own time a frame at a stop, as the game reports it with the profiler on
+/// or off (`frame.main_ms`: its work through the schedules, the render system's share
+/// included, without its wait for the render thread; `frame.main_fixed_ms`: the fixed steps'
+/// part of it; `frame.main_wait_ms`: the wait). Means over `secs` seconds.
+fn main_thread(bridge: &mut Bridge, secs: f32) -> Option<Value> {
+    let (frames, means) = mean_numbers(bridge, "frame.", secs)?;
     Some(json!({
         "frames": frames,
-        "main_ms": mean(sums[0]),
-        "fixed_ms": mean(sums[1]),
-        "wait_ms": mean(sums[2]),
+        "main_ms": means.get("frame.main_ms")?,
+        "fixed_ms": means.get("frame.main_fixed_ms")?,
+        "wait_ms": means.get("frame.main_wait_ms")?,
     }))
 }
 
-/// The soft bodies' numbers as they stand (`softbody.*`: what the cloth solved beside the
-/// frame waits and holds), for the stop's JSON. `None` where there are none.
-fn softbody_numbers(bridge: &mut Bridge) -> Option<Value> {
+/// The game's numbers under `prefix` as they stand (`softbody.`: what the cloth solved beside
+/// the frame waits and holds), for the stop's JSON. `None` where there are none.
+fn numbers(bridge: &mut Bridge, prefix: &str) -> Option<Value> {
     let stats = bridge
-        .call("engine.stats", json!({"prefix": "softbody."}))
+        .call("engine.stats", json!({"prefix": prefix}))
         .ok()?;
     let metrics = stats.get("metrics")?.as_object()?;
     (!metrics.is_empty()).then(|| Value::Object(metrics.clone()))
@@ -1252,6 +1308,8 @@ struct Args {
     old_way: bool,
     /// Bridge methods called once at each stop, their answers kept in the JSON.
     calls: Vec<String>,
+    /// Prefixes of the game's numbers (`engine.stats`) kept in the JSON at each stop.
+    stats: Vec<String>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -1271,6 +1329,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shots_only: false,
         old_way: false,
         calls: Vec::new(),
+        stats: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -1307,6 +1366,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--old-way" => a.old_way = true,
             "--call" => {
                 a.calls = value("--call")?
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            "--stats" => {
+                a.stats = value("--stats")?
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
@@ -1442,8 +1508,21 @@ fn run(args: &Args) -> Result<(), String> {
         if let Some(main) = &main {
             stop_json.insert("main_thread".into(), main.clone());
         }
-        if let Some(soft) = softbody_numbers(&mut bridge) {
+        if let Some(soft) = numbers(&mut bridge, "softbody.") {
             stop_json.insert("softbody".into(), soft);
+        }
+        // The mesh scene's slots, and how many of them the frame's sync wrote again or found
+        // written without change: what "meshes: sync" on the main thread is made of.
+        let mesh_scene = mean_numbers(&mut bridge, "render.meshes.", 0.5);
+        if let Some((frames, means)) = &mesh_scene {
+            stop_json.insert(
+                "mesh_scene".into(),
+                json!({"frames": frames, "means": means}),
+            );
+        }
+        // Whatever else was asked for (`--stats`), as means over half a second.
+        if let Some(asked) = asked_stats(&mut bridge, &args.stats, stop) {
+            stop_json.insert("stats".into(), asked);
         }
         let mut answers = Map::new();
         for method in &args.calls {
@@ -1481,6 +1560,8 @@ fn run(args: &Args) -> Result<(), String> {
             let s = sample(&mut bridge, args.secs)?;
             let tris = triangles(&mut bridge);
             let state = gi_and_memory(&mut bridge);
+            // (What was asked for with `--stats`, as it is while this row is on.)
+            let row_stats = asked_stats(&mut bridge, &args.stats, &format!("{stop}, {}", v.name));
             // (`count_mesh_runs*` and `count_grass_runs*` rows.)
             let runs = ["mesh_runs", "grass_runs"]
                 .into_iter()
@@ -1502,6 +1583,9 @@ fn run(args: &Args) -> Result<(), String> {
             entry["triangles"] = json!(tris);
             if let Some(state) = state {
                 entry["state"] = state;
+            }
+            if let Some(stats) = row_stats {
+                entry["stats"] = stats;
             }
             if let Some((key, runs)) = runs {
                 eprintln!("{stop}: {} {runs}", v.name);
@@ -1626,6 +1710,15 @@ fn run(args: &Args) -> Result<(), String> {
                     m["skinned_vertices"]
                 ));
                 stop_json.insert("meshes".into(), m.clone());
+            }
+            if let Some((frames, means)) = &mesh_scene {
+                let n = |key: &str| means.get(key).copied().unwrap_or(-1.0);
+                md.push_str(&format!(
+                    "Mesh scene: {:.0} slots; a frame's sync writes {:.0} of them again and finds {:.0} written without change (means of {frames} frames).\n\n",
+                    n("render.meshes.slots"),
+                    n("render.meshes.dirty_slots"),
+                    n("render.meshes.unchanged_writes"),
+                ));
             }
             // What the ground reports (patches resident and in the shadow maps' still images,
             // how often each image was drawn so far), to read the shadow rows against.

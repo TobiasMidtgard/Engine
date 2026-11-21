@@ -106,6 +106,7 @@ pub mod plant_wind;
 pub mod portal;
 mod prepare;
 mod probe_gi;
+pub mod ray_scene;
 pub mod renderer;
 pub mod rock;
 pub mod settings;
@@ -163,6 +164,7 @@ pub use plant_wind::{
     PlantWindSpecies, pack_plant_vertex,
 };
 pub use portal::Portal;
+pub use ray_scene::{RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayView};
 pub use renderer::{
     RenderDisabled, RenderPaused, RenderStats, RenderThread, Renderer, ScreenshotInfo, Screenshots,
     capture_now, with_renderer,

@@ -8,7 +8,7 @@
 #
 # A new tests/*.rs lands in `other` on its own; move it to SLOW when that half grows longer.
 set -euo pipefail
-SLOW=(virtual_texturing impostors image_memory probe_gi shadow_cache virtual_geometry texture_compression)
+SLOW=(virtual_texturing impostors image_memory probe_gi shadow_cache virtual_geometry texture_compression ray_scene)
 cd "$(dirname "$0")/../crates/render/tests"
 case "${1:-}" in
   slow)
