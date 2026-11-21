@@ -26,6 +26,7 @@ use crate::state::{BodyState, SharedWater, WaterState};
 use crate::waves::MAX_WAVES;
 
 mod detail;
+mod ray;
 mod surface;
 mod swash;
 mod waterline;
@@ -888,6 +889,8 @@ pub struct WaterFeature {
     /// The body the mirror reflects for, how many frames in a row it has had a picture there
     /// (the main view samples it only after [`MIRROR_SETTLE_FRAMES`]), and the eye last frame.
     mirror_age: (Option<Entity>, u32, DVec3),
+    /// The bodies' stand-ins in the ray scene.
+    rays: ray::WaterRays,
 }
 
 /// Frames a lake mirror's picture is left to settle before the water shows it, after the
@@ -2305,6 +2308,17 @@ impl RenderFeature for WaterFeature {
         self.gpu = Some(Self::build(gpu));
     }
 
+    // One flat stand-in per body for probe light and world reflections (the ray-traced
+    // lighting round, engine-design/rt-lighting-round/plan-corrected.md, step 5).
+    fn ray_scene(
+        &mut self,
+        _gpu: &GpuShared,
+        view: &engine_render::RayView,
+        out: &mut engine_render::RaySceneOut<'_>,
+    ) {
+        self.rays.fill(view, out);
+    }
+
     fn resize(&mut self, _gpu: &GpuShared, _width: u32, _height: u32) {
         if let Some(g) = &mut self.gpu {
             g.group1.clear();
@@ -2344,6 +2358,9 @@ impl RenderFeature for WaterFeature {
         self.stats = FeatureStats::default();
         self.extra_view = view.extra_view;
         self.mirror = None;
+        if !view.extra_view {
+            self.rays.bodies.clear();
+        }
         if self.gpu.is_none() {
             return;
         }
@@ -2446,6 +2463,15 @@ impl RenderFeature for WaterFeature {
         let lock = tracing::info_span!("water", name = "prepare: lock").entered();
         let state = water.0.read();
         drop(lock);
+        if !view.extra_view {
+            self.rays.bodies.extend(
+                state
+                    .bodies
+                    .iter()
+                    .filter(|b| b.body.visible)
+                    .map(ray::RayBody::of),
+            );
+        }
         let bodies_span = tracing::info_span!("water", name = "prepare: bodies").entered();
         let hidden_below = hidden
             .and_then(|e| state.bodies.iter().find(|b| b.entity == e))
