@@ -443,7 +443,10 @@ fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
             holds.0.insert(i);
         }
     }
-    let (moved, waiting) = crate::reports::move_up_all_of(world, i, tiers);
+    // (No higher than its character takes its towns.)
+    let top = knobs(world).top;
+    let tiers: Vec<Tier> = tiers.iter().copied().filter(|t| *t < top).collect();
+    let (moved, waiting) = crate::reports::move_up_all_of(world, i, &tiers);
     if moved > 0 {
         log.act("moved houses up");
         let held: u32 = waiting.values().sum();
@@ -2422,8 +2425,12 @@ fn colonise(world: &mut World, log: &mut Log, now: f64) {
     let me = me(world);
     let h = home(world);
     let claimed: Vec<bool> = (0..n).map(|i| crate::settle::claimed(world, i)).collect();
+    // (An island closed to settlers counts as taken.)
     let taken: Vec<bool> = (0..n)
-        .map(|i| world.resource::<Economy>().owner(i).is_some())
+        .map(|i| {
+            let econ = world.resource::<Economy>();
+            econ.owner(i).is_some() || econ.rules.closed(i)
+        })
         .collect();
     let under_way = world
         .query::<&Vessel>()

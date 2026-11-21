@@ -71,17 +71,29 @@ pub struct Rival {
     pub events: VecDeque<(f64, String, i32)>,
     /// When a gift last went (a second gift soon after buys less).
     pub last_gift_s: f64,
+    /// The head of the house and how it plays, when a character leads it
+    /// ([`crate::characters`]).
+    pub leader: &'static str,
+    pub style: &'static str,
+    pub character: Option<usize>,
+    /// Standing not yet whole (the drift adds up here).
+    pub mood: f32,
+    /// Game seconds at war, and when the standings were last looked at.
+    pub war_s: f64,
+    pub looked_s: f64,
+    /// No war before this game time (after a peace).
+    pub truce_until: f64,
 }
 
 impl Rival {
-    fn log(&mut self, clock: f64, text: impl Into<String>, delta: i32) {
+    pub(crate) fn log(&mut self, clock: f64, text: impl Into<String>, delta: i32) {
         self.events.push_back((clock, text.into(), delta));
         while self.events.len() > KEEP_EVENTS {
             self.events.pop_front();
         }
     }
 
-    fn shift(&mut self, delta: i32) -> i32 {
+    pub(crate) fn shift(&mut self, delta: i32) -> i32 {
         let before = self.standing;
         self.standing = (self.standing + delta).clamp(-100, 100);
         self.standing - before
@@ -135,6 +147,13 @@ impl Default for Rivals {
             trade_per_min: 0.0,
             events: VecDeque::new(),
             last_gift_s: f64::NEG_INFINITY,
+            leader: "",
+            style: "",
+            character: None,
+            mood: 0.0,
+            war_s: 0.0,
+            looked_s: 0.0,
+            truce_until: 0.0,
         };
         let mut v = vec![
             Rival {
@@ -218,9 +237,9 @@ pub fn company_name(world: &World, c: crate::sim::Company) -> String {
 pub struct Standing {
     pub company: crate::sim::Company,
     pub name: String,
-    /// People in all, then by tier (Fisherfolk, Labourers, Burghers).
+    /// People in all, then by tier (Fisherfolk up to Patricians).
     pub people: u32,
-    pub tiers: [u32; 3],
+    pub tiers: [u32; crate::defs::Tier::COUNT],
     pub coins: i64,
     /// Taxes less upkeep a minute.
     pub coins_per_min: i64,
@@ -258,7 +277,7 @@ pub fn compare(world: &mut World) -> Vec<Standing> {
             let isles: Vec<usize> = (0..econ.islands.len())
                 .filter(|&i| econ.owns(c, i))
                 .collect();
-            let mut tiers = [0.0f32; 3];
+            let mut tiers = [0.0f32; crate::defs::Tier::COUNT];
             let mut made = [0.0f32; Good::COUNT];
             let mut short = [0.0f32; Good::COUNT];
             for &i in &isles {
@@ -296,6 +315,11 @@ pub fn compare(world: &mut World) -> Vec<Standing> {
             }
         })
         .collect()
+}
+
+/// Names for rival house `c`'s new ships: its character's, or the slot's.
+pub fn ship_names_in(world: &World, c: crate::sim::Company) -> &'static [&'static str] {
+    crate::characters::of(world, c).map_or_else(|| ship_names(c), |ch| ch.ships)
 }
 
 /// Names for a rival house's new ships, taken in turn.
@@ -351,6 +375,9 @@ pub fn ship_names(c: crate::sim::Company) -> &'static [&'static str] {
 pub struct RivalView {
     pub id: u32,
     pub name: String,
+    /// The head of the house and how it plays (empty when no character leads it).
+    pub leader: String,
+    pub style: String,
     pub colour: u32,
     pub emblem: String,
     pub temperament: String,
@@ -516,6 +543,8 @@ pub fn relations(world: &mut World) -> Vec<RivalView> {
         .map(|r| RivalView {
             id: r.id,
             name: r.name.into(),
+            leader: r.leader.into(),
+            style: r.style.into(),
             colour: r.colour,
             emblem: r.emblem.into(),
             temperament: r.temperament.into(),
@@ -610,6 +639,10 @@ pub fn act(world: &mut World, verb: &str, id: u32) -> Result<String, String> {
             // A second gift within ten minutes is worth half; a friend is harder to please.
             let base = if clock - r.last_gift_s < 600.0 { 4 } else { 8 };
             let delta = if r.standing > 50 { base / 2 } else { base };
+            // (What a gift is worth to the character that leads the house.)
+            let delta = r.character.map_or(delta, |c| {
+                (delta as f32 * crate::characters::ALL[c].traits.gifts).round() as i32
+            });
             r.last_gift_s = clock;
             let d = r.shift(delta);
             r.log(clock, format!("We sent a gift of {GIFT_COINS} coins"), d);
@@ -734,7 +767,7 @@ mod tests {
         let rows = compare(&mut w);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].company, 0);
-        assert_eq!((rows[0].people, rows[0].tiers), (120, [80, 40, 0]));
+        assert_eq!((rows[0].people, rows[0].tiers), (120, [80, 40, 0, 0, 0]));
         assert_eq!(rows[0].makes.first(), Some(&(Good::Fish, 3.0)));
         assert_eq!(
             (rows[2].people, rows[2].islands, rows[2].coins),

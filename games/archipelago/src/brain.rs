@@ -59,6 +59,8 @@ pub struct Knobs {
     pub clears: bool,
     /// It buys raw goods from the free traders once its purse is deep.
     pub traders: bool,
+    /// The highest tier it takes its towns to (its character's ambition).
+    pub top: crate::defs::Tier,
 }
 
 impl Level {
@@ -106,6 +108,7 @@ impl Level {
             isles,
             clears: self == Level::Admiral,
             traders: matches!(self, Level::Commodore | Level::Admiral),
+            top: crate::defs::Tier::Patricians,
         }
     }
 
@@ -132,6 +135,8 @@ pub struct RivalSetup {
 pub struct Captain {
     pub company: Company,
     pub level: Level,
+    /// The character it plays as ([`crate::characters::ALL`]), if any.
+    pub character: Option<usize>,
     /// The island it began on.
     pub home: usize,
     next_s: f64,
@@ -157,7 +162,7 @@ impl Charted {
             .is_some_and(|b| b & (1 << isle) != 0)
     }
 
-    fn mark(&mut self, c: Company, isle: usize) {
+    pub(crate) fn mark(&mut self, c: Company, isle: usize) {
         let c = c as usize;
         if self.seen.len() <= c {
             self.seen.resize(c + 1, 0);
@@ -237,7 +242,10 @@ pub fn tick(world: &mut World) {
             if now < cap.next_s {
                 continue;
             }
-            let knobs = cap.level.knobs();
+            let mut knobs = cap.level.knobs();
+            if let Some(ch) = cap.character {
+                knobs = crate::characters::shape(knobs, &crate::characters::ALL[ch].traits);
+            }
             cap.next_s = now + knobs.turn_s;
             (cap.company, knobs, std::mem::take(&mut cap.log))
         };
@@ -262,9 +270,9 @@ pub fn tick(world: &mut World) {
 
 /// Where rival `c` starts: one in the player's home waters on the hardest levels, the
 /// others each in a region of its own.
-fn start_island(c: Company, level: Level) -> usize {
+fn start_island(c: Company, near: bool) -> usize {
     let by_name = |n: &str| islands().iter().position(|i| i.name == n).unwrap_or(0);
-    match (c, level.one_near()) {
+    match (c, near) {
         (1, true) => by_name("Northmoor"),
         (1, false) => by_name("Amberland"),
         (2, _) => by_name("Frostholm"),
@@ -273,8 +281,30 @@ fn start_island(c: Company, level: Level) -> usize {
 }
 
 /// A new game's rivals: each house gets the player's start, a barque off its own island with
-/// planks, fish and clothes aboard and the same purse, and a captain at `level`.
+/// planks, fish and clothes aboard and the same purse, and a captain at `level`. The houses
+/// are the characters picked for the game ([`crate::characters::RivalPicks`], each at its own
+/// level), or the first ones.
 pub fn start_rivals(world: &mut World, count: usize, level: Level) {
+    let picks = world
+        .get_resource::<crate::characters::RivalPicks>()
+        .map(|p| p.0.clone())
+        .unwrap_or_default();
+    let n = count.min(3);
+    let mut chosen: Vec<(usize, Level)> = picks.into_iter().take(n).collect();
+    for ch in 0..crate::characters::ALL.len() {
+        if chosen.len() >= n {
+            break;
+        }
+        if !chosen.iter().any(|(c, _)| *c == ch) {
+            chosen.push((ch, level));
+        }
+    }
+    start_houses(world, &chosen);
+}
+
+/// A new game's rivals, one house for each character and level of `picks` (at most three).
+pub fn start_houses(world: &mut World, picks: &[(usize, Level)]) {
+    let rules = world.resource::<Economy>().rules;
     world.init_resource::<Charted>();
     world.init_resource::<Captains>();
     {
@@ -282,9 +312,10 @@ pub fn start_rivals(world: &mut World, count: usize, level: Level) {
         let mut ch = world.resource_mut::<Charted>();
         ch.mark(PLAYER, 0);
     }
-    for k in 0..count.min(3) {
+    for (k, &(ch, level)) in picks.iter().enumerate().take(3) {
         let c = (k + 1) as Company;
-        let home = start_island(c, level);
+        crate::characters::install(world, c, ch);
+        let home = start_island(c, k == 0 && rules.rival_near(level));
         *world.resource_mut::<Economy>().coins_mut(c) = crate::settle::FIRST_COINS;
         let isle = &islands()[home];
         let coast = island::landing_coast(isle).unwrap_or(isle.center);
@@ -318,7 +349,7 @@ pub fn start_rivals(world: &mut World, count: usize, level: Level) {
             }
         }
         if let Some(mut v) = world.get_mut::<Vessel>(e) {
-            v.cargo = crate::settle::FIRST_CARGO.to_vec();
+            v.cargo = crate::settle::first_cargo(&rules);
             v.doing = Doing::Moored(30.0);
             v.company = c;
         }
@@ -326,14 +357,16 @@ pub fn start_rivals(world: &mut World, count: usize, level: Level) {
         world.resource_mut::<Captains>().0.push(Captain {
             company: c,
             level,
+            character: Some(ch),
             home,
             // Each takes its turns at its own second.
             next_s: 3.0 * c as f64,
             log: Log::for_captain(1 + c as u64),
         });
         engine::core::log::info!(
-            "archipelago: {} starts off {} ({})",
+            "archipelago: {} ({}) starts off {} ({})",
             crate::rivals::company_name(world, c),
+            crate::characters::ALL[ch].leader,
             isle.name,
             level.name()
         );
@@ -378,6 +411,7 @@ pub fn adopt_far_towns(world: &mut World, count: usize, level: Level) {
         world.resource_mut::<Captains>().0.push(Captain {
             company: c,
             level,
+            character: None,
             home,
             next_s: 3.0 * c as f64,
             log: Log::for_captain(1 + c as u64),
@@ -398,7 +432,7 @@ pub fn standings(world: &World) -> Vec<serde_json::Value> {
                 .iter()
                 .map(|&i| econ.islands[i].population.iter().sum::<f32>())
                 .sum();
-            let tiers: Vec<f32> = (0..3)
+            let tiers: Vec<f32> = (0..crate::defs::Tier::COUNT)
                 .map(|t| {
                     isles
                         .iter()

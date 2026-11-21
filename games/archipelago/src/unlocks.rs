@@ -83,6 +83,12 @@ pub fn lock_of(econ: &Economy, c: Company, kind: Kind) -> Lock {
         .iter()
         .map(|(t, n)| (have[t.index()] / n).min(1.0))
         .fold(if ways.is_empty() { 1.0 } else { 0.0 }, f32::max);
+    // (The unlock-all cheat opens everything to the player.)
+    let progress = if econ.rules.unlocked && c == crate::sim::PLAYER {
+        1.0
+    } else {
+        progress
+    };
     let locked = progress < 1.0;
     let why = if !locked {
         String::new()

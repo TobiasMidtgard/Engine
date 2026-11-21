@@ -343,14 +343,14 @@ fn columns(p: &mut Parts, x0: f32, x1: f32, z: f32, n: usize, y0: f32, h: f32, r
         };
         let b = r * 1.45;
         p.cuboid(
-            Mat::Stone,
+            Mat::Plaster,
             v3(x - b, y0, z - b),
             v3(x + b, y0 + 0.35, z + b),
             col,
             false,
         );
         p.cylinder(
-            Mat::Stone,
+            Mat::Plaster,
             v3(x, y0 + 0.35, z),
             r,
             r * 0.86,
@@ -360,7 +360,7 @@ fn columns(p: &mut Parts, x0: f32, x1: f32, z: f32, n: usize, y0: f32, h: f32, r
             false,
         );
         p.cuboid(
-            Mat::Stone,
+            Mat::Plaster,
             v3(x - b, y0 + h - 0.35, z - b),
             v3(x + b, y0 + h, z + b),
             col,
@@ -375,16 +375,16 @@ fn columns(p: &mut Parts, x0: f32, x1: f32, z: f32, n: usize, y0: f32, h: f32, r
 fn pediment(p: &mut Parts, x0: f32, x1: f32, z: f32, y: f32, h: f32, d: f32, col: Vec4) {
     let m = (x0 + x1) * 0.5;
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(x0 - 0.25, y - 0.45, z - d),
         v3(x1 + 0.25, y, z + 0.25),
         col,
         false,
     );
     let (a, b, c) = (v3(x0, y, z), v3(x1, y, z), v3(m, y + h, z));
-    p.tri(Mat::Stone, a, b, c, shade(col, 0.95));
+    p.tri(Mat::Plaster, a, b, c, shade(col, 0.95));
     let (ab, bb, cb) = (v3(x0, y, z - d), v3(x1, y, z - d), v3(m, y + h, z - d));
-    p.tri(Mat::Stone, bb, ab, cb, col);
+    p.tri(Mat::Plaster, bb, ab, cb, col);
     // The raking cornices, a roof over the triangle.
     p.quad(
         Mat::Slate,
@@ -412,7 +412,7 @@ fn balustrade(p: &mut Parts, a: Vec3, b: Vec3, h: f32, col: Vec4) {
     let dir = (b - a) / len.max(1e-4);
     let side = Vec3::Y.cross(dir) * 0.16;
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         a.min(b) - side.abs() - Vec3::Y * 0.0,
         a.max(b) + side.abs() + Vec3::Y * 0.16,
         col,
@@ -421,7 +421,7 @@ fn balustrade(p: &mut Parts, a: Vec3, b: Vec3, h: f32, col: Vec4) {
     for i in 0..=n {
         let at = a + (b - a) * (i as f32 / n as f32);
         p.cylinder(
-            Mat::Stone,
+            Mat::Plaster,
             at + Vec3::Y * 0.16,
             0.07,
             0.05,
@@ -432,7 +432,7 @@ fn balustrade(p: &mut Parts, a: Vec3, b: Vec3, h: f32, col: Vec4) {
         );
     }
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         a.min(b) - side.abs() * 1.2 + Vec3::Y * (h - 0.16),
         a.max(b) + side.abs() * 1.2 + Vec3::Y * h,
         col,
@@ -473,7 +473,7 @@ fn quoins(p: &mut Parts, c: Vec3, l: f32, w: f32, y0: f32, y1: f32, col: Vec4) {
                 let d = if k % 2 == 0 { 0.55 } else { 0.34 };
                 let (x, z) = (c.x + sx * l * 0.5, c.z + sz * w * 0.5);
                 p.cuboid(
-                    Mat::Stone,
+                    Mat::Plaster,
                     v3(x - d * 0.5 - 0.04, y, z - d * 0.5 - 0.04),
                     v3(x + d * 0.5 + 0.04, y + 0.45, z + d * 0.5 + 0.04),
                     col,
@@ -489,7 +489,7 @@ fn quoins(p: &mut Parts, c: Vec3, l: f32, w: f32, y0: f32, y1: f32, col: Vec4) {
 #[allow(clippy::too_many_arguments)]
 fn body(p: &mut Parts, m: Mat, c: Vec3, l: f32, w: f32, top: f32, col: Vec4, plinth: Vec4) {
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(c.x - l * 0.5 - 0.2, -3.0, c.z - w * 0.5 - 0.2),
         v3(c.x + l * 0.5 + 0.2, 0.6, c.z + w * 0.5 + 0.2),
         plinth,
@@ -578,7 +578,7 @@ fn guild(v: usize) -> Parts {
     body(&mut p, m, c, l, w, eave, col, shade(stone, 0.85));
     // A stone shop floor of three arches.
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-l * 0.5 - 0.05, 0.6, zf - 0.6),
         v3(l * 0.5 + 0.05, 4.2, zf + 0.12),
         stone,
@@ -588,7 +588,7 @@ fn guild(v: usize) -> Parts {
         let x = -3.0 + k as f32 * 3.0;
         p.windows(v3(x, 2.35, zf + 0.14), Vec3::Z, 1, 2.0, 2.7, 0.0, WHITE);
         p.cylinder(
-            Mat::Stone,
+            Mat::Plaster,
             v3(x, 3.8, zf + 0.1),
             1.05,
             0.2,
@@ -641,14 +641,14 @@ fn guild(v: usize) -> Parts {
             false,
         );
         p.cuboid(
-            Mat::Stone,
+            Mat::Plaster,
             v3(-hw - 0.08, y0 + rh / steps_n as f32 + 0.25, zf - 0.15),
             v3(-hw + 0.7, y0 + rh / steps_n as f32 + 0.4, zf + 0.4),
             stone,
             false,
         );
         p.cuboid(
-            Mat::Stone,
+            Mat::Plaster,
             v3(hw - 0.7, y0 + rh / steps_n as f32 + 0.25, zf - 0.15),
             v3(hw + 0.08, y0 + rh / steps_n as f32 + 0.4, zf + 0.4),
             stone,
@@ -717,7 +717,7 @@ fn veranda(v: usize) -> Parts {
     body(&mut p, Mat::Plaster, c, l, w, 10.6, col, stone);
     // Basement raised 1.6 m: steps up to the lower veranda.
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-5.6, -3.0, -5.2),
         v3(5.6, 1.6, 5.2),
         stone,
@@ -902,7 +902,16 @@ fn stave_hall(v: usize) -> Parts {
     let stone = hexc(0x9a968c);
     let c = v3(0.0, 0.0, 0.0);
     let eave = 12.6;
-    body(&mut p, Mat::Stone, c, l, w, 3.6, stone, shade(stone, 0.85));
+    body(
+        &mut p,
+        Mat::Plaster,
+        c,
+        l,
+        w,
+        3.6,
+        stone,
+        shade(stone, 0.85),
+    );
     p.cuboid(
         Mat::Planks,
         v3(-l * 0.5, 3.6, -w * 0.5),
@@ -964,7 +973,7 @@ fn stave_hall(v: usize) -> Parts {
     );
     chimney(
         &mut p,
-        Mat::Stone,
+        Mat::Plaster,
         v3(2.8, eave + 1.0, -1.0),
         eave + 5.0,
         stone,
@@ -991,7 +1000,7 @@ fn palazzo(v: usize) -> Parts {
     let (zf, top) = (c.z + w * 0.5, 15.0);
     body(
         &mut p,
-        Mat::Stone,
+        Mat::Plaster,
         c,
         l,
         w,
@@ -1025,7 +1034,7 @@ fn palazzo(v: usize) -> Parts {
     // The portico: four columns through two floors, a pediment, a balcony behind.
     let pz = zf + 1.1;
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-3.6, -1.0, zf),
         v3(3.6, 0.9, pz + 0.4),
         stone,
@@ -1034,7 +1043,7 @@ fn palazzo(v: usize) -> Parts {
     steps(&mut p, 0.0, pz + 0.4, 4.4, 3, 0.9, stone);
     columns(&mut p, -3.0, 3.0, pz, 4, 0.9, 10.2, 0.34, WHITE);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-3.5, 11.1, zf),
         v3(3.5, 11.6, pz + 0.45),
         WHITE,
@@ -1069,7 +1078,13 @@ fn palazzo(v: usize) -> Parts {
         WHITE,
     );
     for x in [-4.0f32, 4.0] {
-        chimney(&mut p, Mat::Stone, v3(x, top, c.z - 2.2), top + 2.6, stone);
+        chimney(
+            &mut p,
+            Mat::Plaster,
+            v3(x, top, c.z - 2.2),
+            top + 2.6,
+            stone,
+        );
     }
     p.ground_occlusion(0.6, 2.0);
     p.finish()
@@ -1110,7 +1125,14 @@ fn plantation(v: usize) -> Parts {
         );
         crate::regional::railing(&mut p, v3(-4.6, y, pz), v3(4.6, y, pz), 1.0, WHITE);
     }
-    up_quad(&mut p, Mat::Stone, (-5.2, 5.2), (zf, pz + 0.6), 0.6, stone);
+    up_quad(
+        &mut p,
+        Mat::Plaster,
+        (-5.2, 5.2),
+        (zf, pz + 0.6),
+        0.6,
+        stone,
+    );
     steps(&mut p, 0.0, pz + 0.6, 4.0, 2, 0.6, stone);
     columns(&mut p, -4.6, 4.6, pz, 6, 0.6, top - 0.6, 0.36, WHITE);
     p.cuboid(
@@ -1235,7 +1257,7 @@ fn copper_manor(v: usize) -> Parts {
     };
     let c = v3(0.0, 0.0, -0.2);
     let (zf, eave) = (c.z + w * 0.5, 12.8);
-    body(&mut p, Mat::Stone, c, l, w, eave, col, shade(col, 0.8));
+    body(&mut p, Mat::Plaster, c, l, w, eave, col, shade(col, 0.8));
     quoins(&mut p, c, l, w, 0.6, eave, WHITE);
     for (y, h, d) in [(3.8f32, 0.3f32, 0.12f32), (eave - 0.4, 0.45, 0.3)] {
         band(&mut p, c, l, w, y, h, d, WHITE);
@@ -1268,7 +1290,7 @@ fn copper_manor(v: usize) -> Parts {
     // The clock tower over the door, through the roof, under a copper spire.
     let t = v3(0.0, 0.6, zf - 1.0);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         t + v3(-1.6, 0.0, -0.4),
         t + v3(1.6, eave + 4.6 - 0.6, 1.4),
         shade(col, 1.05),
@@ -1314,7 +1336,7 @@ fn copper_manor(v: usize) -> Parts {
     );
     chimney(
         &mut p,
-        Mat::Stone,
+        Mat::Plaster,
         v3(-3.6, eave + 1.2, -2.4),
         eave + 4.0,
         col,
@@ -1381,7 +1403,7 @@ fn ore_mine() -> Parts {
     // Headframe: four legs leaning in over the shaft, braces, the wheel.
     let s = v3(3.0, 0.0, -1.0);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         s + v3(-2.2, -0.5, -2.2),
         s + v3(2.2, 0.4, 2.2),
         hexc(0x8a847a),
@@ -1472,7 +1494,7 @@ fn gold_mine() -> Parts {
     let mut p = Parts::default();
     let stone = hexc(0xa39a88);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-6.6, -1.0, -6.0),
         v3(-0.6, 9.6, -0.6),
         stone,
@@ -1480,7 +1502,7 @@ fn gold_mine() -> Parts {
     );
     p.gable_roof(
         Mat::Slate,
-        Mat::Stone,
+        Mat::Plaster,
         v3(-3.6, 9.6, -3.3),
         6.0,
         5.4,
@@ -1538,7 +1560,7 @@ fn gold_mine() -> Parts {
         true,
     );
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         s + v3(-2.2, -0.5, -2.2),
         s + v3(2.2, 0.4, 2.2),
         stone,
@@ -1585,14 +1607,14 @@ fn ironworks() -> Parts {
     // The furnace: a tapering stone stack with iron bands.
     let f = v3(5.6, 0.0, -2.4);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         f + v3(-3.2, 0.0, -3.2),
         f + v3(3.2, 4.0, 3.2),
         stone,
         false,
     );
     p.cylinder(
-        Mat::Stone,
+        Mat::Plaster,
         f + Vec3::Y * 4.0,
         2.8,
         2.0,
@@ -1723,7 +1745,7 @@ fn shade_tree() -> Parts {
 fn drying_floor() -> Parts {
     let mut p = Parts::default();
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-3.6, -0.5, -3.6),
         v3(3.6, 0.15, 3.6),
         hexc(0xc8bca8),
@@ -2152,7 +2174,7 @@ fn goldsmith() -> Parts {
     let c = v3(0.0, 0.0, -0.4);
     body(
         &mut p,
-        Mat::Stone,
+        Mat::Plaster,
         c,
         9.0,
         9.4,
@@ -2202,14 +2224,14 @@ fn obelisk() -> Parts {
     let mut p = Parts::default();
     let stone = hexc(STONE);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-0.7, -0.3, -0.7),
         v3(0.7, 0.9, 0.7),
         stone,
         false,
     );
     p.cylinder(
-        Mat::Stone,
+        Mat::Plaster,
         v3(0.0, 0.9, 0.0),
         0.5,
         0.28,
@@ -2306,7 +2328,7 @@ fn theatre() -> Parts {
     let zf = c.z + 7.8;
     let pz = zf + 3.0;
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-8.0, -1.0, zf),
         v3(8.0, 1.4, pz + 0.6),
         stone,
@@ -2315,7 +2337,7 @@ fn theatre() -> Parts {
     steps(&mut p, 0.0, pz + 0.6, 14.0, 4, 1.4, stone);
     columns(&mut p, -6.6, 6.6, pz, 6, 1.4, 10.6, 0.5, WHITE);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-7.4, 12.0, zf),
         v3(7.4, 12.8, pz + 0.65),
         WHITE,
@@ -2339,7 +2361,7 @@ fn bank() -> Parts {
     let col = hexc(0xd8d2c2);
     let stone = shade(col, 0.85);
     let c = v3(0.0, 0.0, -1.4);
-    body(&mut p, Mat::Stone, c, 17.0, 14.0, 14.0, col, stone);
+    body(&mut p, Mat::Plaster, c, 17.0, 14.0, 14.0, col, stone);
     for k in 1..5 {
         let y = 0.6 + k as f32 * 0.7;
         band(&mut p, c, 17.0, 14.0, y, 0.06, 0.02, shade(col, 0.6));
@@ -2357,7 +2379,7 @@ fn bank() -> Parts {
     let zf = c.z + 7.0;
     let pz = zf + 2.4;
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-6.0, -1.0, zf),
         v3(6.0, 2.0, pz + 0.7),
         stone,
@@ -2366,7 +2388,7 @@ fn bank() -> Parts {
     steps(&mut p, 0.0, pz + 0.7, 10.0, 5, 2.0, stone);
     columns(&mut p, -4.8, 4.8, pz, 4, 2.0, 9.0, 0.55, WHITE);
     p.cuboid(
-        Mat::Stone,
+        Mat::Plaster,
         v3(-5.8, 11.0, zf),
         v3(5.8, 11.8, pz + 0.75),
         WHITE,
@@ -2384,7 +2406,7 @@ fn bank() -> Parts {
     );
     balustrade_round(&mut p, v3(0.0, 14.4, c.z), 17.4, 14.4, 1.0, WHITE);
     let d = v3(0.0, 14.4, c.z - 0.6);
-    p.cylinder(Mat::Stone, d, 4.2, 4.2, 1.4, 18, col, false);
+    p.cylinder(Mat::Plaster, d, 4.2, 4.2, 1.4, 18, col, false);
     dome(
         &mut p,
         Mat::Copper,

@@ -88,6 +88,12 @@ pub fn terms(world: &engine::prelude::World, a: Company, b: Company) -> Result<f
     if a == b {
         return Ok(1.0);
     }
+    if world
+        .get_resource::<Economy>()
+        .is_some_and(|e| !e.rules.house_trade)
+    {
+        return Err("This game is played without trade between houses.".into());
+    }
     // Between two rival houses: plain trade. With the player: by the treaty.
     let rival = if a == PLAYER {
         b

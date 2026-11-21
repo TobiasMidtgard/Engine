@@ -47,6 +47,21 @@ pub const FIRST_CARGO: &[(Good, u32)] =
 /// The purse of a new game.
 pub const FIRST_COINS: f64 = 12_000.0;
 
+/// What a first ship carries under this game's rules: more or less fish and clothes by the
+/// resources rule (the planks for the first harbour always).
+pub fn first_cargo(rules: &crate::rules::Rules) -> Vec<(Good, u32)> {
+    FIRST_CARGO
+        .iter()
+        .map(|&(g, n)| {
+            if g == Good::Planks {
+                (g, n)
+            } else {
+                (g, (n as f64 * rules.cargo()).round() as u32)
+            }
+        })
+        .collect()
+}
+
 /// Whether the company giving orders ([`crate::sim::acting`]) holds island `isle` (its
 /// harbour was the island's first).
 pub fn claimed(world: &World, isle: usize) -> bool {
@@ -84,7 +99,10 @@ pub fn fresh(world: &mut World) {
     let out = (coast - home.center).normalize_or_zero();
     let ty = island::height(coast.x, coast.y).max(0.0);
     world.insert_resource(crate::town::TownCentre(DVec3::new(coast.x, ty, coast.y)));
-    world.resource_mut::<Economy>().coins = FIRST_COINS;
+    {
+        let mut econ = world.resource_mut::<Economy>();
+        econ.coins = (FIRST_COINS * econ.rules.start_coins()).round();
+    }
     // Lying to, a good way out, bows to the shore.
     let mut at = coast + out * 420.0;
     let mut k = 0;
@@ -105,16 +123,16 @@ pub fn fresh(world: &mut World) {
         },
         4_242,
     );
+    let cargo = first_cargo(&world.resource::<Economy>().rules);
+    engine::core::log::info!(
+        "archipelago: a new game; {FIRST_SHIP} lies off {} with {cargo:?}",
+        home.name,
+    );
     if let Some(mut v) = world.get_mut::<Vessel>(e) {
-        v.cargo = FIRST_CARGO.to_vec();
+        v.cargo = cargo;
         v.doing = Doing::Moored(30.0);
     }
     crate::fleet::spawn_traffic(world, false);
-    engine::core::log::info!(
-        "archipelago: a new game; {FIRST_SHIP} lies off {} with {:?}",
-        home.name,
-        FIRST_CARGO
-    );
 }
 
 /// Whether a vessel is one of the company's and free for an errand (not on a route, not on
@@ -158,8 +176,13 @@ pub fn planks_aboard(v: &Vessel) -> u32 {
 pub fn send_settlers(world: &mut World, origin: IVec2, rot: u8, isle: usize) -> Result<(), String> {
     let name = islands()[isle].name;
     let need = harbour_planks();
-    let coins = Kind::Harbour.def().coins as f64;
     let me = crate::sim::acting(world);
+    let coins = crate::build::price(world, Kind::Harbour, me);
+    if world.resource::<Economy>().rules.closed(isle) {
+        return Err(format!(
+            "{name} is closed to settlers in this game (a crowded map)."
+        ));
+    }
     let purse = world.resource::<Economy>().coins_of(me);
     if purse < coins {
         return Err(format!(
@@ -384,8 +407,8 @@ pub fn land(world: &mut World, v: &mut Vessel) {
     v.roam = Roam::Idle { at: here };
     v.doing = Doing::Moored(20.0);
     let need = harbour_planks();
-    let coins = Kind::Harbour.def().coins as f64;
     let me = v.company;
+    let coins = crate::build::price(world, Kind::Harbour, me);
     let fail = |world: &mut World, why: String| {
         if me == crate::sim::PLAYER {
             crate::hud::complain(world, &format!("Settling {name}"), &why);

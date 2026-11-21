@@ -61,10 +61,19 @@ def judge(rows):
     if rivals:
         lab = first(rows, lambda r: r["companies"][0]["tiers"][1] > 0)
         bur = first(rows, lambda r: r["companies"][0]["tiers"][2] > 0)
+        # (Timelines from before the fourth and fifth tiers have three entries.)
+        mas = first(rows, lambda r: len(r["companies"][0]["tiers"]) > 3 and r["companies"][0]["tiers"][3] > 0)
+        pat = first(rows, lambda r: len(r["companies"][0]["tiers"]) > 4 and r["companies"][0]["tiers"][4] > 0)
+        # The first time any rival company has Masters or Patricians.
+        rmas = first(rows, lambda r: any(len(c["tiers"]) > 3 and c["tiers"][3] > 0 for c in r["companies"][1:]))
+        rpat = first(rows, lambda r: any(len(c["tiers"]) > 4 and c["tiers"][4] > 0 for c in r["companies"][1:]))
         people = last["companies"][0]["people"]
     else:
         lab = first(rows, lambda r: r["houses"][1] > 0)
         bur = first(rows, lambda r: r["houses"][2] > 0)
+        mas = first(rows, lambda r: len(r["houses"]) > 3 and r["houses"][3] > 0)
+        pat = first(rows, lambda r: len(r["houses"]) > 4 and r["houses"][4] > 0)
+        rmas = rpat = None
         people = sum(sum(i["people"]) for i in last["islands"])
     houses = sum(last["houses"])
     happy = None
@@ -78,6 +87,10 @@ def judge(rows):
         "balance_positive_at": turned,
         "first_labourers_at": None if lab is None else lab - t0,
         "first_burghers_at": None if bur is None else bur - t0,
+        "first_masters_at": None if mas is None else mas - t0,
+        "first_patricians_at": None if pat is None else pat - t0,
+        "rival_masters_at": None if rmas is None else rmas - t0,
+        "rival_patricians_at": None if rpat is None else rpat - t0,
         "people_at_end": round(people),
         "islands_at_end": last["companies"][0]["islands"] if rivals else last.get("settled", len(last["islands"])),
         # Where the player's company finished by people (1 = first), in a game with rivals.
@@ -92,6 +105,10 @@ TARGETS = [
     ("2 Money recovers", "balance_positive_at", lambda v: v is not None and v <= 25, "by 0:25"),
     ("3 Steady climb", "first_labourers_at", lambda v: v is not None and 8 <= v <= 15, "0:08 to 0:15"),
     ("4 Burghers", "first_burghers_at", lambda v: v is not None and 60 <= v <= 90, "1:00 to 1:30"),
+    ("4b Masters", "first_masters_at", lambda v: v is not None, "reached"),
+    ("4c Patricians", "first_patricians_at", lambda v: v is not None, "reached"),
+    ("4d Rivals reach Masters", "rival_masters_at", lambda v: v is not None, "reached"),
+    ("4e Rivals reach Patricians", "rival_patricians_at", lambda v: v is not None, "reached"),
     ("5a People", "people_at_end", lambda v: v is not None and v >= 4000, "4,000 or more"),
     ("5b Islands", "islands_at_end", lambda v: v is not None and v >= 4, "4 or more"),
     ("6 Happy towns", "happy_share_at_end", lambda v: v is not None and v >= 0.7, "70 % or more"),

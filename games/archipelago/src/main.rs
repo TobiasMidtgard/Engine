@@ -22,6 +22,8 @@ mod build;
 mod burgher;
 mod camera;
 mod catalog;
+mod characters;
+mod cheats;
 mod civic;
 mod defs;
 mod draw;
@@ -52,6 +54,7 @@ mod playtest;
 mod regional;
 mod reports;
 mod rivals;
+mod rules;
 mod sea;
 mod settle;
 mod shipyard;
@@ -108,6 +111,39 @@ fn main() {
             count: n.min(3),
             level: level_arg("--rival-level").unwrap_or(brain::Level::Captain),
         });
+    }
+    // `--rules economy=hard,military=ruthless,...`: the game's rules (see `rules.rs`).
+    if let Some(text) = args
+        .iter()
+        .position(|a| a == "--rules")
+        .and_then(|i| args.get(i + 1))
+    {
+        let mut r = rules::Rules::default();
+        match r.parse(text) {
+            Ok(()) => rules::apply(&mut app.world, r),
+            Err(e) => engine::core::log::warn!("archipelago: --rules: {e}"),
+        }
+    }
+    // `--rival-picks gullwick:admiral,vane,hask:mate`: the characters played against.
+    if let Some(text) = args
+        .iter()
+        .position(|a| a == "--rival-picks")
+        .and_then(|i| args.get(i + 1))
+    {
+        let level = level_arg("--rival-level").unwrap_or(brain::Level::Captain);
+        match characters::RivalPicks::parse(text, level) {
+            Ok(p) => {
+                // (Picks alone start a game with that many rivals.)
+                if app.world.get_resource::<brain::RivalSetup>().is_none() {
+                    app.insert_resource(brain::RivalSetup {
+                        count: p.0.len(),
+                        level,
+                    });
+                }
+                app.insert_resource(p);
+            }
+            Err(e) => engine::core::log::warn!("archipelago: --rival-picks: {e}"),
+        }
     }
     // `--play-level admiral`: how well the scripted player plays (Captain unless told).
     if let Some(l) = level_arg("--play-level") {
@@ -216,7 +252,14 @@ pub fn add_game(app: &mut App) {
                 hud::read_actions,
                 tools::input,
                 town::upgrade_looks,
-                (items::tick, incidents::tick, traders::tick, reports::alerts).chain(),
+                (
+                    items::tick,
+                    incidents::tick,
+                    traders::tick,
+                    characters::diplomacy,
+                    reports::alerts,
+                )
+                    .chain(),
                 build::refresh,
                 draw::redraw_buildings,
                 streets::redraw_streets,
@@ -252,6 +295,9 @@ pub fn add_game(app: &mut App) {
     rivals::register(app);
     tradelines::register(app);
     traders::register(app);
+    rules::register(app);
+    characters::register(app);
+    cheats::register(app);
     settle::register(app);
     helm::register(app);
     incidents::register(app);

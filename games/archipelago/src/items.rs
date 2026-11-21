@@ -1857,6 +1857,9 @@ pub fn unsocket(world: &mut World, building: u32, slot: usize) -> Result<(), Str
 
 /// Buy the pedlar's `index`th offer.
 pub fn buy(world: &mut World, index: usize) -> Result<&'static str, String> {
+    if !world.resource::<Economy>().rules.pedlar {
+        return Err("This game is played without the pedlar.".into());
+    }
     let items = world.resource::<Items>();
     if !items.market_open {
         return Err("The pedlar is not at the quay.".into());

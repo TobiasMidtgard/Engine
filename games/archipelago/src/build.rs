@@ -42,12 +42,19 @@ fn pay(world: &mut World, kind: Kind, isle: usize) -> Result<(), String> {
     can_pay(world, kind, isle)?;
     let def = kind.def();
     let me = crate::sim::acting(world);
+    let coins = price(world, kind, me);
     let mut econ = world.resource_mut::<Economy>();
-    *econ.coins_mut(me) -= def.coins as f64;
+    *econ.coins_mut(me) -= coins;
     for (g, n) in def.cost {
         econ.islands[isle].take(*g, *n as f64);
     }
     Ok(())
+}
+
+/// What company `c` pays in coins for `kind` under this game's rules (the list price on a
+/// normal economy).
+pub fn price(world: &World, kind: Kind, c: crate::sim::Company) -> f64 {
+    (kind.def().coins as f64 * world.resource::<Economy>().rules.build_cost(c)).round()
 }
 
 /// Whether the company giving orders could pay for `kind` on island `isle` now, and if not,
@@ -56,17 +63,18 @@ pub fn can_pay(world: &World, kind: Kind, isle: usize) -> Result<(), String> {
     let def = kind.def();
     let me = crate::sim::acting(world);
     let econ = world.resource::<Economy>();
+    if kind == Kind::AirshipMast && !econ.rules.airships {
+        return Err("This game is played without airships.".into());
+    }
+    let cost = price(world, kind, me);
     // Nothing is built in debt, not even a house: a purse below zero has to be won back
     // first (pause works, sell goods), as a company would.
     let purse = econ.coins_of(me);
-    if purse < def.coins as f64 || purse < 0.0 {
+    if purse < cost || purse < 0.0 {
         return Err(if purse < 0.0 {
             format!("The purse is {purse:.0} coins in debt: nothing can be built until it is out.")
         } else {
-            format!(
-                "{} costs {} coins; you have {purse:.0}.",
-                def.name, def.coins
-            )
+            format!("{} costs {cost:.0} coins; you have {purse:.0}.", def.name)
         });
     }
     let books = &econ.islands[isle];

@@ -529,6 +529,7 @@ pub fn move_up(world: &mut World, e: Entity) -> Result<Option<String>, String> {
         &world.resource::<Economy>().islands[b.island],
         free,
         true,
+        crate::rules::of(world).top_tier,
     );
     if why != Wait::None {
         let mut shown = h.clone();
@@ -588,9 +589,10 @@ pub fn move_up_all_of(
         };
         let free = world.get::<Boost>(e).is_some_and(|x| x.rise);
         let mut econ = world.resource_mut::<Economy>();
+        let top = econ.rules.top_tier;
         let books = &mut econ.islands[i];
         // (The guard and the building reserve, as for houses that move up on their own.)
-        let why = sim::up_wait(&h, books, free, false);
+        let why = sim::up_wait(&h, books, free, false, top);
         if why == Wait::None {
             let mut h2 = h;
             sim::move_up(&mut h2, books, free);

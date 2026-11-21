@@ -552,7 +552,7 @@ pub fn launch(world: &mut World, e: Entity) {
     } else if owner == crate::sim::PLAYER {
         NAMES
     } else {
-        crate::rivals::ship_names(owner)
+        crate::rivals::ship_names_in(world, owner)
     };
     let name = {
         let taken: Vec<String> = world

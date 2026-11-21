@@ -76,6 +76,9 @@ pub fn order(world: &mut World, c: Company, i: usize, g: Good, keep: f64) -> Res
         ));
     }
     let econ = world.resource::<Economy>();
+    if !econ.rules.free_traders {
+        return Err("This game is played without the free traders.".into());
+    }
     let Some(b) = econ.islands.get(i) else {
         return Err("No such island.".into());
     };
@@ -123,6 +126,10 @@ pub fn step(world: &mut World, now: f64) {
         return;
     };
     let mut econ = world.resource_mut::<Economy>();
+    if !econ.rules.free_traders {
+        world.insert_resource(t);
+        return;
+    }
     let n = econ.islands.len();
     if t.last_call.len() != n {
         // (The calls are spread over the round so not every harbour gets one at once.)

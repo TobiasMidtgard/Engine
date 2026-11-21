@@ -113,7 +113,7 @@ fn stands(world: &mut World) -> Vec<Stand> {
             coins: c.coins as f32,
             balance: c.coins_per_min as f32,
             people: c.people as f32,
-            tiers: c.tiers.map(|n| n as f32),
+            tiers: std::array::from_fn(|i| c.tiers.get(i).map_or(0.0, |n| *n as f32)),
             islands: c.islands as f32,
             ships: c.ships as f32,
             makes: c.makes,

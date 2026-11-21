@@ -495,6 +495,8 @@ pub struct Economy {
     pub auto_paused: u32,
     /// Game seconds waiting for the next fixed step.
     pub acc: f32,
+    /// The rules this game is played by.
+    pub rules: crate::rules::Rules,
 }
 
 /// One line of what costs the most: works of a kind on an island, running or idle.
@@ -525,6 +527,7 @@ impl Default for Economy {
             drains: Vec::new(),
             auto_paused: 0,
             acc: 0.0,
+            rules: crate::rules::Rules::default(),
         }
     }
 }
@@ -639,6 +642,7 @@ pub fn step(
     }
     econ.clock_s += dt as f64;
     let clock = econ.clock_s;
+    let rules = econ.rules;
     let n = econ.islands.len();
     let k = (dt / SMOOTH_S).min(1.0);
     for b in econ.islands.iter_mut() {
@@ -832,7 +836,7 @@ pub fn step(
         h.rent = rent;
         h.goodwill = goodwill;
         h.income = coins * (h.residents / base).min(cap / base) + rent + goodwill;
-        taxes[own[b.island]] += (h.income / 60.0 * dt) as f64;
+        taxes[own[b.island]] += (h.income / 60.0 * dt) as f64 * rules.tax(own[b.island] as Company);
         // Ready to move up: full, every basic category met, not angry, no trouble. Once
         // ready it stays so until a category has been well short for a while.
         let full = h.residents >= cap - 0.25;
@@ -847,7 +851,7 @@ pub fn step(
             h.ready = full && short.is_none() && calm;
         }
         h.content_s = if h.ready { h.content_s + dt } else { 0.0 };
-        h.wait = if tier.next().is_none() {
+        h.wait = if tier.next().is_none_or(|(t, _)| !rules.allows_tier(t)) {
             Wait::Top
         } else if h.ready {
             Wait::None
@@ -868,7 +872,13 @@ pub fn step(
     for (i, (b, mut h, boost)) in houses.iter_mut().enumerate() {
         let books = &econ.islands[b.island];
         if h.ready && h.tier.next().is_some() {
-            h.wait = up_wait(&h, books, boost.is_some_and(|x| x.rise), false);
+            h.wait = up_wait(
+                &h,
+                books,
+                boost.is_some_and(|x| x.rise),
+                false,
+                rules.top_tier,
+            );
             if h.wait == Wait::None
                 && books.auto_up
                 && clock >= books.next_up_s
@@ -901,7 +911,7 @@ pub fn step(
                 let p = &econ.rivals[c - 1];
                 (p.public_upkeep, p.fleet_upkeep)
             };
-            ((public + fleet) / 60.0 * dt) as f64
+            ((public + fleet) / 60.0 * dt) as f64 * rules.upkeep(c as Company)
         })
         .collect();
     let mut econ_chandlery = 0;
@@ -944,7 +954,7 @@ pub fn step(
             } else {
                 1.0
             };
-        upkeep[c] += (cost / 60.0 * dt) as f64;
+        upkeep[c] += (cost / 60.0 * dt) as f64 * rules.upkeep(c as Company);
         // (What costs the most, of the player's.)
         if cost > 0.0 && c == 0 {
             let idle = p.paused || p.idle_s >= LET_GO_S;
@@ -1070,7 +1080,7 @@ pub fn step(
         } else {
             Status::Working
         };
-        p.progress += dt / def.cycle_s * p.efficiency * (1.0 + boost.faster);
+        p.progress += dt / def.cycle_s * p.efficiency * (1.0 + boost.faster) * rules.yield_of(def);
         if p.progress >= 1.0 {
             p.progress -= 1.0;
             p.made += 1;
@@ -1276,8 +1286,8 @@ pub fn appraise(h: &House, books: &IslandBooks, boost: Option<&Boost>) -> Apprai
 
 /// What stops a ready house moving up now (`Wait::None`: nothing). `now` is the player's
 /// order for this one house: it ignores the job guard (the caller warns instead).
-pub fn up_wait(h: &House, books: &IslandBooks, free: bool, now: bool) -> Wait {
-    let Some((next, cost)) = h.tier.next() else {
+pub fn up_wait(h: &House, books: &IslandBooks, free: bool, now: bool, top: Tier) -> Wait {
+    let Some((next, cost)) = h.tier.next().filter(|(t, _)| *t <= top) else {
         return Wait::Top;
     };
     if next.wants_paving() && !h.paved {
