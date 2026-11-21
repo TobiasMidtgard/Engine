@@ -3255,7 +3255,13 @@ impl RenderFeature for TerrainFeature {
             return;
         };
         if !self.once_now {
-            gpu.once = None;
+            // Another view (a mirror, a portal) draws its ground the old way and leaves the
+            // main view's targets alone: dropped here, the main view made six screen-sized
+            // images anew every frame such a view was drawn (195 MiB at 2560x1440, and the
+            // dropped ones live on until the GPU is past them).
+            if !self.extra_view {
+                gpu.once = None;
+            }
             return;
         }
         if gpu.once.as_ref().is_none_or(|o| o.size != targets.size) {
