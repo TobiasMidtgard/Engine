@@ -91,6 +91,11 @@ pub struct FaceFollow {
     now: Vec<Vec3>,
 }
 
+/// Scalp hair drawn this much wider than its fibres: a real head's hundred thousand hairs
+/// cover it, and where long hair spreads over the shoulders and thins at its ends ours, at
+/// true width and a little under a pixel each at 1440p, let the shirt show through: thin.
+const SCALP_WIDTH: f32 = 1.5;
+
 /// How dark the most buried hair is drawn, against hair in the open (its color's share).
 const BURIED_DARK: f32 = 0.35;
 
@@ -591,7 +596,11 @@ pub(crate) fn draw_hair(
                     visible: true,
                     // Brow hairs are coarser than scalp hair, and so few that a thinner
                     // sprinkle of them lets the skin show through as a pale brow.
-                    width_scale: if kind == StrandKind::Brows { 1.3 } else { 1.0 },
+                    width_scale: match kind {
+                        StrandKind::Brows => 1.3,
+                        StrandKind::Scalp => SCALP_WIDTH,
+                        _ => 1.0,
+                    },
                     ..StrandInstance::new(handle)
                 },
                 DrawnHair {

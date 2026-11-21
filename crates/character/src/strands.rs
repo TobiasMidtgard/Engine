@@ -673,7 +673,7 @@ fn grow_scalp(
             points: 18,
             density: 170.0,
             gravity: 1.0,
-            loft: 0.016,
+            loft: 0.022,
             clump: 0.6,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
@@ -683,7 +683,9 @@ fn grow_scalp(
             points: 32,
             density: 190.0,
             gravity: 1.0,
-            loft: 0.012,
+            // (Standing off the scalp as much as a real head of long hair does: at 1.2 cm it
+            // lay flat as a wig on the head.)
+            loft: 0.02,
             clump: 0.75,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
