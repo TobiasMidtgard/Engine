@@ -24,6 +24,8 @@ use engine_ui::style::{Align, Direction, Fill, Justify, Pick, Shadow, pct};
 use engine_ui::text::{DISPLAY_FONT, TextSpec};
 use serde_json::{Value, json};
 
+use crate::defs::{Good, Tier};
+
 pub const SCREEN: &str = "isle_relations";
 const DIAL: &str = "isle_rel_dial";
 const BODY_ID: &str = "isle.rel.body";
@@ -86,30 +88,36 @@ struct Move {
     args: Option<Value>,
 }
 
-/// A company's standing from the game (`brain::standings`): purse, people, islands, tiers.
+/// A company's standing from the game (`rivals::compare`): purse, people by tier, islands,
+/// ships, and what it makes most and lacks most.
 #[derive(Clone, Debug, Default)]
 struct Stand {
+    /// Whether the game keeps books for this house (false: the report's rough figures only).
+    known: bool,
     coins: f32,
     balance: f32,
     people: f32,
+    tiers: [f32; 3],
     islands: f32,
-    /// The highest tier with people (0 fisherfolk), or none.
-    top: Option<usize>,
+    ships: f32,
+    makes: Vec<(Good, f32)>,
+    short_of: Vec<(Good, f32)>,
 }
 
-/// Every company's standing, the player's first.
-fn stands(world: &World) -> Vec<Stand> {
-    crate::brain::standings(world)
-        .iter()
-        .map(|v| Stand {
-            coins: num(v, &["coins"]),
-            balance: num(v, &["balance"]),
-            people: num(v, &["people"]),
-            islands: num(v, &["islands"]),
-            top: v
-                .get("tiers")
-                .and_then(Value::as_array)
-                .and_then(|t| t.iter().rposition(|x| x.as_f64().unwrap_or(0.0) >= 1.0)),
+/// Every company's standing, by company number (the player's first).
+fn stands(world: &mut World) -> Vec<Stand> {
+    crate::rivals::compare(world)
+        .into_iter()
+        .map(|c| Stand {
+            known: true,
+            coins: c.coins as f32,
+            balance: c.coins_per_min as f32,
+            people: c.people as f32,
+            tiers: c.tiers.map(|n| n as f32),
+            islands: c.islands as f32,
+            ships: c.ships as f32,
+            makes: c.makes,
+            short_of: c.short_of,
         })
         .collect()
 }
@@ -606,12 +614,8 @@ fn balance_two(ours: f32, theirs: f32, c: Color) -> El {
         }))
 }
 
-fn tier_word(t: Option<usize>) -> String {
-    t.and_then(|i| crate::defs::Tier::ALL.get(i))
-        .map_or("nobody yet".into(), |t| t.name().to_string())
-}
-
-/// You against them, side by side: purse, balance, people, islands, top tier, fleet, guns.
+/// You against them, side by side: purse, balance, people tier by tier, islands, ships,
+/// fleet and guns, then what each makes most and lacks most.
 fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
     let c = r.color;
     let money = |x: f32| super::fmt_int(x as f64);
@@ -638,20 +642,53 @@ fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
             (money(us.people), money(them.people)),
             c,
         ),
+    ];
+    // The balance and people tier by tier only when the game keeps their books.
+    let both = us.known && them.known;
+    let rows: Vec<El> = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 1 || both)
+        .map(|(_, e)| e)
+        .collect();
+    let tiers: Vec<El> = Tier::ALL
+        .iter()
+        .filter(|_| both)
+        .enumerate()
+        .map(|(i, t)| {
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(6.0).align_items(Align::Center))
+                .child(brass::badge(super::plan::tier_icon(*t), 24.0))
+                .child(
+                    versus_row(
+                        &t.name().to_lowercase(),
+                        us.tiers[i],
+                        them.tiers[i],
+                        (money(us.tiers[i]), money(them.tiers[i])),
+                        c,
+                    )
+                    .with_style(|s| s.grow(1.0)),
+                )
+        })
+        .collect();
+    let rows2 = vec![versus_row(
+        "islands",
+        us.islands,
+        them.islands,
+        (format!("{:.0}", us.islands), format!("{:.0}", them.islands)),
+        c,
+    )];
+    let ships = both.then(|| {
         versus_row(
-            "islands",
-            us.islands,
-            them.islands,
-            (format!("{:.0}", us.islands), format!("{:.0}", them.islands)),
+            "ships and aircraft",
+            us.ships,
+            them.ships,
+            (format!("{:.0}", us.ships), format!("{:.0}", them.ships)),
             c,
-        ),
-        versus_row(
-            "highest tier",
-            us.top.map_or(0.0, |t| t as f32 + 1.0),
-            them.top.map_or(0.0, |t| t as f32 + 1.0),
-            (tier_word(us.top), tier_word(them.top)),
-            c,
-        ),
+        )
+    });
+    let rows3 = vec![
         versus_row(
             "warships",
             r.our_warships,
@@ -675,22 +712,30 @@ fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
     ];
     let ahead = [
         us.coins > them.coins,
-        us.balance > them.balance,
+        both && us.balance > them.balance,
         us.people > them.people,
+        both && us.tiers[2] > them.tiers[2],
         us.islands > them.islands,
-        us.top > them.top,
+        both && us.ships > them.ships,
         r.our_warships > r.warships,
         r.our_firepower > r.firepower,
     ]
     .iter()
     .filter(|x| **x)
     .count();
-    let verdict = match ahead {
-        6.. => ("You lead them on nearly every count", Colors::good_ink()),
-        4..=5 => ("You are ahead of them", Colors::good_ink()),
-        3 => ("Neck and neck", Colors::ink()),
-        1..=2 => ("They are ahead of you", Colors::bad_ink()),
-        _ => ("They lead you on every count", Colors::bad_ink()),
+    // Out of eight counts, or five when their books are not kept.
+    let of = if both { 8.0 } else { 5.0 };
+    let share = ahead as f32 / of;
+    let verdict = if share > 0.85 {
+        ("You lead them on nearly every count", Colors::good_ink())
+    } else if share > 0.55 {
+        ("You are ahead of them", Colors::good_ink())
+    } else if share >= 0.45 {
+        ("Neck and neck", Colors::ink())
+    } else if share > 0.0 {
+        ("They are ahead of you", Colors::bad_ink())
+    } else {
+        ("They lead you on every count", Colors::bad_ink())
     };
     El::new()
         .class("col")
@@ -726,6 +771,78 @@ fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
                 .child(shield(r, 34.0)),
         )
         .children(rows)
+        .children(tiers)
+        .children(rows2)
+        .child_opt(ships)
+        .children(rows3)
+        .child_opt(both.then(|| goods_versus(us, them, c)))
+}
+
+/// One side's goods: the label, then each good's picture and its rate a minute.
+fn goods_side(label: &str, goods: &[(Good, f32)], tint: Color) -> El {
+    let mut col = El::new()
+        .class("col")
+        .with_style(|s| s.gap(4.0).grow(1.0).basis(0.0))
+        .child(brass::label(label, true));
+    if goods.is_empty() {
+        col = col.child(
+            El::text("nothing to speak of")
+                .class("ink")
+                .text_style(|t| t.italic().size(13.0))
+                .with_style(|s| s.color(Colors::ink_dim()))
+                .pick_ignore(),
+        );
+    }
+    col.child(
+        El::new()
+            .class("row")
+            .with_style(|s| s.gap(8.0).wrap(true))
+            .children(goods.iter().take(5).map(move |(g, n)| {
+                El::new()
+                    .class("col")
+                    .with_style(|s| s.gap(0.0).align_items(Align::Center).width(54.0))
+                    .tooltip(g.name(), format!("{n:.1} a minute"))
+                    .child(brass::badge(g.icon(), 34.0))
+                    .child(
+                        El::text(format!("{n:.1}"))
+                            .class("ink")
+                            .text_style(|t| t.size(12.5).bold().tabular().nowrap())
+                            .with_style(move |s| s.color(tint))
+                            .pick_ignore(),
+                    )
+            })),
+    )
+}
+
+/// What each side makes most of, and what each side's towns lack most, a minute.
+fn goods_versus(us: &Stand, them: &Stand, c: Color) -> El {
+    let theirs = c.lerp(Colors::ink(), 0.35);
+    El::new()
+        .class("col")
+        .with_style(|s| s.gap(8.0).margin([6.0, 0.0, 0.0, 0.0]))
+        .child(brass::divider(320.0))
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(18.0).align_items(Align::Start))
+                .child(goods_side("you make most", &us.makes, our_color()))
+                .child(goods_side("they make most", &them.makes, theirs)),
+        )
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(18.0).align_items(Align::Start))
+                .child(goods_side(
+                    "your towns lack",
+                    &us.short_of,
+                    Colors::bad_ink(),
+                ))
+                .child(goods_side(
+                    "their towns lack",
+                    &them.short_of,
+                    Colors::bad_ink(),
+                )),
+        )
 }
 
 /// Every house at a glance, you first: purse, people, islands; the leader of each in bold.
@@ -738,19 +855,21 @@ fn league(list: &[Rival], all: &[Stand]) -> El {
         // Without the game's numbers for a house, what the relations report says.
         let st = all.get(r.id as usize).cloned().unwrap_or(Stand {
             coins: r.wealth,
-            balance: 0.0,
             people: r.people,
             islands: r.islands as f32,
-            top: None,
+            ..Default::default()
         });
         rows.push((r.name.clone(), r.color, st));
     }
     let best =
         |f: &dyn Fn(&Stand) -> f32| rows.iter().map(|(_, _, s)| f(s)).fold(f32::MIN, f32::max);
-    let (bc, bp, bi) = (
+    let (bc, bm, bp, bb, bi, bs) = (
         best(&|s| s.coins),
+        best(&|s| s.balance),
         best(&|s| s.people),
+        best(&|s| s.tiers[2]),
         best(&|s| s.islands),
+        best(&|s| s.ships),
     );
     let cell = |t: String, lead: bool, w: f32| {
         El::text(t)
@@ -766,13 +885,27 @@ fn league(list: &[Rival], all: &[Stand]) -> El {
             .with_style(move |s| s.width(w))
             .pick_ignore()
     };
+    let head_cell = |t: &str, w: f32| {
+        El::text(t.to_string())
+            .class("ink_label")
+            .text_style(|s| {
+                s.size(11.0)
+                    .nowrap()
+                    .align(engine_ui::node::TextAlign::Right)
+            })
+            .with_style(move |s| s.width(w))
+            .pick_ignore()
+    };
     let head = El::new()
         .class("row")
         .with_style(|s| s.gap(6.0))
         .child(El::new().with_style(|s| s.grow(1.0)))
-        .child(cell("coins".into(), false, 70.0).class("ink_label"))
-        .child(cell("people".into(), false, 64.0).class("ink_label"))
-        .child(cell("isles".into(), false, 40.0).class("ink_label"));
+        .child(head_cell("coins", 64.0))
+        .child(head_cell("a min", 52.0))
+        .child(head_cell("people", 58.0))
+        .child(head_cell("burghers", 70.0))
+        .child(head_cell("isles", 38.0))
+        .child(head_cell("ships", 40.0));
     El::new()
         .class("col")
         .with_style(|s| s.gap(4.0).margin([6.0, 0.0, 0.0, 0.0]))
@@ -796,13 +929,40 @@ fn league(list: &[Rival], all: &[Stand]) -> El {
                         .with_style(|s| s.grow(1.0).shrink(1.0))
                         .pick_ignore(),
                 )
-                .child(cell(super::fmt_int(st.coins as f64), st.coins >= bc, 70.0))
+                .child(cell(super::fmt_int(st.coins as f64), st.coins >= bc, 64.0))
+                .child(cell(
+                    if st.known {
+                        format!("{:+.0}", st.balance)
+                    } else {
+                        "–".into()
+                    },
+                    st.known && st.balance >= bm,
+                    52.0,
+                ))
                 .child(cell(
                     super::fmt_int(st.people as f64),
                     st.people >= bp,
-                    64.0,
+                    58.0,
                 ))
-                .child(cell(format!("{:.0}", st.islands), st.islands >= bi, 40.0))
+                .child(cell(
+                    if st.known {
+                        super::fmt_int(st.tiers[2] as f64)
+                    } else {
+                        "–".into()
+                    },
+                    st.known && st.tiers[2] >= bb && bb > 0.0,
+                    70.0,
+                ))
+                .child(cell(format!("{:.0}", st.islands), st.islands >= bi, 38.0))
+                .child(cell(
+                    if st.known {
+                        format!("{:.0}", st.ships)
+                    } else {
+                        "–".into()
+                    },
+                    st.known && st.ships >= bs,
+                    40.0,
+                ))
         }))
 }
 
@@ -1084,10 +1244,9 @@ fn body(list: &[Rival], picked: Option<u64>, clock: f64, all: &[Stand]) -> Vec<E
             // Without the game's numbers for them, what the relations report says.
             let them = all.get(pick.id as usize).cloned().unwrap_or(Stand {
                 coins: pick.wealth,
-                balance: 0.0,
                 people: pick.people,
                 islands: pick.islands as f32,
-                top: None,
+                ..Default::default()
             });
             detail(pick, clock, &us, &them)
         });
