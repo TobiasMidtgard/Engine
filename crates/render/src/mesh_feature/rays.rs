@@ -29,7 +29,7 @@
 use super::*;
 use crate::ray_scene::look::{material_light, texture_mean};
 use crate::ray_scene::{
-    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayView,
+    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayTileSource, RayView,
 };
 
 /// Slots a frame looks at in turn, at least; every slot comes up within [`ROLL_FRAMES`].
@@ -56,6 +56,22 @@ const UNMEASURED_RADIUS_M: f32 = 64.0;
 /// (meters), which the finest cascades have: of the stand-ins a thing may have for maps of
 /// different coarseness (`ShadowTexelRange`), the one for the finest.
 const STAND_IN_TEXEL_M: f32 = 0.05;
+
+/// The texture a material's tile in the ray tiles is filled from (`MaterialFrame::ray_tile`).
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub(super) enum RayTileName {
+    /// None: its hits take their row's colour.
+    #[default]
+    None,
+    /// Its base colour image (the canonical handle index), RGBA8; `srgb`: read as sRGB, as a
+    /// colour slot reads an sRGB image.
+    Image { index: u32, srgb: bool },
+    /// Its preset's generated base colour at `size` texels.
+    Preset { preset: MaterialPreset, size: u32 },
+}
+
+/// Key bit of a preset's tile (an image's key is its handle index, below 2^32).
+const PRESET_TILE: u64 = 1 << 63;
 
 /// The triangles of a mesh the pool does not hold, for the scene to build from.
 struct RayCopy {
@@ -280,6 +296,56 @@ impl MeshRays {
         (albedo.to_array(), emissive.to_array())
     }
 
+    /// Which texture a hit of `material` reads as its tile, and the texture's scale (xy) and
+    /// offset (zw) over the mesh's uv: its base colour image (RGBA8, as its mean is), else its
+    /// preset's generated map, which is what the raster draws in that slot
+    /// (`texture_set_for`); none where the texture is not laid by the mesh's uv (a hit knows
+    /// no other). Field reads, only while the scene is on.
+    pub(super) fn tile_name(
+        &self,
+        material: &StandardMaterial,
+        images: Option<&Assets<Image>>,
+        preset_size: u32,
+    ) -> (RayTileName, [f32; 4]) {
+        let none = (RayTileName::None, [1.0, 1.0, 0.0, 0.0]);
+        if !self.on || material.mapping.projection() != crate::TextureProjection::Uv {
+            return none;
+        }
+        let name = match (material.base_color_texture, material.preset) {
+            (Some(handle), _) => {
+                let Some(images) = images else {
+                    return none;
+                };
+                let handle = images.canonical(handle);
+                match images.get(handle) {
+                    Some(image) if image.format == crate::PixelFormat::Rgba8 => {
+                        RayTileName::Image {
+                            index: handle.index(),
+                            srgb: image.srgb,
+                        }
+                    }
+                    _ => return none,
+                }
+            }
+            (None, Some(preset)) => RayTileName::Preset {
+                preset,
+                size: preset_size,
+            },
+            (None, None) => return none,
+        };
+        // As mesh.wgsl lays it: uv x `uv_scale` / `texture_scale` (a material has no offset).
+        let per_m = 1.0 / material.texture_scale.max(1e-4);
+        (
+            name,
+            [
+                material.uv_scale[0] * per_m,
+                material.uv_scale[1] * per_m,
+                0.0,
+                0.0,
+            ],
+        )
+    }
+
     /// On the main thread, once a frame: copy the triangles of the meshes the last fill
     /// asked for, within the frame's allowance (those left out are asked for again).
     pub(super) fn copy_wanted(&mut self, meshes: &Assets<Mesh>, frame: u64) {
@@ -352,8 +418,8 @@ enum Seen {
     /// Its bounds are not known yet (its mesh is neither uploaded nor built as clusters).
     NotYet,
     /// In the scene, as this class (one past a reach, within [`KEEP_M`] of it, only if it
-    /// is there already).
-    Yes(RayClass),
+    /// is there already), its nearest point this far from the camera (meters).
+    Yes(RayClass, f32),
 }
 
 /// Whether something of radius `radius` whose nearest point is `distance` from the camera
@@ -380,6 +446,10 @@ struct Fill<'a> {
     canopy: bool,
     view: &'a RayView,
     rays: &'a mut MeshRays,
+    /// Where the ray tiles' pixels are looked up: the image cache, the generated presets,
+    /// and the virtual texture cache's root tiles of streamed base colours.
+    gpu: &'a GpuShared,
+    vt: Option<&'a VirtualTextureSystem>,
 }
 
 impl Fill<'_> {
@@ -477,7 +547,7 @@ impl Fill<'_> {
                 && placed()
         };
         if within || kept() {
-            Seen::Yes(class)
+            Seen::Yes(class, distance)
         } else {
             Seen::No
         }
@@ -636,12 +706,54 @@ impl Fill<'_> {
         }
     }
 
+    /// The layer of the ray tiles that holds texture `name`, for a slot whose nearest point is
+    /// `distance` meters away (`None`: no tile, or waiting for one). Its pixels are looked up
+    /// only when the scene asks for them, where the raster has them (`texture_set_for`): the
+    /// virtual texture cache's root tile, the image cache's upload, the preset's maps as
+    /// generated. Nothing is uploaded or generated for the rays.
+    fn tile(&self, name: RayTileName, distance: f32, out: &mut RaySceneOut<'_>) -> Option<u16> {
+        let (gpu, vt) = (self.gpu, self.vt);
+        match name {
+            RayTileName::None => None,
+            RayTileName::Image { index, srgb } => {
+                out.tile(RayKey(index as u64, 0), distance, || {
+                    if let Some((view, rect, version)) = vt.and_then(|vt| vt.root_tile(index, srgb))
+                    {
+                        return Some(RayTileSource {
+                            view,
+                            rect,
+                            version,
+                        });
+                    }
+                    let (texture, since) = gpu.images.uploaded_color(index, srgb)?;
+                    Some(RayTileSource {
+                        view: texture.view.clone(),
+                        rect: [0.0, 0.0, 1.0, 1.0],
+                        version: since,
+                    })
+                })
+            }
+            RayTileName::Preset { preset, size } => {
+                let key = RayKey(PRESET_TILE | preset as u64, size as u64);
+                out.tile(key, distance, || {
+                    let set = gpu.materials.existing(preset, size)?;
+                    Some(RayTileSource {
+                        view: set.base_color.clone(),
+                        rect: [0.0, 0.0, 1.0, 1.0],
+                        // (A preset at a size has one look; its compressed copy shows it too.)
+                        version: 0,
+                    })
+                })
+            }
+        }
+    }
+
     /// Bring slot `s` up to date in the scene: placed as it stands, or removed.
     fn slot(&mut self, s: usize, out: &mut RaySceneOut<'_>) {
         let cold = &self.scene.cold[s];
         let id = RayKey(cold.entity.to_bits(), 0);
         self.rays.stats.looked += 1;
-        let class = match self.seen(s, || out.has(id)) {
+        let (class, distance) = match self.seen(s, || out.has(id)) {
             Seen::No => {
                 out.remove(id);
                 return;
@@ -650,7 +762,7 @@ impl Fill<'_> {
                 self.rays.waiting.insert(self.scene.hot[s].mesh);
                 return;
             }
-            Seen::Yes(class) => class,
+            Seen::Yes(class, distance) => (class, distance),
         };
         let hot = &self.scene.hot[s];
         let Some((&mesh, &mat)) = self.tables(hot) else {
@@ -681,15 +793,28 @@ impl Fill<'_> {
         } else {
             cold.moved + STILL_FRAMES
         };
+        // Its texture as a tile, where a hit has a uv to read it at: triangles with records
+        // (a geometry built from the pool's ranges; one drawn only as clusters is built from
+        // a copy, which has none). A shadow stand-in shows no colour.
+        let pooled = self
+            .meshes
+            .get(&mesh.index)
+            .is_some_and(|g| g.version == mesh.version);
+        let tile = if class != RayClass::ShadowOnly && pooled {
+            self.tile(mat.ray_tile, distance, out)
+        } else {
+            None
+        };
         let look = RayLook {
             albedo: mat.ray_albedo,
             roughness: mat.ray_surface[0],
             emissive: mat.ray_emissive,
             metallic: mat.ray_surface[1],
+            tile,
+            uv: mat.ray_uv,
             cutoff: mat.ray_surface[2],
             coverage: mat.coverage,
             double_sided: mat.double_sided,
-            ..Default::default()
         };
         out.place(
             id,
@@ -714,7 +839,7 @@ impl Fill<'_> {
         let wanted = slots
             .iter()
             .any(|&s| match self.seen(s as usize, || false) {
-                Seen::Yes(_) => true,
+                Seen::Yes(..) => true,
                 Seen::NotYet => {
                     unknown = true;
                     false
@@ -747,7 +872,12 @@ impl Fill<'_> {
 impl MeshFeature {
     /// The meshes' part of the frame's ray scene, on the render thread after the main view's
     /// `prepare_frame` (see the module).
-    pub(super) fn fill_ray_scene(&mut self, view: &RayView, out: &mut RaySceneOut<'_>) {
+    pub(super) fn fill_ray_scene(
+        &mut self,
+        gpu: &GpuShared,
+        view: &RayView,
+        out: &mut RaySceneOut<'_>,
+    ) {
         if self.shader.is_none() || !self.rays.on() {
             return;
         }
@@ -787,6 +917,8 @@ impl MeshFeature {
             canopy: self.class_canopy,
             view,
             rays: &mut rays,
+            gpu,
+            vt: self.vt.as_ref(),
         };
         // Gone first: an entity in both lists is gone unless it has a slot now.
         for entity in &gone {

@@ -265,9 +265,15 @@ after the probes' atlases were copied. A mesh from the pool is in the rays at it
 (the coarsest of its levels within 3 cm at the largest scale it is placed at, built while the
 whole mesh serves), and a structure built from the pool's pages gets triangle records, written
 on the GPU after the frame's builds (`ray_scene/tris.rs`, `ray_attr.wgsl`): a hit reads its
-smooth normal, uv and vertex colour there (`ray_surface` in lib_ray.wgsl). Without ray
-queries, or with the switch off, nothing of it is made and the probes gather their own scene as
-before. `render.ray.*` and `render.meshes.ray_*` count it.
+smooth normal, uv and vertex colour there (`ray_surface` in lib_ray.wgsl). A pool mesh whose
+material projects its RGBA8 base colour image (or preset) by uv also gets a tile
+(`ray_scene/tiles.rs`, `ray_tiles.wgsl`): a 128-texel copy, down to its mean, in one 256-layer
+array (22 MB, made at the first fill), filled on the GPU from the texture the raster draws
+with, four a frame nearest first, and given to another texture only after 128 frames in which
+no instance named it; a hit reads it at the level its ray's footprint asks and divides by the
+tile's mean, so the row's colour stays the average. Without ray queries, or with the switch
+off, nothing of it is made and the probes gather their own scene as before. `render.ray.*` and
+`render.meshes.ray_*` count it.
 
 **GPU skinning** (built; `skinning.rs`): a module that poses a mesh puts `GpuSkin` (per-vertex
 bones and weights in an `Arc<SkinWeights>`, each bone's `SkinBone` dual quaternion from the

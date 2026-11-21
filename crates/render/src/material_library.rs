@@ -435,6 +435,17 @@ const MAP_LABELS: [&str; 4] = [
 ];
 
 impl MaterialLibrary {
+    /// The textures of `preset` at `size`² texels if they were generated: a lookup for the ray
+    /// tiles (`ray_scene/tiles.rs`), which never generates.
+    pub(crate) fn existing(
+        &self,
+        preset: MaterialPreset,
+        size: u32,
+    ) -> Option<Arc<MaterialTextures>> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.sets.get(&(preset, clamp_size(size))).cloned()
+    }
+
     /// The textures of `preset` at `size`² texels, generating them on first use.
     pub fn get(&self, gpu: &GpuShared, preset: MaterialPreset, size: u32) -> Arc<MaterialTextures> {
         let size = clamp_size(size);

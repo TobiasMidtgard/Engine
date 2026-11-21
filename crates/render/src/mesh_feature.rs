@@ -591,6 +591,11 @@ struct MaterialFrame {
     ray_albedo: [f32; 3],
     ray_emissive: [f32; 3],
     ray_surface: [f32; 3],
+    /// The texture a hit's tile of it is filled from, and that texture's scale (xy) and
+    /// offset (zw) over the mesh's uv (`RayLook::uv`): `RayTileName::None` while the scene is
+    /// off, or when the material has no texture a hit can read.
+    ray_tile: rays::RayTileName,
+    ray_uv: [f32; 4],
     /// Its material slot and texture set this frame, once something drawn uses it.
     slot: Option<(u32, u32)>,
     /// Which impostors show it: the handle index, the material's GPU values and its images'
@@ -4249,6 +4254,7 @@ impl RenderFeature for MeshFeature {
                     self.material_frames.resize(i + 1, MaterialFrame::default());
                 }
                 let (ray_albedo, ray_emissive) = self.rays.light(gpu, material, image_assets);
+                let (ray_tile, ray_uv) = self.rays.tile_name(material, image_assets, preset_size);
                 let entry = MaterialFrame {
                     index: handle.index(),
                     blend: material.alpha_mode == AlphaMode::Blend,
@@ -4281,6 +4287,8 @@ impl RenderFeature for MeshFeature {
                             _ => 0.5,
                         },
                     ],
+                    ray_tile,
+                    ray_uv,
                 };
                 let change = note_class(&mut self.material_class, i, entry.class());
                 // A material has no `Ready` change.
@@ -5463,11 +5471,11 @@ impl RenderFeature for MeshFeature {
 
     fn ray_scene(
         &mut self,
-        _gpu: &GpuShared,
+        gpu: &GpuShared,
         view: &crate::RayView,
         out: &mut crate::RaySceneOut<'_>,
     ) {
-        self.fill_ray_scene(view, out);
+        self.fill_ray_scene(gpu, view, out);
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {

@@ -53,8 +53,9 @@ struct RayRow {
 // The triangle records (ray_scene/tris.rs; ray_attr.wgsl writes them and says what a record
 // holds).
 @group(RAY_GROUP) @binding(4) var<storage, read> ray_tris: array<u32>;
-// The tiles: a material's base colour in layer `RayRow.tile`, every level down to one texel,
-// its mean. (A stand-in until the tiles land, as is the ground map until step 11 draws it.)
+// The tiles (ray_scene/tiles.rs, filled by ray_tiles.wgsl): a material's base colour in layer
+// `RayRow.tile` at 128 texels, every level down to one texel, its mean; a 1x1 stand-in until
+// the scene's first fill. (The ground map is a stand-in until step 11 draws it.)
 @group(RAY_GROUP) @binding(5) var ray_tiles: texture_2d_array<f32>;
 @group(RAY_GROUP) @binding(6) var ray_ground: texture_2d<f32>;
 

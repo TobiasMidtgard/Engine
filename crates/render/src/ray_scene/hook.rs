@@ -162,6 +162,19 @@ impl Default for RayLook {
     }
 }
 
+/// Where the pixels a layer of the ray tiles is filled from are ([`RaySceneOut::tile`]).
+#[derive(Clone)]
+pub struct RayTileSource {
+    /// A 2D view that samples as filterable float with its mips (an sRGB view of sRGB pixels:
+    /// the colour as the raster reads it).
+    pub view: wgpu::TextureView,
+    /// The texture within the view as its uv: corner (xy) and size (zw); `[0, 0, 1, 1]`: the
+    /// whole view.
+    pub rect: [f32; 4],
+    /// Changes when the pixels do: the layer is filled again (looked at every 64 frames).
+    pub version: u64,
+}
+
 /// The scene, as one feature fills it in [`crate::RenderFeature::ray_scene`].
 pub struct RaySceneOut<'a> {
     pub(super) scene: &'a mut super::RayScene,
@@ -228,6 +241,23 @@ impl RaySceneOut<'_> {
             still_from,
             look,
         )
+    }
+
+    /// The layer of the ray tiles that holds texture `key` (the feature's own name for it), for
+    /// [`RayLook::tile`] of an instance whose nearest point is `distance` meters from the
+    /// camera: `Some` once a layer holds it. `None` while it waits: it is asked for, and each
+    /// frame fills a few asks, the nearest first; ask again whenever the instance is placed.
+    /// `source`: where its pixels are on the GPU now (`None`: not there), asked only for an
+    /// ask (once a frame while it waits) and every 64 frames for a texture a layer holds, to
+    /// see whether its pixels changed. A layer no instance's look has named for a while goes
+    /// to another texture.
+    pub fn tile(
+        &mut self,
+        key: RayKey,
+        distance: f32,
+        source: impl FnOnce() -> Option<RayTileSource>,
+    ) -> Option<u16> {
+        self.scene.tile(self.feature, key, distance, source)
     }
 
     /// Instance `id` is gone (nothing happens if it was never placed).

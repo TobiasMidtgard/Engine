@@ -998,6 +998,61 @@ impl VirtualTextureSystem {
         }
     }
 
+    /// The root tile of the virtual texture that the image at handle index `index` is drawn
+    /// through as colour (`srgb`: through the sRGB cache, as `texture_for` gives a colour slot of
+    /// an sRGB image): the whole texture at 128 texels or fewer across. The cache texture's
+    /// view, the tile's corner and size in it (uv), and the version of what it shows (the
+    /// registration's generation, or the image's version); `None` when the image is not virtual
+    /// here or its root tile is not in. A lookup for the ray tiles (`ray_scene/tiles.rs`): it
+    /// neither loads nor keeps anything.
+    pub(crate) fn root_tile(
+        &self,
+        index: u32,
+        srgb: bool,
+    ) -> Option<(wgpu::TextureView, [f32; 4], u64)> {
+        if self.by_key.is_empty() {
+            return None;
+        }
+        let last_used = |id: u8| {
+            self.textures[id as usize - 1]
+                .as_ref()
+                .map_or(0, |t| t.last_used)
+        };
+        // (An image whose pixels changed may have its old texture here still: the one drawn
+        // last.)
+        let (version, id) = self
+            .by_key
+            .iter()
+            .filter_map(|(&(key, view_srgb), &id)| {
+                let (i, version) = match key {
+                    SourceKey::Registered(i, generation) => (i, generation),
+                    SourceKey::Image(i, version) => (i, version),
+                };
+                (i == index && view_srgb == srgb).then_some((version, id))
+            })
+            .max_by_key(|&(version, id)| (last_used(id), version))?;
+        let tex = self.textures[id as usize - 1].as_ref()?;
+        if tex.failed || !tex.residency.ready() {
+            return None;
+        }
+        let root = tex.residency.root();
+        let slot = tex.residency.slot(root)?;
+        let (w, h) = tex.residency.layout.level_size(root.level);
+        let atlas = &self.atlases[tex.atlas];
+        if !atlas.real {
+            return None;
+        }
+        let size = atlas.texture.width() as f32;
+        let (sx, sy) = (slot % self.per_row, slot / self.per_row);
+        let rect = [
+            (sx * SLOT + BORDER) as f32 / size,
+            (sy * SLOT + BORDER) as f32 / size,
+            w as f32 / size,
+            h as f32 / size,
+        ];
+        Some((atlas.view.clone(), rect, version))
+    }
+
     /// The virtual texture id to draw `handle` with in a slot (`color`: an sRGB view of sRGB
     /// images), or `None` when it is an ordinary texture or not ready to draw yet (the caller
     /// then binds the image itself as usual). Registers images over the size threshold and

@@ -274,7 +274,15 @@ pub(super) struct Instances {
     shifted: u64,
     /// The structures this frame builds (bits), set by [`settle`](Self::settle).
     building: u8,
+    /// Rows of instances (in a structure or parked) that name each layer of the ray tiles:
+    /// a layer goes to another texture only once none has for a while.
+    tile_users: Vec<u32>,
     stats: InstanceStats,
+}
+
+/// The layer of the ray tiles `row` names.
+fn tile_of(row: &RayRow) -> Option<usize> {
+    (row.flags & ROW_HAS_TILE != 0).then_some(row.tile as usize)
 }
 
 impl Instances {
@@ -296,12 +304,31 @@ impl Instances {
             rebuild_all: false,
             shifted: 0,
             building: 0,
+            tile_users: vec![0; super::tiles::LAYERS as usize],
             stats: InstanceStats::default(),
         }
     }
 
     pub(super) fn tlas(&self, level: usize) -> &wgpu::Tlas {
         &self.levels[level].tlas
+    }
+
+    /// Rows that name layer `layer` of the ray tiles now.
+    pub(super) fn tile_users(&self, layer: u16) -> u32 {
+        self.tile_users.get(layer as usize).copied().unwrap_or(0)
+    }
+
+    /// An instance's row named layer `was` of the ray tiles, and names `now`.
+    fn count_tile(&mut self, was: Option<usize>, now: Option<usize>) {
+        if was == now {
+            return;
+        }
+        if let Some(n) = was.and_then(|t| self.tile_users.get_mut(t)) {
+            *n -= 1;
+        }
+        if let Some(n) = now.and_then(|t| self.tile_users.get_mut(t)) {
+            *n += 1;
+        }
     }
 
     pub(super) fn anchor(&self) -> DVec3 {
@@ -523,6 +550,7 @@ impl Instances {
                 }
             };
             self.names.insert(name, i);
+            self.count_tile(None, tile_of(&row));
             let at = self.list_under(geometry, i);
             self.list[i as usize]
                 .as_mut()
@@ -550,6 +578,7 @@ impl Instances {
             return matches!(inst.at, At::In(..));
         }
         let (was_geometry, was_at) = (inst.geometry, inst.of_geometry);
+        let tiles = (tile_of(&inst.row), tile_of(&row));
         inst.to_world = *to_world;
         inst.class = class;
         inst.row = row;
@@ -558,6 +587,7 @@ impl Instances {
             inst.still_from = still_from;
         }
         let at = inst.at;
+        self.count_tile(tiles.0, tiles.1);
         if was_geometry != geometry {
             self.unlist_under(was_geometry, was_at);
             let at = self.list_under(geometry, i);
@@ -594,6 +624,7 @@ impl Instances {
     pub(super) fn remove(&mut self, store: &mut Store, name: Name, frame: u64) -> Option<u32> {
         let i = self.names.remove(&name)?;
         let inst = self.list[i as usize].take().expect("a named instance");
+        self.count_tile(tile_of(&inst.row), None);
         self.free.push(i);
         self.unlist_under(inst.geometry, inst.of_geometry);
         store.count_user(inst.geometry, -1, frame);

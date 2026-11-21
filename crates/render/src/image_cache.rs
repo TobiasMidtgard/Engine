@@ -523,6 +523,21 @@ impl ImageCache {
         self.lock().images.get(&index).and_then(|c| c.coverage)
     }
 
+    /// The view a colour slot draws the image at canonical index `index` with, if it is on the
+    /// GPU (`srgb`: an sRGB RGBA8 image, read through its sRGB view), and the frame its pixels
+    /// were uploaded (a new upload: new pixels). A lookup for the ray tiles
+    /// (`ray_scene/tiles.rs`): it neither uploads nor marks the image used.
+    pub(crate) fn uploaded_color(
+        &self,
+        index: u32,
+        srgb: bool,
+    ) -> Option<(Arc<ImageTexture>, u64)> {
+        let inner = self.lock();
+        let cached = inner.images.get(&index)?;
+        let texture = cached.views[TextureUse::Color.slot(srgb)].clone()?;
+        Some((texture, cached.since))
+    }
+
     /// The texture of `handle` for a slot that reads it as `usage`, uploading it when it is not
     /// on the GPU or its pixels changed. Each use has its own GPU copy (compressed its own way).
     pub fn get_for(

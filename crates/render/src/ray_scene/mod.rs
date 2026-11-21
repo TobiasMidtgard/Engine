@@ -11,6 +11,8 @@
 //!   the row a hit reads of its instance.
 //! * [`tris`]: the triangle records a hit reads of its triangle (uv, the corners' normals,
 //!   vertex colour), written on the GPU from the mesh pool's pages as a structure is built.
+//! * [`tiles`]: the ray tiles, a layer of a texture array a material's base colour each at
+//!   128 texels down to its mean, filled on the GPU from what the raster draws with.
 //!
 //! The scene exists only on devices with ray queries that take two structures in a stage,
 //! and only while [`crate::settings::trial_cut_more::RAY_WORLD`] is on: off, nothing here is
@@ -18,7 +20,8 @@
 //!
 //! Its bind group (group 1 of every ray pipeline, lib_ray.wgsl): 0 [`RayUniform`], 1 the
 //! still structure, 2 the moving one, 3 the rows, 4 triangle records, 5 the ray tiles, 6 the
-//! ground map (the last two are stand-ins until their steps land). Binding a structure
+//! ground map (a stand-in until its step lands; so are the tiles until a first fill makes
+//! them). Binding a structure
 //! costs the render thread a walk of its instances at submit (0.02 ms a thousand on the
 //! RTX 5080), and again whenever a group before it is set, so a frame's ray dispatches run in
 //! one compute pass with groups 0 and 1 set once.
@@ -26,6 +29,7 @@
 mod blas;
 mod hook;
 pub(crate) mod look;
+mod tiles;
 mod tlas;
 mod tris;
 
@@ -34,7 +38,9 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
-pub use hook::{RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayView};
+pub use hook::{
+    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayTileSource, RayView,
+};
 
 use crate::features::GpuShared;
 use crate::frame::ViewData;
@@ -101,6 +107,12 @@ pub(crate) struct RayStats {
     pub tris: u32,
     pub tris_mb: f32,
     pub tris_refused: u32,
+    /// Layers of the ray tiles holding a texture, textures waiting for one (or for new pixels
+    /// in theirs), layers filled this frame, the array (MB; 0 until a first fill makes it).
+    pub tiles: u32,
+    pub tiles_waiting: u32,
+    pub tiles_filled: u32,
+    pub tiles_mb: f32,
     pub instances: u32,
     pub still: u32,
     pub moving: u32,
@@ -130,11 +142,11 @@ pub(crate) struct RayScene {
     uniform: wgpu::Buffer,
     rows: wgpu::Buffer,
     tris: tris::Records,
+    tiles: tiles::Tiles,
     /// What the group is made of besides the above (made again when the records move to a
-    /// larger buffer).
+    /// larger buffer, and when the tiles are made).
     device: wgpu::Device,
     layout: wgpu::BindGroupLayout,
-    tiles: wgpu::TextureView,
     ground: wgpu::TextureView,
     group: wgpu::BindGroup,
     /// This frame (`ViewData::frame_index + 1`, as the mesh scene counts: 0 is never).
@@ -237,7 +249,8 @@ impl RayScene {
             mapped_at_creation: false,
         });
         let tris = tris::Records::new(device);
-        // Stand-ins for what later steps bind: the tiles, the ground map.
+        // Stand-ins for the tiles until a first fill makes them, and for the ground map until
+        // its step lands.
         let stand_in = |label, dimension| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -259,10 +272,10 @@ impl RayScene {
                     ..Default::default()
                 })
         };
-        let tiles = stand_in(
+        let tiles = tiles::Tiles::new(stand_in(
             "ray scene tiles (none yet)",
             wgpu::TextureViewDimension::D2Array,
-        );
+        ));
         let ground = stand_in(
             "ray scene ground map (none yet)",
             wgpu::TextureViewDimension::D2,
@@ -273,7 +286,7 @@ impl RayScene {
             &layout,
             [&uniform, &rows, tris.buffer()],
             &instances,
-            [&tiles, &ground],
+            [tiles.view(), &ground],
         );
         Self {
             queue: shared.queue.clone(),
@@ -282,9 +295,9 @@ impl RayScene {
             uniform,
             rows,
             tris,
+            tiles,
             device: device.clone(),
             layout,
-            tiles,
             ground,
             group,
             frame: 0,
@@ -467,8 +480,9 @@ impl RayScene {
     }
 
     /// Record the frame's builds: the geometries' new structures and the top-level
-    /// structures that changed, in one call, and the triangle records of what was built.
-    /// Before any pass that binds the scene, and before [`group`](Self::group) is asked for.
+    /// structures that changed, in one call, the triangle records of what was built, and the
+    /// frame's tile fills. Before any pass that binds the scene, and before
+    /// [`group`](Self::group) is asked for.
     pub(crate) fn encode_builds(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let building = std::mem::take(&mut self.building);
         let mut tlas: [Option<&wgpu::Tlas>; 2] = [None; 2];
@@ -480,13 +494,22 @@ impl RayScene {
         let tlas: Vec<&wgpu::Tlas> = tlas.into_iter().flatten().collect();
         let regroup = self.store.encode(encoder, &tlas, building, &mut self.tris);
         self.instances.built(&mut self.store, self.frame);
-        if regroup {
+        // The textures this frame fills, the nearest asks first (a layer goes to another
+        // texture only once no row has named it for a while).
+        let instances = &self.instances;
+        let made = self.tiles.encode(
+            &self.device,
+            encoder,
+            |layer| instances.tile_users(layer),
+            self.frame,
+        );
+        if regroup || made {
             self.group = Self::make_group(
                 &self.device,
                 &self.layout,
                 [&self.uniform, &self.rows, self.tris.buffer()],
                 &self.instances,
-                [&self.tiles, &self.ground],
+                [self.tiles.view(), &self.ground],
             );
         }
     }
@@ -500,6 +523,7 @@ impl RayScene {
         let s = self.store.stats();
         let i = self.instances.stats();
         let (tris, tris_mb, tris_refused) = self.tris.stats();
+        let tiles = self.tiles.stats();
         RayStats {
             geometries: s.geometries,
             triangles: s.held.triangles,
@@ -511,6 +535,10 @@ impl RayScene {
             tris,
             tris_mb,
             tris_refused,
+            tiles: tiles.layers,
+            tiles_waiting: tiles.waiting,
+            tiles_filled: tiles.filled,
+            tiles_mb: tiles.mb,
             instances: self.instances.len() as u32,
             still: i.still,
             moving: i.moving,
@@ -561,6 +589,10 @@ impl RayScene {
         d.set("render.ray.tris", s.tris as f64);
         d.set("render.ray.tris_mb", s.tris_mb as f64);
         d.set("render.ray.tris_refused", s.tris_refused as f64);
+        d.set("render.ray.tiles", s.tiles as f64);
+        d.set("render.ray.tiles_waiting", s.tiles_waiting as f64);
+        d.set("render.ray.tiles_filled", s.tiles_filled as f64);
+        d.set("render.ray.tiles_mb", s.tiles_mb as f64);
         d.set("render.ray.instances", s.instances as f64);
         d.set("render.ray.still_instances", s.still as f64);
         d.set("render.ray.moving_instances", s.moving as f64);
@@ -630,6 +662,16 @@ impl RayScene {
     fn remove(&mut self, feature: u16, id: RayKey) {
         self.instances
             .remove(&mut self.store, (feature, id), self.frame);
+    }
+
+    fn tile(
+        &mut self,
+        feature: u16,
+        key: RayKey,
+        distance: f32,
+        source: impl FnOnce() -> Option<RayTileSource>,
+    ) -> Option<u16> {
+        self.tiles.ask((feature, key), distance, self.frame, source)
     }
 
     fn is_live(&self, feature: u16, id: RayKey) -> bool {

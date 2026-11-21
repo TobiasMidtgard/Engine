@@ -2,8 +2,8 @@
 //! hardware every ray of the frame (probe light, world reflections, the sun's measuring rays)
 //! traces one scene that the features fill on the render thread, instead of the scene probe GI
 //! gathers for itself. The same triangles, so each scene of `probe_gi.rs` is lit as before; a
-//! mirror shows a smooth ball round and a wall in its vertex paint (the triangle records); a
-//! thing that moves is in the rays where it went and one that leaves is gone; the sun's rays
+//! mirror shows a smooth ball round and a wall in its vertex paint (the triangle records), and
+//! a checkered wall in its checks, as bright as its colour (the tiles); a thing that moves is in the rays where it went and one that leaves is gone; the sun's rays
 //! are stopped where the shadow falls, by what casts it or by its stand-in, and pass what
 //! casts none; a thing inside its stand-in is not shaded by it; a dense mesh is in the rays at
 //! a coarse level of detail that casts its shadow; a mesh drawn only as clusters is in the
@@ -685,7 +685,10 @@ fn a_mirror_shows_a_ball_round_and_a_painted_wall_in_its_paint() {
     let (r, g, b) = (r / n, g / n, b / n);
     let green = (g - 0.5 * (r + b)) / g.max(1.0);
     eprintln!(
-        "records: {tris} for {triangles} triangles in {geometries} geometries; the smooth          ball's largest bend {smooth:.1} over {smooth_span:.0} levels, the faceted one's          {stepped:.1} over {stepped_span:.0}; the wall {r:.0} {g:.0} {b:.0}, green share          {green:.2}"
+        "records: {tris} for {triangles} triangles in {geometries} geometries; the smooth \
+         ball's largest bend {smooth:.1} over {smooth_span:.0} levels, the faceted one's \
+         {stepped:.1} over {stepped_span:.0}; the wall {r:.0} {g:.0} {b:.0}, green share \
+         {green:.2}"
     );
     assert!(
         smooth_span > 40.0 && stepped_span > 40.0,
@@ -693,11 +696,169 @@ fn a_mirror_shows_a_ball_round_and_a_painted_wall_in_its_paint() {
     );
     assert!(
         smooth * 3.0 < stepped,
-        "the smooth ball is round in the mirror: its light bends by {smooth:.1} at most, the          faceted one's by {stepped:.1}"
+        "the smooth ball is round in the mirror: its light bends by {smooth:.1} at most, the \
+         faceted one's by {stepped:.1}"
     );
     assert!(
         green > 0.25,
         "the wall shows its green paint in the mirror: green share {green:.2} ({r:.0} {g:.0} {b:.0})"
+    );
+}
+
+/// A mirror facing the camera (as in [`mirror_with`]), and behind the camera two walls the sun
+/// lights side by side, 4 m wide each: on the left one of `checker` (2 x 2 cells), on the right
+/// one of `gray`, the checker's mean. The camera looks at the walls (so that the checker is
+/// drawn, and uploaded: a tile is filled from what the raster draws with).
+fn checker_mirror(w: &mut World, checker: Handle<Image>, gray: f32) -> Entity {
+    ground(w);
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 1.5, -3.0)),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [5.0, 3.0, 0.1],
+            },
+            StandardMaterial::color(0.95, 0.95, 0.95)
+                .with_metallic(1.0)
+                .with_roughness(0.05),
+        ),
+    ));
+    let checkered = StandardMaterial::color(1.0, 1.0, 1.0)
+        .with_roughness(0.9)
+        .with_base_color_texture(checker);
+    let plain = StandardMaterial::color(gray, gray, gray).with_roughness(0.9);
+    for (x, material) in [(-2.0, checkered), (2.0, plain)] {
+        w.spawn((
+            Transform::from_translation(DVec3::new(x, 2.0, 4.0)),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [4.0, 4.0, 0.3],
+                },
+                material,
+            ),
+        ));
+    }
+    sun(w, 110_000.0, DVec3::new(0.2, -0.8, 0.6));
+    camera(
+        w,
+        DVec3::new(0.0, 1.5, 1.0),
+        DVec3::new(0.0, 1.5, 4.0),
+        14.0,
+    )
+}
+
+/// Turn `camera` to look at `target` from where it stands.
+fn turn(app: &mut App, camera: Entity, target: DVec3) {
+    let eye = app
+        .world
+        .get::<Transform>(camera)
+        .expect("camera")
+        .translation;
+    let at = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+    *app.world.get_mut::<Transform>(camera).expect("camera") = at;
+    // (For a picture taken before the next update, which is what carries this over.)
+    *app.world
+        .get_mut::<GlobalTransform>(camera)
+        .expect("camera") = at.into();
+}
+
+fn srgb_to_linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Mean linear light of the pixels `[x0, y0, x1, y1)` (the output is sRGB-encoded; with no
+/// tonemapper the decoded means compare as the light does).
+fn linear_mean(image: &image::RgbImage, [x0, y0, x1, y1]: [u32; 4]) -> f32 {
+    let mut sum = 0.0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = image.get_pixel(x, y);
+            sum += (0..3).map(|c| srgb_to_linear(p[c])).sum::<f32>() / 3.0;
+        }
+    }
+    sum / ((x1 - x0) * (y1 - y0)) as f32
+}
+
+/// The walls' cells in the mirror (pixels `[x0, y0, x1, y1)`, 2 px inside each edge): the
+/// checker's four, and the same places on the gray wall. The faces stand 10.75 m away through
+/// the mirror (the camera 3.95 m before it, the walls 6.8 m behind it); 70 degrees high and
+/// 4:3, the two 8 m by 4 m span x 48-112 and y 40-72, meeting at x 80.
+const CHECKER_CELLS: [[u32; 4]; 4] = [
+    [50, 42, 62, 54],
+    [66, 42, 78, 54],
+    [50, 58, 62, 70],
+    [66, 58, 78, 70],
+];
+const GRAY_CELLS: [[u32; 4]; 4] = [
+    [82, 42, 94, 54],
+    [98, 42, 110, 54],
+    [82, 58, 94, 70],
+    [98, 58, 110, 70],
+];
+
+/// A checkered wall behind the camera, seen in the mirror: its hits read its texture's tile, so
+/// the mirror shows the checker, as bright on average as the gray wall beside it, whose colour
+/// is the texture's mean (what every hit of the checkered wall had before the tiles: its row's
+/// colour).
+#[test]
+fn a_mirror_shows_the_texture_of_a_wall_behind_the_camera() {
+    let mut app = app(true);
+    let (light, dark) = (200u8, 50u8);
+    let gray = (srgb_to_linear(light) + srgb_to_linear(dark)) * 0.5;
+    let checker = app
+        .world
+        .resource_mut::<Assets<Image>>()
+        .add(Image::checker(
+            64,
+            2,
+            [light, light, light, 255],
+            [dark, dark, dark, 255],
+        ));
+    let camera = checker_mirror(&mut app.world, checker, gray);
+    app.update_n(4);
+    if !can_run(&app) {
+        return;
+    }
+    turn(&mut app, camera, DVec3::new(0.0, 1.5, -3.0));
+    app.update_n(12);
+    assert_in_ray_scene(&app, "the checkered wall");
+    let image = picture(&mut app, "tiles_mirror.png");
+    let checker = CHECKER_CELLS.map(|r| linear_mean(&image, r));
+    let plain = GRAY_CELLS.map(|r| linear_mean(&image, r));
+    let (tiles, waiting, filled) = (
+        diag(&app, "render.ray.tiles"),
+        diag(&app, "render.ray.tiles_waiting"),
+        diag(&app, "render.ray.tiles_filled"),
+    );
+    eprintln!(
+        "the walls' cells in the mirror (linear): checker {checker:?}, gray {plain:?}; {tiles} \
+         tiles, {waiting} waiting, {filled} filled this frame"
+    );
+    assert_eq!(
+        (tiles, waiting),
+        (1.0, 0.0),
+        "the checker's texture has its tile"
+    );
+    let spread = |m: &[f32; 4]| {
+        m.iter().fold(f32::MIN, |a, &b| a.max(b)) - m.iter().fold(f32::MAX, |a, &b| a.min(b))
+    };
+    let mean = |m: &[f32; 4]| m.iter().sum::<f32>() / 4.0;
+    assert!(
+        spread(&checker) > 0.5 * mean(&checker),
+        "the mirror shows the checker: {checker:?}"
+    );
+    assert!(
+        spread(&plain) < 0.1 * mean(&plain),
+        "the gray wall shows even: {plain:?}"
+    );
+    let ratio = mean(&checker) / mean(&plain);
+    assert!(
+        (ratio - 1.0).abs() < 0.1,
+        "the checker is {ratio:.3} times as bright as the gray wall beside it"
     );
 }
 
