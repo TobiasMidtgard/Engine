@@ -651,10 +651,13 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
         .child(
             El::new()
                 .class("row")
-                .with_style(|s| s.gap(16.0).justify(Justify::End))
-                .child(legend(FISHERFOLK, "fisherfolk"))
-                .child(legend(LABOURERS, "labourers"))
-                .child(legend(BURGHERS, "burghers")),
+                .with_style(|s| s.gap(12.0).wrap(true).justify(Justify::End))
+                .children(Tier::ALL.iter().map(|t| {
+                    legend(
+                        TIER_INKS[t.index()],
+                        &format!("{{isle.led.tier{}}}", t.index()),
+                    )
+                })),
         )
         .child(chart(PEOPLE_PAINTER, 120.0))
         .child(
@@ -718,6 +721,20 @@ const BURGHERS: Color = Color {
     b: 0.17,
     a: 1.0,
 };
+const MASTERS: Color = Color {
+    r: 0.45,
+    g: 0.25,
+    b: 0.55,
+    a: 1.0,
+};
+const PATRICIANS: Color = Color {
+    r: 0.72,
+    g: 0.52,
+    b: 0.10,
+    a: 1.0,
+};
+/// Each tier's line in the people chart, in [`Tier::ALL`] order.
+const TIER_INKS: [Color; Tier::COUNT] = [FISHERFOLK, LABOURERS, BURGHERS, MASTERS, PATRICIANS];
 
 fn set_width(world: &mut World, id: &str, frac: f32) {
     if let Some(e) = engine_ui::input::find_id(world, id)
@@ -808,10 +825,20 @@ pub fn update(world: &mut World) {
         d.set(
             "isle.led.people",
             format!(
-                "{:.0} fisherfolk · {:.0} labourers · {:.0} burghers",
-                books.population[0], books.population[1], books.population[2]
+                "{} people · each tier's line below",
+                super::fmt_int(books.population.iter().sum::<f32>() as f64)
             ),
         );
+        for t in Tier::ALL {
+            d.set(
+                &format!("isle.led.tier{}", t.index()),
+                format!(
+                    "{} {}",
+                    t.name().to_lowercase(),
+                    super::fmt_int(books.population[t.index()] as f64)
+                ),
+            );
+        }
         d.set("isle.led.since", format!("since {}", clock(since)));
         d.set(
             "isle.led.flow",
@@ -1492,11 +1519,10 @@ fn paint_people(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
             .map(|s| (s.clock_s, s.people.get(i).map_or(0.0, |p| p[k])))
             .collect()
     };
-    let series = [
-        (tier(0), FISHERFOLK),
-        (tier(1), LABOURERS),
-        (tier(2), BURGHERS),
-    ];
+    let series: Vec<(Vec<(f64, f32)>, Color)> = Tier::ALL
+        .iter()
+        .map(|t| (tier(t.index()), TIER_INKS[t.index()]))
+        .collect();
     line_chart(world, ctx, &series, short);
 }
 

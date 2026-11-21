@@ -196,13 +196,19 @@ pub fn tab_of(by_type: bool, k: Kind) -> usize {
         .unwrap_or(0)
 }
 
-/// What building `k` still lacks on island `isle`: coins first, then each good.
-pub fn short(econ: &Economy, isle: usize, k: Kind) -> Vec<(Option<Good>, f64)> {
+/// What the company giving orders pays in coins for `k` under this game's rules.
+pub fn coins(world: &World, k: Kind) -> f64 {
+    crate::build::price(world, k, crate::sim::acting(world))
+}
+
+/// What building `k` still lacks on island `isle` at `price` coins: coins first, then each
+/// good.
+pub fn short(econ: &Economy, isle: usize, k: Kind, price: f64) -> Vec<(Option<Good>, f64)> {
     let d = k.def();
     let mut out = Vec::new();
     let coins = econ.coins_of(crate::sim::PLAYER);
-    if coins < d.coins as f64 {
-        out.push((None, d.coins as f64 - coins.max(0.0)));
+    if coins < price {
+        out.push((None, price - coins.max(0.0)));
     }
     if let Some(b) = econ.islands.get(isle) {
         for (g, n) in d.cost {
@@ -268,20 +274,21 @@ fn hex(c: Color) -> String {
 /// Fill the shown tiles' prices (red where short) and grey out what can't be built now.
 pub fn refresh_prices(world: &mut World, kinds: &[Kind], isle: usize) {
     let econ = world.resource::<Economy>().clone();
+    let prices: Vec<f64> = kinds.iter().map(|&k| coins(world, k)).collect();
     let red = hex(Colors::bad_ink());
     let mut faded: Vec<(Kind, bool)> = Vec::new();
     {
         let mut data = world.resource_mut::<UiData>();
-        for &k in kinds {
+        for (&k, &cost) in kinds.iter().zip(&prices) {
             let d = k.def();
-            let lacks = short(&econ, isle, k);
+            let lacks = short(&econ, isle, k, cost);
             let coins_short = lacks.iter().any(|(g, _)| g.is_none());
             data.set(
                 &price_id(k),
                 if coins_short {
-                    format!("[color={red}]{}[/color]", d.coins)
+                    format!("[color={red}]{cost:.0}[/color]")
                 } else {
-                    d.coins.to_string()
+                    format!("{cost:.0}")
                 },
             );
             for (j, (g, n)) in d.cost.iter().enumerate() {
@@ -392,7 +399,7 @@ pub fn update(world: &mut World, isle: usize) {
     let sig = match k {
         Some(k) => format!(
             "{k:?}|{isle}|{:?}|{}",
-            short(econ, isle, k)
+            short(econ, isle, k, coins(world, k))
                 .iter()
                 .map(|(g, n)| (*g, (*n).ceil() as i64))
                 .collect::<Vec<_>>(),
@@ -487,11 +494,12 @@ fn fact(icon: &str, label: &str, value: String) -> El {
 pub fn card(world: &World, k: Kind, isle: usize) -> El {
     let d = k.def();
     let econ = world.resource::<Economy>();
-    let lacks = short(econ, isle, k);
+    let cost = coins(world, k);
+    let lacks = short(econ, isle, k, cost);
     let lack_of = |g: Option<Good>| lacks.iter().find(|(x, _)| *x == g).map(|(_, n)| *n);
     let here = crate::island::islands().get(isle).map_or("", |i| i.name);
     let tier = tier_of(k);
-    let mut chips = vec![cost_chip("coin", d.coins.to_string(), lack_of(None))];
+    let mut chips = vec![cost_chip("coin", format!("{cost:.0}"), lack_of(None))];
     for (g, n) in d.cost {
         chips.push(cost_chip(g.icon(), n.to_string(), lack_of(Some(*g))));
     }

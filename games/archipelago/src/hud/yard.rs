@@ -9,7 +9,7 @@
 use engine::prelude::*;
 use engine_ui::el::El;
 use engine_ui::kit::brass::{self, Colors, Rank, SocketState};
-use engine_ui::style::{Align, Justify, Pick, pct};
+use engine_ui::style::{Align, Fill, Justify, Pick, Shadow, pct};
 
 use crate::defs::Kind;
 use crate::fittings::{self, Fit, Fitting};
@@ -250,23 +250,41 @@ fn plan_row(p: &Plan, why: Option<String>, coins: f64, books: &IslandBooks) -> E
         why.as_ref()
             .map_or(String::new(), |w| format!("\n[color=#9a2f1c]{w}[/color]"))
     );
+    // A flagship's row is gilded: a gold wash and rim, a bigger badge, and a ribbon.
+    let flag = p.craft.flagship();
+    let gold = Colors::brass();
     El::new()
         .class("row")
         .with_style(move |s| {
-            s.gap(8.0)
+            let s = s
+                .gap(8.0)
                 .align_items(Align::Center)
-                .opacity(if ok { 1.0 } else { 0.8 })
+                .opacity(if ok { 1.0 } else { 0.8 });
+            if flag {
+                s.padding([6.0, 5.0])
+                    .background(Fill::vertical(gold.with_alpha(0.30), gold.with_alpha(0.10)))
+                    .border(1.5, gold)
+                    .radius(6.0)
+                    .shadow(Shadow::new(gold.with_alpha(0.45), 8.0, 0.0))
+            } else {
+                s
+            }
         })
         .tooltip(p.craft.name(), tip)
-        .child(brass::badge(craft_icon(p.craft), 38.0))
+        .child(brass::badge(
+            craft_icon(p.craft),
+            if flag { 42.0 } else { 38.0 },
+        ))
         .child(
             El::new()
                 .class("col")
                 .with_style(|s| s.gap(1.0).grow(1.0).shrink(1.0).basis(0.0))
+                // (The ribbon sits over the name, so the row is no wider than the others.)
+                .child_opt(flag.then(flag_ribbon))
                 .child(
                     El::text(p.craft.name())
                         .class("ink")
-                        .text_style(|t| t.size(14.0).bold().nowrap())
+                        .text_style(move |t| t.size(if flag { 16.0 } else { 14.0 }).bold().nowrap())
                         .pick_ignore(),
                 )
                 .child(
@@ -307,6 +325,30 @@ fn plan_row(p: &Plan, why: Option<String>, coins: f64, books: &IslandBooks) -> E
                 .text_style(|t| t.nowrap())
                 .with_style(|s| s.shrink(0.0))
                 .disabled(!ok),
+        )
+}
+
+/// The "Flagship" ribbon by a flagship's name.
+fn flag_ribbon() -> El {
+    let gold = Colors::brass();
+    El::new()
+        .with_style(move |s| {
+            s.height(18.0)
+                .padding([0.0, 8.0])
+                .align_items(Align::Center)
+                .align_self(Align::Start)
+                .background(Fill::vertical(gold, engine_ui::color::Color::hex(0x6a3c10)))
+                .border(1.0, engine_ui::color::Color::hex(0x4a2a0a))
+                .radius(3.0)
+                .shrink(0.0)
+                .pick(Pick::Ignore)
+        })
+        .child(
+            El::text("FLAGSHIP")
+                .class("brass_label")
+                .text_style(|t| t.nowrap().bold().size(11.0).shadow())
+                .with_style(|s| s.color(Colors::cream()))
+                .pick_ignore(),
         )
 }
 
@@ -791,7 +833,9 @@ pub fn refresh(world: &mut World) {
         return;
     };
     let isle = crate::island::islands()[b.island].name;
-    let plans: Vec<&Plan> = PLANS.iter().filter(|p| p.at == b.kind).collect();
+    // Flagships head the list, so the biggest craft is never below the fold.
+    let mut plans: Vec<&Plan> = PLANS.iter().filter(|p| p.at == b.kind).collect();
+    plans.sort_by_key(|p| !p.craft.flagship());
     let design = world
         .resource::<YardCard>()
         .design

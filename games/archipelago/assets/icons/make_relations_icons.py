@@ -1,5 +1,7 @@
 # Painted-style icons for the relations screen, in the same hand as make_icons.py: the rival
-# houses' emblems (isle_emblem_gull, isle_emblem_lantern, isle_emblem_anvil), the treaties
+# houses' emblems (isle_emblem_gull, isle_emblem_lantern, isle_emblem_anvil, and for the new
+# characters isle_emblem_compass, isle_emblem_owl, isle_emblem_cutlass, isle_emblem_rose,
+# isle_emblem_scales), the treaties
 # (isle_treaty_war, isle_treaty_hostile, isle_treaty_neutral, isle_treaty_pact,
 # isle_treaty_alliance) and the three sides of a relation (isle_rel_diplomacy,
 # isle_rel_trade, isle_rel_military), and a gift (isle_gift).
@@ -39,6 +41,44 @@ I['isle_emblem_anvil'] = svg(CH,
     f'<g {o(2.6)}><path d="M6 18 L44 18 C50 18 56 20 60 24 C54 26 48 26 44 28 L42 34 L36 36 L40 48 L46 50 L46 56 L18 56 L18 50 L24 48 L28 36 L20 34 L18 28 C12 26 8 22 6 18 Z" fill="url(#ch)"/></g>'
     '<path d="M10 20 L42 20" stroke="#fff" stroke-width="1.6" opacity=".8"/>'
     f'<g {o(2)}><path d="M48 4 L52 12 M56 6 L54 13 M40 6 L46 13" fill="none"/></g>')
+
+# A compass rose: four long points and four short, a ring and a pin.
+I['isle_emblem_compass'] = svg(CH,
+    f'<g {o(2.2)}><circle cx="32" cy="32" r="16" fill="none"/>'
+    '<path d="M32 2 L37 27 L62 32 L37 37 L32 62 L27 37 L2 32 L27 27 Z" fill="url(#ch)"/>'
+    '</g>'
+    f'<g {o(1.8)}><path d="M32 32 L45 19 L36 32 Z M32 32 L45 45 L32 36 Z M32 32 L19 45 L28 32 Z M32 32 L19 19 L32 28 Z" fill="url(#ch)"/></g>'
+    f'<g {o(2.2)}><path d="M32 2 L37 27 L62 32 L37 37 L32 62 L27 37 L2 32 L27 27 Z" fill="url(#ch)"/></g>'
+    '<path d="M32 4 L36 28 L32 32 Z" fill="#2a1708" opacity=".35"/>'
+    f'<circle cx="32" cy="32" r="3" fill="{INK}"/>')
+# An owl, face on: tufted ears, round eyes, folded wings.
+I['isle_emblem_owl'] = svg(CH + lg('ey', (0, '#fff0a0'), (1, '#e0a020')),
+    f'<g {o(2.4)}><path d="M16 12 L22 20 C28 18 36 18 42 20 L48 12 L50 28 C54 40 48 56 32 58 C16 56 10 40 14 28 Z" fill="url(#ch)"/>'
+    '<circle cx="24" cy="30" r="7" fill="url(#ey)"/><circle cx="40" cy="30" r="7" fill="url(#ey)"/>'
+    '<path d="M29 36 L32 42 L35 36 Z" fill="#f0b040"/></g>'
+    f'<circle cx="24" cy="30" r="3" fill="{INK}"/><circle cx="40" cy="30" r="3" fill="{INK}"/>'
+    '<g fill="none" stroke="#2a1708" stroke-width="1.6"><path d="M20 44 C24 50 28 52 32 52 C36 52 40 50 44 44"/><path d="M24 48 L26 46 M30 50 L32 48 M36 50 L38 48"/></g>')
+# A cutlass, point up, with a basket guard.
+I['isle_emblem_cutlass'] = svg(CH + GOLD,
+    f'<g {o(2.4)}><path d="M30 42 C26 30 28 16 40 4 C38 18 38 30 36 42 Z" fill="url(#ch)"/>'
+    '<path d="M20 42 L44 42 L44 46 L20 46 Z" fill="url(#gd)"/>'
+    '<path d="M44 44 C50 46 50 56 40 58 L28 58" fill="none"/>'
+    '<path d="M30 46 L34 46 L34 58 L30 58 Z" fill="url(#gd)"/></g>'
+    '<path d="M33 40 C32 28 34 16 39 7" fill="none" stroke="#a8a090" stroke-width="1.4"/>')
+# A rose, open, on a short stem with two leaves.
+I['isle_emblem_rose'] = svg(CH,
+    f'<g {o(2.2)}><path d="M32 40 L32 60" fill="none"/>'
+    '<path d="M32 50 C24 44 16 48 14 54 C22 56 28 54 32 50 Z M32 46 C40 40 48 44 50 50 C42 52 36 50 32 46 Z" fill="url(#ch)"/>'
+    '<path d="M32 6 C44 6 52 14 50 26 C48 36 40 42 32 42 C24 42 16 36 14 26 C12 14 20 6 32 6 Z" fill="url(#ch)"/></g>'
+    '<g fill="none" stroke="#2a1708" stroke-width="1.8" stroke-linecap="round"><path d="M32 14 C26 16 24 22 28 26 C32 30 38 26 36 20"/><path d="M22 20 C20 28 24 34 32 34 C40 34 44 28 42 20"/><path d="M18 28 C20 36 26 40 32 40"/></g>')
+# The scales of a counting house: a beam on a post, two pans.
+I['isle_emblem_scales'] = svg(CH,
+    f'<g {o(2.4)}><path d="M30 10 L34 10 L34 52 L30 52 Z" fill="url(#ch)"/>'
+    '<path d="M20 52 L44 52 L46 58 L18 58 Z" fill="url(#ch)"/>'
+    '<path d="M8 16 L56 16 L56 20 L8 20 Z" fill="url(#ch)"/>'
+    '<circle cx="32" cy="10" r="4" fill="url(#ch)"/>'
+    '<path d="M2 38 C4 46 20 46 22 38 Z M42 38 C44 46 60 46 62 38 Z" fill="url(#ch)"/></g>'
+    '<g fill="none" stroke="#2a1708" stroke-width="1.6"><path d="M12 20 L2 38 M12 20 L22 38 M52 20 L42 38 M52 20 L62 38"/></g>')
 
 # Treaties.
 I['isle_treaty_war'] = svg(IRON + WOOD + lg('rd', (0, '#ff8a6a'), (1, '#9a2414')),

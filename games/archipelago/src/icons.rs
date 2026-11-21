@@ -426,6 +426,26 @@ const RELATIONS: &[(&str, &str)] = &[
         include_str!("../assets/icons/isle_emblem_anvil.svg"),
     ),
     (
+        "isle_emblem_compass",
+        include_str!("../assets/icons/isle_emblem_compass.svg"),
+    ),
+    (
+        "isle_emblem_owl",
+        include_str!("../assets/icons/isle_emblem_owl.svg"),
+    ),
+    (
+        "isle_emblem_cutlass",
+        include_str!("../assets/icons/isle_emblem_cutlass.svg"),
+    ),
+    (
+        "isle_emblem_rose",
+        include_str!("../assets/icons/isle_emblem_rose.svg"),
+    ),
+    (
+        "isle_emblem_scales",
+        include_str!("../assets/icons/isle_emblem_scales.svg"),
+    ),
+    (
         "isle_treaty_war",
         include_str!("../assets/icons/isle_treaty_war.svg"),
     ),
@@ -498,6 +518,50 @@ const TIERS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The fourth and fifth tiers' goods, hats and public buildings, painted by
+/// `assets/icons/make_late_icons.py`.
+const LATE: &[(&str, &str)] = &[
+    ("isle_ore", include_str!("../assets/icons/isle_ore.svg")),
+    ("isle_iron", include_str!("../assets/icons/isle_iron.svg")),
+    (
+        "isle_coffee_beans",
+        include_str!("../assets/icons/isle_coffee_beans.svg"),
+    ),
+    (
+        "isle_coffee",
+        include_str!("../assets/icons/isle_coffee.svg"),
+    ),
+    (
+        "isle_clocks",
+        include_str!("../assets/icons/isle_clocks.svg"),
+    ),
+    ("isle_cacao", include_str!("../assets/icons/isle_cacao.svg")),
+    (
+        "isle_chocolate",
+        include_str!("../assets/icons/isle_chocolate.svg"),
+    ),
+    ("isle_silk", include_str!("../assets/icons/isle_silk.svg")),
+    ("isle_gowns", include_str!("../assets/icons/isle_gowns.svg")),
+    ("isle_gold", include_str!("../assets/icons/isle_gold.svg")),
+    (
+        "isle_jewellery",
+        include_str!("../assets/icons/isle_jewellery.svg"),
+    ),
+    (
+        "isle_tier_masters",
+        include_str!("../assets/icons/isle_tier_masters.svg"),
+    ),
+    (
+        "isle_tier_patricians",
+        include_str!("../assets/icons/isle_tier_patricians.svg"),
+    ),
+    (
+        "isle_theatre",
+        include_str!("../assets/icons/isle_theatre.svg"),
+    ),
+    ("isle_bank", include_str!("../assets/icons/isle_bank.svg")),
+];
+
 pub fn all() -> Vec<(&'static str, String)> {
     let mut v: Vec<(&'static str, String)> = PAINTED
         .iter()
@@ -506,6 +570,7 @@ pub fn all() -> Vec<(&'static str, String)> {
         .chain(MOOD)
         .chain(RELATIONS)
         .chain(TIERS)
+        .chain(LATE)
         .map(|(n, s)| (*n, s.to_string()))
         .collect();
     v.extend(vec![

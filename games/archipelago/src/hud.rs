@@ -29,6 +29,7 @@ mod advisor;
 mod alerts;
 mod chains;
 mod fleet;
+mod free_traders;
 mod house;
 mod ledger;
 mod map;
@@ -140,6 +141,8 @@ pub(super) fn kind_icon(k: Kind) -> &'static str {
         Kind::FireWatch => "isle_fire_watch",
         Kind::WatchHouse => "isle_watch_house",
         Kind::Infirmary => "isle_infirmary",
+        Kind::Theatre => "isle_theatre",
+        Kind::Bank => "isle_bank",
         _ => k.def().output.map_or("isle_workshop", Good::icon),
     }
 }
@@ -538,10 +541,18 @@ fn info_card(kind: Kind, ruin: bool, held: Option<(String, u32)>) -> El {
         .child_opt(held.is_none().then(|| {
             El::new()
                 .class("row")
-                .with_style(|s| s.gap(10.0).margin([8.0, 0.0, 0.0, 0.0]))
+                .with_style(|s| s.gap(10.0).wrap(true).margin([8.0, 0.0, 0.0, 0.0]))
                 // A ruin makes nothing and pays nothing: no Pause, and Demolish clears it.
                 .child_opt(d.output.filter(|_| !ruin).map(|_| {
                     El::button("{isle.sel.pause}", "isle.sel.pause").class("brass_button")
+                }))
+                .child_opt((kind == Kind::Harbour && !ruin).then(|| {
+                    El::button("Free traders", "isle.traders")
+                        .class("brass_button")
+                        .tooltip(
+                            "The free traders",
+                            "Standing orders for raw goods, bought dearly at each of their calls here.",
+                        )
                 }))
                 .child_opt((kind == Kind::Harbour && !ruin).then(|| {
                     El::button("Pedlar's stall", "isle.pedlar")
@@ -736,6 +747,7 @@ pub fn setup(world: &mut World) {
     trouble::install(world);
     shelf::install(world);
     pedlar::install(world);
+    free_traders::install(world);
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
         shelf::toggle(world);
@@ -746,6 +758,14 @@ pub fn setup(world: &mut World) {
         let mut p = [0.0; Tier::COUNT];
         p[Tier::Fisherfolk.index()] = 63.0;
         world.resource_mut::<plan::Plan>().demo_people = Some(p);
+    }
+    // `--hud-traders`: open the free traders' desk on the home harbour, with a standing order
+    // for wool left there first (tour shots).
+    if std::env::args().any(|a| a == "--hud-traders") {
+        let me = crate::sim::acting(world);
+        let _ = crate::traders::order(world, me, 0, Good::Wool, 60.0);
+        let _ = crate::traders::order(world, me, 0, Good::Clay, 40.0);
+        free_traders::toggle(world, Some(0));
     }
     // `--hud-pedlar`: open the pedlar's stall (tour shots).
     if std::env::args().any(|a| a == "--hud-pedlar") {
@@ -781,6 +801,12 @@ pub fn setup(world: &mut World) {
     }
     // `--hud-relations`: open the relations book (tour shots).
     if std::env::args().any(|a| a == "--hud-relations") {
+        // `--hud-leaders`: the rival houses led by the game's first three characters.
+        if std::env::args().any(|a| a == "--hud-leaders") {
+            for c in 1..=3 {
+                crate::characters::install(world, c, c as usize - 1);
+            }
+        }
         relations::toggle(world);
     }
     // `--hud-chains=Coats`: open the production chains book on that good (tour shots).
@@ -926,6 +952,7 @@ pub fn read_actions(world: &mut World) {
             || chains::action(world, &a)
             || shelf::action(world, &a)
             || pedlar::action(world, &a)
+            || free_traders::action(world, &a)
             || fleet::action(world, &a)
             || alerts::action(world, &a)
             || advisor::action(world, &a)
@@ -1000,6 +1027,9 @@ fn read_keys(world: &mut World) {
     );
     if m || (esc && world.resource::<pedlar::Stall>().open) {
         pedlar::toggle(world);
+    }
+    if esc && world.resource::<free_traders::Desk>().open {
+        free_traders::toggle(world, None);
     }
     if k || (esc && world.resource::<chains::Chains>().open) {
         chains::toggle(world, None);
@@ -1329,6 +1359,7 @@ pub fn update_data(world: &mut World) {
         map::update(world, 0.2);
         shelf::update(world);
         pedlar::update(world);
+        free_traders::update(world);
         let here = pedlar::here(world);
         set_selected(world, map::PEDLAR_MEDAL, here);
         house::refresh(world);

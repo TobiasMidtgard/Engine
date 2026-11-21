@@ -131,8 +131,7 @@ impl Good {
         }
     }
 
-    /// The `ui` icon that stands for it. (The Masters' and Patricians' goods borrow a
-    /// neighbour's until the interface paints their own.)
+    /// The `ui` icon that stands for it.
     pub fn icon(self) -> &'static str {
         match self {
             Good::Fish => "fish",
@@ -158,17 +157,17 @@ impl Good {
             Good::DateCakes => "isle_datecakes",
             Good::Coats => "isle_coats",
             Good::Lamps => "isle_lamps",
-            Good::Ore => "isle_clay",
-            Good::Iron => "isle_bricks",
-            Good::CoffeeBeans => "isle_dates",
-            Good::Coffee => "isle_ale",
-            Good::Clocks => "isle_lamps",
-            Good::Cacao => "isle_dates",
-            Good::Chocolate => "isle_datecakes",
-            Good::Silk => "isle_wool",
-            Good::Gowns => "isle_coats",
-            Good::Gold => "isle_salt",
-            Good::Jewellery => "isle_glass",
+            Good::Ore => "isle_ore",
+            Good::Iron => "isle_iron",
+            Good::CoffeeBeans => "isle_coffee_beans",
+            Good::Coffee => "isle_coffee",
+            Good::Clocks => "isle_clocks",
+            Good::Cacao => "isle_cacao",
+            Good::Chocolate => "isle_chocolate",
+            Good::Silk => "isle_silk",
+            Good::Gowns => "isle_gowns",
+            Good::Gold => "isle_gold",
+            Good::Jewellery => "isle_jewellery",
         }
     }
 

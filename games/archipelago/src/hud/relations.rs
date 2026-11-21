@@ -56,6 +56,9 @@ struct Rival {
     color: Color,
     emblem: String,
     temperament: String,
+    /// The head of the house and how it plays (empty when no character leads it).
+    leader: String,
+    style: String,
     standing: f32,
     treaty: String,
     /// The game's words for the treaty ("Trade pact"), when it gives them.
@@ -97,11 +100,17 @@ struct Stand {
     coins: f32,
     balance: f32,
     people: f32,
-    tiers: [f32; 3],
+    /// People by tier, in [`Tier::ALL`] order (as many tiers as the game reports).
+    tiers: Vec<f32>,
     islands: f32,
     ships: f32,
     makes: Vec<(Good, f32)>,
     short_of: Vec<(Good, f32)>,
+}
+
+/// People of the Burghers and every tier above them.
+fn upper(s: &Stand) -> f32 {
+    s.tiers.iter().skip(2).sum()
 }
 
 /// Every company's standing, by company number (the player's first).
@@ -113,7 +122,7 @@ fn stands(world: &mut World) -> Vec<Stand> {
             coins: c.coins as f32,
             balance: c.coins_per_min as f32,
             people: c.people as f32,
-            tiers: std::array::from_fn(|i| c.tiers.get(i).map_or(0.0, |n| *n as f32)),
+            tiers: c.tiers.iter().map(|n| *n as f32).collect(),
             islands: c.islands as f32,
             ships: c.ships as f32,
             makes: c.makes,
@@ -261,6 +270,8 @@ fn parse(v: &Value) -> Rival {
         color: color_of(v),
         emblem: text(v, &["emblem"]),
         temperament: text(v, &["temperament"]),
+        leader: text(v, &["leader"]),
+        style: text(v, &["style"]),
         standing: num(v, &["standing"]),
         treaty: text(v, &["treaty"]),
         treaty_text: text(v, &["treaty_name"]),
@@ -445,11 +456,15 @@ fn rival_card(r: &Rival, picked: bool) -> El {
                         .pick_ignore(),
                 )
                 .child(
-                    El::text(r.temperament.clone())
-                        .class("ink")
-                        .text_style(|t| t.size(12.5).italic().nowrap())
-                        .with_style(|s| s.color(Colors::ink_dim()))
-                        .pick_ignore(),
+                    El::text(if r.leader.is_empty() {
+                        r.temperament.clone()
+                    } else {
+                        format!("{} · {}", r.leader, r.temperament)
+                    })
+                    .class("ink")
+                    .text_style(|t| t.size(12.5).italic().nowrap())
+                    .with_style(|s| s.color(Colors::ink_dim()))
+                    .pick_ignore(),
                 )
                 .child(
                     El::new()
@@ -651,9 +666,10 @@ fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
         .filter(|(i, _)| *i != 1 || both)
         .map(|(_, e)| e)
         .collect();
+    let shown = us.tiers.len().min(them.tiers.len());
     let tiers: Vec<El> = Tier::ALL
         .iter()
-        .filter(|_| both)
+        .take(if both { shown } else { 0 })
         .enumerate()
         .map(|(i, t)| {
             El::new()
@@ -714,7 +730,7 @@ fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
         us.coins > them.coins,
         both && us.balance > them.balance,
         us.people > them.people,
-        both && us.tiers[2] > them.tiers[2],
+        both && upper(us) > upper(them),
         us.islands > them.islands,
         both && us.ships > them.ships,
         r.our_warships > r.warships,
@@ -868,7 +884,7 @@ fn league(list: &[Rival], all: &[Stand]) -> El {
         best(&|s| s.coins),
         best(&|s| s.balance),
         best(&|s| s.people),
-        best(&|s| s.tiers[2]),
+        best(&upper),
         best(&|s| s.islands),
         best(&|s| s.ships),
     );
@@ -904,7 +920,7 @@ fn league(list: &[Rival], all: &[Stand]) -> El {
         .child(head_cell("coins", 64.0))
         .child(head_cell("a min", 52.0))
         .child(head_cell("people", 58.0))
-        .child(head_cell("burghers", 70.0))
+        .child(head_cell("burghers+", 70.0))
         .child(head_cell("isles", 38.0))
         .child(head_cell("ships", 40.0));
     El::new()
@@ -947,11 +963,11 @@ fn league(list: &[Rival], all: &[Stand]) -> El {
                 ))
                 .child(cell(
                     if st.known {
-                        super::fmt_int(st.tiers[2] as f64)
+                        super::fmt_int(upper(&st) as f64)
                     } else {
                         "–".into()
                     },
-                    st.known && st.tiers[2] >= bb && bb > 0.0,
+                    st.known && upper(&st) >= bb && bb > 0.0,
                     70.0,
                 ))
                 .child(cell(format!("{:.0}", st.islands), st.islands >= bi, 38.0))
@@ -985,12 +1001,24 @@ fn detail(r: &Rival, clock: f64, us: &Stand, them: &Stand) -> El {
                         .pick_ignore(),
                 )
                 .child(
-                    El::text(r.temperament.clone())
-                        .class("ink")
-                        .text_style(|t| t.size(14.0).italic())
-                        .with_style(|s| s.color(Colors::ink_dim()))
-                        .pick_ignore(),
+                    El::text(if r.leader.is_empty() {
+                        r.temperament.clone()
+                    } else {
+                        format!("Led by {} · {}", r.leader, r.temperament)
+                    })
+                    .class("ink")
+                    .text_style(|t| t.size(14.0).italic())
+                    .with_style(|s| s.color(Colors::ink_dim()))
+                    .pick_ignore(),
                 )
+                // How the house plays, in the game's words.
+                .child_opt((!r.style.is_empty()).then(|| {
+                    El::text(r.style.clone())
+                        .class("ink")
+                        .text_style(|t| t.size(13.0))
+                        .with_style(|s| s.color(Colors::ink()).max_width(560.0))
+                        .pick_ignore()
+                }))
                 .child(
                     El::new()
                         .class("row")
