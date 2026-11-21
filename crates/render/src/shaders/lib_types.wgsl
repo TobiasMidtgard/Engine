@@ -130,22 +130,38 @@ fn oct_decode(e: vec2<f32>) -> vec3<f32> {
     return normalize(n);
 }
 
+// The value noises take their lattice corners as whole numbers and turn each into a float
+// on its own, so a corner hashes the same from both cells that share it. Added as floats
+// (`floor(p) + 1.0`), a GPU compiler may hash `(i + 1) * 0.1031` as `i * 0.1031 + 0.1031`,
+// two roundings. A thousand cells or more from the origin, about a fifth of the corners then
+// hash differently from the two sides, and a surface's detail breaks into straight seams along
+// the lattice: the Brightsund sea's glints broke off at them on an RTX 5080, while lavapipe
+// rounds once and showed none. The corners are the same as before, so the noise is the same
+// wherever it was already right.
+fn noise_corner2(i: vec2<i32>, dx: i32, dy: i32) -> f32 {
+    return hash12(vec2<f32>(i + vec2<i32>(dx, dy)));
+}
+
+fn noise_corner3(i: vec3<i32>, dx: i32, dy: i32, dz: i32) -> f32 {
+    return hash13(vec3<f32>(i + vec3<i32>(dx, dy, dz)));
+}
+
 fn value_noise2(p: vec2<f32>) -> f32 {
-    let i = floor(p);
+    let i = vec2<i32>(floor(p));
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x),
-               mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x), u.y);
+    return mix(mix(noise_corner2(i, 0, 0), noise_corner2(i, 1, 0), u.x),
+               mix(noise_corner2(i, 0, 1), noise_corner2(i, 1, 1), u.x), u.y);
 }
 
 fn value_noise3(p: vec3<f32>) -> f32 {
-    let i = floor(p);
+    let i = vec3<i32>(floor(p));
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
-    let a = mix(mix(hash13(i), hash13(i + vec3(1.0, 0.0, 0.0)), u.x),
-                mix(hash13(i + vec3(0.0, 1.0, 0.0)), hash13(i + vec3(1.0, 1.0, 0.0)), u.x), u.y);
-    let b = mix(mix(hash13(i + vec3(0.0, 0.0, 1.0)), hash13(i + vec3(1.0, 0.0, 1.0)), u.x),
-                mix(hash13(i + vec3(0.0, 1.0, 1.0)), hash13(i + vec3(1.0, 1.0, 1.0)), u.x), u.y);
+    let a = mix(mix(noise_corner3(i, 0, 0, 0), noise_corner3(i, 1, 0, 0), u.x),
+                mix(noise_corner3(i, 0, 1, 0), noise_corner3(i, 1, 1, 0), u.x), u.y);
+    let b = mix(mix(noise_corner3(i, 0, 0, 1), noise_corner3(i, 1, 0, 1), u.x),
+                mix(noise_corner3(i, 0, 1, 1), noise_corner3(i, 1, 1, 1), u.x), u.y);
     return mix(a, b, u.z);
 }
 
