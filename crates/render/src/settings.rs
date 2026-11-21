@@ -255,6 +255,12 @@ pub mod shade_skip {
     /// `fs_main_old`). The same picture: what lighting only the blades that show, and reading
     /// their sunlight once, saves in `scene: grass`. Read on the CPU.
     pub const GRASS_OLD_WAY: u32 = 268435456;
+    /// The frame's ray scene takes a leaf card (`RayClass::Leaf`) where a ray meets it, its
+    /// texture unasked: what testing the cards' texture costs the rays that ask it (`gpu_sweep`
+    /// row `ray_leaves_solid`: the texture reads, and the triangles behind the holes). The
+    /// cards stay triangles a ray is handed one by one, so the ground's are still asked. Read
+    /// on the CPU, which tells the shaders (`RayUniform`'s flags).
+    pub const RAY_LEAVES_SOLID: u32 = 536870912;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the picture (lib_frame.wgsl
@@ -619,8 +625,19 @@ pub struct RenderSettings {
     /// leaves and the water in it costs to build and to trace through before those are in it
     /// (`gpu_sweep` rows `ray_scene_10k`, `_20k`, `_40k`; passes "probe gi build", "probe gi",
     /// "world reflections", "ray shadows"). The copies show in the probes' light and in
-    /// reflections while it is on.
+    /// reflections while it is on. With the frame's ray scene on
+    /// (`trial_cut_more::RAY_WORLD`) the copies go into it instead, as many as fit in the still
+    /// structure holding still and the rest moving, and both of its structures are built every
+    /// frame (`render.ray.copies`; row `ray_world_full`, 18,432 fills both).
     pub ray_scene_stress: u32,
+    /// Meters from the camera within which the frame's ray scene holds everything that casts
+    /// a shadow, whatever its size, and what casts none from 0.3 m in radius (160 by default).
+    /// A change makes the features look at everything again.
+    pub ray_caster_reach: f32,
+    /// Meters up to which, past `ray_caster_reach`, the frame's ray scene holds what is at
+    /// least 0.0175 times its distance across (0.05 while the still structure would be past
+    /// its cap, `render.ray.valve`). 384 by default.
+    pub ray_far_reach: f32,
     /// A measurement, off by default: one ray toward the sun from every pixel the prepass drew,
     /// against the rays' scene on the hardware path (pass "ray shadows", `gpu_sweep` row
     /// `ray_sun`; with `shade_skip::COUNT_MESH_RUNS` the rays and their hits are counted,
@@ -926,6 +943,8 @@ impl Default for RenderSettings {
             gi_shadowed_lights: 8,
             gi_hardware_rays: true,
             ray_scene_stress: 0,
+            ray_caster_reach: 160.0,
+            ray_far_reach: 384.0,
             ray_sun_shadows: false,
             subsurface_width: 0.012,
             grass_density: 1.0,

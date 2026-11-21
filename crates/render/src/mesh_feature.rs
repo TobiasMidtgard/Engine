@@ -4291,8 +4291,12 @@ impl RenderFeature for MeshFeature {
                     ray_surface: [
                         material.perceptual_roughness,
                         material.metallic,
+                        // A texel is a hole where its alpha times the colour's is below
+                        // the cutoff, as the raster tests it; a ray tile holds the texel's.
                         match material.alpha_mode {
-                            AlphaMode::Mask(cutoff) => cutoff,
+                            AlphaMode::Mask(cutoff) => {
+                                (cutoff / material.base_color[3].max(1e-3)).min(1.0)
+                            }
                             _ => 0.5,
                         },
                     ],

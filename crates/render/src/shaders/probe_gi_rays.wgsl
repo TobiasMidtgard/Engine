@@ -10,10 +10,10 @@
 // first, then a share of the rest in turn), then the cleared ones.
 @group(2) @binding(18) var<storage, read> updates: array<u32>;
 
-// The last hit `trace_scene` found for a ray that asks what it meets, whole as `ray_whole`
-// gave it: what the shared body's `Hit` has no room for (the triangle, where on it, the turn
-// to its mesh). `shade_hit` shades that hit next (`cs_trace`, `cs_reflect` trace nothing in
-// between); shadow rays leave it as it is.
+// The last hit `trace_scene` or `trace_reflect` found for a ray that asks what it meets, as
+// `ray_whole` or `ray_nearest` gave it: what the shared body's `Hit` has no room for (the
+// triangle, where on it, the turn to its mesh). `shade_hit` shades that hit next (`cs_trace`,
+// `cs_reflect` trace nothing in between); shadow rays leave it as it is.
 var<private> ray_last: RayHit;
 
 // The nearest hit along a camera-relative ray within `t_max` (`instance` all ones: none)
@@ -32,10 +32,28 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
         hit.local_n = vec3<f32>(0.0);
         return hit;
     }
-    let found = ray_whole(origin, dir, t_max, RAY_SEES_SHAPES, false);
+    let found = ray_whole(origin, dir, t_max, RAY_SEES_SHAPES);
     ray_last = found;
     hit.t = found.t;
     hit.instance = found.row;
+    hit.local_n = found.n;
+    return hit;
+}
+
+// What world reflections ask of a leaf card's triangles: their texture, for the first 4 a ray
+// meets, then their coverage; and the ground only at its front.
+const REFLECT_RULES: u32 = RULE_GROUND_FRONT | RULE_LEAF_TEXTURE | (4u << RULE_TESTS_SHIFT);
+
+// The nearest hit along a camera-relative ray within `t_max` that a world reflection sees
+// (`instance` all ones: none), as `trace_scene` gives a probe's: every class a view draws, of
+// any size, leaf cards through the holes of their texture.
+fn trace_reflect(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> Hit {
+    let found = ray_nearest(origin, dir, t_max, RAY_DRAWN, REFLECT_RULES);
+    ray_last = found;
+    var hit: Hit;
+    hit.t = found.t;
+    hit.instance = found.row;
+    hit.triangle = 0u;
     hit.local_n = found.n;
     return hit;
 }

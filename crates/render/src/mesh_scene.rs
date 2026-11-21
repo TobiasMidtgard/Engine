@@ -164,6 +164,17 @@ pub(crate) fn row_matrices(
     (m, n)
 }
 
+/// A [`MeshInstances`] row's mesh to world, in `f64`: what [`row_matrices`] draws it with,
+/// for the frame's ray scene.
+pub(crate) fn row_affine(transform: &GlobalTransform, row: &InstanceRow) -> DAffine3 {
+    transform.0
+        * DAffine3::from_scale_rotation_translation(
+            DVec3::splat(row.scale.abs().max(1e-6) as f64),
+            DQuat::from_rotation_y(row.yaw as f64),
+            row.position.as_dvec3(),
+        )
+}
+
 fn with_translation(mut rows: [[f32; 4]; 3], t: DVec3) -> [[f32; 4]; 3] {
     let t = t.as_vec3();
     rows[0][3] = t.x;
@@ -1269,5 +1280,46 @@ mod tests {
         };
         let v = tinted.packed_tint() as u32 - 1;
         assert_eq!((v & 255, v >> 8 & 255, v >> 16), (64, 128, 255));
+    }
+
+    /// The rays place a row where the raster draws it, in `f64` (a negative scale is its size).
+    #[test]
+    fn a_rows_ray_placement_is_where_it_is_drawn() {
+        let transform = GlobalTransform::from(
+            Transform::from_xyz(100.0, 2.0, -30.0)
+                .with_rotation(Quat::from_rotation_y(0.5) * Quat::from_rotation_x(0.1))
+                .with_scale(Vec3::splat(1.5)),
+        );
+        let origin = DVec3::new(100.0, 0.0, -30.0);
+        for row in [
+            InstanceRow {
+                position: Vec3::new(1.0, 0.0, 2.0),
+                yaw: 0.25,
+                scale: 2.0,
+                ..Default::default()
+            },
+            InstanceRow {
+                position: Vec3::new(-4.0, 0.5, 0.0),
+                yaw: -2.0,
+                scale: -0.5,
+                ..Default::default()
+            },
+        ] {
+            let (m, _) = row_matrices(&transform, &row, origin);
+            let affine = row_affine(&transform, &row);
+            for point in [
+                Vec3::ZERO,
+                Vec3::new(0.3, 1.0, -0.2),
+                Vec3::new(-2.0, 0.0, 5.0),
+            ] {
+                let drawn = Vec3::new(
+                    Vec4::from(m[0]).dot(point.extend(1.0)),
+                    Vec4::from(m[1]).dot(point.extend(1.0)),
+                    Vec4::from(m[2]).dot(point.extend(1.0)),
+                );
+                let traced = (affine.transform_point3(point.as_dvec3()) - origin).as_vec3();
+                assert!(drawn.distance(traced) < 1e-4, "{drawn} vs {traced}");
+            }
+        }
     }
 }

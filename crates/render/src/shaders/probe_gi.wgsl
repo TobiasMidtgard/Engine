@@ -5,7 +5,8 @@
 //
 // What the rays trace comes first, composed before this file, one of three ways
 // (`probe_gi::shader_source`). All give the probes' buffers (`pass_`, `rays`, `probe_state`,
-// `atlas_out`, `updates`), `trace_scene` and `shade_hit`:
+// `atlas_out`, `updates`), `trace_scene`, `trace_reflect` (a world reflection's ray) and
+// `shade_hit`:
 // * the frame's ray scene: lib_ray.wgsl and probe_gi_rays.wgsl (ray queries against the scene
 //   every feature fills, ray_scene/mod.rs);
 // * the probes' own scene on ray-tracing hardware: probe_gi_trace_hw.wgsl and
@@ -341,7 +342,7 @@ fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
     let origin = rel + n * (0.02 + 0.002 * depth);
     let spacing = frame.gi_volume.w;
     let t_max = spacing * 64.0;
-    let hit = trace_scene(origin, dir, t_max, false);
+    let hit = trace_reflect(origin, dir, t_max);
     let wall = sky_volume_wall(origin, dir, min(hit.t, t_max));
     var out = vec4<f32>(0.0);
     if (wall < NO_HIT) {

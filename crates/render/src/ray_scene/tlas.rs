@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use engine_core::prelude::*;
 
 use super::blas::{MOVING, Name, STILL, Store};
-use super::hook::{RayClass, RayLook};
+use super::hook::{RayClass, RayKey, RayLook, RaySphere};
 
 /// Instances the still structure holds at most.
 pub(super) const STILL_CAPACITY: u32 = 16_384;
@@ -34,6 +34,17 @@ const UNMOVED_M: f64 = 1e-3;
 const UNMOVED_TURN: f64 = 4e-6;
 /// No instance (a slot), no geometry (what a slot was set with).
 const NONE: u32 = u32::MAX;
+/// At a full structure, what waits for room takes the slot of the farthest member only when
+/// it is this much nearer the camera (meters), so that two at much the same distance do not
+/// trade places as the camera sways (each trade sets two slots).
+const TRADE_M: f32 = 16.0;
+/// Trades at a build, at most.
+const TRADES_MOST: usize = 1_024;
+/// How far the camera moves (meters) before a full structure whose waiters found no trade is
+/// ranked again (unless more wait since).
+const TRADE_AGAIN_M: f64 = 1.0;
+/// The feature number of the measuring fill's copies ([`Instances::stress`]): no feature has it.
+pub(super) const STRESS: u16 = u16::MAX;
 
 /// [`RayRow::flags`]: lit from both sides.
 const ROW_DOUBLE_SIDED: u32 = 1 << 8;
@@ -105,6 +116,9 @@ struct Instance {
     of_geometry: u32,
     /// Mesh to world.
     to_world: DAffine3,
+    /// Its bounding sphere in the world (moved with `to_world` by a shift): what ranks it at
+    /// a full structure.
+    sphere: RaySphere,
     class: RayClass,
     /// The frame from which it holds still.
     still_from: u64,
@@ -182,6 +196,9 @@ struct Level {
     /// Which slots hold a shadow stand-in ([`RayClass::ShadowOnly`]), and how many do.
     is_stand_in: Vec<bool>,
     stand_ins: u32,
+    /// Which slots hold a copy of the measuring fill, and how many do.
+    is_copy: Vec<bool>,
+    copies: u32,
 }
 
 impl Level {
@@ -214,6 +231,8 @@ impl Level {
             used: 0,
             is_stand_in: vec![false; capacity as usize],
             stand_ins: 0,
+            is_copy: vec![false; capacity as usize],
+            copies: 0,
         }
     }
 
@@ -224,6 +243,17 @@ impl Level {
                 self.stand_ins += 1;
             } else {
                 self.stand_ins -= 1;
+            }
+        }
+    }
+
+    /// `slot` holds a copy of the measuring fill from now on, or not.
+    fn set_copy(&mut self, slot: u32, copy: bool) {
+        if std::mem::replace(&mut self.is_copy[slot as usize], copy) != copy {
+            if copy {
+                self.copies += 1;
+            } else {
+                self.copies -= 1;
             }
         }
     }
@@ -245,8 +275,21 @@ pub(super) struct InstanceStats {
     pub moving: u32,
     /// Instances that wait for room.
     pub parked: u32,
-    /// Placements the scene had no room for, this frame.
+    /// Placements that found the structure they belong in full this frame: parked, to wait
+    /// for room or for a farther member to trade places with.
     pub refused: u32,
+    /// Members of a full structure that gave their slot to a nearer instance, since the
+    /// scene was made.
+    pub evicted: u32,
+    /// What belongs in the still structure (holds still by now), with a slot or waiting for
+    /// one: past its cap, the valve raises the cut.
+    pub still_set: u32,
+    /// At the last ranking of a full still structure: its farthest member's nearest point and
+    /// the nearest of what waits for it (meters; -1 for none).
+    pub still_farthest_m: f32,
+    pub parked_nearest_m: f32,
+    /// Instances of each class ([`RayClass::ALL`]), the measuring fill's copies left out.
+    pub classes: [u32; 8],
     /// The structures built this frame (bits `1 << STILL`, `1 << MOVING`).
     pub built: u8,
     /// Slots set this frame.
@@ -277,6 +320,15 @@ pub(super) struct Instances {
     /// Rows of instances (in a structure or parked) that name each layer of the ray tiles:
     /// a layer goes to another texture only once none has for a while.
     tile_users: Vec<u32>,
+    /// Instances parked since the scene was made; the camera, that count and the movers
+    /// that held still when the still structure's waiters last found no trade (its ranking
+    /// waits until one of them changes).
+    parked_ever: u64,
+    quiet_trade: Option<(DVec3, u64, usize)>,
+    /// The measuring fill's copies placed, and whether both structures are built every frame
+    /// for it.
+    copies: u32,
+    every_frame: bool,
     stats: InstanceStats,
 }
 
@@ -305,7 +357,15 @@ impl Instances {
             shifted: 0,
             building: 0,
             tile_users: vec![0; super::tiles::LAYERS as usize],
-            stats: InstanceStats::default(),
+            parked_ever: 0,
+            quiet_trade: None,
+            copies: 0,
+            every_frame: false,
+            stats: InstanceStats {
+                still_farthest_m: -1.0,
+                parked_nearest_m: -1.0,
+                ..Default::default()
+            },
         }
     }
 
@@ -365,6 +425,11 @@ impl Instances {
         [STILL, MOVING].map(|level| self.levels[level].stand_ins)
     }
 
+    /// The measuring fill's copies placed.
+    pub(super) fn copies(&self) -> u32 {
+        self.copies
+    }
+
     /// Instances the scene knows (placed or parked).
     pub(super) fn len(&self) -> usize {
         self.names.len()
@@ -399,11 +464,14 @@ impl Instances {
     /// structures as they are.
     pub(super) fn shift(&mut self, shift: &DAffine3, translation_only: bool, frame: u64) {
         self.shifted = frame;
+        self.quiet_trade = None;
         for i in self.list.iter_mut().flatten() {
             if translation_only {
                 i.to_world.translation += shift.translation;
+                i.sphere.center += shift.translation;
             } else {
                 i.to_world = *shift * i.to_world;
+                i.sphere.center = shift.transform_point3(i.sphere.center);
             }
         }
         if translation_only {
@@ -455,28 +523,45 @@ impl Instances {
     /// Give instance `i`, which has no slot and is not among the parked, a slot of the
     /// structure it belongs in at `frame`, or park it. True when it has a slot.
     fn enter(&mut self, i: u32, frame: u64) -> bool {
-        let inst = self.list[i as usize].as_mut().expect("a listed instance");
-        let level = if frame >= inst.still_from {
-            STILL
-        } else {
-            MOVING
+        let level = match &self.list[i as usize] {
+            Some(inst) if frame >= inst.still_from => STILL,
+            _ => MOVING,
         };
         let Some(slot) = self.levels[level].free.pop() else {
-            inst.at = At::Parked(self.parked.len() as u32);
-            self.parked.push(i);
+            self.park(i);
             return false;
         };
+        self.take_slot(i, level, slot, frame);
+        true
+    }
+
+    /// Instance `i` holds `slot` of `level` from now on (an empty one, or one whose member
+    /// just left it for the parked), from `frame`.
+    fn take_slot(&mut self, i: u32, level: usize, slot: u32, frame: u64) {
+        let inst = self.list[i as usize].as_mut().expect("a listed instance");
         inst.at = At::In(level, slot);
         inst.entered = frame;
         let row = inst.row;
         let stand_in = inst.class == RayClass::ShadowOnly;
+        let copy = inst.name.0 == STRESS;
         let l = &mut self.levels[level];
+        if l.slots[slot as usize] == NONE {
+            l.used += 1;
+        }
         l.slots[slot as usize] = i;
-        l.used += 1;
         l.set_stand_in(slot, stand_in);
+        l.set_copy(slot, copy);
         l.mark(slot);
         self.write_row(level, slot, row);
-        true
+    }
+
+    /// Instance `i`, which holds no slot, waits for room from now on.
+    fn park(&mut self, i: u32) {
+        if let Some(inst) = self.list[i as usize].as_mut() {
+            inst.at = At::Parked(self.parked.len() as u32);
+        }
+        self.parked.push(i);
+        self.parked_ever += 1;
     }
 
     /// Take the instance out of `slot` of `level`: the slot is empty at the next build and
@@ -486,6 +571,7 @@ impl Instances {
         l.slots[slot as usize] = NONE;
         l.used -= 1;
         l.set_stand_in(slot, false);
+        l.set_copy(slot, false);
         l.freed.push(slot);
         l.mark(slot);
     }
@@ -519,11 +605,13 @@ impl Instances {
         name: Name,
         geometry: u32,
         to_world: &DAffine3,
+        sphere: RaySphere,
         class: RayClass,
         still_from: u64,
         row: RayRow,
         frame: u64,
     ) -> bool {
+        let copy = name.0 == STRESS;
         let Some(&i) = self.names.get(&name) else {
             let of_geometry = NONE;
             let inst = Instance {
@@ -531,6 +619,7 @@ impl Instances {
                 geometry,
                 of_geometry,
                 to_world: *to_world,
+                sphere,
                 class,
                 still_from,
                 row,
@@ -551,6 +640,9 @@ impl Instances {
             };
             self.names.insert(name, i);
             self.count_tile(None, tile_of(&row));
+            if !copy {
+                self.stats.classes[class.index()] += 1;
+            }
             let at = self.list_under(geometry, i);
             self.list[i as usize]
                 .as_mut()
@@ -564,6 +656,8 @@ impl Instances {
         let inst = self.list[i as usize].as_mut().expect("a named instance");
         let first_since_shift = inst.seen < self.shifted;
         inst.seen = frame;
+        // (Its bounds may change without a move: a mesh of another size.)
+        inst.sphere = sphere;
         let same_place = unmoved(&inst.to_world, to_world);
         if same_place && first_since_shift {
             // Where the shift left it, to within rounding: the feature's placement is the
@@ -579,6 +673,7 @@ impl Instances {
         }
         let (was_geometry, was_at) = (inst.geometry, inst.of_geometry);
         let tiles = (tile_of(&inst.row), tile_of(&row));
+        let was_class = inst.class;
         inst.to_world = *to_world;
         inst.class = class;
         inst.row = row;
@@ -588,6 +683,10 @@ impl Instances {
         }
         let at = inst.at;
         self.count_tile(tiles.0, tiles.1);
+        if was_class != class && !copy {
+            self.stats.classes[was_class.index()] -= 1;
+            self.stats.classes[class.index()] += 1;
+        }
         if was_geometry != geometry {
             self.unlist_under(was_geometry, was_at);
             let at = self.list_under(geometry, i);
@@ -625,6 +724,9 @@ impl Instances {
         let i = self.names.remove(&name)?;
         let inst = self.list[i as usize].take().expect("a named instance");
         self.count_tile(tile_of(&inst.row), None);
+        if name.0 != STRESS {
+            self.stats.classes[inst.class.index()] -= 1;
+        }
         self.free.push(i);
         self.unlist_under(inst.geometry, inst.of_geometry);
         store.count_user(inst.geometry, -1, frame);
@@ -641,6 +743,66 @@ impl Instances {
             }
         }
         Some(inst.geometry)
+    }
+
+    /// The measuring fill (`RenderSettings::ray_scene_stress`): `copies` more instances,
+    /// copy `k` of the `k % n`-th of the `n` others moved by `offset(k)` (meters), named
+    /// `(STRESS, k)`. As many as the still structure has room for hold still, the rest move.
+    /// Placed every frame while it is on, and both structures are built every frame (each a
+    /// full build, which is what the measurement prices); at 0 the copies go. They take no
+    /// part in the ranking at a full structure, the still set or the class counts.
+    pub(super) fn stress(
+        &mut self,
+        store: &mut Store,
+        copies: u32,
+        frame: u64,
+        offset: impl Fn(u32) -> DVec3,
+    ) {
+        self.every_frame = copies > 0;
+        let sources: Vec<(u32, DAffine3, RaySphere, RayClass, RayRow)> = if copies > 0 {
+            self.list
+                .iter()
+                .flatten()
+                .filter(|inst| inst.name.0 != STRESS)
+                .map(|inst| {
+                    (
+                        inst.geometry,
+                        inst.to_world,
+                        inst.sphere,
+                        inst.class,
+                        inst.row,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let placing = if sources.is_empty() { 0 } else { copies };
+        let l = &self.levels[STILL];
+        let still_room = l.capacity.saturating_sub(l.used - l.copies);
+        for k in 0..placing {
+            let (geometry, mut to_world, mut sphere, class, row) =
+                sources[k as usize % sources.len()];
+            let by = offset(k);
+            to_world.translation += by;
+            sphere.center += by;
+            let still_from = if k < still_room { 0 } else { u64::MAX };
+            self.place(
+                store,
+                (STRESS, RayKey(k as u64, 0)),
+                geometry,
+                &to_world,
+                sphere,
+                class,
+                still_from,
+                row,
+                frame,
+            );
+        }
+        for k in placing..self.copies {
+            self.remove(store, (STRESS, RayKey(k as u64, 0)), frame);
+        }
+        self.copies = placing;
     }
 
     /// Whether instance `name` is known: in a structure, or waiting for room.
@@ -705,55 +867,128 @@ impl Instances {
     }
 
     /// End a frame's placements: move what holds still by now into the still structure when
-    /// that is built this frame, give parked instances the room that came free, and set the
-    /// changed slots of the structures this frame builds. Returns those structures (bits
-    /// `1 << STILL`, `1 << MOVING`).
-    pub(super) fn settle(&mut self, store: &mut Store, frame: u64) -> u8 {
+    /// that is built this frame, give parked instances the room that came free (the nearest
+    /// to `eye` first), let what waits for a full structure trade places with its farthest
+    /// members, and set the changed slots of the structures this frame builds. Returns those
+    /// structures (bits `1 << STILL`, `1 << MOVING`).
+    pub(super) fn settle(&mut self, store: &mut Store, frame: u64, eye: DVec3) -> u8 {
         // What moved until now and holds still from this frame on asks for the still
         // structure's next build.
-        let promote = |list: &[Option<Instance>], i: u32| {
-            list[i as usize]
-                .as_ref()
-                .is_some_and(|inst| frame >= inst.still_from)
-        };
-        let waiting = self.levels[MOVING]
-            .slots
-            .iter()
-            .any(|&i| i != NONE && promote(&self.list, i));
+        let rested: Vec<u32> = (0..self.levels[MOVING].capacity)
+            .filter(|&slot| {
+                let i = self.levels[MOVING].slots[slot as usize];
+                i != NONE
+                    && self.list[i as usize]
+                        .as_ref()
+                        .is_some_and(|inst| frame >= inst.still_from)
+            })
+            .collect();
+        let still_room = !self.levels[STILL].free.is_empty();
         // (Only when one of them can move in: with the still structure full they stay where
-        // they are, and a build would change nothing.)
-        if waiting && !self.levels[STILL].free.is_empty() {
+        // they are unless they trade places, and a build would change nothing.)
+        if !rested.is_empty() && still_room {
             self.levels[STILL].wanted = true;
+        }
+        if still_room {
+            // (What a ranking left holds only while the structure is full.)
+            self.stats.still_farthest_m = -1.0;
+            self.stats.parked_nearest_m = -1.0;
         }
         let still_due = self.levels[STILL].built == 0
             || self.rebuild_all
+            || self.every_frame
             || frame >= self.levels[STILL].built + STILL_EVERY;
-        let build_still = self.levels[STILL].wanted && still_due;
-        if build_still && waiting {
-            for slot in 0..self.levels[MOVING].capacity {
-                let i = self.levels[MOVING].slots[slot as usize];
-                if i == NONE || !promote(&self.list, i) {
-                    continue;
+        // A full still structure, in a frame it may be built: what belongs in it and waits
+        // (parked, or resting in the moving structure) takes the slots of its farthest
+        // members where it is nearer. Ranked again only once the camera moved or more wait.
+        if still_due && !still_room {
+            let quiet = self.quiet_trade.is_some_and(|(at, parked, movers)| {
+                at.distance(eye) < TRADE_AGAIN_M
+                    && parked == self.parked_ever
+                    && movers == rested.len()
+            });
+            if !quiet {
+                let traded = self.trade(STILL, &rested, frame, eye);
+                self.quiet_trade = (traded == 0).then_some((eye, self.parked_ever, rested.len()));
+                if traded > 0 {
+                    self.levels[STILL].wanted = true;
                 }
-                // Only where the still structure has room: it stays where it is otherwise.
+            }
+        }
+        let build_still = self.levels[STILL].wanted && still_due;
+        if build_still && !rested.is_empty() {
+            // Nearest first, while the still structure has room (they stay where they are
+            // otherwise).
+            let mut movers: Vec<(f32, u32)> = rested
+                .iter()
+                .filter_map(|&slot| {
+                    let i = self.levels[MOVING].slots[slot as usize];
+                    let inst = self.list.get(i as usize)?.as_ref()?;
+                    (inst.at == At::In(MOVING, slot)).then(|| (inst.sphere.distance(eye), slot))
+                })
+                .collect();
+            movers.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            for (_, slot) in movers {
                 if self.levels[STILL].free.is_empty() {
                     break;
                 }
+                let i = self.levels[MOVING].slots[slot as usize];
                 self.leave(MOVING, slot);
                 self.enter(i, frame);
             }
         }
-        // Parked instances take what room there is (a slot emptied this frame is free after
-        // the build, so next frame).
-        if !self.parked.is_empty() {
+        // Parked instances take what room there is, the nearest first (a slot emptied this
+        // frame is free after the build, so next frame). Those whose structure has none wait
+        // where they are.
+        let room = [STILL, MOVING].map(|level| self.levels[level].free.len());
+        if !self.parked.is_empty() && room.iter().any(|&r| r > 0) {
             let parked = std::mem::take(&mut self.parked);
+            let mut entering = Vec::new();
             for i in parked {
-                // (`enter` parks it again when there is still no room.)
+                let Some(inst) = self.list[i as usize].as_ref() else {
+                    continue;
+                };
+                let level = if frame >= inst.still_from {
+                    STILL
+                } else {
+                    MOVING
+                };
+                if room[level] > 0 {
+                    entering.push((inst.sphere.distance(eye), i));
+                } else {
+                    let place = self.parked.len() as u32;
+                    self.parked.push(i);
+                    if let Some(inst) = self.list[i as usize].as_mut() {
+                        inst.at = At::Parked(place);
+                    }
+                }
+            }
+            entering.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            for (_, i) in entering {
+                // (`enter` parks it again when there is no room left.)
                 self.enter(i, frame);
             }
         }
-        let build_moving =
-            self.levels[MOVING].wanted || self.levels[MOVING].built == 0 || self.rebuild_all;
+        // A full moving structure: movers that wait take the slots of the farthest (those
+        // that hold still by now first).
+        if self.levels[MOVING].free.is_empty() && !self.parked.is_empty() {
+            let rested: Vec<u32> = (0..self.levels[MOVING].capacity)
+                .filter(|&slot| {
+                    let i = self.levels[MOVING].slots[slot as usize];
+                    i != NONE
+                        && self.list[i as usize]
+                            .as_ref()
+                            .is_some_and(|inst| frame >= inst.still_from)
+                })
+                .collect();
+            if self.trade(MOVING, &rested, frame, eye) > 0 {
+                self.levels[MOVING].wanted = true;
+            }
+        }
+        let build_moving = self.levels[MOVING].wanted
+            || self.levels[MOVING].built == 0
+            || self.rebuild_all
+            || self.every_frame;
         let mut building = 0u8;
         if build_still {
             building |= 1 << STILL;
@@ -768,7 +1003,172 @@ impl Instances {
             }
         }
         self.building = building;
+        self.stats.still_set = self.still_set(frame);
         building
+    }
+
+    /// In a frame that builds `level`, which is full: the nearest of what belongs in it and
+    /// waits for room (parked; for the still structure also the movers in the moving one that
+    /// hold still by now, in `rested` slots of it) take the slots of its farthest members, a
+    /// pair at a time while the newcomer is [`TRADE_M`] nearer `eye`, and those members are
+    /// parked. A slot's instance and its row change in the build that sets the slot, so no
+    /// ray reads a row that is not its slot's (the rule a slot emptied by `leave` keeps by
+    /// waiting for a build). For the moving structure, `rested` are its members that hold
+    /// still by now: they give way first. The measuring fill's copies take no part. How many
+    /// traded.
+    fn trade(&mut self, level: usize, rested: &[u32], frame: u64, eye: DVec3) -> u32 {
+        let list = &self.list;
+        let belongs = |inst: &Instance| (frame >= inst.still_from) == (level == STILL);
+        let mut waiting: Vec<(f32, u32)> = self
+            .parked
+            .iter()
+            .filter_map(|&i| {
+                let inst = list[i as usize].as_ref()?;
+                (inst.name.0 != STRESS && belongs(inst)).then(|| (inst.sphere.distance(eye), i))
+            })
+            .collect();
+        if level == STILL {
+            for &slot in rested {
+                let i = self.levels[MOVING].slots[slot as usize];
+                if let Some(inst) = list.get(i as usize).and_then(Option::as_ref)
+                    && inst.name.0 != STRESS
+                {
+                    waiting.push((inst.sphere.distance(eye), i));
+                }
+            }
+        }
+        let l = &self.levels[level];
+        let mut gives_way = vec![
+            false;
+            if level == MOVING {
+                l.capacity as usize
+            } else {
+                0
+            }
+        ];
+        if level == MOVING {
+            for &slot in rested {
+                gives_way[slot as usize] = true;
+            }
+        }
+        let mut members: Vec<(f32, u32)> = (0..l.capacity)
+            .filter_map(|slot| {
+                let i = l.slots[slot as usize];
+                let inst = list.get(i as usize)?.as_ref()?;
+                if inst.name.0 == STRESS {
+                    return None;
+                }
+                // (In the moving structure, one that holds still by now gives way first.)
+                let distance = if level == MOVING && gives_way[slot as usize] {
+                    f32::INFINITY
+                } else {
+                    inst.sphere.distance(eye)
+                };
+                Some((distance, slot))
+            })
+            .collect();
+        let k = waiting.len().min(members.len()).min(TRADES_MOST);
+        if k == 0 {
+            if level == STILL {
+                self.stats.still_farthest_m = -1.0;
+                self.stats.parked_nearest_m = -1.0;
+            }
+            return 0;
+        }
+        // The k nearest that wait, nearest first, and the k farthest members, farthest first.
+        if k < waiting.len() {
+            waiting.select_nth_unstable_by(k - 1, |a, b| a.0.total_cmp(&b.0));
+        }
+        let nearest_left = waiting[k..]
+            .iter()
+            .map(|w| w.0)
+            .fold(f32::INFINITY, f32::min);
+        waiting.truncate(k);
+        waiting.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        if k < members.len() {
+            members.select_nth_unstable_by(k - 1, |a, b| b.0.total_cmp(&a.0));
+        }
+        let farthest_left = members[k..].iter().map(|m| m.0).fold(-1.0, f32::max);
+        members.truncate(k);
+        members.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        let pairs: Vec<(u32, u32)> = waiting
+            .iter()
+            .zip(&members)
+            .take_while(|(near, far)| near.0 + TRADE_M < far.0)
+            .map(|(&(_, i), &(_, slot))| (i, slot))
+            .collect();
+        let traded = pairs.len();
+        let mut left = Vec::with_capacity(traded);
+        for &(i, slot) in &pairs {
+            // A mover that holds still leaves its slot of the moving structure (empty at its
+            // build this frame, which the leaving asks for).
+            if let Some(At::In(from, from_slot)) = self.list[i as usize].as_ref().map(|x| x.at) {
+                self.leave(from, from_slot);
+            }
+            let member = self.levels[level].slots[slot as usize];
+            if let Some(m) = self.list[member as usize].as_mut() {
+                m.at = At::Parked(NONE);
+            }
+            left.push(member);
+            self.take_slot(i, level, slot, frame);
+        }
+        if level == STILL {
+            // What the ranking leaves: the farthest member (of those it did not trade, the
+            // newcomers, those past the k farthest) and the nearest that waits (of those it
+            // did not trade, the members it parked, those past the k nearest).
+            let far = members[traded..]
+                .iter()
+                .map(|m| m.0)
+                .chain(waiting[..traded].iter().map(|w| w.0))
+                .chain(std::iter::once(farthest_left))
+                .fold(-1.0, f32::max);
+            let near = waiting[traded..]
+                .iter()
+                .map(|w| w.0)
+                .chain(members[..traded].iter().map(|m| m.0))
+                .chain(std::iter::once(nearest_left))
+                .fold(f32::INFINITY, f32::min);
+            self.stats.still_farthest_m = far;
+            self.stats.parked_nearest_m = if near.is_finite() { near } else { -1.0 };
+        }
+        if traded > 0 {
+            // The parked list: those that took a slot leave it, the members join it.
+            let list = &self.list;
+            self.parked.retain(|&p| {
+                list[p as usize]
+                    .as_ref()
+                    .is_some_and(|inst| matches!(inst.at, At::Parked(_)))
+            });
+            self.parked.extend(left);
+            for (place, &p) in self.parked.iter().enumerate() {
+                if let Some(inst) = self.list[p as usize].as_mut() {
+                    inst.at = At::Parked(place as u32);
+                }
+            }
+            self.parked_ever += traded as u64;
+            self.stats.evicted += traded as u32;
+        }
+        traded as u32
+    }
+
+    /// What belongs in the still structure at `frame` (holds still by now), with a slot or
+    /// waiting for one, the measuring fill's copies left out.
+    fn still_set(&self, frame: u64) -> u32 {
+        let l = &self.levels[STILL];
+        let rested = |i: u32| {
+            self.list
+                .get(i as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|inst| inst.name.0 != STRESS && frame >= inst.still_from)
+        };
+        let moving = self.levels[MOVING]
+            .slots
+            .iter()
+            .filter(|&&i| i != NONE && rested(i))
+            .count();
+        let parked = self.parked.iter().filter(|&&i| rested(i)).count();
+        // (A still member that began to move this frame is in the moving structure already.)
+        l.used - l.copies + (moving + parked) as u32
     }
 
     /// Set the changed slots of `level`'s structure for its build.

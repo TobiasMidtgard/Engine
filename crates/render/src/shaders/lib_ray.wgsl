@@ -17,7 +17,8 @@ struct RayUniform {
     anchor: vec4<f32>,
     // instances in the still structure, in the moving one; the frame; the epoch
     counts: vec4<u32>,
-    // shadow stand-ins in the still structure, in the moving one
+    // shadow stand-ins in the still structure, in the moving one; z: 0; w: the measuring
+    // rungs (`RAY_SCENE_LEAVES_SOLID`)
     stand_ins: vec4<u32>,
     // the sun's rays: reach of the pixels that get one, length (meters); zeros until the
     // sun's own rays read them (the measuring rays have a length of their own)
@@ -68,11 +69,14 @@ const RAY_WATER: u32 = 16u;
 const RAY_NOCAST: u32 = 32u;
 const RAY_SMALL: u32 = 64u;
 const RAY_SHADOW_ONLY: u32 = 128u;
-// What probe light and world reflections see: what holds its shape and is 0.3 m or more.
-const RAY_SEES_SHAPES: u32 = 51u; // SOLID | GROUND | WATER | NOCAST
+// What probe light sees: what holds its shape and is 0.3 m or more (leaves reach the probes
+// through the canopy map).
+const RAY_SEES_SHAPES: u32 = 55u; // SOLID | GROUND | SWAY | WATER | NOCAST
 // What casts a shadow of those: every face of it stops light on its way from the sun or a
 // lamp (`ray_stopped`, which also asks the stand-ins that cast for things that cast none).
-const RAY_CASTS: u32 = 3u; // SOLID | GROUND
+const RAY_CASTS: u32 = 7u; // SOLID | GROUND | SWAY
+// Every class a view draws: all but `RAY_SHADOW_ONLY` (world reflections).
+const RAY_DRAWN: u32 = 127u;
 
 const RAY_ROW_DOUBLE_SIDED: u32 = 256u;
 // `RayRow.tris` names the row's triangle records.
@@ -87,6 +91,92 @@ const RAY_TILE_BIAS: f32 = 0.0;
 const RAY_NONE: u32 = 0xffffffffu;
 // The smallest normal f32: where a query starts, so that a hit at exactly 0 doesn't count.
 const RAY_T_MIN: f32 = 1.17549435e-38;
+
+// The rules a ray asks the triangles that are asked by (`ray_first`, `ray_nearest`): those of
+// the `Ground` and of the `Leaf` cards, the geometries built to be asked (`RayClass::opaque`);
+// every other triangle stops a ray at any hit, as does one a rule leaves alone.
+// The ground stops a ray only at its front (its corners counter-clockwise as the ray sees
+// them): a ray from below passes up through it.
+const RULE_GROUND_FRONT: u32 = 1u;
+// A leaf card stops a ray where its texture is opaque (the tile's alpha at least the row's
+// cutoff), read for the first `(rules >> RULE_TESTS_SHIFT) & 255` of the ray's candidates, by
+// chance after them (`RULE_LEAF_CHANCE`). The back of a card drawn from one side never stops
+// it: the raster culls that face too.
+const RULE_LEAF_TEXTURE: u32 = 2u;
+// A leaf card stops a ray by chance: as often as its texture covers the card (the row's
+// coverage), the same draw for the same candidate within a frame.
+const RULE_LEAF_CHANCE: u32 = 4u;
+// `ray_first`: only the still structure is asked.
+const RULE_STILL_ONLY: u32 = 8u;
+// The rules that ask candidates: without one, every triangle is taken whole (`ray_flags`).
+const RULE_ASKS: u32 = 7u;
+const RULE_TESTS_SHIFT: u32 = 8u;
+// `RayUniform.stand_ins.w`: the measuring rung `ray_leaves_solid` (`shade_skip`), every leaf
+// card's candidate kept at once, as if its texture covered the card (what the row prices: the
+// texture reads, the draws and what lies behind the holes).
+const RAY_SCENE_LEAVES_SOLID: u32 = 1u;
+
+// lowbias32 (Wellons): a well mixed hash of a word.
+fn ray_hash(v: u32) -> u32 {
+    var h = v;
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return h;
+}
+
+// A draw in [0, 1) for candidate `c`: the same for the same candidate within a frame (one
+// handed over twice is decided the same way), another the next frame.
+fn ray_chance(c: RayIntersection) -> f32 {
+    var h = ray_hash(c.instance_custom_data ^ ray_scene.counts.z);
+    h = ray_hash(h ^ c.primitive_index);
+    h = ray_hash(h ^ bitcast<u32>(c.barycentrics.x));
+    h = ray_hash(h ^ bitcast<u32>(c.barycentrics.y));
+    return f32(h >> 8u) * (1.0 / 16777216.0);
+}
+
+// Whether candidate `c` stops a ray that asks by `rules` (`RULE_*`, as `ray_rules` gives them).
+// `tests`: the texture reads the ray made so far, shared by its two structures. A leaf card
+// with no triangle records or no tile (a copy's geometry, a texture not in the tiles yet) is
+// taken by chance.
+fn ray_accepts(c: RayIntersection, rules: u32, tests: ptr<function, u32>) -> bool {
+    let i = c.instance_custom_data;
+    // (The row's fields one by one: the rest of it only where its texture is read.)
+    let flags = ray_rows[i].flags;
+    let class_bit = flags & 255u;
+    if (class_bit == RAY_GROUND) { return (rules & RULE_GROUND_FRONT) == 0u || c.front_face; }
+    let by_texture = (rules & RULE_LEAF_TEXTURE) != 0u;
+    if (class_bit != RAY_LEAF || (!by_texture && (rules & RULE_LEAF_CHANCE) == 0u)) { return true; }
+    if (!c.front_face && (flags & RAY_ROW_DOUBLE_SIDED) == 0u) { return false; }
+    let needs = RAY_ROW_HAS_TRIS | RAY_ROW_HAS_TILE;
+    if (by_texture && (flags & needs) == needs && *tests < ((rules >> RULE_TESTS_SHIFT) & 255u)) {
+        *tests += 1u;
+        let tris = ray_rows[i].tris;
+        let at = ray_tri_at(tris, c.primitive_index);
+        let uv = ray_tri_uv(tris, at, c.barycentrics) * ray_rows[i].uv.xy + ray_rows[i].uv.zw;
+        // Level 0: a coarser one averages alpha, and would move the card's cut edge.
+        let alpha = textureSampleLevel(ray_tiles, linear_repeat, uv, ray_rows[i].tile, 0.0).a;
+        return alpha >= f32((flags >> 16u) & 255u) / 255.0;
+    }
+    return ray_chance(c) < f32(flags >> 24u) / 255.0;
+}
+
+// The flags a ray that asks by `rules` is traced with: every triangle whole when it asks none.
+fn ray_flags(rules: u32) -> u32 {
+    return select(0u, RAY_FLAG_FORCE_OPAQUE, (rules & RULE_ASKS) == 0u);
+}
+
+// The rules a ray's candidates are asked by this frame: with the measuring rung
+// `ray_leaves_solid`, every leaf card's candidate is kept at once (they still come: the ray's
+// flags follow the rules it was given).
+fn ray_rules(rules: u32) -> u32 {
+    if ((ray_scene.stand_ins.w & RAY_SCENE_LEAVES_SOLID) != 0u) {
+        return rules & ~(RULE_LEAF_TEXTURE | RULE_LEAF_CHANCE);
+    }
+    return rules;
+}
 
 struct RayHit {
     // distance along the ray; the ray's end when it hit nothing
@@ -129,10 +219,10 @@ fn ray_hit_whole(best: ptr<function, RayHit>, hit: RayIntersection, v: array<vec
 // The nearest hit of a camera-relative ray within `t_max` among the instances of `classes`,
 // every triangle taken whole (none is asked, whatever its geometry says): no face is culled,
 // and a hit counts at 0 < t < t_max (a query takes tmin <= t <= tmax, so it starts at the
-// smallest normal float and ends one float short). `any_hit`: stop at the first hit found (a
-// shadow ray); its `n` is zero and its `primitive` `RAY_NONE`. The moving structure is asked
-// only for what is nearer than the still one's hit; a structure with no instance is not asked.
-fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, any_hit: bool) -> RayHit {
+// smallest normal float and ends one float short). The moving structure is asked only for
+// what is nearer than the still one's hit; a structure with no instance is not asked. (The
+// probes' rays: `ray_nearest` asks the triangles that are asked.)
+fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32) -> RayHit {
     var best: RayHit;
     best.t = t_max;
     best.row = RAY_NONE;
@@ -145,8 +235,7 @@ fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, any_hi
     // Nothing to cross (a query's range must be a number, at least 0).
     if (!(t_max > 0.0)) { return best; }
     let o = origin - ray_scene.anchor.xyz;
-    var flags = RAY_FLAG_FORCE_OPAQUE;
-    if (any_hit) { flags = RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT; }
+    let flags = RAY_FLAG_FORCE_OPAQUE;
     if (ray_scene.counts.x > 0u) {
         let t_end = bitcast<f32>(bitcast<u32>(best.t) - 1u);
         rayQueryInitialize(&still, ray_still, RayDesc(flags, classes, RAY_T_MIN, t_end, o, dir));
@@ -155,7 +244,6 @@ fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, any_hi
         if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
             best.t = hit.t;
             best.row = hit.instance_custom_data;
-            if (any_hit) { return best; }
             ray_hit_whole(&best, hit, getCommittedHitVertexPositions(&still));
         }
     }
@@ -167,7 +255,6 @@ fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, any_hi
         if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
             best.t = hit.t;
             best.row = hit.instance_custom_data;
-            if (any_hit) { return best; }
             ray_hit_whole(&best, hit, getCommittedHitVertexPositions(&moving));
         }
     }
@@ -187,7 +274,7 @@ fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, any_hi
 fn ray_stopped(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> u32 {
     var still: ray_query<vertex_return>;
     var moving: ray_query<vertex_return>;
-    let caster = ray_whole(origin, dir, t_max, RAY_CASTS, true).row;
+    let caster = ray_first(origin, dir, t_max, RAY_CASTS, 0u);
     if (caster != RAY_NONE || !(t_max > 0.0)) { return caster; }
     let o = origin - ray_scene.anchor.xyz;
     let flags = RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT | RAY_FLAG_CULL_BACK_FACING;
@@ -205,6 +292,98 @@ fn ray_stopped(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> u32 {
         if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
     }
     return RAY_NONE;
+}
+
+// The row of what stops a camera-relative ray within `t_max` among the instances of
+// `classes`, the triangles that are asked asked by `rules` (`RULE_*`; 0: every triangle
+// whole): the first hit found, not the nearest (`RAY_NONE`: nothing). Both structures, the
+// still one alone with `RULE_STILL_ONLY`; one with no instance is not asked. (As in
+// `ray_whole`, the queries are the function's own variables, and a loop holds nothing but the
+// ask: no `break`, no `return`.)
+fn ray_first(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules: u32) -> u32 {
+    var still: ray_query<vertex_return>;
+    var moving: ray_query<vertex_return>;
+    var tests = 0u;
+    if (!(t_max > 0.0)) { return RAY_NONE; }
+    let o = origin - ray_scene.anchor.xyz;
+    let flags = ray_flags(rules) | RAY_FLAG_TERMINATE_ON_FIRST_HIT;
+    let asks = ray_rules(rules);
+    let t_end = bitcast<f32>(bitcast<u32>(t_max) - 1u);
+    if (ray_scene.counts.x > 0u) {
+        rayQueryInitialize(&still, ray_still, RayDesc(flags, classes, RAY_T_MIN, t_end, o, dir));
+        while (rayQueryProceed(&still)) {
+            if (ray_accepts(rayQueryGetCandidateIntersection(&still), asks, &tests)) {
+                rayQueryConfirmIntersection(&still);
+            }
+        }
+        let hit = rayQueryGetCommittedIntersection(&still);
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
+    }
+    if (ray_scene.counts.y > 0u && (rules & RULE_STILL_ONLY) == 0u) {
+        rayQueryInitialize(&moving, ray_moving, RayDesc(flags, classes, RAY_T_MIN, t_end, o, dir));
+        while (rayQueryProceed(&moving)) {
+            if (ray_accepts(rayQueryGetCandidateIntersection(&moving), asks, &tests)) {
+                rayQueryConfirmIntersection(&moving);
+            }
+        }
+        let hit = rayQueryGetCommittedIntersection(&moving);
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
+    }
+    return RAY_NONE;
+}
+
+// Whether anything among `classes` stops a camera-relative ray within `t_max` (`ray_first`).
+fn ray_any(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules: u32) -> bool {
+    return ray_first(origin, dir, t_max, classes, rules) != RAY_NONE;
+}
+
+// The nearest hit of a camera-relative ray within `t_max` among the instances of `classes`, as
+// `ray_whole` gives it, the triangles that are asked asked by `rules` (`RULE_*`): the still
+// structure first, the moving one only for what is nearer.
+fn ray_nearest(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules: u32) -> RayHit {
+    var best: RayHit;
+    best.t = t_max;
+    best.row = RAY_NONE;
+    best.n = vec3<f32>(0.0);
+    best.primitive = RAY_NONE;
+    var still: ray_query<vertex_return>;
+    var moving: ray_query<vertex_return>;
+    var tests = 0u;
+    if (!(t_max > 0.0)) { return best; }
+    let o = origin - ray_scene.anchor.xyz;
+    let flags = ray_flags(rules);
+    let asks = ray_rules(rules);
+    if (ray_scene.counts.x > 0u) {
+        let t_end = bitcast<f32>(bitcast<u32>(best.t) - 1u);
+        rayQueryInitialize(&still, ray_still, RayDesc(flags, classes, RAY_T_MIN, t_end, o, dir));
+        while (rayQueryProceed(&still)) {
+            if (ray_accepts(rayQueryGetCandidateIntersection(&still), asks, &tests)) {
+                rayQueryConfirmIntersection(&still);
+            }
+        }
+        let hit = rayQueryGetCommittedIntersection(&still);
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+            best.t = hit.t;
+            best.row = hit.instance_custom_data;
+            ray_hit_whole(&best, hit, getCommittedHitVertexPositions(&still));
+        }
+    }
+    if (ray_scene.counts.y > 0u) {
+        let t_end = bitcast<f32>(bitcast<u32>(best.t) - 1u);
+        rayQueryInitialize(&moving, ray_moving, RayDesc(flags, classes, RAY_T_MIN, t_end, o, dir));
+        while (rayQueryProceed(&moving)) {
+            if (ray_accepts(rayQueryGetCandidateIntersection(&moving), asks, &tests)) {
+                rayQueryConfirmIntersection(&moving);
+            }
+        }
+        let hit = rayQueryGetCommittedIntersection(&moving);
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+            best.t = hit.t;
+            best.row = hit.instance_custom_data;
+            ray_hit_whole(&best, hit, getCommittedHitVertexPositions(&moving));
+        }
+    }
+    return best;
 }
 
 // The first word of the record of triangle `primitive` (a hit's `primitive_index`) of a row

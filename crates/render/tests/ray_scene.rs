@@ -12,14 +12,18 @@
 //! turned, stretched or hangs on another thing; more movers than the moving structure holds
 //! wait their turn, and so do more things at rest than the still one holds; a mesh that takes
 //! another's handle is a geometry of its own; things that keep moving are lit as things at
-//! rest; a mirror keeps up while the probe grid scrolls; and the switch can be thrown while
-//! the game runs. Needs a GPU with ray queries (lavapipe has them); passes with a note
-//! without.
+//! rest; a mirror keeps up while the probe grid scrolls; the switch can be thrown while the
+//! game runs; a mirror shows the wall behind a leaf card through the card's holes; each kind
+//! of thing is in the rays as its class; the reaches are settings; each row of a
+//! `MeshInstances` slot is an instance of its own; and the measuring fill fills both
+//! structures to their caps. Needs a GPU with ray queries (lavapipe has them); passes with a
+//! note without.
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::rock::rock;
+use engine_render::settings::shade_skip;
 use engine_render::settings::trial_cut_more::RAY_WORLD;
 use engine_render::{RenderDisabled, capture_now};
 
@@ -2202,4 +2206,399 @@ fn the_ray_scene_is_switched_while_the_game_runs() {
             "{name}: ray scene {world:.2}, the probes' own {own:.2}, ray scene again {again:.2}"
         );
     }
+}
+
+/// How much more of channel `c` than of the other two the pixels `[x0, y0, x1, y1)` hold (0:
+/// gray; 1: only `c`).
+fn share(image: &image::RgbImage, [x0, y0, x1, y1]: [u32; 4], c: usize) -> f32 {
+    let mut s = [0.0f32; 3];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            for (sum, v) in s.iter_mut().zip(image.get_pixel(x, y).0) {
+                *sum += v as f32;
+            }
+        }
+    }
+    (s[c] - 0.5 * (s.iter().sum::<f32>() - s[c])) / s[c].max(1.0)
+}
+
+/// The leaf card's four cells in the mirror (pixels `[x0, y0, x1, y1)`, 4 px inside each edge:
+/// reflections are traced at half size and filtered), and the red wall beside it. Through the
+/// mirror the card is 9.7 m away and the wall 10.75 m; 40 degrees high, the card spans x
+/// 60-100 and y 31-72, its cells meeting at (80, 51.5).
+const CARD_CELLS: [[u32; 4]; 4] = [
+    [64, 36, 76, 48],
+    [84, 36, 96, 48],
+    [64, 56, 76, 68],
+    [84, 56, 96, 68],
+];
+const WALL_BESIDE: [[u32; 4]; 2] = [[26, 36, 52, 68], [108, 36, 134, 68]];
+
+/// A leaf card (cut out by its texture, a `Leaf`) hangs between the camera and the red wall
+/// behind it: the mirror shows the wall through the card's clear cells, as bright as beside
+/// the card, and the card's green in its opaque ones (world reflections ask each of a leaf's
+/// triangles). With the measuring rung `ray_leaves_solid` every cell shows the card, and the
+/// opaque cells are as they were.
+#[test]
+fn a_ray_passes_the_holes_of_a_leaf_card() {
+    let mut app = app(true);
+    let cutout = app
+        .world
+        .resource_mut::<Assets<Image>>()
+        .add(Image::checker(
+            64,
+            2,
+            [255, 255, 255, 255],
+            [255, 255, 255, 0],
+        ));
+    let (camera, _) = mirror_with(&mut app.world, false);
+    *app.world.get_mut::<Camera>(camera).expect("camera") = Camera {
+        exposure: Exposure::Manual { ev100: 14.0 },
+        ..Camera::perspective(40.0)
+    };
+    let mut leaf = StandardMaterial::color(0.05, 0.8, 0.05)
+        .with_roughness(0.9)
+        .with_base_color_texture(cutout)
+        .with_alpha_mask(0.5);
+    leaf.double_sided = true;
+    app.world.spawn((
+        Transform::from_xyz(0.0, 2.0, 2.8)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+        MeshRenderer::new(Shape::Quad { size: [2.4, 2.4] }, leaf),
+    ));
+    // Looking at the card first: its tile is filled from the texture the raster uploads.
+    turn(&mut app, camera, DVec3::new(0.0, 1.5, 4.0));
+    app.update_n(4);
+    if !can_run(&app) {
+        return;
+    }
+    turn(&mut app, camera, DVec3::new(0.0, 1.5, -3.0));
+    app.update_n(8);
+    assert_in_ray_scene(&app, "the leaf card");
+    assert_eq!(
+        diag(&app, "render.ray.class_leaf"),
+        1.0,
+        "the card is a leaf"
+    );
+    assert_eq!(
+        (
+            diag(&app, "render.ray.tiles"),
+            diag(&app, "render.ray.tiles_waiting")
+        ),
+        (1.0, 0.0),
+        "the card's texture has its tile"
+    );
+    let holes = picture(&mut app, "leaf_card_holes.png");
+    app.world.resource_mut::<RenderSettings>().debug_skip |= shade_skip::RAY_LEAVES_SOLID;
+    app.update_n(2);
+    let solid = picture(&mut app, "leaf_card_solid.png");
+    let wall = WALL_BESIDE
+        .map(|r| linear_mean(&holes, r))
+        .iter()
+        .sum::<f32>()
+        / 2.0;
+    let red = CARD_CELLS.map(|r| share(&holes, r, 0));
+    let green = |p: &image::RgbImage| CARD_CELLS.map(|r| share(p, r, 1));
+    let mean = |p: &image::RgbImage| CARD_CELLS.map(|r| linear_mean(p, r));
+    eprintln!(
+        "the card's cells in the mirror: red share {red:?}, green {:?}, light {:?} (the wall \
+         beside it {wall:.4}); with the rung: green {:?}, light {:?}",
+        green(&holes),
+        mean(&holes),
+        green(&solid),
+        mean(&solid)
+    );
+    // (Which diagonal is clear follows the card's uv, its turn and the mirror.)
+    let (open, kept) = if red[0] > red[1] {
+        ([0, 3], [1, 2])
+    } else {
+        ([1, 2], [0, 3])
+    };
+    for i in open {
+        assert!(
+            red[i] > 0.25,
+            "cell {i}: the wall through a hole, red {red:?}"
+        );
+        let light = mean(&holes)[i] / wall;
+        assert!(
+            (light - 1.0).abs() < 0.1,
+            "cell {i}: the wall through a hole is {light:.3} times as bright as beside the card"
+        );
+        assert!(
+            green(&solid)[i] > 0.25,
+            "cell {i}: whole with the rung, green {:?}",
+            green(&solid)
+        );
+        let even = mean(&solid)[i] / mean(&solid)[kept[0]];
+        assert!(
+            (even - 1.0).abs() < 0.1,
+            "cell {i}: {even:.3} times as bright as a kept cell with the rung"
+        );
+    }
+    for i in kept {
+        assert!(
+            green(&holes)[i] > 0.25,
+            "cell {i}: the card itself, green {:?}",
+            green(&holes)
+        );
+        let same = mean(&holes)[i] / mean(&solid)[i];
+        assert!(
+            (same - 1.0).abs() < 0.03,
+            "cell {i}: the rung leaves the card's texels alone ({same:.3})"
+        );
+    }
+}
+
+/// Each kind of thing is in the rays as its class (`RayClass`): what casts a shadow and holds
+/// its shape is `Solid`; a card cut out by its texture, and a crown's stand-in, `Leaf`; what
+/// sways in the wind `Sway`; a caster under 0.3 m `Small`; what casts no shadow `NoCast`; a
+/// stand-in that casts as a closed shape `ShadowOnly`. A small thing that casts nothing, and a
+/// swaying card that casts nothing (a crown beside its stand-in), are in no ray's way. One
+/// mesh placed opaque and cut out is two geometries.
+#[test]
+fn each_kind_of_thing_is_in_the_rays_as_its_class() {
+    let mut app = app(true);
+    set_probes(&mut app, FEW_PROBES);
+    let w = &mut app.world;
+    ground(w);
+    sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+    camera(w, EYE, TARGET, 12.0);
+    let gray = StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9);
+    let cut_out = gray.with_alpha_mask(0.5);
+    let crate_mesh = w.resource_mut::<Assets<Mesh>>().add(
+        Shape::Cuboid {
+            size: [0.5, 1.0, 0.5],
+        }
+        .mesh(),
+    );
+    let cube = |size: f32| Shape::Cuboid { size: [size; 3] };
+    let at = |x: f64| Transform::from_xyz(x, 0.5, -2.0);
+    w.spawn((at(-4.0), MeshRenderer::new(crate_mesh, gray)));
+    w.spawn((at(-3.0), MeshRenderer::new(crate_mesh, cut_out)));
+    w.spawn((at(-2.0), MeshRenderer::new(cube(0.2), gray)));
+    w.spawn((
+        at(-1.0),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [0.3, 2.0, 0.3],
+            },
+            gray.with_wind_sway(0.2),
+        ),
+    ));
+    w.spawn((
+        at(0.0),
+        MeshRenderer::new(cube(1.0), gray).without_shadows(),
+    ));
+    w.spawn((
+        at(1.0),
+        MeshRenderer::new(cube(0.1), gray).without_shadows(),
+    ));
+    // A crown and its stand-in, and a stand-in that casts as a closed shape.
+    w.spawn((
+        at(2.5),
+        MeshRenderer::new(cube(1.5), cut_out.with_wind_sway(0.2)).without_shadows(),
+    ));
+    w.spawn((at(2.5), MeshRenderer::new(cube(1.6), cut_out), ShadowOnly));
+    w.spawn((at(4.5), MeshRenderer::new(cube(0.8), gray), ShadowOnly));
+    app.update_n(6);
+    if !can_run(&app) {
+        return;
+    }
+    assert_in_ray_scene(&app, "each kind");
+    let classes = [
+        ("solid", 2.0),
+        ("ground", 0.0),
+        ("sway", 1.0),
+        ("leaf", 2.0),
+        ("water", 0.0),
+        ("no_cast", 1.0),
+        ("small", 1.0),
+        ("shadow_only", 1.0),
+    ];
+    for (class, expected) in classes {
+        assert_eq!(
+            diag(&app, &format!("render.ray.class_{class}")),
+            expected,
+            "class {class}"
+        );
+    }
+    assert_eq!(diag(&app, "render.ray.instances"), 8.0);
+    assert_eq!(diag(&app, "render.ray.stand_ins"), 1.0);
+    // The ground, the crate's mesh twice, and each of the five others in the rays.
+    assert_eq!(diag(&app, "render.ray.geometries"), 8.0);
+}
+
+/// The reaches are settings (`RenderSettings::ray_caster_reach`, `ray_far_reach`): a crate
+/// past the casters' reach comes into the rays once the reach takes it in, and a wall past
+/// the far reach leaves once the far reach falls short of it. Each change makes the scene look
+/// at everything again (a new epoch).
+#[test]
+fn the_ray_scene_reaches_as_far_as_its_settings() {
+    let mut app = app(true);
+    set_probes(&mut app, FEW_PROBES);
+    let w = &mut app.world;
+    ground(w);
+    sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+    camera(w, EYE, TARGET, 12.0);
+    // 100 m away, within the casters' reach; 200 m away, too small for the far reach's cut;
+    // a wall 300 m away, large enough for it.
+    crate_at(w, DVec3::new(0.0, 0.0, -100.0));
+    crate_at(w, DVec3::new(0.0, 0.0, -200.0));
+    slab(
+        w,
+        DVec3::new(0.0, 4.0, -300.0),
+        DVec3::new(20.0, 8.0, 1.0),
+        0.5,
+    );
+    app.update_n(6);
+    if !can_run(&app) {
+        return;
+    }
+    assert_in_ray_scene(&app, "the default reaches");
+    let instances = |app: &App| diag(app, "render.ray.instances");
+    assert_eq!(
+        instances(&app),
+        3.0,
+        "the ground, the near crate and the far wall"
+    );
+    let epoch = diag(&app, "render.ray.epoch");
+    app.world.resource_mut::<RenderSettings>().ray_caster_reach = 250.0;
+    app.update_n(6);
+    assert!(diag(&app, "render.ray.epoch") > epoch, "a new epoch");
+    assert_eq!(
+        instances(&app),
+        4.0,
+        "the crate 200 m away is within the casters' reach"
+    );
+    app.world.resource_mut::<RenderSettings>().ray_far_reach = 260.0;
+    app.update_n(6);
+    assert_eq!(instances(&app), 3.0, "the wall past the far reach left");
+    assert_in_ray_scene(&app, "the reaches changed");
+}
+
+/// Each row of a `MeshInstances` slot is an instance of its own in the rays, of one geometry,
+/// placed where the raster draws it: a wall of red cubes drawn as rows behind the camera shows
+/// in the mirror. A row past every reach is left out, rows taken away leave the rays, and the
+/// entity drawn once is one instance again.
+#[test]
+fn each_row_of_mesh_instances_is_in_the_rays() {
+    let mut app = app(true);
+    let (_, wall) = mirror_parts(&mut app.world);
+    app.world.despawn(wall);
+    let mut rows: Vec<InstanceRow> = (0..32)
+        .map(|k| InstanceRow {
+            position: Vec3::new(-3.5 + (k % 8) as f32, 0.5 + (k / 8) as f32, 0.0),
+            yaw: 0.0,
+            scale: 1.0,
+            ..Default::default()
+        })
+        .collect();
+    // Out of every reach: 0.5 m across, 300 m away.
+    rows.push(InstanceRow {
+        position: Vec3::new(0.0, 0.5, 300.0),
+        scale: 0.5,
+        ..Default::default()
+    });
+    let region = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, 4.0),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [1.0, 1.0, 1.0],
+                },
+                StandardMaterial::color(0.8, 0.05, 0.05).with_roughness(0.9),
+            ),
+            MeshInstances::new(rows.clone()),
+        ))
+        .id();
+    app.update_n(12);
+    if !can_run(&app) {
+        return;
+    }
+    assert_in_ray_scene(&app, "rows");
+    let counts = |app: &App| {
+        (
+            diag(app, "render.meshes.ray_rows"),
+            diag(app, "render.ray.instances"),
+        )
+    };
+    // The ground, the mirror and the 32 rows in reach.
+    assert_eq!(counts(&app), (32.0, 34.0));
+    assert_eq!(diag(&app, "render.ray.geometries"), 3.0);
+    let red = red_share(&picture(&mut app, "rows_mirror.png"));
+    assert!(
+        red > 0.25,
+        "the mirror shows the wall of cubes behind the camera: red share {red:.2}"
+    );
+    app.world
+        .get_mut::<MeshInstances>(region)
+        .expect("rows")
+        .rows = rows[..8].into();
+    app.update_n(4);
+    assert_eq!(counts(&app), (8.0, 10.0), "eight rows left");
+    app.world.entity_mut(region).remove::<MeshInstances>();
+    app.update_n(4);
+    assert_eq!(counts(&app), (0.0, 3.0), "the entity drawn once");
+    assert_in_ray_scene(&app, "fewer rows");
+}
+
+/// The measuring fill (`RenderSettings::ray_scene_stress`) fills both structures to their caps
+/// with copies of what is there, each built in full every frame; it leaves the class counts,
+/// the still set and the valve alone, and its copies go at 0.
+#[test]
+fn the_ray_scene_fills_to_its_caps_for_a_measurement() {
+    const STILL: f64 = 16_384.0;
+    const MOVING: f64 = 2_048.0;
+    let mut app = app(true);
+    set_probes(&mut app, FEW_PROBES);
+    let w = &mut app.world;
+    ground(w);
+    sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+    camera(w, EYE, TARGET, 12.0);
+    crate_at(w, DVec3::new(0.0, 0.0, -3.0));
+    app.update_n(6);
+    if !can_run(&app) {
+        return;
+    }
+    let counts = |app: &App| {
+        (
+            diag(app, "render.ray.still_instances"),
+            diag(app, "render.ray.moving_instances"),
+            diag(app, "render.ray.parked"),
+        )
+    };
+    assert_eq!(counts(&app), (2.0, 0.0, 0.0));
+    let copies = (STILL + MOVING) as u32;
+    app.world.resource_mut::<RenderSettings>().ray_scene_stress = copies;
+    app.update_n(4);
+    assert_in_ray_scene(&app, "filled to the caps");
+    assert_eq!(diag(&app, "render.ray.copies"), copies as f64);
+    assert_eq!(
+        counts(&app),
+        (STILL, MOVING, 2.0),
+        "both structures full, two copies past their room"
+    );
+    for frame in 0..3 {
+        app.update();
+        assert_eq!(
+            diag(&app, "render.ray.structures_built"),
+            2.0,
+            "frame {frame}: both structures are built every frame"
+        );
+    }
+    assert_eq!(
+        (
+            diag(&app, "render.ray.class_solid"),
+            diag(&app, "render.ray.still_set"),
+            diag(&app, "render.ray.valve"),
+        ),
+        (2.0, 2.0, 0.0),
+        "the copies are not counted, and the valve stays shut"
+    );
+    app.world.resource_mut::<RenderSettings>().ray_scene_stress = 0;
+    app.update_n(4);
+    assert_eq!(diag(&app, "render.ray.copies"), 0.0);
+    assert_eq!(counts(&app), (2.0, 0.0, 0.0), "the copies are gone");
+    assert_in_ray_scene(&app, "the copies gone");
 }

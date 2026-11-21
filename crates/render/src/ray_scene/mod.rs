@@ -39,7 +39,9 @@ use engine_core::prelude::*;
 use engine_world::WorldShift;
 
 pub(crate) use hook::RayTileSource;
-pub use hook::{RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayView};
+pub use hook::{
+    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere, RayView,
+};
 
 use crate::features::GpuShared;
 use crate::frame::ViewData;
@@ -57,14 +59,52 @@ const ANCHOR_REACH: f64 = 256.0;
 /// A camera that moved farther than this in a frame jumped (meters): [`RayView::epoch`]
 /// changes, so features look at everything again at once.
 const JUMP_M: f64 = 32.0;
-/// [`RayView::caster_reach`], [`RayView::far_reach`], [`RayView::cut`],
-/// [`RayView::ground_patches`].
-const CASTER_REACH_M: f32 = 160.0;
-const FAR_REACH_M: f32 = 384.0;
+/// [`RayView::cut`] (the reaches are settings, `RenderSettings::ray_caster_reach` and
+/// `ray_far_reach`), the cut while the valve is open, and [`RayView::ground_patches`].
 const CUT: f32 = 0.0175;
+const VALVE_CUT: f32 = 0.05;
 const GROUND_PATCHES: u32 = 512;
+/// Frames the valve holds a step at least before it takes another, so that it cannot flap.
+const VALVE_HOLD_FRAMES: u64 = 240;
+/// The valve closes once what it cut would fit again with this share of the cap to spare.
+const VALVE_CLOSE_SHARE: f32 = 0.95;
+/// `RayUniform::stand_ins` w (the scene's flags): leaf cards are taken as they are met, their
+/// texture unasked (`shade_skip::RAY_LEAVES_SOLID`, a measurement).
+const FLAG_LEAVES_SOLID: u32 = 1;
 /// Frames between two sweeps for geometries nothing uses any more.
 const FORGET_EVERY: u64 = 64;
+
+/// How far the measurement's copies (`RenderSettings::ray_scene_stress`, in this scene or the
+/// probes' own) spread from what they copy, meters each way along x and z (512 m across: about
+/// what sun shadows and reflections will want of a ray scene), and along y.
+pub(crate) const STRESS_REACH: [f32; 3] = [256.0, 3.0, 256.0];
+
+/// Where copy `k` of the measurement's stands, from the instance it copies (meters): the R2
+/// sequence over the reach, so any number of copies covers it evenly and none stand in rows.
+pub(crate) fn stress_offset(k: u32) -> [f32; 3] {
+    // 1/g, 1/g^2, 1/g^3 of the plastic number's three-dimensional cousin (g^4 = g + 1).
+    const STEP: [f64; 3] = [
+        0.819_172_513_396_164_4,
+        0.671_043_606_703_789_2,
+        0.549_700_477_901_970_3,
+    ];
+    let k = f64::from(k) + 1.0;
+    [0, 1, 2].map(|axis| {
+        (((0.5 + STEP[axis] * k).fract() * 2.0 - 1.0) * f64::from(STRESS_REACH[axis])) as f32
+    })
+}
+
+/// `render.ray.class_*`, in the order of [`RayClass::ALL`].
+const CLASS_ROWS: [&str; 8] = [
+    "render.ray.class_solid",
+    "render.ray.class_ground",
+    "render.ray.class_sway",
+    "render.ray.class_leaf",
+    "render.ray.class_water",
+    "render.ray.class_no_cast",
+    "render.ray.class_small",
+    "render.ray.class_shadow_only",
+];
 
 /// `RayUniform` in lib_ray.wgsl.
 #[repr(C)]
@@ -74,7 +114,8 @@ struct RayUniform {
     anchor: [f32; 4],
     /// Instances in the still structure, in the moving one; the frame; the epoch.
     counts: [u32; 4],
-    /// Shadow stand-ins in the still structure, in the moving one.
+    /// Shadow stand-ins in the still structure, in the moving one; w: the scene's flags
+    /// ([`FLAG_LEAVES_SOLID`]).
     stand_ins: [u32; 4],
     /// The sun's rays: reach of the pixels that get one, length (meters). Zeros until the
     /// sun's own rays read them (the measuring rays have a length of their own).
@@ -123,6 +164,20 @@ pub(crate) struct RayStats {
     /// Shadow stand-ins that hold a slot of either structure.
     pub stand_ins: u32,
     pub refused: u32,
+    /// Members of a full structure that gave their slot to a nearer instance since the scene
+    /// was made; what belongs in the still structure, with a slot or waiting for one; at the
+    /// last ranking of the full still structure, its farthest member and the nearest that
+    /// waits (meters, -1: none).
+    pub instances_evicted: u32,
+    pub still_set: u32,
+    pub still_farthest_m: f32,
+    pub parked_nearest_m: f32,
+    /// Instances of each class ([`RayClass::ALL`]), the measuring fill's copies left out, and
+    /// those copies.
+    pub classes: [u32; 8],
+    pub copies: u32,
+    /// The valve is open: the cut is raised while the still set is past the cap.
+    pub valve: bool,
     pub built: u32,
     pub built_triangles: u32,
     pub compacted: u32,
@@ -167,6 +222,55 @@ pub(crate) struct RayScene {
     started: Option<std::time::Instant>,
     gather_ms: f32,
     anchor_moves: u32,
+    /// The reaches as the features were last told them (caster, far; `None`: not yet).
+    reach: Option<[f32; 2]>,
+    valve: Valve,
+}
+
+/// The valve: while what belongs in the still structure is past its cap, the cut between the
+/// reaches rises ([`VALVE_CUT`]), and it falls again once what it cut would fit with room to
+/// spare. Each step is held [`VALVE_HOLD_FRAMES`] at least and starts a new epoch.
+#[derive(Default, Debug)]
+struct Valve {
+    open: bool,
+    /// The frame of the last step (`None`: none yet).
+    stepped: Option<u64>,
+    /// The still set when it opened, and how much of it the raised cut took (read once the
+    /// first hold since it opened had passed).
+    before: u32,
+    gain: Option<u32>,
+}
+
+impl Valve {
+    /// Frame `frame` with `still_set` of the still structure's `cap` belonging in it: true
+    /// when the valve took a step. `stress`: the measuring fill is on (it never opens then).
+    fn step(&mut self, still_set: u32, cap: u32, frame: u64, stress: bool) -> bool {
+        let held = self
+            .stepped
+            .is_none_or(|at| frame >= at + VALVE_HOLD_FRAMES);
+        if !self.open {
+            if held && !stress && still_set > cap {
+                self.open = true;
+                self.stepped = Some(frame);
+                self.before = still_set;
+                self.gain = None;
+                return true;
+            }
+            return false;
+        }
+        if !held {
+            return false;
+        }
+        let gain = *self
+            .gain
+            .get_or_insert(self.before.saturating_sub(still_set));
+        if stress || (still_set + gain) as f32 <= VALVE_CLOSE_SHARE * cap as f32 {
+            self.open = false;
+            self.stepped = Some(frame);
+            return true;
+        }
+        false
+    }
 }
 
 /// lib_ray.wgsl with its bindings in group `group` (`RAY_GROUP` in the shader): 1 in the
@@ -313,6 +417,8 @@ impl RayScene {
             started: None,
             gather_ms: 0.0,
             anchor_moves: 0,
+            reach: None,
+            valve: Valve::default(),
         }
     }
 
@@ -397,8 +503,10 @@ impl RayScene {
         self.store.swap_compacted(&self.queue);
     }
 
-    /// Start the frame's gather, on the render thread: what the features' hooks are told.
-    pub(crate) fn begin(&mut self, view: &ViewData) -> RayView {
+    /// Start the frame's gather, on the render thread: what the features' hooks are told. A
+    /// change of a reach, a step of the valve and a jump of the camera each start a new epoch
+    /// (the features look at everything again).
+    pub(crate) fn begin(&mut self, view: &ViewData, settings: &crate::RenderSettings) -> RayView {
         self.started = Some(std::time::Instant::now());
         self.frame = view.frame_index + 1;
         self.store.begin_frame(&mut self.tris);
@@ -415,7 +523,18 @@ impl RayScene {
         }
         let eye = view.origin;
         let jumped = self.eye.is_none_or(|last| last.distance(eye) > JUMP_M);
-        if jumped {
+        let caster_reach = settings.ray_caster_reach.max(0.0);
+        let reach = [caster_reach, settings.ray_far_reach.max(caster_reach)];
+        let reach_changed = self.reach.is_some_and(|r| r != reach);
+        self.reach = Some(reach);
+        let stats = self.instances.stats();
+        let valve_stepped = self.valve.step(
+            stats.still_set,
+            STILL_CAPACITY,
+            self.frame,
+            settings.ray_scene_stress > 0,
+        );
+        if jumped || reach_changed || valve_stepped {
             self.epoch = self.epoch.wrapping_add(1);
         }
         let first = self.eye.is_none();
@@ -431,11 +550,16 @@ impl RayScene {
             frame: self.frame,
             epoch: self.epoch,
             shifted: self.shifted,
-            caster_reach: CASTER_REACH_M,
-            far_reach: FAR_REACH_M,
-            cut: CUT,
+            caster_reach: reach[0],
+            far_reach: reach[1],
+            cut: self.cut(),
             ground_patches: GROUND_PATCHES,
         }
+    }
+
+    /// The cut between the reaches ([`RayView::cut`]).
+    fn cut(&self) -> f32 {
+        if self.valve.open { VALVE_CUT } else { CUT }
     }
 
     /// The scene for feature number `feature` to fill.
@@ -446,13 +570,21 @@ impl RayScene {
         }
     }
 
-    /// End the frame's gather: settle what the hooks placed into the two structures and
-    /// write the rows and the uniform. `lights`: point lights a hit may ask for their shadow.
-    pub(crate) fn finish(&mut self, view: &ViewData, lights: u32) {
+    /// End the frame's gather: add the measuring fill's copies (`ray_scene_stress`), settle
+    /// what the hooks placed into the two structures and write the rows and the uniform.
+    pub(crate) fn finish(&mut self, view: &ViewData, settings: &crate::RenderSettings) {
         for geometry in self.store.take_changed() {
             self.instances.geometry_changed(geometry);
         }
-        self.building = self.instances.settle(&mut self.store, self.frame);
+        self.instances.stress(
+            &mut self.store,
+            settings.ray_scene_stress,
+            self.frame,
+            |k| Vec3::from(stress_offset(k)).as_dvec3(),
+        );
+        self.building = self
+            .instances
+            .settle(&mut self.store, self.frame, view.origin);
         for (first, rows) in self.instances.take_changed_rows() {
             self.queue.write_buffer(
                 &self.rows,
@@ -463,13 +595,19 @@ impl RayScene {
         let anchor = (self.instances.anchor() - view.origin).as_vec3();
         let [still, moving] = self.instances.counts();
         let [still_stand_ins, moving_stand_ins] = self.instances.stand_ins();
+        let flags = if settings.debug_skip & crate::settings::shade_skip::RAY_LEAVES_SOLID != 0 {
+            FLAG_LEAVES_SOLID
+        } else {
+            0
+        };
+        let [caster_reach, far_reach] = self.reach.unwrap_or_default();
         let uniform = RayUniform {
             anchor: [anchor.x, anchor.y, anchor.z, 0.0],
             counts: [still, moving, self.frame as u32, self.epoch],
-            stand_ins: [still_stand_ins, moving_stand_ins, 0, 0],
+            stand_ins: [still_stand_ins, moving_stand_ins, 0, flags],
             sun: [0.0; 4],
-            reach: [CASTER_REACH_M, FAR_REACH_M, CUT, 0.0],
-            lights: [lights as f32, 0.0, 0.0, 0.0],
+            reach: [caster_reach, far_reach, self.cut(), 0.0],
+            lights: [settings.gi_shadowed_lights as f32, 0.0, 0.0, 0.0],
             ground: [0.0; 4],
         };
         self.queue
@@ -550,6 +688,13 @@ impl RayScene {
             parked: i.parked,
             stand_ins: self.instances.stand_ins().iter().sum(),
             refused: i.refused,
+            instances_evicted: i.evicted,
+            still_set: i.still_set,
+            still_farthest_m: i.still_farthest_m,
+            parked_nearest_m: i.parked_nearest_m,
+            classes: i.classes,
+            copies: self.instances.copies(),
+            valve: self.valve.open,
             built: s.built,
             built_triangles: s.built_triangles,
             compacted: s.compacted,
@@ -606,6 +751,15 @@ impl RayScene {
         d.set("render.ray.parked", s.parked as f64);
         d.set("render.ray.stand_ins", s.stand_ins as f64);
         d.set("render.ray.refused", s.refused as f64);
+        d.set("render.ray.instances_evicted", s.instances_evicted as f64);
+        d.set("render.ray.still_set", s.still_set as f64);
+        d.set("render.ray.still_farthest_m", s.still_farthest_m as f64);
+        d.set("render.ray.parked_nearest_m", s.parked_nearest_m as f64);
+        for (row, count) in CLASS_ROWS.iter().zip(s.classes) {
+            d.set(row, count as f64);
+        }
+        d.set("render.ray.copies", s.copies as f64);
+        d.set("render.ray.valve", s.valve as u8 as f64);
         d.set("render.ray.built", s.built as f64);
         d.set("render.ray.built_triangles", s.built_triangles as f64);
         d.set("render.ray.compacted", s.compacted as f64);
@@ -647,6 +801,7 @@ impl RayScene {
         id: RayKey,
         geometry: RayKey,
         to_world: &DAffine3,
+        sphere: RaySphere,
         class: RayClass,
         still_from: u64,
         look: &RayLook,
@@ -659,6 +814,7 @@ impl RayScene {
             (feature, id),
             geometry,
             to_world,
+            sphere,
             class,
             still_from,
             RayRow::new(class, look),
@@ -707,6 +863,34 @@ impl RayScene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The valve opens once what belongs in the still structure is past its cap, holds each
+    /// step, and closes once what it cut would fit again with room to spare; the measuring
+    /// fill closes it, and it never opens while that runs.
+    #[test]
+    fn the_valve_cuts_far_things_while_the_still_structure_is_over_its_cap() {
+        const HOLD: u64 = VALVE_HOLD_FRAMES;
+        let mut valve = Valve::default();
+        assert!(!valve.step(90, 100, 0, false));
+        assert!(valve.step(120, 100, 1, false));
+        assert!(valve.open);
+        // Each step is held.
+        assert!(!valve.step(10, 100, 2, false));
+        assert!(!valve.step(10, 100, HOLD, false));
+        // The first look past the hold measures what the cut took (120 - 90): 90 and that
+        // would not fit with room to spare.
+        assert!(!valve.step(90, 100, 1 + HOLD, false));
+        assert!(!valve.step(66, 100, 2 + HOLD, false));
+        assert!(valve.open);
+        assert!(valve.step(64, 100, 3 + HOLD, false));
+        assert!(!valve.open);
+        // Over its cap again at once: held first.
+        assert!(!valve.step(120, 100, 4 + HOLD, false));
+        assert!(valve.step(120, 100, 3 + 2 * HOLD, false));
+        assert!(valve.step(120, 100, 3 + 3 * HOLD, true));
+        assert!(!valve.open);
+        assert!(!valve.step(500, 100, 3 + 5 * HOLD, true));
+    }
 
     #[test]
     fn the_ray_library_takes_its_group_where_it_is_composed() {

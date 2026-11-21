@@ -271,10 +271,15 @@ fn try_create(
         // structure with its last handle, though a top-level structure the GPU is still
         // tracing points at it: `Retired` and `Drop for Store` there); a geometry is built
         // only from ranges whose indices were checked against its vertices; the scene
-        // starts over when a submission holding its builds fails. Every query forces its
-        // triangles opaque, so no shader is run for a candidate. Their tests hold the
-        // pictures to the software path's, and the ray scene's to the probes' own, on
-        // lavapipe's ray queries (tests/probe_gi.rs, ray_queries.rs, ray_scene.rs).
+        // starts over when a submission holding its builds fails. Probe GI's own queries
+        // and the probes' rays of the ray scene force their triangles opaque; the queries
+        // that ask the triangles built to be asked (a leaf card's, lib_ray.wgsl's
+        // `ray_first` and `ray_nearest`) read a candidate's row, triangle record and tile
+        // only for a row the scene wrote, a record its geometry has and a layer a fill
+        // filled, inside the query's loop and nowhere else. Their tests hold the pictures
+        // to the software path's, and the ray scene's to the probes' own, on lavapipe's ray
+        // queries (tests/probe_gi.rs, ray_queries.rs, ray_scene.rs), and read a texture in
+        // a candidate's loop there (ray_queries.rs).
         unsafe { wgpu::ExperimentalFeatures::enabled() }
     } else {
         wgpu::ExperimentalFeatures::disabled()

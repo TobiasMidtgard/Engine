@@ -251,14 +251,25 @@ frame at most), what moves in a small one (2,048, built again in every frame a m
 Both are placed around an anchor, put on a 64 m grid whenever the camera leaves its reach and
 carried along by a world shift, so a shift without a turn builds nothing (one that happens
 while rendering is paused is not followed: everything is then seen to move). A ray names the
-classes it sees: one that asks what it meets (probe light, reflections) sees what casts, what
-does not, ground and water; a shadow ray only what the shadow maps draw: what casts, and the
-`ShadowOnly` stand-ins that cast for things that do not (a stand-in stops light where it goes
-in, not where it leaves, so the thing inside one is not shaded by it). The mesh feature brings its
-`MeshRenderer`s whose bounding sphere has a radius of 0.3 m or more (casters within 160 m,
-larger things to 384 m) from the mesh scene's log of changed slots plus a share of all slots
-in turn, never a walk of every slot in one frame; it names a geometry by its mesh's handle
-index and that index's generation. The frame's rays run in one compute pass, "rays", which
+classes it sees: probe light what holds its shape and is 0.3 m or more (what casts, what sways,
+what casts none, ground and water; leaves reach the probes through the canopy map); world
+reflections every class a view draws, asking a leaf card's triangles one by one, so that a ray
+passes where the card's texture is clear (`ray_nearest` in lib_ray.wgsl); a shadow ray from a
+hit what casts and sways, and the `ShadowOnly` stand-ins that cast for things that do not (a
+stand-in stops light where it goes in, not where it leaves, so the thing inside one is not
+shaded by it). The mesh feature brings its `MeshRenderer`s, each row of a `MeshInstances` slot
+an instance of its own, as their class: `Leaf` where the texture cuts it out (and a crown's
+stand-in, the crown's one place in the rays), `Sway` where it moves in the wind, `Small` for a
+caster under 0.3 m, else `Solid`, and `NoCast` for what casts none (left out under 0.3 m, and
+as a swaying card); everything that casts within `RenderSettings::ray_caster_reach` (160 m),
+larger things to `ray_far_reach` (384 m), the cut between them raised while the still
+structure is over its cap (`render.ray.valve`). A full structure holds the instances nearest
+the camera: one that waits takes the slot of the farthest member it is 16 m nearer than, at a
+build. The feature works from the mesh scene's log of changed slots plus a share of all slots
+in turn, never a walk of every slot in one frame, and names a geometry by its mesh's handle
+index, that index's generation and whether its triangles are asked (a mesh placed both ways is
+two). `RenderSettings::ray_scene_stress` fills both structures to their caps with copies, for a
+measurement. The frame's rays run in one compute pass, "rays", which
 binds the scene once (binding a structure costs the render thread a walk of its instances at
 submit); in a frame whose probe grid scrolled, the world reflections run in a second pass,
 after the probes' atlases were copied. A mesh from the pool is in the rays at its ray level

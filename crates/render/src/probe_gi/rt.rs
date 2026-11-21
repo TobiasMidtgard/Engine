@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use wgpu::util::DeviceExt;
 
 use crate::mesh::Mesh;
+use crate::ray_scene::stress_offset;
 
 /// Triangles whose structures may be built a frame; a mesh with more builds alone in its
 /// frame. A zone's arrival builds over a few frames, each mesh in the rays' scene once built.
@@ -213,25 +214,6 @@ fn create_tlas(device: &wgpu::Device, capacity: u32) -> wgpu::Tlas {
         flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE
             | wgpu::AccelerationStructureFlags::ALLOW_RAY_HIT_VERTEX_RETURN,
         update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-    })
-}
-
-/// How far the measurement's copies spread from what they copy, meters each way along x and z
-/// (512 m across: about what sun shadows and reflections will want of a ray scene), and along y.
-const STRESS_REACH: [f32; 3] = [256.0, 3.0, 256.0];
-
-/// Where copy `k` of the measurement's stands, from the instance it copies (meters): the R2
-/// sequence over the reach, so any number of copies covers it evenly and none stand in rows.
-fn stress_offset(k: u32) -> [f32; 3] {
-    // 1/g, 1/g^2, 1/g^3 of the plastic number's three-dimensional cousin (g^4 = g + 1).
-    const STEP: [f64; 3] = [
-        0.819_172_513_396_164_4,
-        0.671_043_606_703_789_2,
-        0.549_700_477_901_970_3,
-    ];
-    let k = f64::from(k) + 1.0;
-    [0, 1, 2].map(|axis| {
-        (((0.5 + STEP[axis] * k).fract() * 2.0 - 1.0) * f64::from(STRESS_REACH[axis])) as f32
     })
 }
 

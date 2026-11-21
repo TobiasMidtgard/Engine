@@ -488,6 +488,11 @@ impl Store {
         let existing = self.names.get(&name).copied();
         if let Some(g) = existing.and_then(|i| self.list[i as usize].as_mut()) {
             g.last_used = frame;
+            debug_assert_eq!(
+                g.opaque, opaque,
+                "a geometry's triangles stop rays or are asked, for good: a feature names the \
+                 two ways apart"
+            );
             if g.version == version {
                 return RayGeometryState::Ready;
             }

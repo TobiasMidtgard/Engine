@@ -11,14 +11,19 @@ pub struct RayKey(pub u64, pub u64);
 /// What an instance is to a ray: a ray names the classes it sees (an instance's class is its
 /// mask in the top-level structures).
 ///
-/// The frame's rays name two sets so far (lib_ray.wgsl): a ray that asks what it meets (probe
-/// light, world reflections) sees `Solid`, `Ground`, `Water` and `NoCast`; a shadow ray
-/// (toward the sun or a lamp) sees `Solid`, `Ground` and `ShadowOnly`, which is what the
-/// shadow maps draw. Every triangle of what a ray sees stops it, but for a `ShadowOnly`
-/// stand-in, which stops a shadow ray only where the ray goes into it (at its outer faces).
-/// The rays that see `Sway`, `Leaf` and `Small`, and the asking of single triangles (a `Leaf`
-/// card's texture, the back of the `Ground`), come with the steps that place such things;
-/// until then no ray sees an instance of those three classes.
+/// The frame's rays name three sets (lib_ray.wgsl):
+/// * probe light sees what holds its shape and is 0.3 m or more: `Solid`, `Ground`, `Sway`,
+///   `Water` and `NoCast`, every triangle whole (leaves reach the probes through the canopy
+///   map, never as cards);
+/// * world reflections see every class a view draws, all but `ShadowOnly`, and ask a `Leaf`
+///   card's triangles one by one (a ray passes where the card's texture is clear) and the
+///   `Ground`'s (a ray passes its back);
+/// * a shadow ray from a hit (toward the sun or a lamp) sees `Solid`, `Ground` and `Sway`,
+///   and the `ShadowOnly` stand-ins, which stop it only where it goes into one (at its outer
+///   faces).
+///
+/// The sun's own rays (a later step) add `Small`, and `Leaf` and `Sway` where the shadow maps
+/// draw no swaying plants.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u8)]
 pub enum RayClass {
@@ -46,14 +51,31 @@ pub enum RayClass {
 }
 
 impl RayClass {
+    /// Every class, in the order of their bits.
+    pub const ALL: [RayClass; 8] = [
+        RayClass::Solid,
+        RayClass::Ground,
+        RayClass::Sway,
+        RayClass::Leaf,
+        RayClass::Water,
+        RayClass::NoCast,
+        RayClass::Small,
+        RayClass::ShadowOnly,
+    ];
+
     /// Its bit in a ray's mask.
     pub const fn bit(self) -> u8 {
         self as u8
     }
 
+    /// Its place in [`RayClass::ALL`].
+    pub const fn index(self) -> usize {
+        (self as u8).trailing_zeros() as usize
+    }
+
     /// Whether its triangles stop a ray without being asked: what a feature passes as
     /// `opaque` for the geometries of its instances ([`RaySceneOut::geometry`]). Those of
-    /// the other classes are built to be asked one by one, once the rays do.
+    /// the other classes are built to be asked one by one.
     pub const fn opaque(self) -> bool {
         !matches!(self, RayClass::Ground | RayClass::Leaf)
     }
@@ -74,15 +96,32 @@ pub struct RayView {
     /// still (placed again, should it go on moving, it is a mover from then).
     pub shifted: u64,
     /// Everything that casts a shadow within this distance of the camera belongs in the
-    /// scene, whatever its size (meters). (The meshes leave out what is under 0.3 m in
-    /// radius until the rays that see [`RayClass::Small`] are there.)
+    /// scene, whatever its size, and what casts none from 0.3 m in radius (meters;
+    /// `RenderSettings::ray_caster_reach`).
     pub caster_reach: f32,
-    /// Beyond `caster_reach`, up to here: what is at least `cut` times its distance across.
+    /// Beyond `caster_reach`, up to here: what is at least `cut` times its distance across
+    /// (`RenderSettings::ray_far_reach`).
     pub far_reach: f32,
-    /// Radius over distance below which a far thing is left out.
+    /// Radius over distance below which a far thing is left out (raised while the still
+    /// structure would be over its cap, `render.ray.valve`).
     pub cut: f32,
     /// Patches of ground a terrain may bring.
     pub ground_patches: u32,
+}
+
+/// An instance's bounding sphere in the world, as the camera's distance to it ranks it when a
+/// structure is full ([`RaySceneOut::place`]).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct RaySphere {
+    pub center: DVec3,
+    pub radius: f32,
+}
+
+impl RaySphere {
+    /// Meters from `eye` to its nearest point (0 inside it).
+    pub fn distance(&self, eye: DVec3) -> f32 {
+        ((self.center - eye).length() as f32 - self.radius).max(0.0)
+    }
 }
 
 /// Where a geometry's triangles are.
@@ -222,16 +261,19 @@ impl RaySceneOut<'_> {
         self.scene.has_geometry(self.feature, key, version)
     }
 
-    /// Instance `id` of geometry `geometry` stands at `to_world` (mesh to world) from now on.
-    /// `still_from`: the frame from which it holds still (0: it never moves); until then it
-    /// is in the structure that is built again every frame. Placing an instance as it stands
-    /// already changes nothing. False when the geometry has no structure yet, or the scene is
-    /// full.
+    /// Instance `id` of geometry `geometry` stands at `to_world` (mesh to world) from now on,
+    /// within `sphere`. `still_from`: the frame from which it holds still (0: it never moves);
+    /// until then it is in the structure that is built again every frame. Placing an instance
+    /// as it stands already changes nothing. False when the geometry has no structure yet, or
+    /// the structure it belongs in is full: then the nearest to the camera are held, and one
+    /// farther than another that waits gives its slot to that one at a build.
+    #[allow(clippy::too_many_arguments)]
     pub fn place(
         &mut self,
         id: RayKey,
         geometry: RayKey,
         to_world: &DAffine3,
+        sphere: RaySphere,
         class: RayClass,
         still_from: u64,
         look: &RayLook,
@@ -241,6 +283,7 @@ impl RaySceneOut<'_> {
             id,
             geometry,
             to_world,
+            sphere,
             class,
             still_from,
             look,

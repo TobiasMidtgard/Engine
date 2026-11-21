@@ -43,6 +43,9 @@ fn app(switches: bool) -> App {
         if switches {
             s.trial_cuts_more |= RAY_WORLD;
             s.ray_sun_shadows = true;
+            s.debug_skip |= engine_render::settings::shade_skip::RAY_LEAVES_SOLID;
+            s.ray_caster_reach = 40.0;
+            s.ray_far_reach = 90.0;
         }
     }
     app

@@ -2864,11 +2864,11 @@ impl Renderer {
         // What the frame's rays trace: each feature says its part, the scene settles it.
         if !extra && let Some(ray) = &mut self.ray_scene {
             cpu.step("ray scene");
-            let ray_view = ray.begin(&view);
+            let ray_view = ray.begin(&view, &settings);
             for (f, number) in self.features.iter_mut().zip(&self.feature_numbers) {
                 f.ray_scene(&self.shared, &ray_view, &mut ray.out(*number));
             }
-            ray.finish(&view, settings.gi_shadowed_lights);
+            ray.finish(&view, &settings);
         }
         // The canopy map as the meshes left it this frame (other views read the main view's).
         {
