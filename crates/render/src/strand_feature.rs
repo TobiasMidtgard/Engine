@@ -119,6 +119,12 @@ const STRAND_BYTES: u64 = std::mem::size_of::<GpuInfo>() as u64;
 pub(crate) const GROOM_UPLOAD_KEY: u64 = 1 << 61;
 /// Strands a thread packs at a time ([`pack_groom`]).
 const PACK_CHUNK: usize = 8192;
+/// Grooms workers pack at a time in play (each holds a copy of its groom, 19 MB for a coat).
+const PACK_JOBS: usize = 2;
+/// Frames a packed groom waits for an instance to be drawn with it (one whose wearer left the
+/// view meanwhile), and frames a worker's groom is waited for before it is asked again.
+const PACKED_KEEP_FRAMES: u64 = 120;
+const PACK_GIVE_UP_FRAMES: u64 = 600;
 /// A groom the arrays had no room for (they are as large as the device lets a buffer be) is
 /// tried again after this many frames, not packed in vain every frame.
 const NO_ROOM_FRAMES: u64 = 120;
@@ -225,6 +231,51 @@ struct PackedGroom {
     thin: bool,
     lo: Vec3,
     hi: Vec3,
+}
+
+/// A groom a worker packed: its asset index and version, the groom, the frame it came, and
+/// how long the worker took (ms).
+struct Arrived {
+    index: u32,
+    version: u64,
+    groom: PackedGroom,
+    frame: u64,
+    ms: f32,
+}
+
+/// Where the workers send the grooms they packed (index, version, the groom, their time).
+struct PackChannel {
+    send: crossbeam_channel::Sender<(u32, u64, PackedGroom, f32)>,
+    arrive: crossbeam_channel::Receiver<(u32, u64, PackedGroom, f32)>,
+}
+
+impl Default for PackChannel {
+    fn default() -> Self {
+        let (send, arrive) = crossbeam_channel::unbounded();
+        Self { send, arrive }
+    }
+}
+
+/// `groom` copied for a worker to pack: packing reads every strand out of place, 10 ms on
+/// the main thread for a coat of 200,000 strands on the PC, where this copy runs at memory
+/// speed (its points, most of it, side by side on the frame's leaf threads).
+fn copy_groom(groom: &StrandGroom) -> StrandGroom {
+    const CHUNK: usize = 1 << 16;
+    let mut points = vec![[0.0f32; 4]; groom.points.len()];
+    engine_core::tasks::par_chunks_mut(&mut points, CHUNK, |chunk, out| {
+        let from = chunk * CHUNK;
+        out.copy_from_slice(&groom.points[from..from + out.len()]);
+    });
+    StrandGroom {
+        fiber: groom.fiber,
+        points_per: groom.points_per,
+        points,
+        roots: groom.roots.clone(),
+        tips: groom.tips.clone(),
+        guides: groom.guides.clone(),
+        follow: groom.follow.clone(),
+        thin: groom.thin,
+    }
 }
 
 /// Free room in one of the shared groom arrays, in elements (points or strands).
@@ -446,10 +497,21 @@ pub(crate) struct StrandFeature {
     /// Free room in the shared groom arrays: points (`buffers.rest`), strands (`buffers.info`).
     point_room: Spans,
     strand_room: Spans,
-    /// Grooms `prepare` packed for `prepare_frame` to send (drawn, and new or changed), and
-    /// how long packing them took (ms).
+    /// Packed grooms for `prepare_frame` to send (drawn, and new or changed), how long the
+    /// main thread worked for them this frame (packing them, or copying one for a worker),
+    /// and how long workers packed those among them that came from one (ms).
     incoming: Vec<(u32, u64, PackedGroom)>,
     pack_ms: f32,
+    worker_pack_ms: f32,
+    /// In play a groom is packed by a worker, from a copy: the grooms under way (asset index,
+    /// version, the frame it was asked), where they arrive, and those that arrived and wait
+    /// for an instance to be drawn with them within the frame's upload allowance (with the
+    /// frame they came and the worker's time).
+    packing: Vec<(u32, u64, u64)>,
+    packed_from: PackChannel,
+    packed: Vec<Arrived>,
+    /// Grooms workers packed so far.
+    groom_worker_packs: u64,
     /// Grooms sent and grooms dropped so far, and how often the arrays were made again.
     groom_uploads: u64,
     groom_evictions: u64,
@@ -1451,11 +1513,12 @@ impl RenderFeature for StrandFeature {
         draws.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         draws.truncate(MAX_INSTANCES);
         // The grooms these wear that the GPU does not hold (or holds as they were before a
-        // change) are packed now, the nearest first, as far as the frame's upload allowance
-        // goes (all of them while loading or headless). An instance whose groom has to wait
-        // is not drawn until it is there. Nor is one whose groom has no room beside those the
-        // frame draws, in arrays as large as the device lets a buffer be: asked before the
-        // allowance is taken and the groom packed, so it costs nothing while that lasts.
+        // change) are packed and sent, the nearest first, as far as the frame's upload
+        // allowance goes (all of them while loading or headless). An instance whose groom has
+        // to wait is not drawn until it is there. Nor is one whose groom has no room beside
+        // those the frame draws, in arrays as large as the device lets a buffer be: asked
+        // before the allowance is taken and the groom packed, so it costs nothing while that
+        // lasts.
         let most = most_bytes(gpu);
         let most = (
             most_elements(POINT_BYTES, most) as u64,
@@ -1474,14 +1537,42 @@ impl RenderFeature for StrandFeature {
                 in_view.1 += g.strands as u64;
             }
         }
-        let mut packing: Vec<(u32, u64, &StrandGroom)> = Vec::new();
+        // In play a worker packs a groom from a copy and the instance is drawn once it has
+        // come back (the frame after next at the earliest); where uploads are not paced
+        // (headless, behind a loading screen) it is packed here and drawn this frame.
+        let paced = gpu.uploads.paced();
+        let frames = self.frames;
+        while let Ok((index, version, groom, ms)) = self.packed_from.arrive.try_recv() {
+            self.packing.retain(|p| (p.0, p.1) != (index, version));
+            self.groom_worker_packs += 1;
+            self.packed.push(Arrived {
+                index,
+                version,
+                groom,
+                frame: frames,
+                ms,
+            });
+        }
+        self.packing.retain(|p| p.2 + PACK_GIVE_UP_FRAMES > frames);
+        self.packed
+            .retain(|a| a.frame + PACKED_KEEP_FRAMES > frames);
+        // Packed here this frame, and the one a worker is asked for (a copy a frame).
+        let mut here: Vec<(u32, u64, &StrandGroom)> = Vec::new();
+        let mut for_a_worker: Option<(u32, u64, &StrandGroom)> = None;
+        self.worker_pack_ms = 0.0;
         let mut no_room = None;
         draws.retain(|d| {
             let held = self.grooms.get(&d.groom).map(|g| g.version);
-            if held == Some(d.version) || packing.iter().any(|p| p.0 == d.groom) {
+            if held == Some(d.version)
+                || here.iter().any(|p| p.0 == d.groom)
+                || self
+                    .incoming
+                    .iter()
+                    .any(|i| (i.0, i.1) == (d.groom, d.version))
+            {
                 return true;
             }
-            if self.facts[&d.groom].no_room_until > self.frames {
+            if self.facts[&d.groom].no_room_until > frames {
                 return false;
             }
             let groom = worn[&d.groom];
@@ -1491,15 +1582,41 @@ impl RenderFeature for StrandFeature {
                 return false;
             }
             let bytes = points * POINT_BYTES + strands * STRAND_BYTES;
-            if !gpu
-                .uploads
-                .take(GROOM_UPLOAD_KEY | d.groom as u64, bytes, held.is_some())
-            {
+            let key = GROOM_UPLOAD_KEY | d.groom as u64;
+            let arrived = self
+                .packed
+                .iter()
+                .position(|a| (a.index, a.version) == (d.groom, d.version));
+            // (A groom that changed is packed here as before: its instance would not be drawn
+            // while a worker had it, and what the GPU holds of it is the old shape.)
+            if arrived.is_none() && paced && held.is_none() {
+                // A worker has it, or is asked for it now (the nearest first; the others in
+                // later frames).
+                if !self
+                    .packing
+                    .iter()
+                    .any(|p| (p.0, p.1) == (d.groom, d.version))
+                    && self.packing.len() < PACK_JOBS
+                    && for_a_worker.is_none()
+                {
+                    for_a_worker = Some((d.groom, d.version, groom));
+                }
+                gpu.uploads.waiting(key, bytes);
+                return false;
+            }
+            if !gpu.uploads.take(key, bytes, held.is_some()) {
                 return false;
             }
             in_view.0 += points;
             in_view.1 += strands;
-            packing.push((d.groom, d.version, groom));
+            match arrived {
+                Some(at) => {
+                    let a = self.packed.swap_remove(at);
+                    self.worker_pack_ms += a.ms;
+                    self.incoming.push((a.index, a.version, a.groom));
+                }
+                None => here.push((d.groom, d.version, groom)),
+            }
             true
         });
         if let Some(strands) = no_room
@@ -1512,7 +1629,25 @@ impl RenderFeature for StrandFeature {
             self.warned_no_room = true;
         }
         let packing_since = std::time::Instant::now();
-        for (index, version, groom) in packing {
+        if let Some((index, version, groom)) = for_a_worker {
+            let (lo, hi) = (self.facts[&index].lo, self.facts[&index].hi);
+            let copy = copy_groom(groom);
+            let send = self.packed_from.send.clone();
+            // ("async": its loops split on the background's threads, not the frame's.)
+            let spawned = std::thread::Builder::new()
+                .name("async groom pack".into())
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    let packed = pack_groom(&copy, lo, hi);
+                    let ms = started.elapsed().as_secs_f32() * 1000.0;
+                    let _ = send.send((index, version, packed, ms));
+                });
+            match spawned {
+                Ok(_) => self.packing.push((index, version, frames)),
+                Err(e) => engine_core::log::warn!("strands: no thread to pack a groom on: {e}"),
+            }
+        }
+        for (index, version, groom) in here {
             let facts = &self.facts[&index];
             self.incoming
                 .push((index, version, pack_groom(groom, facts.lo, facts.hi)));
@@ -1585,12 +1720,14 @@ impl RenderFeature for StrandFeature {
             // what making the arrays again for them cost.
             let mb = |bytes: u64| bytes as f64 / (1 << 20) as f64;
             engine_core::log::info!(
-                "strands: {} groom(s) of {} strands to the GPU ({:.1} MB): packed in {:.1} ms, \
-                 sent in {:.1} ms{}; {} held in arrays of {:.0} MB",
+                "strands: {} groom(s) of {} strands to the GPU ({:.1} MB): packed in {:.1} ms \
+                 on the frame and {:.1} ms on workers, sent in {:.1} ms{}; {} held in arrays \
+                 of {:.0} MB",
                 coming.0,
                 coming.1,
                 mb(coming.2),
                 self.pack_ms,
+                self.worker_pack_ms,
                 sent_ms,
                 if self.groom_repacks != repacks {
                     " with the arrays made again"
@@ -2180,6 +2317,9 @@ impl RenderFeature for StrandFeature {
                 + self.strand_room.used() as u64 * STRAND_BYTES) as f64
                 / (1 << 20) as f64,
             "groom_uploads": self.groom_uploads,
+            // Of those, packed by a worker (in play), and the grooms workers have now.
+            "groom_worker_packs": self.groom_worker_packs,
+            "grooms_with_workers": self.packing.len(),
             "groom_evictions": self.groom_evictions,
             "groom_repacks": self.groom_repacks,
             "instances": f.map_or(0, |f| f.instances.len()),

@@ -244,6 +244,23 @@ impl UploadBudget {
         s.deadline = deadline;
     }
 
+    /// Whether this frame's uploads are paced by a byte budget (a game in play). Without one
+    /// (headless, or behind a loading screen) everything asked for goes at once, so work for
+    /// an upload is better done where it is asked than handed to a worker.
+    pub fn paced(&self) -> bool {
+        let s = self.state();
+        s.left != u64::MAX && s.deadline.is_none()
+    }
+
+    /// Item `key` of `bytes` is wanted but not ready to upload this frame (a worker is still
+    /// preparing it): counted as pending, like one [`take`](Self::take) refused.
+    pub fn waiting(&self, key: u64, bytes: u64) {
+        let mut s = self.state();
+        if s.refused_keys.insert(key) {
+            s.refused += bytes;
+        }
+    }
+
     /// Whether the item `key` (unique per mesh or image and use) may upload `bytes` this frame;
     /// `update`: a new version of something already on the GPU, which always goes. Counted
     /// when it may; recorded once as pending when not.

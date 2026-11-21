@@ -1084,6 +1084,8 @@ fn a_groom_goes_to_the_gpu_when_it_is_drawn_and_moves_no_other() {
     assert_eq!(count(&state, "grooms"), 2, "{state}");
     assert_eq!(count(&state, "groom_uploads"), 2, "{state}");
     assert_eq!(count(&state, "groom_repacks"), 1, "{state}");
+    // (Headless, with no upload allowance: packed where they were asked for.)
+    assert_eq!(count(&state, "groom_worker_packs"), 0, "{state}");
 
     // Frames later nothing more was sent.
     app.update_n(4);
@@ -1134,11 +1136,16 @@ fn a_groom_goes_to_the_gpu_when_it_is_drawn_and_moves_no_other() {
         "the curtain's strands moved on the GPU and it is drawn differently (worst {moved_worst}/255)"
     );
 
-    // With an upload allowance that lets one new thing through a frame, the grooms arrive
-    // one a frame, the nearest first, and are drawn from then on; the picture ends the same.
+    // With an upload allowance that lets one new thing through a frame (a game in play),
+    // workers pack the grooms from copies (packing a coat of 200,000 strands held the PC's
+    // main thread for 10 ms); they arrive one a frame at the most, and are drawn from then
+    // on; the picture ends the same.
     let (mut app, _) = groom_scene(Some(0.0001));
     let mut held = Vec::new();
-    for _ in 0..40 {
+    // (Bounded by frames and by wall time: how many frames a worker takes is the machine's
+    // load.)
+    let started = std::time::Instant::now();
+    while held.len() < 40 || started.elapsed() < std::time::Duration::from_secs(30) {
         app.update_n(1);
         let state = strand_state(&app);
         held.push((count(&state, "grooms"), count(&state, "instances")));
@@ -1171,6 +1178,12 @@ fn a_groom_goes_to_the_gpu_when_it_is_drawn_and_moves_no_other() {
     );
     assert_eq!(count(&state, "groom_uploads"), 2, "{state}");
     assert_eq!(count(&state, "grooms"), 2, "{state}");
+    assert_eq!(
+        count(&state, "groom_worker_packs"),
+        2,
+        "workers packed both: {state}"
+    );
+    assert_eq!(count(&state, "grooms_with_workers"), 0, "{state}");
     assert_eq!(
         differ, 0,
         "grooms that came one a frame are drawn differently (worst {worst}/255)"
