@@ -364,6 +364,18 @@ fn variants() -> Vec<Variant> {
             "the count of the sun's rays through the frame's ray scene (against count_ray_sun)",
         ),
         v(
+            "ray_probes",
+            r,
+            json!({"trial_cuts_more": 32, "gi_hardware_rays": true}),
+            "light probes four times as often on ray-tracing hardware (8,192 a frame within 1.6 times `gi_budget_ms`, 3.0 ms at Ultra) and probes stuck inside something asleep, on the probes' own scene: read `probe gi` against the baseline's; `--stats render.gi.` keeps `probes_updated`, `probes_budget_cut`, `probes_traced` and `probes_awake` (under the row's `stats`)",
+        ),
+        v(
+            "ray_world_probes",
+            r,
+            json!({"trial_cuts_more": 48, "gi_hardware_rays": true}),
+            "ray_world with ray_probes: four times the probes' rays through the frame's ray scene (read `probe gi` and `probe gi copies` against ray_world)",
+        ),
+        v(
             "skip_lighting",
             r,
             json!({"debug_skip": 128}),
@@ -1227,9 +1239,10 @@ fn round3(x: f64) -> f64 {
 /// What a reading keeps besides the passes' GPU times: the CPU time of recording the rays'
 /// structures' builds and the sun's rays, of placing the instances and of the gather as a
 /// whole, of finishing and submitting the frame's commands (wgpu walks a top-level structure's
-/// instances again there), the render's CPU time in all, and the probes traced and what a
-/// thousand of their rays cost.
-const RAY_ROWS: [&str; 10] = [
+/// instances again there), the render's CPU time in all, the probes planned and what a
+/// thousand of their rays cost, and what their update did (the budget's cut, the probes that
+/// traced and those awake after, of those counted).
+const RAY_ROWS: [&str; 14] = [
     "render.cpu.probe gi build",
     "render.cpu.ray shadows",
     "render.cpu.finish commands",
@@ -1240,6 +1253,10 @@ const RAY_ROWS: [&str; 10] = [
     "render.gi.extract_ms",
     "render.gi.probes_updated",
     "render.gi.gpu_ms_per_kray",
+    "render.gi.probes_budget_cut",
+    "render.gi.probes_counted",
+    "render.gi.probes_traced",
+    "render.gi.probes_awake",
 ];
 
 /// Read the render rows of distinct frames for `secs`.

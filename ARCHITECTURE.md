@@ -225,7 +225,10 @@ DDGI probes (`probe_gi/`): a grid that scrolls with the camera, as many probes t
 frame as fit `gi_budget_ms` of GPU time, in compute against a software BVH of the
 `MeshRenderer`s near it (one per mesh, large ones built on workers; one over the instances,
 gathered again only when an entity, asset or the snapped region changes). Probes with nothing
-near sleep and trace one turn in eight. Hits are lit by
+near sleep and trace one turn in eight. With `trial_cut_more::RAY_PROBES` (off by default),
+where the rays trace on ray-tracing hardware, four times the probes are traced a frame within
+1.6 times the budget, and probes stuck inside something sleep too; `render.gi.probes_awake`
+and `probes_traced` count, read back some frames late, what the update did. Hits are lit by
 the sun and the nearest point lights through shadow rays, glowing materials and last frame's
 probes. `probe_gi` in lib_frame.wgsl (frame binding 23, the atlas) gives every lit surface
 the probes' irradiance where the grid covers it, so other modules' shaders that call

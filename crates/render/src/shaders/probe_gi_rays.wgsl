@@ -9,6 +9,8 @@
 // The storage slots updated this frame: the traced ones (probes that scrolled into the grid
 // first, then a share of the rest in turn), then the cleared ones.
 @group(2) @binding(18) var<storage, read> updates: array<u32>;
+// What `cs_update` did this frame (cleared before the pass): see probe_gi.wgsl.
+@group(2) @binding(19) var<storage, read_write> probe_counts: array<atomic<u32>, 4>;
 
 // The last hit `trace_scene` or `trace_reflect` found for a ray that asks what it meets, as
 // `ray_whole` or `ray_nearest` gave it: what the shared body's `Hit` has no room for (the

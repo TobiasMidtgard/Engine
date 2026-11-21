@@ -74,8 +74,16 @@ const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// What the sun's rays found, a texel a pixel (`cs_sun`'s `sun_out`): a format a compute pass
 /// may write on every GPU.
 const SUN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// `cs_sun`'s `sun_counts`: four counters.
-const SUN_COUNTS_BYTES: u64 = 16;
+/// A [`GpuCounts`]' four counters (`cs_sun`'s `sun_counts`, `cs_update`'s `probe_counts`).
+const COUNTS_BYTES: u64 = 16;
+/// `trial_cut_more::RAY_PROBES` where the rays trace on ray-tracing hardware: the most probes
+/// a frame and the GPU time they may take, times these (8,192 of the default 2,048 within
+/// 2.4 ms of 1.5).
+const RAISED_PROBES: u32 = 4;
+const RAISED_BUDGET: f32 = 1.6;
+/// `GiPass::world_origin`'s w, flags: a probe stuck inside something sleeps
+/// (`GI_STUCK_SLEEP` in probe_gi.wgsl; `trial_cut_more::RAY_PROBES` on ray-tracing hardware).
+const GI_STUCK_SLEEP: i32 = 1;
 /// Triangles whose hierarchies may be built per frame where the gather runs (at least one mesh
 /// is).
 const BUILD_TRIANGLES_PER_FRAME: usize = 8_000;
@@ -611,6 +619,11 @@ struct Active {
     sun_inputs: Option<wgpu::BindGroup>,
     /// This frame's sun rays are counted.
     sun_counted: bool,
+    /// `cs_update`'s count of the probes it updated: planned, traced (the rest slept through
+    /// their turn), awake after (`render.gi.probes_counted`, `probes_traced`, `probes_awake`).
+    probe_counts: GpuCounts,
+    /// The frame's ray pass updates the probes: copy their counts out after it.
+    probes_counting: bool,
 }
 
 /// What the frame's ray pass holds of the probes' ([`ProbeGi::begin_rays`]).
@@ -645,61 +658,98 @@ struct SunRays {
     /// and again when the view's size changes. 4 bytes a pixel, 14.7 MB at 2560x1440.
     out: Option<crate::targets::Tex>,
     /// The rays shot and those stopped, counted by the pass while
-    /// `shade_skip::COUNT_MESH_RUNS` is set, and their copy for the CPU to read.
+    /// `shade_skip::COUNT_MESH_RUNS` is set.
+    counts: GpuCounts,
+}
+
+/// Four counters a pass adds to on the GPU, and their copy for the CPU to read some frames
+/// later: cleared before the pass, copied out after it, mapped once the copy was submitted.
+struct GpuCounts {
     counts: wgpu::Buffer,
     read: wgpu::Buffer,
-    /// `SUN_COUNT_*`.
+    /// `COUNTS_*`.
     state: Arc<AtomicU8>,
     /// This frame's commands copy the counts out: map the copy once they are submitted.
     copied: bool,
-    /// The latest counts read: rays, hits.
-    latest: Option<[u32; 2]>,
+    /// The latest counts read.
+    latest: Option<[u32; 4]>,
 }
 
-const SUN_COUNT_FREE: u8 = 0;
-const SUN_COUNT_MAPPING: u8 = 1;
-const SUN_COUNT_MAPPED: u8 = 2;
-const SUN_COUNT_FAILED: u8 = 3;
+const COUNTS_FREE: u8 = 0;
+const COUNTS_MAPPING: u8 = 1;
+const COUNTS_MAPPED: u8 = 2;
+const COUNTS_FAILED: u8 = 3;
 
-impl SunRays {
-    /// After the pass that shot the rays: copy their counts out for the CPU, when they were
-    /// counted and no earlier copy is still on its way.
-    fn copy_counts(&mut self, encoder: &mut wgpu::CommandEncoder, count: bool) {
-        if count && !self.copied && self.state.load(Ordering::Acquire) == SUN_COUNT_FREE {
-            encoder.copy_buffer_to_buffer(&self.counts, 0, &self.read, 0, SUN_COUNTS_BYTES);
+impl GpuCounts {
+    fn new(device: &wgpu::Device, label: &str) -> Self {
+        let buffer = |label: &str, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: COUNTS_BYTES,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            counts: buffer(
+                label,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            ),
+            read: buffer(
+                &format!("{label} readback"),
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            ),
+            state: Default::default(),
+            copied: false,
+            latest: None,
+        }
+    }
+
+    /// Before the pass that counts: start from zero.
+    fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.clear_buffer(&self.counts, 0, None);
+    }
+
+    /// After the pass: copy the counts out for the CPU, when they were counted and no earlier
+    /// copy is still on its way.
+    fn copy(&mut self, encoder: &mut wgpu::CommandEncoder, count: bool) {
+        if count && !self.copied && self.state.load(Ordering::Acquire) == COUNTS_FREE {
+            encoder.copy_buffer_to_buffer(&self.counts, 0, &self.read, 0, COUNTS_BYTES);
             self.copied = true;
         }
     }
 
     /// Take in the counts that arrived, and ask for those last frame's commands copied out
     /// (they are submitted by now).
-    fn take_counts(&mut self) {
+    fn take(&mut self) {
         if std::mem::take(&mut self.copied) {
-            self.state.store(SUN_COUNT_MAPPING, Ordering::Release);
+            self.state.store(COUNTS_MAPPING, Ordering::Release);
             let state = self.state.clone();
             self.read
                 .slice(..)
                 .map_async(wgpu::MapMode::Read, move |r| {
                     let to = if r.is_ok() {
-                        SUN_COUNT_MAPPED
+                        COUNTS_MAPPED
                     } else {
-                        SUN_COUNT_FAILED
+                        COUNTS_FAILED
                     };
                     state.store(to, Ordering::Release);
                 });
         }
         match self.state.load(Ordering::Acquire) {
-            SUN_COUNT_MAPPED => {
+            COUNTS_MAPPED => {
                 if let Ok(view) = self.read.slice(..).get_mapped_range() {
                     let n = |at: usize| u32::from_le_bytes([0, 1, 2, 3].map(|b| view[at * 4 + b]));
-                    self.latest = Some([n(0), n(1)]);
+                    self.latest = Some([n(0), n(1), n(2), n(3)]);
                 }
                 self.read.unmap();
-                self.state.store(SUN_COUNT_FREE, Ordering::Release);
+                self.state.store(COUNTS_FREE, Ordering::Release);
             }
-            SUN_COUNT_FAILED => {
+            COUNTS_FAILED => {
                 self.read.unmap();
-                self.state.store(SUN_COUNT_FREE, Ordering::Release);
+                self.state.store(COUNTS_FREE, Ordering::Release);
             }
             _ => {}
         }
@@ -776,6 +826,10 @@ pub(crate) struct ProbeGi {
 #[derive(Default, Clone, Copy)]
 struct Stats {
     probes: u32,
+    /// Probes the time budget held back this frame (0: none).
+    budget_cut: u32,
+    /// `trial_cut_more::RAY_PROBES` acts: the rays trace on ray-tracing hardware.
+    raised: bool,
     /// Probes that scrolled in this frame, and those cleared to wait for their first trace.
     scrolled_in: u32,
     cleared: u32,
@@ -1024,8 +1078,9 @@ impl ProbeGi {
             view_dimension: wgpu::TextureViewDimension::D2Array,
         };
         // The pass, the instances (the probes' own scene only), the rays, the probes' state,
-        // the atlas written and the slots updated: group 1 with the probes' own scene
-        // (probe_gi_scene_old.wgsl), group 2 behind the ray scene (probe_gi_rays.wgsl).
+        // the atlas written, the slots updated and the count of what the update did: group 1
+        // with the probes' own scene (probe_gi_scene_old.wgsl), group 2 behind the ray scene
+        // (probe_gi_rays.wgsl).
         let mut entries = if world {
             vec![
                 layout_entry(10, S::COMPUTE, uniform),
@@ -1033,6 +1088,7 @@ impl ProbeGi {
                 layout_entry(16, S::COMPUTE, storage(false)),
                 layout_entry(17, S::COMPUTE, atlas_out),
                 layout_entry(18, S::COMPUTE, storage(true)),
+                layout_entry(19, S::COMPUTE, storage(false)),
             ]
         } else {
             vec![
@@ -1042,6 +1098,7 @@ impl ProbeGi {
                 layout_entry(6, S::COMPUTE, storage(false)),
                 layout_entry(7, S::COMPUTE, atlas_out),
                 layout_entry(8, S::COMPUTE, storage(true)),
+                layout_entry(9, S::COMPUTE, storage(false)),
             ]
         };
         if world {
@@ -1208,31 +1265,11 @@ impl ProbeGi {
                 ],
                 immediate_size: 0,
             });
-            let counts = |label, usage| {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size: SUN_COUNTS_BYTES,
-                    usage,
-                    mapped_at_creation: false,
-                })
-            };
             SunRays {
                 pipeline: pipeline("cs_sun", &pipeline_layout),
                 layout: inputs,
                 out: None,
-                counts: counts(
-                    "ray shadow counts",
-                    wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_SRC
-                        | wgpu::BufferUsages::COPY_DST,
-                ),
-                read: counts(
-                    "ray shadow counts readback",
-                    wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                ),
-                state: Default::default(),
-                copied: false,
-                latest: None,
+                counts: GpuCounts::new(device, "ray shadow counts"),
             }
         });
         let usage = wgpu::BufferUsages::STORAGE;
@@ -1271,6 +1308,8 @@ impl ProbeGi {
             reflect_inputs: None,
             sun_inputs: None,
             sun_counted: false,
+            probe_counts: GpuCounts::new(device, "probe gi counts"),
+            probes_counting: false,
         });
         // The new buffers hold nothing yet.
         self.store.gpu_nodes = 0;
@@ -1292,36 +1331,49 @@ impl ProbeGi {
         };
     }
 
-    /// Probes to trace this frame: what fits `gi_budget_ms` at the measured cost, up to
-    /// `gi_probes_per_frame` (always that many without a budget, timestamps or a hardware GPU).
-    /// `share` is the frame's [`crate::FramePacing::share`]: the settings come paced already,
-    /// and the floor and the count before a measurement are paced the same way, so a second
-    /// holds as many probes whatever the frame rate.
+    /// Probes to trace this frame, and those the time budget held back: what fits
+    /// `gi_budget_ms` at the measured cost, up to `gi_probes_per_frame` (always that many
+    /// without a budget, timestamps or a GPU that is not a CPU). `raised`
+    /// (`trial_cut_more::RAY_PROBES` on ray-tracing hardware): [`RAISED_PROBES`] times as many
+    /// within [`RAISED_BUDGET`] times the time. `share` is the frame's
+    /// [`crate::FramePacing::share`]: the settings come paced already, and the floor and the
+    /// count before a measurement are paced the same way, so a second holds as many probes
+    /// whatever the frame rate.
     fn probes_this_frame(
         &self,
         shared: &GpuShared,
         settings: &RenderSettings,
         count: u32,
         share: f32,
-    ) -> u32 {
-        let most = settings.gi_probes_per_frame.clamp(1, count);
-        let budgeted = settings.gi_budget_ms > 0.0
+        raised: bool,
+    ) -> (u32, u32) {
+        let (most, budget_ms) = if raised {
+            let most = settings.gi_probes_per_frame.saturating_mul(RAISED_PROBES);
+            let most = crate::settings::gi_probes_cap().map_or(most, |cap| most.min(cap));
+            (most, settings.gi_budget_ms * RAISED_BUDGET)
+        } else {
+            (settings.gi_probes_per_frame, settings.gi_budget_ms)
+        };
+        let most = most.clamp(1, count);
+        let budgeted = budget_ms > 0.0
             && shared.adapter_info.device_type != wgpu::DeviceType::Cpu
             && shared
                 .device
                 .features()
                 .contains(wgpu::Features::TIMESTAMP_QUERY);
         if !budgeted {
-            return most;
+            return (most, 0);
         }
         let paced = |n: u32| ((n as f32 * share.clamp(0.25, 1.0)).round() as u32).max(1);
         let least = paced(MIN_PROBES_PER_FRAME).min(most);
-        if self.ms_per_kray <= 0.0 {
-            return paced(UNMEASURED_PROBES_PER_FRAME).clamp(least, most);
-        }
-        let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS) as f32;
-        let fit = settings.gi_budget_ms / self.ms_per_kray * 1000.0 / rays;
-        (fit as u32).clamp(least, most)
+        let fits = if self.ms_per_kray <= 0.0 {
+            paced(UNMEASURED_PROBES_PER_FRAME).clamp(least, most)
+        } else {
+            let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS) as f32;
+            let fit = budget_ms / self.ms_per_kray * 1000.0 / rays;
+            (fit as u32).clamp(least, most)
+        };
+        (fits, most - fits)
     }
 
     /// A mesh's local bounds at its current version (`None` while it isn't loaded or has no
@@ -2225,7 +2277,12 @@ impl ProbeGi {
         let share = world
             .get_resource::<crate::FramePacing>()
             .map_or(1.0, |p| p.share);
-        let per_frame = self.probes_this_frame(shared, settings, count, share);
+        // `trial_cut_more::RAY_PROBES`: four times the probes, and stuck ones asleep, where the
+        // rays trace on ray-tracing hardware.
+        let raised = settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_PROBES != 0
+            && rays_trace != Rays::Software;
+        let (per_frame, budget_cut) =
+            self.probes_this_frame(shared, settings, count, share, raised);
         let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS);
 
         // Probes that scrolled in go first, then the rest in turn; those that scrolled in and
@@ -2287,7 +2344,9 @@ impl ProbeGi {
                 instance_count as f32,
                 settings.gi_shadowed_lights as f32,
             ],
-            world_origin: origin.extend(0).to_array(),
+            world_origin: origin
+                .extend(if raised { GI_STUCK_SLEEP } else { 0 })
+                .to_array(),
             anchor: (own.anchor - view.origin).as_vec3().extend(0.0).to_array(),
         };
         queue.write_buffer(&active.uniform, 0, bytemuck::bytes_of(&pass));
@@ -2308,6 +2367,7 @@ impl ProbeGi {
                     entry(16, buffer(&active.probe_state)),
                     entry(17, wgpu::BindingResource::TextureView(&active.next_view)),
                     entry(18, buffer(&active.updates.buffer)),
+                    entry(19, buffer(&active.probe_counts.counts)),
                 ]
             } else {
                 vec![
@@ -2317,6 +2377,7 @@ impl ProbeGi {
                     entry(6, buffer(&active.probe_state)),
                     entry(7, wgpu::BindingResource::TextureView(&active.next_view)),
                     entry(8, buffer(&active.updates.buffer)),
+                    entry(9, buffer(&active.probe_counts.counts)),
                 ]
             };
             match (&active.hw, active.rays_trace) {
@@ -2373,6 +2434,8 @@ impl ProbeGi {
         let hw = self.active.as_ref().and_then(|a| a.hw.as_ref());
         self.stats = Stats {
             probes: traced,
+            budget_cut,
+            raised,
             scrolled_in: plan.scrolled_in,
             cleared,
             instances: instance_count,
@@ -2470,12 +2533,16 @@ impl ProbeGi {
         if self.traces_ray_world() {
             return;
         }
-        let (Some(work), Some(active)) = (self.work.take(), self.active.as_ref()) else {
+        let work = self.work.take();
+        let Some(active) = self.active.as_mut() else {
             return;
         };
-        let Some(group) = &active.group else {
+        // The counts of what an update did, as they arrive.
+        active.probe_counts.take();
+        let (Some(work), Some(group)) = (work, &active.group) else {
             return;
         };
+        active.probe_counts.clear(encoder);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("probe gi"),
@@ -2488,6 +2555,7 @@ impl ProbeGi {
             pass.set_pipeline(&active.update);
             pass.dispatch_workgroups(work.probes + work.cleared, 1, 1);
         }
+        active.probe_counts.copy(encoder, true);
         copy_atlas_rows(encoder, &active.next, &self.atlas, &work.rows);
     }
 
@@ -2632,7 +2700,7 @@ impl ProbeGi {
             pass.set_bind_group(2, &inputs, &[]);
             pass.dispatch_workgroups(targets.width.div_ceil(8), targets.height.div_ceil(8), 1);
         }
-        sun.copy_counts(encoder, count);
+        sun.counts.copy(encoder, count);
         true
     }
 
@@ -2649,9 +2717,9 @@ impl ProbeGi {
         let active = self.active.as_mut()?;
         active.group.as_ref()?;
         let sun = active.sun.as_mut()?;
-        sun.take_counts();
+        sun.counts.take();
         if !count {
-            sun.latest = None;
+            sun.counts.latest = None;
         }
         let size = (targets.width, targets.height);
         let out = match &mut sun.out {
@@ -2683,12 +2751,12 @@ impl ProbeGi {
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: sun.counts.as_entire_binding(),
+                    resource: sun.counts.counts.as_entire_binding(),
                 },
             ],
         });
         if count {
-            encoder.clear_buffer(&sun.counts, 0, None);
+            sun.counts.clear(encoder);
         }
         Some(inputs)
     }
@@ -2721,6 +2789,12 @@ impl ProbeGi {
             active.reflect_inputs = reflect_inputs;
             active.sun_inputs = sun_inputs;
             active.sun_counted = sun == Some(true);
+            // The probes' update counts what it did (`end_rays` copies the counts out).
+            active.probe_counts.take();
+            active.probes_counting = work.probes;
+            if work.probes {
+                active.probe_counts.clear(encoder);
+            }
         }
         work
     }
@@ -2780,9 +2854,9 @@ impl ProbeGi {
     }
 
     /// After the frame's ray pass: copy the atlas rows the probes' update wrote into the
-    /// atlas the frame samples, and the sun's counts out. (The reflections' inputs stay for
-    /// a pass that follows these copies: [`dispatch_reflections`](Self::dispatch_reflections)
-    /// takes them.)
+    /// atlas the frame samples, and the probes' and the sun's counts out. (The reflections'
+    /// inputs stay for a pass that follows these copies:
+    /// [`dispatch_reflections`](Self::dispatch_reflections) takes them.)
     pub fn end_rays(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let work = self.work.take();
         let Some(active) = self.active.as_mut() else {
@@ -2793,10 +2867,12 @@ impl ProbeGi {
         {
             copy_atlas_rows(encoder, &active.next, &self.atlas, &work.rows);
         }
+        let counted = std::mem::take(&mut active.probes_counting);
+        active.probe_counts.copy(encoder, counted);
         if active.sun_inputs.take().is_some()
             && let Some(sun) = active.sun.as_mut()
         {
-            sun.copy_counts(encoder, active.sun_counted);
+            sun.counts.copy(encoder, active.sun_counted);
         }
     }
 
@@ -2809,6 +2885,16 @@ impl ProbeGi {
         }
         let s = self.stats;
         d.set("render.gi.probes_updated", s.probes as f64);
+        d.set("render.gi.probes_budget_cut", s.budget_cut as f64);
+        d.set("render.gi.probes_raised", s.raised as u8 as f64);
+        // What the update did in the latest frame read back (-1: none read yet): the probes it
+        // was given, those that traced (the rest slept through their turn), those awake after.
+        let counted = self.active.as_ref().and_then(|a| a.probe_counts.latest);
+        let [given, traced, awake] =
+            counted.map_or([-1.0; 3], |n| [n[0], n[1], n[2]].map(f64::from));
+        d.set("render.gi.probes_counted", given);
+        d.set("render.gi.probes_traced", traced);
+        d.set("render.gi.probes_awake", awake);
         d.set("render.gi.scrolled_in", s.scrolled_in as f64);
         d.set("render.gi.cleared", s.cleared as f64);
         d.set("render.gi.pending", self.schedule.pending() as f64);
@@ -2864,7 +2950,10 @@ impl ProbeGi {
         d.set("render.gi.rt_losses", self.hw_losses as f64);
         // The sun's rays counted in the latest frame read back (-1: not counted now).
         if let Some(sun) = self.active.as_ref().and_then(|a| a.sun.as_ref()) {
-            let [rays, hits] = sun.latest.map_or([-1.0; 2], |n| n.map(f64::from));
+            let [rays, hits] = sun
+                .counts
+                .latest
+                .map_or([-1.0; 2], |n| [n[0], n[1]].map(f64::from));
             d.set("render.gi.sun_rays", rays);
             d.set("render.gi.sun_hits", hits);
         }

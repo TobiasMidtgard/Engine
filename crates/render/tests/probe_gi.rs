@@ -1530,3 +1530,279 @@ fn the_ray_scenes_stand_in_copies_come_and_go() {
         "the room is lit as before the copies: {before:.1}, {after:.1}"
     );
 }
+
+/// What the probes' update did in a frame of the scene as it stands, as
+/// `render.gi.probes_counted`, `probes_traced` and `probes_awake` read it back (frames after
+/// it was taken, as [`sun_counts`]): the probes it was given, those that traced, those awake
+/// after.
+fn probe_counts(app: &mut App) -> [f64; 3] {
+    let dir = std::env::temp_dir().join("engine-probe-gi");
+    let _ = std::fs::create_dir_all(&dir);
+    for _ in 0..4 {
+        capture_now(&mut app.world, dir.join("probe_count.png")).expect("screenshot");
+    }
+    let d = app.world.resource::<Diagnostics>();
+    ["counted", "traced", "awake"].map(|n| {
+        d.get(&format!("render.gi.probes_{n}"))
+            .filter(|v| *v >= 0.0)
+            .expect("the probes are counted")
+    })
+}
+
+/// `trial_cut_more::RAY_PROBES` (step 6 of the ray-traced lighting round): on ray-tracing
+/// hardware a frame traces four times the probes, so a change of light reaches them in a
+/// quarter of the frames. The lid of [`a_lid_slid_aside_lets_the_sun_in_like_one_that_was_never_on`]
+/// slides off the roof's opening, and the far wall and the ceiling, lit only by the probes,
+/// are timed to 63% of the way to the light they settle at: with an eighth of the grid
+/// traced a frame and hysteresis 0.9, each probe is traced every eighth frame and the light
+/// takes about 9.5 of its traces; with the switch, every other frame. With the lid on, the
+/// switch changes nothing in the room over 16 frames (the probes stuck in the lid sleep then,
+/// and one that blended in rays nobody traced for it lit the ceiling, 21 Nov).
+#[test]
+fn a_change_of_light_reaches_the_probes_four_times_sooner() {
+    use engine_render::settings::trial_cut_more::RAY_PROBES;
+    const GRID: u32 = 16 * 8 * 16;
+    let lid_over = DVec3::new(0.0, HEIGHT + THICK * 1.5, -0.5);
+    let lid_aside = DVec3::new(2.2, HEIGHT + THICK * 1.5, -0.5);
+    let mut app = app_rays(true);
+    let lid = {
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.8, Some((1.4, -0.5)));
+        ground(w);
+        sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
+        camera(w, EYE, TARGET, 12.0);
+        w.spawn((
+            Transform::from_translation(lid_aside),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [1.8, THICK as f32, 2.0],
+                },
+                StandardMaterial::color(0.7, 0.7, 0.7).with_roughness(0.9),
+            ),
+        ))
+        .id()
+    };
+    let place = |app: &mut App, at: DVec3| {
+        app.world
+            .get_mut::<Transform>(lid)
+            .expect("lid")
+            .translation = at;
+    };
+    // Settled: every probe traced each frame, keeping a quarter of its light. The light
+    // bouncing in the closed room settles slowly: keeping half, 24 frames left a tenth of the
+    // open room's light in it.
+    let settle = |app: &mut App| {
+        {
+            let mut s = app.world.resource_mut::<RenderSettings>();
+            s.gi_probes_per_frame = GRID;
+            s.gi_hysteresis = 0.25;
+            s.trial_cuts_more &= !RAY_PROBES;
+        }
+        app.update_n(48);
+    };
+    settle(&mut app);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    if skip_path(&app, true) {
+        return;
+    }
+    let open = brightness(&mut app, "sooner_open.png", UPPER);
+    let diag = |app: &App, name: &str| {
+        app.world
+            .resource::<Diagnostics>()
+            .get(name)
+            .unwrap_or(-1.0)
+    };
+    let mut frames = [0u32; 2];
+    let mut closed_at = [(0.0f32, 0.0f32); 2];
+    for (i, raised) in [false, true].into_iter().enumerate() {
+        place(&mut app, lid_over);
+        settle(&mut app);
+        {
+            let mut s = app.world.resource_mut::<RenderSettings>();
+            s.gi_probes_per_frame = GRID / 8;
+            s.gi_hysteresis = 0.9;
+            if raised {
+                s.trial_cuts_more |= RAY_PROBES;
+            }
+        }
+        app.update_n(8);
+        // The closed room over 16 frames (each capture is one): a probe asleep at the raised
+        // rate traces one of them.
+        let (mut closed, mut brightest) = (0.0, 0.0f32);
+        for _ in 0..16 {
+            let now = brightness(&mut app, &format!("sooner_closed_{i}.png"), UPPER);
+            closed += now / 16.0;
+            brightest = brightest.max(now);
+        }
+        closed_at[i] = (closed, brightest);
+        let per_frame = if raised { GRID / 2 } else { GRID / 8 };
+        assert_eq!(diag(&app, "render.gi.probes_updated"), per_frame as f64);
+        assert_eq!(diag(&app, "render.gi.probes_raised"), raised as u8 as f64);
+        assert_eq!(diag(&app, "render.gi.probes_budget_cut"), 0.0);
+        assert!(
+            open > closed * 1.3 + 3.0,
+            "the opening should light the room: lid on {closed:.1}, aside {open:.1}"
+        );
+        // The lid slides aside (the frame of the update is the first with it there).
+        place(&mut app, lid_aside);
+        app.update();
+        let goal = closed + 0.63 * (open - closed);
+        let mut n = 1;
+        loop {
+            let now = brightness(&mut app, &format!("sooner_{i}.png"), UPPER);
+            n += 1;
+            if now >= goal {
+                break;
+            }
+            assert!(
+                n < 200,
+                "switch {raised}: the light never arrived: {now:.1} of {closed:.1} to {open:.1}"
+            );
+        }
+        on_hardware(&app);
+        eprintln!("switch {raised}: 63% of {closed:.1} to {open:.1} in {n} frames");
+        frames[i] = n;
+    }
+    let [(off, off_most), (on, on_most)] = closed_at;
+    assert!(
+        (on - off).abs() <= off * 0.05 + 1.0 && on_most <= off_most * 1.05 + 1.0,
+        "the switch changed the closed room: {off:.1} (at most {off_most:.1}) without it, \
+         {on:.1} (at most {on_most:.1}) with it"
+    );
+    assert!(
+        frames[0] >= 3 * frames[1],
+        "four times the probes a frame: {} frames without the switch, {} with it",
+        frames[0],
+        frames[1]
+    );
+}
+
+/// `trial_cut_more::RAY_PROBES`: on ray-tracing hardware a probe whose rays mostly meet the
+/// inside of something sleeps, as one with nothing near does: it traces one turn in eight.
+/// Under open ground (a single-sided plane 0.3 m down) the grid's three lowest layers, 768
+/// probes, see its back and light nothing. They are awake without the switch and asleep with
+/// it, on the probes' own scene and on the frame's ray scene, and the picture stays the same.
+/// The software walk keeps them awake.
+#[test]
+fn probes_inside_the_ground_sleep() {
+    use engine_render::settings::trial_cut_more::{RAY_PROBES, RAY_WORLD};
+    const GRID: f64 = (16 * 8 * 16) as f64;
+    const UNDER: f64 = (3 * 16 * 16) as f64;
+    // The scene with `bits` on, some frames in: what the update counted, and the picture.
+    // `None` where the path asked for can't run here.
+    let run = |hardware: bool, bits: u32, name: &str| -> Option<([f64; 3], image::RgbImage)> {
+        let mut app = app_rays(hardware);
+        app.world.resource_mut::<RenderSettings>().trial_cuts_more |= bits;
+        {
+            let w = &mut app.world;
+            ground(w);
+            slab(
+                w,
+                DVec3::new(1.0, 0.5, -2.0),
+                DVec3::new(2.0, 1.0, 2.0),
+                0.6,
+            );
+            sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.2));
+            camera(w, EYE, DVec3::new(0.5, 0.0, -2.0), 13.0);
+        }
+        app.update_n(10);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return None;
+        }
+        if on_hardware(&app) != hardware {
+            eprintln!("skipping {name}: the GPU has no ray queries");
+            return None;
+        }
+        let diag = |app: &App, n: &str| app.world.resource::<Diagnostics>().get(n).unwrap_or(-1.0);
+        if bits & RAY_WORLD != 0 && diag(&app, "render.ray.supported") != 1.0 {
+            eprintln!("skipping {name}: the GPU cannot hold the ray scene");
+            return None;
+        }
+        let counts = probe_counts(&mut app);
+        let raised = hardware && bits & RAY_PROBES != 0;
+        assert_eq!(
+            diag(&app, "render.gi.probes_raised"),
+            raised as u8 as f64,
+            "{name}"
+        );
+        assert_eq!(
+            diag(&app, "render.gi.ray_world"),
+            (bits & RAY_WORLD != 0) as u8 as f64,
+            "{name}"
+        );
+        assert_eq!(counts[0], GRID, "{name}: every probe each frame");
+        eprintln!(
+            "{name}: given {}, traced {}, awake {}",
+            counts[0], counts[1], counts[2]
+        );
+        let dir = std::env::temp_dir().join("engine-probe-gi");
+        let path = dir.join(name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+        }
+        Some((counts, image::open(&path).expect("read the shot").to_rgb8()))
+    };
+    let apart = |a: &image::RgbImage, b: &image::RgbImage| {
+        let (mut over, mut most, mut sum) = (0u32, 0u8, 0u64);
+        for (p, q) in a.pixels().zip(b.pixels()) {
+            let d = (0..3).map(|c| p[c].abs_diff(q[c])).max().unwrap_or(0);
+            over += (d > DITHER) as u32;
+            most = most.max(d);
+            sum += d as u64;
+        }
+        (
+            over as f32 / (W * H) as f32,
+            most,
+            sum as f32 / (W * H) as f32,
+        )
+    };
+    // The software walk: the switch changes nothing.
+    let Some((sw_off, _)) = run(false, 0, "stuck_sw_off.png") else {
+        return;
+    };
+    let (sw_on, _) = run(false, RAY_PROBES, "stuck_sw_on.png").expect("GPU");
+    assert!(
+        sw_off[2] >= UNDER,
+        "the probes under the ground are awake: {}",
+        sw_off[2]
+    );
+    assert!(
+        (sw_on[2] - sw_off[2]).abs() <= GRID * 0.02,
+        "the software walk keeps its probes awake: {} without the switch, {} with it",
+        sw_off[2],
+        sw_on[2]
+    );
+    // Ray-tracing hardware, on the probes' own scene and on the frame's.
+    for (scene, bits) in [("own", 0), ("ray_world", RAY_WORLD)] {
+        let Some((off, before)) = run(true, bits, &format!("stuck_{scene}_off.png")) else {
+            continue;
+        };
+        let (on, after) =
+            run(true, bits | RAY_PROBES, &format!("stuck_{scene}_on.png")).expect("GPU");
+        let asleep = off[2] - on[2];
+        assert!(
+            (UNDER * 0.8..=UNDER + 64.0).contains(&asleep),
+            "{scene}: the {UNDER} probes under the ground sleep: awake {} without the switch, \
+             {} with it",
+            off[2],
+            on[2]
+        );
+        assert!(
+            on[2] >= 2.0 * 16.0 * 16.0,
+            "{scene}: the probes above the ground stay awake: {}",
+            on[2]
+        );
+        let (share, most, mean) = apart(&before, &after);
+        eprintln!("{scene}: {share:.4} of the pixels apart, at most {most}, mean {mean:.2}");
+        assert!(
+            share <= HW_APART_SHARE && most <= HW_APART_MOST && mean <= HW_APART_MEAN,
+            "{scene}: the sleeping probes changed the picture: {share:.4} apart, at most \
+             {most}, mean {mean:.2}"
+        );
+    }
+}

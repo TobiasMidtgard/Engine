@@ -5,8 +5,8 @@
 //
 // What the rays trace comes first, composed before this file, one of three ways
 // (`probe_gi::shader_source`). All give the probes' buffers (`pass_`, `rays`, `probe_state`,
-// `atlas_out`, `updates`), `trace_scene`, `trace_reflect` (a world reflection's ray),
-// `trace_sun` (a sun's measuring ray) and `shade_hit`:
+// `atlas_out`, `updates`, `probe_counts`), `trace_scene`, `trace_reflect` (a world
+// reflection's ray), `trace_sun` (a sun's measuring ray) and `shade_hit`:
 // * the frame's ray scene: lib_ray.wgsl and probe_gi_rays.wgsl (ray queries against the scene
 //   every feature fills, ray_scene/mod.rs);
 // * the probes' own scene on ray-tracing hardware: probe_gi_trace_hw.wgsl and
@@ -17,6 +17,12 @@
 // Probes with nothing within `SLEEP_REACH` probe spacings sleep (Majercik et al. 2021, section
 // 6): they light no surface, so they trace one turn in `SLEEP_TURNS` and keep their light the
 // rest of the time. `probe_state.w` is 1 for an awake probe, 2 + turns slept for a sleeping one.
+// With `GI_STUCK_SLEEP` so do those stuck inside something, which light nothing either.
+//
+// `cs_update` counts what it did into `probe_counts`, which the CPU reads back some frames
+// later (`render.gi.probes_counted`, `probes_traced`, `probes_awake`): [0] the probes it was
+// given to trace, [1] those that traced (the rest slept through their turn), [2] those awake
+// after.
 
 struct GiPass {
     // probes traced this frame, rays per probe, probes cleared after them (they scrolled in and
@@ -28,7 +34,8 @@ struct GiPass {
     rotation_z: vec4<f32>,
     // hysteresis, distance sharpness, instances, shadowed point lights at most
     params: vec4<f32>,
-    // world probe index of the grid's first probe (its lowest corner)
+    // world probe index of the grid's first probe (its lowest corner); w: flags
+    // (`GI_STUCK_SLEEP`)
     world_origin: vec4<i32>,
     // the probes' own instances' anchor, camera-relative
     anchor: vec4<f32>,
@@ -41,6 +48,9 @@ const MAX_RAYS: u32 = 256u;
 const SLEEP_REACH: f32 = 2.0;
 // A sleeping probe traces one of this many turns.
 const SLEEP_TURNS: i32 = 8;
+// `GiPass::world_origin.w`: a probe stuck inside something sleeps as well
+// (`trial_cut_more::RAY_PROBES` on ray-tracing hardware; the software walk never has it).
+const GI_STUCK_SLEEP: i32 = 1;
 
 struct Hit {
     t: f32,
@@ -223,19 +233,25 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
         }
         return;
     }
+    // Every thread reads the probe's state before the barrier; thread 0 writes it only after.
+    // One reading it after the write (a later SIMD chunk on a CPU, another warp on a GPU) saw
+    // the turn the probe traces on, one early, and blended in rays `cs_trace` never traced:
+    // another probe's, at another slot.
+    let g = slot_grid(slot);
+    let world = pass_.world_origin.xyz + vec3<i32>(g);
+    let state = probe_state[slot];
+    let sleeping = sleeps_now(slot, world);
     for (var r = thread; r < rays_per_probe; r += 64u) {
         shared_rays[r] = rays[probe * pass_.counts.y + r];
         shared_dirs[r] = ray_direction(r, pass_.counts.y);
     }
     workgroupBarrier();
 
-    let g = slot_grid(slot);
-    let world = pass_.world_origin.xyz + vec3<i32>(g);
-    let state = probe_state[slot];
-    if (sleeps_now(slot, world)) {
+    if (sleeping) {
         // Its maps stay as they are (`atlas_out` still holds them); count the turn.
         if (thread == 0u) {
             probe_state[slot] = vec4<i32>(world, state.w + 1);
+            atomicAdd(&probe_counts[0], 1u);
         }
         return;
     }
@@ -284,9 +300,16 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     // w: the epoch it was written in (`probe_gi` ignores probes from another).
     textureStore(atlas_out, texel, 1, vec4<f32>(mix(moments, old_moments.xy, keep), in_use, frame.gi_grid.w));
     if (thread == 0u) {
-        // Awake while something is near; a fresh probe stays awake for its first turn.
-        let asleep = !fresh && nearest > SLEEP_REACH * spacing;
+        // Awake while something is near; a fresh probe stays awake for its first turn. With
+        // `GI_STUCK_SLEEP` one stuck inside something sleeps too: it lights nothing either
+        // (its `in_use` stays 0 in the maps it keeps), and it wakes within a sleep's turns of
+        // whatever held it moving away.
+        let stuck = (pass_.world_origin.w & GI_STUCK_SLEEP) != 0 && in_use < 0.5;
+        let asleep = !fresh && (nearest > SLEEP_REACH * spacing || stuck);
         probe_state[slot] = vec4<i32>(world, select(1, 2, asleep));
+        atomicAdd(&probe_counts[0], 1u);
+        atomicAdd(&probe_counts[1], 1u);
+        if (!asleep) { atomicAdd(&probe_counts[2], 1u); }
     }
 }
 

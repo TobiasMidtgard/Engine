@@ -24,6 +24,8 @@ struct Instance {
 // The storage slots updated this frame: the traced ones (probes that scrolled into the grid
 // first, then a share of the rest in turn), then the cleared ones.
 @group(1) @binding(8) var<storage, read> updates: array<u32>;
+// What `cs_update` did this frame (cleared before the pass): see probe_gi.wgsl.
+@group(1) @binding(9) var<storage, read_write> probe_counts: array<atomic<u32>, 4>;
 
 // A world reflection's ray that meets nothing may still pass what this scene lacks (it holds
 // the meshes near the probes, not all that the sky cover map does): the map's march dims it.

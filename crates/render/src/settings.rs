@@ -460,6 +460,17 @@ pub mod trial_cut_more {
     /// `gi_hardware_rays` on a device with ray queries that takes two structures in a
     /// shader stage; without, nothing changes.
     pub const RAY_WORLD: u32 = 16;
+    /// Light probes four times as often where their rays trace on ray-tracing hardware (the
+    /// probes' own scene or, with [`RAY_WORLD`], the frame's): four times
+    /// `gi_probes_per_frame` (8,192 of the default 2,048: each probe of the default grid
+    /// every other frame, not every eighth) within 1.6 times `gi_budget_ms` (2.4 ms of 1.5,
+    /// 3.0 at Ultra), so a change of light reaches them in a quarter of the time. And a
+    /// probe whose rays mostly meet the inside of something (one stuck in the ground, a rock
+    /// or a wall, which lights nothing) sleeps as one with nothing near does: it traces one
+    /// turn in eight. The probes' work a frame is `render.gi.probes_budget_cut` (what the
+    /// budget held back), `probes_traced` and `probes_awake`. Off by default until its
+    /// pictures and timings are in. The software walk does as before.
+    pub const RAY_PROBES: u32 = 32;
 }
 
 /// What the screen shows.
@@ -1166,19 +1177,8 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
         s.texture_compression_ms = *ms;
         s.texture_compression_loading_ms = *ms;
     }
-    // `ENGINE_GI_PROBES_PER_FRAME=<n>` caps the probes traced a frame (as a GPU budget does), to
-    // see on a software GPU how the probes keep up with a moving camera.
-    static GI_PROBES: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    let gi_probes = GI_PROBES.get_or_init(|| {
-        let text = std::env::var("ENGINE_GI_PROBES_PER_FRAME").ok()?;
-        let n = text.parse::<u32>().ok().filter(|n| *n > 0);
-        if n.is_none() {
-            tracing::warn!("ENGINE_GI_PROBES_PER_FRAME={text} is not a positive whole number");
-        }
-        n
-    });
-    if let Some(n) = gi_probes {
-        s.gi_probes_per_frame = s.gi_probes_per_frame.min(*n);
+    if let Some(n) = gi_probes_cap() {
+        s.gi_probes_per_frame = s.gi_probes_per_frame.min(n);
     }
     // `ENGINE_RENDER_SCALE=<0.25..2>` multiplies the internal resolution: a pass whose GPU time
     // halves at 0.7 pays per pixel, one that doesn't per vertex or per dispatch.
@@ -1198,6 +1198,22 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
         s.render_scale = (s.render_scale * scale).clamp(0.25, 2.0);
     }
     s
+}
+
+/// `ENGINE_GI_PROBES_PER_FRAME=<n>` caps the probes traced a frame (as a GPU budget does), to
+/// see on a software GPU how the probes keep up with a moving camera: on
+/// `RenderSettings::gi_probes_per_frame` here, and on what `trial_cut_more::RAY_PROBES` makes
+/// of it in probe_gi. Read once.
+pub(crate) fn gi_probes_cap() -> Option<u32> {
+    static GI_PROBES: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *GI_PROBES.get_or_init(|| {
+        let text = std::env::var("ENGINE_GI_PROBES_PER_FRAME").ok()?;
+        let n = text.parse::<u32>().ok().filter(|n| *n > 0);
+        if n.is_none() {
+            tracing::warn!("ENGINE_GI_PROBES_PER_FRAME={text} is not a positive whole number");
+        }
+        n
+    })
 }
 
 /// `<name>=on|off`, when set, overrides a setting (to compare the two on one build, in any
