@@ -213,6 +213,91 @@ pub fn company_name(world: &World, c: crate::sim::Company) -> String {
         .map_or_else(|| format!("House {c}"), |r| r.name.to_string())
 }
 
+/// One company's line in the side-by-side comparison (`isle.rivals.compare`).
+#[derive(Clone, Debug, Serialize)]
+pub struct Standing {
+    pub company: crate::sim::Company,
+    pub name: String,
+    /// People in all, then by tier (Fisherfolk, Labourers, Burghers).
+    pub people: u32,
+    pub tiers: [u32; 3],
+    pub coins: i64,
+    /// Taxes less upkeep a minute.
+    pub coins_per_min: i64,
+    pub islands: u32,
+    /// Its ships and aircraft (not the fishing smacks of its fisheries).
+    pub ships: u32,
+    /// What it makes most of, a minute, and what its towns are shortest of.
+    pub makes: Vec<(Good, f32)>,
+    pub short_of: Vec<(Good, f32)>,
+}
+
+/// The player against every house in play: people, purse, islands, ships and goods, the
+/// player first. A game without rival captains has the player alone.
+pub fn compare(world: &mut World) -> Vec<Standing> {
+    let econ = world.resource::<Economy>().clone();
+    let mut ships = vec![0u32; econ.companies()];
+    {
+        let mut q = world.query::<&crate::fleet::Vessel>();
+        // (The player's ships are those the player commands, as the map card counts them.)
+        for v in q.iter(world).filter(|v| {
+            if v.company == crate::sim::PLAYER {
+                v.commanded()
+            } else {
+                v.owned() && !matches!(v.roam, crate::fleet::Roam::Fishing { .. })
+            }
+        }) {
+            if let Some(n) = ships.get_mut(v.company as usize) {
+                *n += 1;
+            }
+        }
+    }
+    (0..econ.companies())
+        .map(|c| {
+            let c = c as crate::sim::Company;
+            let isles: Vec<usize> = (0..econ.islands.len())
+                .filter(|&i| econ.owns(c, i))
+                .collect();
+            let mut tiers = [0.0f32; 3];
+            let mut made = [0.0f32; Good::COUNT];
+            let mut short = [0.0f32; Good::COUNT];
+            for &i in &isles {
+                let b = &econ.islands[i];
+                for (t, n) in tiers.iter_mut().zip(b.population) {
+                    *t += n;
+                }
+                for g in Good::ALL {
+                    let k = g.index();
+                    made[k] += b.made_per_min[k];
+                    short[k] += (b.wanted_per_min[k] * (1.0 - b.supply[k])).max(0.0);
+                }
+            }
+            let top = |v: &[f32; Good::COUNT], at_least: f32| {
+                let mut gs: Vec<(Good, f32)> = Good::ALL
+                    .iter()
+                    .map(|&g| (g, (v[g.index()] * 10.0).round() / 10.0))
+                    .filter(|x| x.1 >= at_least)
+                    .collect();
+                gs.sort_by(|a, b| b.1.total_cmp(&a.1));
+                gs.truncate(5);
+                gs
+            };
+            Standing {
+                company: c,
+                name: company_name(world, c),
+                people: tiers.iter().sum::<f32>().round() as u32,
+                tiers: tiers.map(|t| t.round() as u32),
+                coins: econ.coins_of(c).round() as i64,
+                coins_per_min: econ.balance_of(c).round() as i64,
+                islands: isles.len() as u32,
+                ships: ships[c as usize],
+                makes: top(&made, 0.1),
+                short_of: top(&short, 0.1),
+            }
+        })
+        .collect()
+}
+
 /// Names for a rival house's new ships, taken in turn.
 pub fn ship_names(c: crate::sim::Company) -> &'static [&'static str] {
     match c {
@@ -324,7 +409,10 @@ fn our_fleet(world: &mut World) -> (u32, f32) {
     let mut q = world.query::<&crate::fleet::Vessel>();
     let mut n = 0;
     let mut fire = 0.0;
-    for v in q.iter(world) {
+    for v in q
+        .iter(world)
+        .filter(|v| v.owned() && v.company == crate::sim::PLAYER)
+    {
         let f = crate::fittings::stats(v.craft, &v.fit).firepower;
         if f > 0.0 {
             n += 1;
@@ -594,6 +682,12 @@ pub fn register(app: &mut App) {
             |world, _| Ok(serde_json::to_value(crate::reports::relations(world)).unwrap_or_default()),
         )
         .register_api(
+            "isle.rivals.compare",
+            "Your company against every rival house in play, side by side: people (and by tier), coins, coins a minute, islands, ships, the five goods each makes most of a minute and the five its towns are shortest of. Yours is the first row.",
+            "{}",
+            |world, _| Ok(serde_json::to_value(compare(world)).unwrap_or_default()),
+        )
+        .register_api(
             "isle.rival",
             "Give an order to a rival house: gift, pact, alliance, peace or war.",
             r#"{"rival": 1, "order": "gift"}"#,
@@ -618,6 +712,32 @@ mod tests {
         });
         w.insert_resource(Rivals::default());
         w
+    }
+
+    #[test]
+    fn the_comparison_puts_each_company_beside_the_player() {
+        let mut w = world();
+        {
+            let mut econ = w.resource_mut::<Economy>();
+            *econ.coins_mut(2) = 4_000.0;
+            for (i, c, people) in [(0, 0, [80.0, 40.0, 0.0]), (5, 2, [30.0, 0.0, 0.0])] {
+                let b = &mut econ.islands[i];
+                b.harbours = 1;
+                b.owner = c;
+                b.population = people;
+            }
+            econ.islands[0].made_per_min[Good::Fish.index()] = 3.0;
+        }
+        let rows = compare(&mut w);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].company, 0);
+        assert_eq!((rows[0].people, rows[0].tiers), (120, [80, 40, 0]));
+        assert_eq!(rows[0].makes.first(), Some(&(Good::Fish, 3.0)));
+        assert_eq!(
+            (rows[2].people, rows[2].islands, rows[2].coins),
+            (30, 1, 4_000)
+        );
+        assert_eq!(rows[1].islands, 0);
     }
 
     #[test]

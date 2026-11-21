@@ -84,10 +84,10 @@ impl Level {
 
     pub fn knobs(self) -> Knobs {
         let (turn_s, slip, reserve, race, depth, across, abroad, works, isles) = match self {
-            Level::Deckhand => (120.0, 1.0 / 3.0, 3_000.0, false, 1, false, false, 1, 2),
-            Level::Mate => (60.0, 1.0 / 5.0, 2_000.0, false, 1, false, false, 2, 2),
+            Level::Deckhand => (120.0, 1.0 / 3.0, 3_000.0, false, 1, false, false, 1, 1),
+            Level::Mate => (60.0, 1.0 / 5.0, 2_000.0, false, 1, false, false, 1, 2),
             Level::Captain => (30.0, 1.0 / 10.0, 1_200.0, false, 2, false, false, 2, 3),
-            Level::Commodore => (15.0, 1.0 / 25.0, 800.0, true, 3, true, false, 6, 8),
+            Level::Commodore => (15.0, 1.0 / 25.0, 800.0, true, 3, true, false, 6, 5),
             Level::Admiral => (5.0, 0.0, 800.0, true, 3, true, true, 99, 99),
         };
         Knobs {
