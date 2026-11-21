@@ -55,6 +55,8 @@ pub struct Knobs {
     pub works: u32,
     /// The most islands it holds.
     pub isles: usize,
+    /// On a full island it takes down a works it can spare to make room.
+    pub clears: bool,
 }
 
 impl Level {
@@ -100,6 +102,7 @@ impl Level {
             abroad,
             works,
             isles,
+            clears: self == Level::Admiral,
         }
     }
 

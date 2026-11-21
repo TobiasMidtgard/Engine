@@ -357,6 +357,7 @@ pub(crate) fn turn(world: &mut World, log: &mut Log) {
         if !slips(world, w + 4) {
             grow(world, log, now, i);
         }
+        clear_ground(world, log, now, i);
     }
     if !slips(world, 2) {
         trade(world, log, now);
@@ -1072,6 +1073,14 @@ fn build_within(
     // Where a kind found no spot that joins the roads lately, leave it be a while (each try
     // places and takes down a building).
     let isle = crate::island::island_at(at.x, at.y).unwrap_or(usize::MAX);
+    // (Nor where the captain took one down to make room lately: see [`clear_ground`].)
+    if log
+        .last
+        .get(&(800_000 + 100 * kind as usize + isle.min(99), None))
+        .is_some_and(|t| now - t < 3600.0)
+    {
+        return false;
+    }
     let no_join = (900_000 + 100 * kind as usize + isle.min(99), None);
     if log.last.get(&no_join).is_some_and(|t| now - t < 600.0) {
         return false;
@@ -1146,7 +1155,105 @@ fn build_within(
         &format!("build a {}", kind.def().name),
         &format!("no free ground within {} m", max_r * 4),
     );
+    // (A captain who clears ground notes the island is full: see [`clear_ground`].)
+    if isle != usize::MAX {
+        log.last.insert((isle + 9500, None), now);
+    }
     false
+}
+
+/// A full island: a captain who clears ground takes down one works it can spare to make room
+/// for houses and what they need. Spare means another of its kind is kept, its store is
+/// full at five times what the island keeps, and what the company makes of its good without
+/// it is still half as much again as its islands use. A works that cannot work where it stands (no trees, wilds or fields in reach) goes first, then
+/// the one with the fullest store, the biggest first.
+fn clear_ground(world: &mut World, log: &mut Log, now: f64, i: usize) {
+    if !knobs(world).clears
+        || !log
+            .last
+            .get(&(i + 9500, None))
+            .is_some_and(|t| now - t < 600.0)
+        || log
+            .last
+            .get(&(i + 9600, None))
+            .is_some_and(|t| now - t < 600.0)
+    {
+        return;
+    }
+    log.last.insert((i + 9600, None), now);
+    let me = me(world);
+    let econ = world.resource::<Economy>().clone();
+    let mine: Vec<usize> = (0..econ.islands.len())
+        .filter(|&j| econ.owns(me, j))
+        .collect();
+    let made = |g: Good| -> f32 {
+        mine.iter()
+            .map(|&j| econ.islands[j].made_per_min[g.index()])
+            .sum()
+    };
+    let used = |g: Good| -> f32 {
+        mine.iter()
+            .map(|&j| {
+                let b = &econ.islands[j];
+                b.used_per_min[g.index()].max(b.wanted_per_min[g.index()])
+            })
+            .sum()
+    };
+    let mut count: HashMap<Kind, usize> = HashMap::new();
+    for b in world.query::<&Building>().iter(world) {
+        if econ.owns(me, b.island) {
+            *count.entry(b.kind).or_default() += 1;
+        }
+    }
+    let books = &econ.islands[i];
+    // (rank, store over what it keeps, cells, entity, name)
+    let best = world
+        .query::<(Entity, &Building, &Producer)>()
+        .iter(world)
+        .filter(|(_, b, _)| b.island == i && count.get(&b.kind).copied().unwrap_or(0) >= 2)
+        .filter_map(|(e, b, p)| {
+            let d = b.kind.def();
+            let g = d.output?;
+            if matches!(b.kind, Kind::Fishery | Kind::Woodcutter | Kind::Sawmill) {
+                // (Timber and fish: every island lives on its own.)
+                return None;
+            }
+            // (Nor what building and moving up take, which the books of use leave out.)
+            let builds = DEFS
+                .iter()
+                .flat_map(|d| d.cost.iter().map(|(x, _)| *x))
+                .any(|x| x == g || chain_has(x, g));
+            if builds {
+                return None;
+            }
+            let stuck = matches!(
+                p.status,
+                Status::NoTrees | Status::NoWilds | Status::NoFields
+            );
+            let one = 60.0 / d.cycle_s.max(1.0);
+            let over = books.get(g) / crate::market::keeps(books, g).max(1.0);
+            let spare = made(g) - one >= used(g) * 1.5 && over > 5.0 && p.status == Status::Full;
+            (stuck || spare).then(|| (u8::from(!stuck), over, d.size.0 * d.size.1, e, d.name))
+        })
+        .min_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(b.2.cmp(&a.2)));
+    let Some((_, _, _, e, name)) = best else {
+        return;
+    };
+    let kind = world.get::<Building>(e).map(|b| b.kind);
+    crate::build::demolish(world, e);
+    if let Some(k) = kind {
+        // (And it does not put one up there again for an hour.)
+        log.last
+            .insert((800_000 + 100 * k as usize + i.min(99), None), now);
+    }
+    log.act("ground cleared");
+    log.line(
+        now,
+        format!(
+            "took down a {name} on {} to make room (one it can spare)",
+            islands()[i].name
+        ),
+    );
 }
 
 /// Where to put a woodcutter on island `i`: the nearest thick wood to `at` that no woodcutter
