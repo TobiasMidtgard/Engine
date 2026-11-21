@@ -29,10 +29,16 @@ fn fs_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return c;
 }
 
+const HAIR_MOTION_COVER: f32 = 0.2;
+
 @fragment
 fn fs_motion(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let m = textureLoad(hair_motion, vec2<i32>(pos.xy), 0);
-    if (m.w < 0.5) {
+    // Where hair covers a fifth of a pixel or more, its motion: the resolve then follows the
+    // hair there. With the motion behind it (only where hair covered most of a pixel, as at
+    // first), the thin edges and ends of moving hair, and all of it at a distance, were
+    // blended with where the background had been and smeared into trails.
+    if (m.w < HAIR_MOTION_COVER) {
         discard;
     }
     return vec4<f32>(m.xy, 0.0, 0.0);

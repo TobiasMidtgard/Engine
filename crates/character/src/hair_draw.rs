@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use engine_assets::{Assets, Handle};
-use engine_core::math::{Mat4, Vec3};
+use engine_core::math::{Mat4, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Camera, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance};
 use engine_world::animation::SkeletonPose;
@@ -698,13 +698,93 @@ fn guides_now(world: &World, entity: Entity, out: &mut Vec<Vec3>) -> bool {
     {
         return false;
     }
-    // The person's model space to the head's frame (the skin's rest space riding the head).
-    let to_head =
-        Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.translation.as_vec3())
-            .inverse();
+    // The person's model space to the head's frame (the skin's rest space riding the head), as
+    // the simulation saw the head: fitted to where it left the guides' roots, which ride the
+    // scalp. The simulation steps at its own rate, a frame or two behind the pose drawn (and
+    // beside the frame when it is busy); taking the head from this frame's pose instead left
+    // the hair that far behind every turn and step of the head, sliding on the scalp. Fitted,
+    // the hair rides the head as drawn this frame and only its swing comes from the steps.
+    let now = Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.translation.as_vec3());
+    let per = hair.rest_guides.len() / guides.guides.len().max(1);
+    let to_head = if per >= 2 {
+        let roots = hair
+            .rest_guides
+            .iter()
+            .step_by(per)
+            .zip(posed.points.iter().step_by(per));
+        similarity_fit(roots, t.rotation).unwrap_or(now)
+    } else {
+        now
+    }
+    .inverse();
     out.clear();
     out.extend(posed.points.iter().map(|p| to_head.transform_point3(*p)));
     true
+}
+
+/// The similarity transform (rotation, uniform scale, translation) carrying the `from` points
+/// onto their `to` partners best in the least-squares sense (Horn 1987: the rotation is the
+/// quaternion of the largest eigenvalue of a 4x4 matrix of the cross-covariance). `guess`
+/// starts the power iteration (the rotation last seen). `None` for fewer than three pairs or
+/// points all in one place.
+pub(crate) fn similarity_fit<'a>(
+    pairs: impl Iterator<Item = (&'a Vec3, &'a Vec3)> + Clone,
+    guess: Quat,
+) -> Option<Mat4> {
+    let (mut n, mut cp, mut cq) = (0.0f32, Vec3::ZERO, Vec3::ZERO);
+    for (p, q) in pairs.clone() {
+        n += 1.0;
+        cp += *p;
+        cq += *q;
+    }
+    if n < 3.0 {
+        return None;
+    }
+    cp /= n;
+    cq /= n;
+    let (mut s, mut pp, mut qq) = ([[0.0f32; 3]; 3], 0.0f32, 0.0f32);
+    for (p, q) in pairs {
+        let (a, b) = ((*p - cp).to_array(), (*q - cq).to_array());
+        for (r, row) in s.iter_mut().enumerate() {
+            for (c, v) in row.iter_mut().enumerate() {
+                *v += a[r] * b[c];
+            }
+        }
+        pp += (*p - cp).length_squared();
+        qq += (*q - cq).length_squared();
+    }
+    if pp < 1e-12 || qq < 1e-12 {
+        return None;
+    }
+    let [[sxx, sxy, sxz], [syx, syy, syz], [szx, szy, szz]] = s;
+    let m = [
+        [sxx + syy + szz, syz - szy, szx - sxz, sxy - syx],
+        [syz - szy, sxx - syy - szz, sxy + syx, szx + sxz],
+        [szx - sxz, sxy + syx, syy - sxx - szz, syz + szy],
+        [sxy - syx, szx + sxz, syz + szy, szz - sxx - syy],
+    ];
+    // Shifted so every eigenvalue is positive: the largest then dominates the iteration.
+    let shift: f32 = s.iter().flatten().map(|v| v.abs()).sum();
+    let mut v = [guess.w, guess.x, guess.y, guess.z];
+    for _ in 0..64 {
+        let mut next = [0.0f32; 4];
+        for (r, out) in next.iter_mut().enumerate() {
+            *out = shift * v[r] + (0..4).map(|c| m[r][c] * v[c]).sum::<f32>();
+        }
+        let len = next.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if len < 1e-20 {
+            return None;
+        }
+        v = next.map(|x| x / len);
+    }
+    let rotation = Quat::from_xyzw(v[1], v[2], v[3], v[0]).normalize();
+    let scale = (qq / pp).sqrt();
+    let translation = cq - rotation * (cp * scale);
+    Some(Mat4::from_scale_rotation_translation(
+        Vec3::splat(scale),
+        rotation,
+        translation,
+    ))
 }
 
 #[cfg(test)]
@@ -824,6 +904,29 @@ mod tests {
             gap(&g.points),
             gap(&dry.points)
         );
+    }
+
+    #[test]
+    fn the_head_is_fitted_to_where_the_roots_are() {
+        let rest: Vec<Vec3> = (0..40)
+            .map(|i| {
+                let a = i as f32 * 0.7;
+                let b = i as f32 * 0.31;
+                Vec3::new(a.cos() * b.sin(), b.cos(), a.sin() * b.sin()) * 0.09
+            })
+            .collect();
+        let truth = Mat4::from_scale_rotation_translation(
+            Vec3::splat(1.04),
+            Quat::from_euler(engine_core::math::EulerRot::YXZ, 1.9, -0.4, 0.25),
+            Vec3::new(0.02, 1.62, -0.05),
+        );
+        let moved: Vec<Vec3> = rest.iter().map(|p| truth.transform_point3(*p)).collect();
+        // From a guess far off (the head turned most of the way round since).
+        let fit = similarity_fit(rest.iter().zip(&moved), Quat::IDENTITY).expect("a fit");
+        for (p, q) in rest.iter().zip(&moved) {
+            assert!(fit.transform_point3(*p).distance(*q) < 1e-4, "{p} {q}");
+        }
+        assert!(similarity_fit(rest[..2].iter().zip(&moved[..2]), Quat::IDENTITY).is_none());
     }
 
     #[test]

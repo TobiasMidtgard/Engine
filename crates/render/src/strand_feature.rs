@@ -35,6 +35,8 @@
 //! `Hidden` draws nothing. Extra views (editor splits, portals, mirrors) draw no hair yet.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use bytemuck::{Pod, Zeroable};
 use engine_assets::Assets;
@@ -65,6 +67,8 @@ const WORKGROUP: u32 = 256;
 /// Segment references per tile list, at most and at least.
 const MAX_REFS: u64 = 16 << 20;
 const MIN_REFS: u64 = 1 << 20;
+/// Readbacks of the references a frame wanted in flight at once.
+const REF_READBACKS: usize = 3;
 /// A groom smaller than this on screen (its bounds' height, px) is not drawn; at
 /// [`FULL_PX`] and above every strand is.
 const MIN_PX: f32 = 3.0;
@@ -453,6 +457,67 @@ struct Pipelines {
     shadow_inset: wgpu::RenderPipeline,
 }
 
+/// How many tile references a frame wanted (the tile counts' total), read back. A head of
+/// long hair filling the screen at 1440p wants more than [`MAX_REFS`]: the references are
+/// handed out in tile order, so every tile below the row where they ran out drew no hair (the
+/// hair stopped in a level line across the neck). With the number known, the next frames draw
+/// fewer strands, each wider, until it fits.
+struct RefReadback {
+    buffer: wgpu::Buffer,
+    /// [`REF_IDLE`], [`REF_COPIED`] (recorded in a frame), [`REF_MAPPING`], [`REF_READY`].
+    state: Arc<AtomicU8>,
+}
+
+const REF_IDLE: u8 = 0;
+const REF_COPIED: u8 = 1;
+const REF_MAPPING: u8 = 2;
+const REF_READY: u8 = 3;
+
+/// The share of strands to leave out next, from the share left out now and the references
+/// that wanted (`wanted`) against the room for them (`room`): enough to fit with a margin,
+/// and back by degrees once there is room again.
+fn next_ref_cut(cut: f32, wanted: u64, room: u64) -> f32 {
+    let drawn = 1.0 - cut;
+    let fits = room as f32 * 0.85 / wanted.max(1) as f32;
+    if fits < 1.0 {
+        (1.0 - drawn * fits).clamp(0.0, 0.9)
+    } else {
+        // (Back toward every strand, a little a frame, without overshooting the room.)
+        (1.0 - (drawn * 1.05).min(drawn * fits)).clamp(0.0, 0.9)
+    }
+}
+
+/// Record copying the frame's wanted references (`cs_scan_blocks` leaves the tile counts'
+/// total after the active count: word 4 x tiles + blocks + 1) into an idle readback.
+fn copy_refs_wanted(
+    gpu: &GpuShared,
+    readbacks: &mut Vec<RefReadback>,
+    tiles_buffer: &wgpu::Buffer,
+    encoder: &mut wgpu::CommandEncoder,
+    tiles: u32,
+) {
+    if readbacks.is_empty() {
+        readbacks.extend((0..REF_READBACKS).map(|_| RefReadback {
+            buffer: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("strand references wanted"),
+                size: 4,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            state: Arc::new(AtomicU8::new(REF_IDLE)),
+        }));
+    }
+    let Some(rb) = readbacks
+        .iter()
+        .find(|r| r.state.load(Ordering::Acquire) == REF_IDLE)
+    else {
+        return;
+    };
+    let word = 4 * tiles as u64 + tiles.div_ceil(1024) as u64 + 1;
+    encoder.copy_buffer_to_buffer(tiles_buffer, word * 4, &rb.buffer, 0, 4);
+    rb.state.store(REF_COPIED, Ordering::Release);
+}
+
 /// Buffers sized for the frame's points, tiles and grooms.
 #[derive(Default)]
 struct Buffers {
@@ -522,6 +587,12 @@ pub(crate) struct StrandFeature {
     /// Strand slots each instance had last frame ([`strand_slots`]).
     slots: HashMap<Entity, u32>,
     buffers: Buffers,
+    /// The tile references recent frames wanted, read back ([`RefReadback`]), and the share of
+    /// strands left out for want of room for their references (0: none).
+    ref_readbacks: Vec<RefReadback>,
+    ref_cut: f32,
+    /// The references the latest frame read back wanted.
+    refs_wanted: u64,
     groups: Option<Groups>,
     frame: Option<FrameDraws>,
     frame_index: u32,
@@ -599,6 +670,41 @@ fn pack_groom(groom: &StrandGroom, lo: Vec3, hi: Vec3) -> PackedGroom {
 }
 
 impl StrandFeature {
+    /// Take in the readbacks of references wanted that have arrived (the latest counts), and
+    /// start mapping those recorded in a frame since submitted (`prepare_frame` runs after the
+    /// last frame's submit).
+    fn read_refs(&mut self) {
+        let mut latest = None;
+        for rb in &self.ref_readbacks {
+            match rb.state.load(Ordering::Acquire) {
+                REF_READY => {
+                    if let Ok(bytes) = rb.buffer.slice(..).get_mapped_range() {
+                        latest = Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                    }
+                    rb.buffer.unmap();
+                    rb.state.store(REF_IDLE, Ordering::Release);
+                }
+                REF_COPIED => {
+                    rb.state.store(REF_MAPPING, Ordering::Release);
+                    let state = rb.state.clone();
+                    rb.buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |r| {
+                            state.store(
+                                if r.is_ok() { REF_READY } else { REF_IDLE },
+                                Ordering::Release,
+                            );
+                        });
+                }
+                _ => {}
+            }
+        }
+        if let Some(wanted) = latest {
+            self.refs_wanted = wanted as u64;
+            self.ref_cut = next_ref_cut(self.ref_cut, wanted as u64, MAX_REFS);
+        }
+    }
+
     /// The grooms `prepare` packed, into the shared arrays: each into free room of its own, so
     /// no other groom is sent again. (Until 17 Nov 2026 every groom's strands were kept here
     /// and both arrays were built and sent whole whenever one groom came or left, and grooms
@@ -1759,11 +1865,12 @@ impl RenderFeature for StrandFeature {
                 Some(d.wanted.ceil() as usize * g.points_per as usize)
             })
             .sum();
+        self.read_refs();
         let budget = if wanted > MAX_POINTS {
             MAX_POINTS as f32 / wanted as f32
         } else {
             1.0
-        };
+        } * (1.0 - self.ref_cut);
         // Points the budget leaves over: the room instances may keep beyond what they draw.
         let mut spare = MAX_POINTS.saturating_sub(wanted) as u64;
 
@@ -1897,7 +2004,11 @@ impl RenderFeature for StrandFeature {
         // Counts, starts, fill cursors, block sums, active list, then two counters, then the
         // farthest opaque depth per tile.
         let tile_words = tiles as u64 * 5 + blocks as u64 + 2;
-        let ref_want = (drawn_points * 4).clamp(MIN_REFS, MAX_REFS);
+        // (Room for what the latest frame read back wanted, and some: a near head of hair
+        // wants many references for each point, a far coat fewer.)
+        let ref_want = (drawn_points * 4)
+            .max(self.refs_wanted + self.refs_wanted / 4)
+            .clamp(MIN_REFS, MAX_REFS);
 
         let b = &mut self.buffers;
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
@@ -1934,7 +2045,7 @@ impl RenderFeature for StrandFeature {
             &mut b.tile_capacity,
             tile_words * 4,
             "strand tiles",
-            storage,
+            storage | wgpu::BufferUsages::COPY_SRC,
         );
         if b.refs.is_none() || b.ref_capacity < ref_want {
             let cap = ref_want.next_power_of_two().min(MAX_REFS);
@@ -2268,7 +2379,14 @@ impl RenderFeature for StrandFeature {
                 pass.dispatch_workgroups_indirect(args, 0);
             }
         }
-        // The hair's motion where it covers most of a pixel.
+        copy_refs_wanted(
+            ctx.gpu,
+            &mut self.ref_readbacks,
+            b.tiles.as_ref().expect("made"),
+            encoder,
+            f.tiles,
+        );
+        // The hair's motion where it covers a fifth of a pixel or more.
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("strands motion"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2327,6 +2445,8 @@ impl RenderFeature for StrandFeature {
             "points": f.map_or(0, |f| f.points),
             "strands": f.map_or(0, |f| f.strands),
             "strands_in_grooms": f.map_or(0, |f| f.groom_strands),
+            "refs_wanted": self.refs_wanted,
+            "strands_cut_for_refs": self.ref_cut,
         })
     }
 }
@@ -2334,6 +2454,31 @@ impl RenderFeature for StrandFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strands_are_cut_until_their_tile_references_fit() {
+        let room = MAX_REFS;
+        // Fits: nothing left out.
+        assert_eq!(next_ref_cut(0.0, room / 2, room), 0.0);
+        // Twice what fits: about half left out, with a margin.
+        let cut = next_ref_cut(0.0, room * 2, room);
+        assert!((0.55..0.6).contains(&cut), "{cut}");
+        // Drawn with that cut it fits, and the cut comes back by degrees, never over the room.
+        let wanted = (room as f32 * 2.0 * (1.0 - cut)) as u64;
+        let next = next_ref_cut(cut, wanted, room);
+        assert!(next <= cut && next > cut - 0.05, "{cut} -> {next}");
+        let mut c = cut;
+        for _ in 0..200 {
+            c = next_ref_cut(
+                c,
+                (room as f32 * 0.3 * (1.0 - c) / (1.0 - cut)) as u64,
+                room,
+            );
+        }
+        assert_eq!(c, 0.0);
+        // Never more than nine in ten.
+        assert_eq!(next_ref_cut(0.0, room * 100, room), 0.9);
+    }
 
     #[test]
     fn strand_shaders_validate() {
