@@ -85,6 +85,10 @@ pub fn setup(
     settings.shadow_softness = 1.0;
     settings.sun_penumbra_scale = 3.0;
     settings.contact_shadow_length = 0.03;
+    // No sun shadows marched through the depth buffer past the cascades' 6 m: there is nothing
+    // out there to cast them, and the march takes a caster to be metres thick, so the person
+    // threw a long dithered slab of shadow across the ground behind them in daylight.
+    settings.distant_shadows = 0.0;
     settings.ao_radius = 0.06;
     settings.volumetric_fog = false;
     settings.vignette = 0.25;

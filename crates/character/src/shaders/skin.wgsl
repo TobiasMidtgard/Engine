@@ -155,6 +155,10 @@ fn lip_border(upper: bool, a: f32) -> vec2<f32> {
     return vec2<f32>(p0.y + (a - p0.x) * slope, slope);
 }
 
+// How far behind the mouth landmark (mm, along the face's forward axis) the lips can reach: the
+// mouth corners sit about 20 mm back.
+const LIP_BACK_MM: f32 = -40.0;
+
 struct LipShape {
     amount: f32,  // 1 on the vermilion
     border: f32,  // distance to its border, mm (positive on the lip)
@@ -167,6 +171,15 @@ struct LipShape {
 fn lip_shape(r: vec3<f32>, footprint: f32) -> LipShape {
     var s: LipShape;
     let q = (r - character.rest_mouth.xyz) * 1000.0;
+    // The lips are measured across the face (x and y only): behind the mouth corners (the back
+    // of the neck at the mouth's height) there are none, nor their relief or corner shade.
+    if (q.z < LIP_BACK_MM) {
+        s.a = 1e4;
+        s.y = 1e4;
+        s.border = -1e4;
+        s.line = 1e4;
+        return s;
+    }
     let a = abs(q.x);
     s.a = a;
     s.y = q.y;
@@ -177,7 +190,7 @@ fn lip_shape(r: vec3<f32>, footprint: f32) -> LipShape {
     s.border = min(du, dl);
     // The border is crisp, but the red deepens over the first millimeter.
     let blur = max(footprint * 1000.0, 0.3);
-    s.amount = smoothstep(-blur, blur + 1.0, s.border);
+    s.amount = smoothstep(-blur, blur + 1.0, s.border) * smoothstep(LIP_BACK_MM, LIP_BACK_MM + 10.0, q.z);
     s.upper = smoothstep(-0.3, 0.3, q.y - LIP_LINE);
     s.line = abs(q.y - LIP_LINE);
     return s;
