@@ -128,6 +128,8 @@ struct Instance {
     entered: u64,
     /// The frame it was last placed (as it stood, or anew).
     seen: u64,
+    /// The frame a feature last kept it as it stood without placing it (0: never).
+    kept: u64,
 }
 
 /// Mesh to anchor-relative world as the rows of a 3x4, what a top-level instance takes.
@@ -627,6 +629,7 @@ impl Instances {
                 at: At::Parked(NONE),
                 entered: 0,
                 seen: frame,
+                kept: 0,
             };
             let i = match self.free.pop() {
                 Some(i) => {
@@ -810,9 +813,22 @@ impl Instances {
         self.names.contains_key(&name)
     }
 
-    /// Remove the instances of feature `feature` that were not placed since frame `since`
-    /// (it looked at everything it has since then, and they were not among it). How many
-    /// went.
+    /// Instance `name` stays as it stands, as if placed in frame `frame` for
+    /// [`remove_unseen`](Self::remove_unseen) (see [`super::RaySceneOut::keep`]). Whether it is
+    /// known.
+    pub(super) fn keep(&mut self, name: Name, frame: u64) -> bool {
+        let Some(&i) = self.names.get(&name) else {
+            return false;
+        };
+        if let Some(inst) = self.list[i as usize].as_mut() {
+            inst.kept = frame;
+        }
+        true
+    }
+
+    /// Remove the instances of feature `feature` that were neither placed nor kept since
+    /// frame `since` (it looked at everything it has since then, and they were not among it).
+    /// How many went.
     pub(super) fn remove_unseen(
         &mut self,
         store: &mut Store,
@@ -824,7 +840,7 @@ impl Instances {
             .list
             .iter()
             .flatten()
-            .filter(|inst| inst.name.0 == feature && inst.seen < since)
+            .filter(|inst| inst.name.0 == feature && inst.seen.max(inst.kept) < since)
             .map(|inst| inst.name)
             .collect();
         for &name in &gone {

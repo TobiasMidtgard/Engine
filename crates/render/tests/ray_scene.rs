@@ -2398,8 +2398,8 @@ fn a_ray_passes_the_holes_of_a_cut_out_card() {
 }
 
 /// Each kind of thing is in the rays as its class (`RayClass`): what casts a shadow and holds
-/// its shape is `Solid`, a fence cut out by its texture too, and a mask over no texture (drawn
-/// whole); a crown's stand-in (swaying cards) `Leaf`; what sways in the wind `Sway`; a caster
+/// its shape is `Solid`, a fence cut out by its texture too, and a mask over no texture; a
+/// crown's stand-in (swaying cards) `Leaf`; what sways in the wind `Sway`; a caster
 /// under 0.3 m `Small`; what casts no shadow `NoCast`; a stand-in that casts as a closed shape
 /// `ShadowOnly`. A small thing that casts nothing, and a swaying card that casts nothing (a
 /// crown beside its stand-in), are in no ray's way. One mesh placed whole and cut out is two
@@ -2434,9 +2434,10 @@ fn each_kind_of_thing_is_in_the_rays_as_its_class() {
     let at = |x: f64| Transform::from_xyz(x, 0.5, -2.0);
     w.spawn((at(-4.0), MeshRenderer::new(crate_mesh, gray)));
     w.spawn((at(-3.0), MeshRenderer::new(crate_mesh, cut_out)));
+    // (On the cube's mesh of the thing at 0, which only whole instances use.)
     w.spawn((
         at(-5.0),
-        MeshRenderer::new(crate_mesh, gray.with_alpha_mask(0.5)),
+        MeshRenderer::new(cube(1.0), gray.with_alpha_mask(0.5)),
     ));
     w.spawn((at(-2.0), MeshRenderer::new(cube(0.2), gray)));
     w.spawn((
@@ -2487,8 +2488,9 @@ fn each_kind_of_thing_is_in_the_rays_as_its_class() {
     }
     assert_eq!(diag(&app, "render.ray.instances"), 9.0);
     assert_eq!(diag(&app, "render.ray.stand_ins"), 1.0);
-    // The ground, the crate's mesh twice (whole, and cut out: the crate under a mask over no
-    // texture is whole), and each of the five others in the rays.
+    // The ground, the crate's mesh twice (whole, and cut out), and each of the five others in
+    // the rays: the cube under a mask over no texture shares the whole cube's geometry (cut
+    // out, it were a ninth).
     assert_eq!(diag(&app, "render.ray.geometries"), 8.0);
 }
 

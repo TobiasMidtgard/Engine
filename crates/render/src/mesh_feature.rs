@@ -584,6 +584,10 @@ struct MaterialFrame {
     /// The share of its base color's texels an alpha test keeps (leaf cards: how much of a card
     /// is leaf, for the canopy map); 1 without a base color texture.
     coverage: f32,
+    /// The lowest alpha of its base color's texels where it is masked (0 until the image's
+    /// pixels are known; 1 without a base color texture, and when it is not masked): its
+    /// cutoff cuts holes where it is above that (`rays::cut_out`).
+    alpha_lowest: f32,
     /// `StandardMaterial::unlit`: the frame's rays pass it.
     unlit: bool,
     /// What a ray's hit reads of it (`RayLook`), filled while the frame's ray scene is on:
@@ -634,6 +638,27 @@ const MATERIAL_RECHECK_FRAMES: u64 = 64;
 /// Material slots unused this long are freed: well before their texture set may be
 /// (`EVICT_AFTER_FRAMES`, less the check's period), whose id may then go to other images.
 const MATERIAL_EVICT_FRAMES: u64 = 300;
+
+/// What material `material`'s alpha test does to its base colour, for [`MaterialFrame`]: the
+/// share of the texture it keeps and the texture's lowest alpha, from `measured` (the texture's,
+/// once its pixels are known: `ImageCache::alpha_coverage`, `alpha_lowest`). A mask over a
+/// texture not measured yet keeps the leaf cards' usual share and may cut holes anywhere; a
+/// mask over no texture, and what is not masked, keep everything and cut none.
+fn mask_alpha(
+    material: &StandardMaterial,
+    measured: impl FnOnce(Handle<Image>) -> (Option<f32>, Option<f32>),
+) -> (f32, f32) {
+    match (material.alpha_mode, material.base_color_texture) {
+        (AlphaMode::Mask(_), Some(image)) => {
+            let (kept, lowest) = measured(image);
+            (
+                kept.unwrap_or(crate::canopy::DEFAULT_LEAF_COVERAGE),
+                lowest.unwrap_or(0.0),
+            )
+        }
+        _ => (1.0, 1.0),
+    }
+}
 
 /// Note `class` as handle `i`'s latest in `seen`, telling whether it differs from before.
 fn note_class(seen: &mut Vec<u8>, i: usize, class: u8) -> ClassChange {
@@ -4266,6 +4291,13 @@ impl RenderFeature for MeshFeature {
                 }
                 let (ray_albedo, ray_emissive) = self.rays.light(gpu, material, image_assets);
                 let (ray_tile, ray_uv) = self.rays.tile_name(material, image_assets, preset_size);
+                let (coverage, alpha_lowest) = mask_alpha(material, |image| match image_assets {
+                    Some(images) => (
+                        gpu.images.alpha_coverage(images, image),
+                        gpu.images.alpha_lowest(images, image),
+                    ),
+                    None => (None, None),
+                });
                 let entry = MaterialFrame {
                     index: handle.index(),
                     blend: material.alpha_mode == AlphaMode::Blend,
@@ -4276,15 +4308,8 @@ impl RenderFeature for MeshFeature {
                     opaque: material.alpha_mode == AlphaMode::Opaque,
                     sways: material.wind_sway > 0.0,
                     wind_sway: material.wind_sway.max(0.0),
-                    coverage: match material.alpha_mode {
-                        AlphaMode::Mask(_) => match material.base_color_texture {
-                            Some(image) => image_assets
-                                .and_then(|images| gpu.images.alpha_coverage(images, image))
-                                .unwrap_or(crate::canopy::DEFAULT_LEAF_COVERAGE),
-                            None => 1.0,
-                        },
-                        _ => 1.0,
-                    },
+                    coverage,
+                    alpha_lowest,
                     slot: None,
                     impostor_key,
                     unlit: material.unlit,
@@ -5830,6 +5855,30 @@ impl RenderFeature for MeshFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mask over no texture keeps everything and cuts no hole (a ray takes it whole); over a
+    /// texture, what the texture's pixels say once they are known, until then the leaf cards'
+    /// usual share and a hole anywhere; what is not masked, everything.
+    #[test]
+    fn a_mask_over_no_texture_is_whole_and_one_over_a_texture_is_measured() {
+        let gray = StandardMaterial::color(0.5, 0.5, 0.5);
+        let unasked =
+            |_: Handle<Image>| -> (Option<f32>, Option<f32>) { panic!("no texture to measure") };
+        assert_eq!(mask_alpha(&gray.with_alpha_mask(0.5), unasked), (1.0, 1.0));
+        assert_eq!(mask_alpha(&gray, unasked), (1.0, 1.0));
+        let image = Handle::<Image>::from_index(3);
+        let textured = gray.with_base_color_texture(image).with_alpha_mask(0.5);
+        assert_eq!(
+            mask_alpha(&textured, |_| (None, None)),
+            (crate::canopy::DEFAULT_LEAF_COVERAGE, 0.0)
+        );
+        assert_eq!(
+            mask_alpha(&textured, |_| (Some(0.7), Some(0.2))),
+            (0.7, 0.2)
+        );
+        let opaque = gray.with_base_color_texture(image);
+        assert_eq!(mask_alpha(&opaque, unasked), (1.0, 1.0));
+    }
 
     #[test]
     fn a_red_slot_reads_the_whole_copy_of_an_image_the_material_also_reads_whole() {

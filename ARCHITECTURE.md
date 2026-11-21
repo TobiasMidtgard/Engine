@@ -252,15 +252,16 @@ Both are placed around an anchor, put on a 64 m grid whenever the camera leaves 
 carried along by a world shift, so a shift without a turn builds nothing (one that happens
 while rendering is paused is not followed: everything is then seen to move). A ray names the
 classes it sees: probe light what holds its shape and is 0.3 m or more (what casts, what casts
-none, ground and water, every triangle whole; plants that move in the wind are out, their
-leaves reaching the probes through the canopy map while it holds crowns and as whole cards
-while it holds none); world reflections every class a view draws, asking the triangles of a
-card cut out by its texture one by one, so that a ray passes where the texture is clear
-(`ray_nearest` in lib_ray.wgsl); a shadow ray from a hit what casts (and the leaves while the
-canopy map holds no crown), and the `ShadowOnly` stand-ins that cast for things that do not (a
-stand-in stops light where it goes in, not where it leaves, so the thing inside one is not
-shaded by it); the sun's measuring rays what casts at any size and the leaves through their
-holes. The mesh feature brings its `MeshRenderer`s, each row of a `MeshInstances` slot an
+none, swaying trunks and branches, ground and water, every triangle whole; the leaves reach the
+probes through the canopy map while it holds crowns and as whole cards while it holds none);
+world reflections every class a view draws, asking the triangles of a card cut out by its
+texture one by one, so that a ray passes where the texture is clear and the back of a card
+drawn from one side (`ray_nearest` in lib_ray.wgsl); a shadow ray from a hit what casts at 0.3 m
+or more (and the leaves while the canopy map holds no crown), a cut-out through its holes at
+either face as the shadow maps draw it, and the `ShadowOnly` stand-ins that cast for things
+that do not (a stand-in stops light where it goes in, not where it leaves, so the thing inside
+one is not shaded by it); the sun's measuring rays what casts at any size and the leaves
+through their holes. The mesh feature brings its `MeshRenderer`s, each row of a `MeshInstances` slot an
 instance of its own, as their class: `Leaf` where it is a swaying card cut out by its texture
 (and a crown's stand-in, the crown's one place in the rays), `Sway` where it otherwise moves in
 the wind, `Small` for a caster under 0.3 m, else `Solid` (a cut-out that holds still, such as a

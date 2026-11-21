@@ -361,9 +361,19 @@ struct CachedImage {
     keys: [Option<(u64, u64)>; VIEW_SLOTS],
     /// Mean linear color of the pixels as uploaded (RGBA8 images), which outlives a release.
     mean: Option<[f32; 3]>,
-    /// Share of its pixels an alpha test at 0.5 keeps (RGBA8 images), which
-    /// outlives a release: how much of a leaf card is leaf.
-    coverage: Option<f32>,
+    /// What an alpha test does to its pixels (RGBA8 images), which outlives a release: how
+    /// much of a leaf card is leaf, and whether a cutoff cuts holes in it.
+    alpha: Option<AlphaStats>,
+}
+
+/// What an alpha test does to an image's pixels, from about 4096 of them spread over it
+/// ([`spread_pixels`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AlphaStats {
+    /// The share an alpha test at 0.5 keeps.
+    kept: f32,
+    /// The lowest alpha among them (0 to 1): a cutoff above it cuts a hole.
+    lowest: f32,
 }
 
 impl CachedImage {
@@ -520,7 +530,27 @@ impl ImageCache {
     /// The canopy map counts a leaf card's leaf area by it (`crate::canopy`).
     pub fn alpha_coverage(&self, images: &Assets<Image>, handle: Handle<Image>) -> Option<f32> {
         let index = images.canonical(handle).index();
-        self.lock().images.get(&index).and_then(|c| c.coverage)
+        self.lock()
+            .images
+            .get(&index)
+            .and_then(|c| c.alpha)
+            .map(|a| a.kept)
+    }
+
+    /// The lowest alpha among `handle`'s pixels (0 to 1; about 4096 of them, spread over the
+    /// image), known as [`Self::alpha_coverage`] is: an alpha test whose cutoff is above it
+    /// cuts holes in what the image covers, one at or below it none.
+    pub(crate) fn alpha_lowest(
+        &self,
+        images: &Assets<Image>,
+        handle: Handle<Image>,
+    ) -> Option<f32> {
+        let index = images.canonical(handle).index();
+        self.lock()
+            .images
+            .get(&index)
+            .and_then(|c| c.alpha)
+            .map(|a| a.lowest)
     }
 
     /// The view a colour slot draws the image at canonical index `index` with (`srgb`: an sRGB
@@ -743,8 +773,8 @@ impl ImageCache {
                 (texture, view, encoding, key, aliasable)
             })
         };
-        // A new image's mean color and coverage are read from its pixels, here too.
-        let looks = (!known).then(|| (mean_color(image), alpha_coverage(image)));
+        // A new image's mean color and alpha are read from its pixels, here too.
+        let looks = (!known).then(|| (mean_color(image), alpha_stats(image)));
         let mut guard = self.lock();
         let inner = &mut *guard;
         inner.uploading.remove(&(index, slot));
@@ -781,7 +811,7 @@ impl ImageCache {
             pending: [None; VIEW_SLOTS],
             keys: [None; VIEW_SLOTS],
             mean: looks.map_or_else(|| mean_color(image), |l| l.0),
-            coverage: looks.map_or_else(|| alpha_coverage(image), |l| l.1),
+            alpha: looks.map_or_else(|| alpha_stats(image), |l| l.1),
         });
         cached.views[slot] = Some(uploaded.clone());
         cached.pending[slot] = encoding;
@@ -1878,14 +1908,33 @@ fn alias_view(other: &ImageTexture, srgb: bool, id: u64) -> ImageTexture {
 /// (mips are re-generated in the matching color space when the stored ones don't match).
 /// Levels larger than the device allows are skipped. `aliasable` also lets the RGBA8 texture be
 /// viewed in the other color space.
-/// Mean linear color of an RGBA8 image's pixels (about 4096 of them, evenly spread), sRGB
+/// About 4096 of an RGBA8 image's level-0 pixels spread over it: one in each cell of a grid of
+/// up to 64 by 64, at a place in the cell a hash of the cell picks (every pixel of an image up
+/// to 64 by 64). A stride through the rows would read a few columns only wherever a row's
+/// width is a multiple of it: a fence whose posts stand on those columns reads as solid, a
+/// brick's colour as its mortar's.
+fn spread_pixels(image: &Image) -> impl Iterator<Item = [u8; 4]> + '_ {
+    let (w, h) = (image.width.max(1) as usize, image.height.max(1) as usize);
+    let (cols, rows) = (w.min(64), h.min(64));
+    let pixels = image.data.as_chunks::<4>().0;
+    (0..rows * cols).filter_map(move |cell| {
+        let (cx, cy) = (cell % cols, cell / cols);
+        let (x0, x1) = (cx * w / cols, (cx + 1) * w / cols);
+        let (y0, y1) = (cy * h / rows, (cy + 1) * h / rows);
+        let hash = (cell as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let hash = (hash ^ (hash >> 31)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        let x = x0 + (hash as u32 as usize) % (x1 - x0);
+        let y = y0 + ((hash >> 32) as usize) % (y1 - y0);
+        pixels.get(y * w + x).copied()
+    })
+}
+
+/// Mean linear color of an RGBA8 image's pixels (about 4096 of them, spread over it), sRGB
 /// decoded when the image is sRGB.
 fn mean_color(image: &Image) -> Option<[f32; 3]> {
     if image.format != PixelFormat::Rgba8 || image.data.len() < 4 {
         return None;
     }
-    let pixels = image.data.len() / 4;
-    let step = (pixels / 4096).max(1);
     let decode = |c: u8| {
         let c = c as f32 / 255.0;
         if !image.srgb {
@@ -1898,29 +1947,30 @@ fn mean_color(image: &Image) -> Option<[f32; 3]> {
     };
     let mut sum = [0.0f64; 3];
     let mut n = 0.0f64;
-    for p in image.data.as_chunks::<4>().0.iter().step_by(step) {
+    for p in spread_pixels(image) {
         for c in 0..3 {
             sum[c] += decode(p[c]) as f64;
         }
         n += 1.0;
     }
-    Some(sum.map(|s| (s / n) as f32))
+    (n > 0.0).then(|| sum.map(|s| (s / n) as f32))
 }
 
-/// Share of an RGBA8 image's pixels (about 4096 of them, evenly spread) with alpha at least
-/// 0.5.
-fn alpha_coverage(image: &Image) -> Option<f32> {
+/// What an alpha test does to an RGBA8 image's pixels (about 4096 of them, spread over it).
+fn alpha_stats(image: &Image) -> Option<AlphaStats> {
     if image.format != PixelFormat::Rgba8 || image.data.len() < 4 {
         return None;
     }
-    let pixels = image.data.len() / 4;
-    let step = (pixels / 4096).max(1);
-    let (mut kept, mut n) = (0u32, 0u32);
-    for p in image.data.as_chunks::<4>().0.iter().step_by(step) {
+    let (mut kept, mut n, mut lowest) = (0u32, 0u32, 255u8);
+    for p in spread_pixels(image) {
         kept += (p[3] >= 128) as u32;
+        lowest = lowest.min(p[3]);
         n += 1;
     }
-    Some(kept as f32 / n as f32)
+    (n > 0).then(|| AlphaStats {
+        kept: kept as f32 / n as f32,
+        lowest: lowest as f32 / 255.0,
+    })
 }
 
 pub(crate) fn upload_image(
@@ -2072,7 +2122,39 @@ mod tests {
             data.extend_from_slice(&[0, 255, 0, if i % 4 == 0 { 255 } else { 0 }]);
         }
         let image = Image::new(4, 4, data, true);
-        assert_eq!(alpha_coverage(&image), Some(0.25));
+        let stats = alpha_stats(&image).expect("RGBA8");
+        assert_eq!(stats.kept, 0.25);
+        assert_eq!(stats.lowest, 0.0);
+    }
+
+    /// A grille whose bars stand on the columns a stride through the rows would read (every
+    /// 256th of a 1024-wide image): its gaps are found, and its colour is the bars' and gaps'.
+    #[test]
+    fn a_grille_on_the_strides_columns_shows_its_gaps() {
+        let (w, h) = (1024usize, 256usize);
+        let mut data = Vec::with_capacity(w * h * 4);
+        for _ in 0..h {
+            for x in 0..w {
+                let bar = x % 64 < 8;
+                data.extend_from_slice(&if bar {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 40]
+                });
+            }
+        }
+        let image = Image::new(w as u32, h as u32, data, false);
+        let stats = alpha_stats(&image).expect("RGBA8");
+        assert!((stats.kept - 0.125).abs() < 0.03, "{stats:?}");
+        assert!((stats.lowest - 40.0 / 255.0).abs() < 1e-6, "{stats:?}");
+        let mean = mean_color(&image).expect("RGBA8");
+        assert!((mean[0] - 0.125).abs() < 0.03, "{mean:?}");
+        // Opaque everywhere: no hole at any cutoff up to 1.
+        let solid = Image::new(64, 64, [9, 9, 9, 255].repeat(64 * 64), false);
+        assert_eq!(
+            alpha_stats(&solid).map(|s| (s.kept, s.lowest)),
+            Some((1.0, 1.0))
+        );
     }
 
     #[test]

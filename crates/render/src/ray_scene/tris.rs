@@ -17,9 +17,10 @@ use crate::mesh_pool::Ranges;
 const SHADER: &str = include_str!("../shaders/ray_attr.wgsl");
 /// Bytes of a record: 5 words.
 const RECORD_BYTES: u64 = 20;
-/// Records the buffer starts with (12 MB) and may double up to (48 MB).
+/// Records the buffer starts with (12 MB) and may grow to by doubling (72 MB; on the RTX 5080
+/// at 2560x1440 the market, the plaza and the paddock wanted 48 to 53 MB on 21 November).
 const FIRST_RECORDS: u32 = 600_000;
-const MOST_RECORDS: u32 = 2_400_000;
+const MOST_RECORDS: u32 = 3_600_000;
 /// Triangles of a workgroup, and workgroups in a row of a dispatch (`ROW` in ray_attr.wgsl is
 /// their product).
 const GROUP: u32 = 64;
@@ -100,7 +101,7 @@ impl Records {
 
     /// Records in use, the buffer (MiB), ranges refused so far, and what the records in use
     /// and `missing` more take (MiB): with the records the geometries in the scene were
-    /// refused ([`super::blas::Store::missing_records`]), the need, which may pass the 48 MB
+    /// refused ([`super::blas::Store::missing_records`]), the need, which may pass the 72 MB
     /// the buffer grows to.
     pub(super) fn stats(&self, missing: u64) -> (u32, f32, u32, f32) {
         let mib = |records: u64| (records * RECORD_BYTES) as f32 / (1u64 << 20) as f32;

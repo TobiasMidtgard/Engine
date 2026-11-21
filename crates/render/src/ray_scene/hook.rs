@@ -12,19 +12,21 @@ pub struct RayKey(pub u64, pub u64);
 /// mask in the top-level structures).
 ///
 /// The frame's rays name these sets (lib_ray.wgsl, probe_gi_rays.wgsl):
-/// * probe light sees what holds its shape and is 0.3 m or more: `Solid`, `Ground`, `Water`
-///   and `NoCast`, every triangle whole. Plants that move in the wind are out: their leaves
-///   reach the probes through the canopy map while it holds crowns (and as `Leaf` cards,
-///   whole, while it holds none), and `Sway` until a measurement decides (the plan's open
-///   question);
-/// * a shadow ray from a hit (toward the sun or a lamp) sees `Solid` and `Ground` (and `Leaf`
-///   while the canopy map holds no crown), whole, and the `ShadowOnly` stand-ins, which stop
-///   it only where it goes into one (at its outer faces);
+/// * probe light sees what holds its shape and is 0.3 m or more: `Solid`, `Ground`, `Sway`,
+///   `Water` and `NoCast`, every triangle whole (a tree's trunk at every level of detail:
+///   `Sway` where it casts, `NoCast` where a stand-in casts for it). The leaves reach the
+///   probes through the canopy map while it holds crowns, and as `Leaf` cards, whole, while it
+///   holds none;
+/// * a shadow ray from a hit (toward the sun or a lamp) sees `Solid`, `Ground` and `Sway`
+///   (and `Leaf` while the canopy map holds no crown), a card cut out by its texture through
+///   its holes at either face, and the `ShadowOnly` stand-ins, which stop it only where it goes
+///   into one (at its outer faces);
 /// * world reflections see every class a view draws, all but `ShadowOnly`, and ask the
 ///   triangles of a card cut out by its texture one by one (a ray passes where the texture is
-///   clear) and the `Ground`'s (a ray passes its back);
+///   clear, and the back of a card drawn from one side) and the `Ground`'s (a ray passes its
+///   back);
 /// * the sun's measuring rays (`RenderSettings::ray_sun_shadows`) see `Solid`, `Ground`,
-///   `Small` and `Leaf`, cut-outs through their holes, and the stand-ins.
+///   `Small` and `Leaf`, cut-outs through their holes at either face, and the stand-ins.
 ///
 /// A card cut out by its texture is a `Leaf` where it sways; one that holds still (a fence)
 /// keeps the class of its size, its triangles asked as a leaf's. The sun's own rays (a later
@@ -327,8 +329,16 @@ impl RaySceneOut<'_> {
         self.scene.has(self.feature, id)
     }
 
+    /// Instance `id` stays as it stands, though the feature does not place it anew this frame
+    /// (it waits for its geometry): [`remove_unplaced_since`](Self::remove_unplaced_since)
+    /// takes it for placed. Whether it is placed.
+    pub fn keep(&mut self, id: RayKey) -> bool {
+        self.scene.keep(self.feature, id)
+    }
+
     /// The feature looked at everything it has since frame `since` (a [`RayView::frame`]):
-    /// its instances that were not placed since then are gone. For a feature that cannot
+    /// its instances that were neither placed nor kept ([`keep`](Self::keep)) since then are
+    /// gone. For a feature that cannot
     /// name what left (it lost count, or starts over after [`RayView::epoch`] changed).
     pub fn remove_unplaced_since(&mut self, since: u64) {
         self.scene.remove_unseen(self.feature, since);

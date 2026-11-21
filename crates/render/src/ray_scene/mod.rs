@@ -241,7 +241,9 @@ pub(crate) struct RayScene {
 /// The valve: while what belongs in the still structure is past its cap, once that set has
 /// settled ([`VALVE_SETTLE_FRAMES`]), the cut between the reaches rises ([`VALVE_CUT`]), and
 /// it falls again once what it cut would fit with room to spare. Each step is held
-/// [`VALVE_HOLD_FRAMES`] at least and starts a new epoch.
+/// [`VALVE_HOLD_FRAMES`] at least and starts a new epoch. A jump of the camera or a change of
+/// a reach shuts it at once, hold or not: what the cut took is measured anew, from the set the
+/// new fill settles at.
 #[derive(Default, Debug)]
 struct Valve {
     open: bool,
@@ -259,9 +261,15 @@ struct Valve {
 impl Valve {
     /// Frame `frame` with `still_set` of the still structure's `cap` belonging in it: true
     /// when the valve took a step. `stress`: the measuring fill is on (it never opens then).
-    /// `settling`: the scene is filling again after a jump or a change of a reach (a shut
-    /// valve waits, and measures the set afresh after).
+    /// `settling`: the scene is filling again after a jump or a change of a reach (an open
+    /// valve shuts, a shut one waits, and the set is measured afresh after).
     fn step(&mut self, still_set: u32, cap: u32, frame: u64, stress: bool, settling: bool) -> bool {
+        if self.open && settling {
+            // (What it cut was measured in the area before, or is about to be: neither tells
+            // what it would cut here.)
+            *self = Valve::default();
+            return true;
+        }
         let held = self
             .stepped
             .is_none_or(|at| frame >= at + VALVE_HOLD_FRAMES);
@@ -874,6 +882,10 @@ impl RayScene {
         self.instances.is_live((feature, id))
     }
 
+    fn keep(&mut self, feature: u16, id: RayKey) -> bool {
+        self.instances.keep((feature, id), self.frame)
+    }
+
     fn has(&self, feature: u16, id: RayKey) -> bool {
         self.instances.has((feature, id))
     }
@@ -925,8 +937,11 @@ mod tests {
         assert!(valve.step(64, 100, opened + HOLD + 2, false, false));
         assert!(!valve.open);
         let closed = opened + HOLD + 2;
-        // Over its cap again at once: held first (the set settles meanwhile).
+        // Over its cap again at once: held first (the set settles meanwhile, and the hold
+        // goes on past it).
         assert!(!valve.step(120, 100, closed + 1, false, false));
+        assert!(!valve.step(120, 100, closed + SETTLE + 1, false, false));
+        assert!(!valve.step(120, 100, closed + HOLD - 1, false, false));
         assert!(valve.step(120, 100, closed + HOLD, false, false));
         let reopened = closed + HOLD;
         assert!(valve.step(120, 100, reopened + HOLD, true, false));
@@ -947,6 +962,14 @@ mod tests {
         assert!(!valve.step(120, 100, SETTLE + 1, false, false));
         assert!(!valve.step(120, 100, 2 * SETTLE, false, false));
         assert!(valve.step(120, 100, 2 * SETTLE + 1, false, false));
+        // A jump while it is open shuts it at once, within its hold, and it may open again
+        // once the new set has settled past the cap (no hold after such a shut).
+        let opened = 2 * SETTLE + 1;
+        assert!(valve.step(30, 100, opened + 10, false, true));
+        assert!(!valve.open);
+        assert!(!valve.step(120, 100, opened + 11, false, true));
+        assert!(!valve.step(120, 100, opened + 10 + SETTLE, false, false));
+        assert!(valve.step(120, 100, opened + 10 + 2 * SETTLE, false, false));
     }
 
     #[test]

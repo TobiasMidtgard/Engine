@@ -4,7 +4,8 @@
 //! `RenderFeature::ray_scene`).
 //!
 //! A slot is in the scene when it is drawn at all (visible, its mesh loaded, not skinned),
-//! its material stops light (not blended, not unlit, not cut out everywhere) and it is within
+//! its material stops light (not blended, not unlit, not a mask whose cutoff is above its
+//! colour's alpha, which the raster draws nowhere) and it is within
 //! the scene's reach of the camera ([`in_reach`]), as its class ([`class_of`]): what casts a
 //! shadow is a `Leaf` where it is a swaying card cut out by its texture (the canopy map holds
 //! such cards for the probes), `Sway` where it moves in the wind otherwise, `Small` under 0.3 m
@@ -176,8 +177,8 @@ pub(super) fn asset_of(version: u64) -> u64 {
 /// What a frame's fill did, for `render.meshes.ray_*`.
 #[derive(Default, Clone, Copy)]
 struct FillStats {
-    /// Looks taken: a slot that draws its mesh once is one, a slot of rows one a row (one
-    /// for a region wholly out of reach).
+    /// Looks taken: a slot that draws its mesh once is one, a slot of rows one a row (for a
+    /// region wholly out of reach one, and one for each of its rows the scene held).
     looked: u32,
     /// Instances placed by them.
     placed: u32,
@@ -576,11 +577,13 @@ fn plant_sways(mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
 }
 
 /// Whether material `mat` cuts holes in what it covers, so that the triangles a ray meets of it
-/// are asked one by one (`RULE_LEAF_TEXTURE` in lib_ray.wgsl): masked, and its texture clear
-/// somewhere (its share kept by an alpha test at 0.5, measured once the image was uploaded; a
-/// mask without a texture, or over one with no clear texel, is drawn whole).
+/// are asked one by one (`RULE_LEAF_TEXTURE` in lib_ray.wgsl): masked, and its cutoff above the
+/// lowest alpha of its texture (a hole where a texel's alpha times the colour's is below the
+/// cutoff, as the raster tests it; the lowest is read once the image was uploaded, from about
+/// 4096 texels spread over it, and taken as 0 until then). A mask over no texture, or over one
+/// that no texel of passes as a hole, is drawn whole.
 fn cut_out(mat: &MaterialFrame) -> bool {
-    mat.masked && mat.coverage < 1.0
+    mat.masked && mat.alpha_lowest < mat.ray_surface[2]
 }
 
 /// The class a slot (or a row of one) takes by what it is; `None`: no ray sees it.
@@ -1065,8 +1068,9 @@ impl Fill<'_> {
     }
 
     /// Bring slot `s` up to date in the scene: placed as it stands, or removed. Returns how
-    /// many instances it looked at (a slot of rows: one a row, or one for a region it passes
-    /// over whole), which `render.meshes.ray_looked` counts.
+    /// many instances it looked at (a slot of rows: one a row, or for a region it passes over
+    /// whole one, and one for each of its rows the scene held), which
+    /// `render.meshes.ray_looked` counts.
     fn slot(&mut self, s: usize, out: &mut RaySceneOut<'_>) -> usize {
         let looks = if self.scene.hot[s].flags & mesh_scene::ROWS != 0 {
             self.rows(s, out)
@@ -1112,7 +1116,9 @@ impl Fill<'_> {
                 self.rays.waiting.insert(hot.mesh);
             }
             RayGeometryState::Building => {
+                // (Placed before, it stays as it is, kept through a walk's end.)
                 self.rays.waiting.insert(hot.mesh);
+                out.keep(id);
                 return 1;
             }
             RayGeometryState::Refused => {
@@ -1219,12 +1225,12 @@ impl Fill<'_> {
                 self.rays.waiting.insert(hot.mesh);
             }
             RayGeometryState::Building => {
-                // (Rows placed before and still in reach stay as they are; those this look
-                // took out are out.)
+                // (Rows placed before and still in reach stay as they are, kept through a
+                // walk's end; those this look took out are out.)
                 self.rays.waiting.insert(hot.mesh);
                 let placed = near
                     .iter()
-                    .filter(|r| r.row < had && out.has(RayKey(bits, r.row as u64 + 1)))
+                    .filter(|r| r.row < had && out.keep(RayKey(bits, r.row as u64 + 1)))
                     .count() as u32;
                 self.rays.hold_rows(bits, had, placed, frame, near);
                 return looks;
@@ -1340,6 +1346,7 @@ impl MeshFeature {
             } else {
                 rays.sweep = Some((0, view.frame));
                 rays.waiting.clear();
+                rays.round_so_far = 0;
             }
         }
         let edited: Vec<u32> = rays.edited.drain().collect();
@@ -1412,6 +1419,7 @@ impl MeshFeature {
                     looks += fill.slot(end, out);
                     end += 1;
                 }
+                fill.rays.round_so_far += looks;
                 if end >= slots {
                     // Every slot was looked at since the walk began (one whose number
                     // changed meanwhile is in the log): what the scene still has of this
@@ -1421,18 +1429,13 @@ impl MeshFeature {
                     let again = std::mem::take(&mut fill.rays.sweep_again);
                     if !again {
                         out.remove_unplaced_since(began);
-                        // (Rows kept while their geometry was building, placed before the walk
-                        // began, are gone now: what is left of each slot is counted again.)
-                        fill.rays.rows.retain(|&bits, held| {
-                            held.placed = (0..held.had)
-                                .filter(|&k| out.has(RayKey(bits, k as u64 + 1)))
-                                .count() as u32;
-                            held.seen >= began
-                        });
+                        fill.rays.rows.retain(|_, held| held.seen >= began);
                     }
                     fill.rays.sweep = again.then_some((0, view.frame + 1));
                     fill.rays.cursor = 0;
-                    fill.rays.round_so_far = 0;
+                    // (The walk looked at every slot: a round's looks, which pace the rounds
+                    // in turn that follow it.)
+                    fill.rays.round_looks = std::mem::take(&mut fill.rays.round_so_far);
                 } else {
                     fill.rays.sweep = Some((end, began));
                 }
@@ -1522,19 +1525,29 @@ mod tests {
         }
     }
 
-    /// A mask cuts holes where its texture is clear somewhere; over no texture, or one with
-    /// no clear texel, it is drawn whole.
+    /// A mask cuts holes where some texel of its texture is below its cutoff (in the
+    /// texture's alpha: the cutoff over the colour's); over no texture (lowest 1), or one no
+    /// texel of which is below it, it is drawn whole.
     #[test]
     fn a_mask_cuts_holes_only_where_its_texture_is_clear() {
-        let mask = |coverage| MaterialFrame {
+        let mask = |alpha_lowest, cutoff| MaterialFrame {
             masked: true,
-            coverage,
+            alpha_lowest,
+            ray_surface: [0.5, 0.0, cutoff],
             ..MaterialFrame::default()
         };
-        assert!(cut_out(&mask(0.4)));
-        assert!(!cut_out(&mask(1.0)));
+        assert!(cut_out(&mask(0.0, 0.5)));
+        // Texels of 0.7 under a cutoff of 0.5 over a colour of alpha 0.6 (0.83 in the
+        // texture's alpha) are holes.
+        assert!(cut_out(&mask(0.7, 0.5 / 0.6)));
+        assert!(!cut_out(&mask(0.7, 0.5)));
+        assert!(!cut_out(&mask(1.0, 0.5)));
+        // A cutoff of 0 cuts nothing.
+        assert!(!cut_out(&mask(0.0, 0.0)));
+        // Not masked: whole.
         assert!(!cut_out(&MaterialFrame {
-            coverage: 0.4,
+            alpha_lowest: 0.0,
+            ray_surface: [0.5, 0.0, 0.5],
             ..MaterialFrame::default()
         }));
     }
