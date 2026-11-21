@@ -754,14 +754,61 @@ fn distant_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         let z = textureLoad(prepass_depth, clamp(px, vec2<i32>(0), size - 1), 0);
         if (z <= 0.0) { continue; }
         let ray = view_depth(q);
-        let diff = ray - scene_linear_depth(uv, z);
+        let scene = scene_linear_depth(uv, z);
+        let diff = ray - scene;
         let bias = 0.05 + ray * 0.0005;
-        if (diff > bias && diff < thickness) {
+        if (diff > bias && diff < thickness && diff < caster_depth(px, scene, size)) {
             lit = 0.0;
             break;
         }
     }
     return mix(1.0, lit, fade);
+}
+
+// How deep a caster seen at pixel `px` (view depth `d`) may be taken to be behind its front
+// face, for `distant_shadow`: about as deep as it is wide, its narrower side on screen (a person
+// is half a metre wide however tall), with room to spare. The search goes out to
+// `CASTER_SEARCH_M` each way in doubling steps (in meters, so it is the same at any resolution);
+// a caster wider than that on both sides of an axis (terrain, a house) keeps the march's own
+// thickness. Without it every caster was metres deep, so a person past the cascades laid a long
+// slab of shadow on the ground behind them on screen. Only reached where a step found a
+// candidate.
+const CASTER_SEARCH_STEPS: i32 = 6;
+const CASTER_SEARCH_M: f32 = 2.0;
+
+fn caster_depth(px: vec2<i32>, d: f32, size: vec2<i32>) -> f32 {
+    // Meters per pixel at depth d.
+    let per_px = 2.0 * d / (vec2<f32>(frame.proj[0][0], frame.proj[1][1]) * frame.viewport.xy);
+    // Off the caster: nothing, or something well behind it.
+    let gap = max(0.5, d * 0.05);
+    var narrow = 1e9;
+    for (var axis = 0; axis < 2; axis++) {
+        var span = 0.0;
+        for (var side = -1; side <= 1; side += 2) {
+            var reach = -1.0;
+            var last = 0.0;
+            for (var k = 0; k < CASTER_SEARCH_STEPS; k++) {
+                let meters = CASTER_SEARCH_M * exp2(f32(k - CASTER_SEARCH_STEPS + 1));
+                let step = max(1, i32(round(meters / per_px[axis])));
+                var o = vec2<i32>(0);
+                o[axis] = side * step;
+                let p = px + o;
+                if (any(p < vec2<i32>(0)) || any(p >= size)) { break; }
+                let zn = textureLoad(prepass_depth, p, 0);
+                let uvn = (vec2<f32>(p) + 0.5) * frame.viewport.zw;
+                if (zn <= 0.0 || scene_linear_depth(uvn, zn) > d + gap) {
+                    // Left between the last step on it and this one.
+                    reach = 0.5 * (last + f32(step));
+                    break;
+                }
+                last = f32(step);
+            }
+            if (reach < 0.0) { span = -1.0; break; }
+            span += reach;
+        }
+        if (span >= 0.0) { narrow = min(narrow, span * per_px[axis]); }
+    }
+    return max(1.5 * narrow, 0.3);
 }
 
 // ---------------------------------------------------------------- lamp tiles
