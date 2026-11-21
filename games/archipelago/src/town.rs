@@ -1617,10 +1617,16 @@ fn fleet_review(world: &mut World, hb: &Building) {
         (Craft::Frigate, 190.0, 0.0),
         (Craft::Liner, 292.0, 0.0),
         (Craft::FlyingBoat, 180.0, 60.0),
+        // The third line, furthest out: the flagships.
+        (Craft::Dreadnought, 60.0, 0.0),
+        (Craft::Leviathan, 270.0, 0.0),
+        (Craft::SkyCarrier, -60.0, 170.0),
     ];
     for (i, (craft, d, y)) in line.into_iter().enumerate() {
         let lift = if craft == Craft::Airship || craft == Craft::Biplane {
             -out * 40.0
+        } else if craft.flagship() {
+            out * 250.0
         } else if i >= 9 {
             out * 110.0
         } else {

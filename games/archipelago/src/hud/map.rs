@@ -28,7 +28,6 @@ use crate::globe;
 use crate::grid::{self, Grid};
 use crate::island;
 use crate::sim::Building;
-use crate::vessels::Craft;
 
 /// The part of map space a region's chart covers, meters (X right, Z down the chart: north
 /// is up), in the picture's aspect.
@@ -938,7 +937,7 @@ fn paint(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
             (
                 at(v.at.x, v.at.z),
                 std::f32::consts::FRAC_PI_2 - v.heading,
-                v.craft == Craft::Airship,
+                v.craft.rigid(),
             )
         })
         .collect();

@@ -403,6 +403,8 @@ pub struct Vessel {
     pub altitude: f32,
     /// How much faster than its craft it sails this leg (the last quay's pilots).
     pub haste: f32,
+    /// How much faster it sails inside a dreadnought's convoy ring ([`crate::flagships`]).
+    pub escort: f32,
     /// What the gear aboard adds up to ([`crate::gear`]), fittings included.
     pub kit: crate::gear::Kit,
     /// What the hull was built with ([`crate::fittings`]).
@@ -504,6 +506,7 @@ pub fn spawn_vessel(
         Craft::Biplane => 260.0 + (seed % 7) as f32 * 20.0,
         Craft::Seaplane => 140.0 + (seed % 5) as f32 * 15.0,
         Craft::FlyingBoat => 190.0 + (seed % 5) as f32 * 15.0,
+        Craft::SkyCarrier => 230.0 + (seed % 5) as f32 * 10.0,
         _ => 0.0,
     };
     let v = Vessel {
@@ -525,6 +528,7 @@ pub fn spawn_vessel(
         seed,
         altitude,
         haste: 0.0,
+        escort: 0.0,
         kit: crate::gear::Kit::default(),
         fit: crate::fittings::Fit::default(),
         company: crate::sim::acting(world),
@@ -546,6 +550,8 @@ pub fn spawn_vessel(
             Craft::Cutter => 2.8,
             Craft::Brig => 4.0,
             Craft::Frigate => 6.0,
+            Craft::Dreadnought => 11.0,
+            Craft::Leviathan => 12.0,
             Craft::Gunboat => 3.5,
             Craft::Liner => 6.0,
             _ => 1.8,
@@ -921,11 +927,12 @@ fn depart(world: &mut World, v: &mut Vessel, here: DVec3) {
         let over = last[n - 1];
         last[n - 1] = over + back * climb;
         if v.route.is_some() || matches!(v.roam, Roam::Idle { .. }) {
-            // Nose to the mast: its middle ends 48 m short, just above the cup.
+            // Nose to the mast: its middle ends half its length short, just above the cup.
+            let nose = (v.craft.half_length() as f64).max(48.0);
             last.push(DVec3::new(
-                to.x + back.x * 48.0,
+                to.x + back.x * nose,
                 to.y + 4.0,
-                to.z + back.z * 48.0,
+                to.z + back.z * nose,
             ));
         } else {
             last.push(over);
@@ -970,7 +977,7 @@ pub fn sail(world: &mut World) {
             // Ease off over the last stretch.
             let left = (total - v.s).max(0.0) as f32;
             v.craft.speed()
-                * (1.0 + v.haste + v.kit.speed).max(0.3)
+                * (1.0 + v.haste + v.kit.speed + v.escort).max(0.3)
                 * (left / (v.craft.half_length() * 4.0 + 20.0)).clamp(0.25, 1.0)
         } else {
             0.0
@@ -1012,7 +1019,7 @@ pub fn sail(world: &mut World) {
             let bank_want = (-turn_rate * v.speed / 9.81).atan().clamp(-0.6, 0.6);
             v.bank += (bank_want - v.bank) * (gdt * 1.5).min(1.0);
             let pos = DVec3::new(p.x, p.y, p.z);
-            let bob = if v.craft == Craft::Airship {
+            let bob = if v.craft.rigid() {
                 (t_now * 0.3 + v.seed as f32).sin() as f64 * 0.6
             } else {
                 0.0
@@ -1026,7 +1033,7 @@ pub fn sail(world: &mut World) {
             };
             t.rotation = yaw
                 * Quat::from_rotation_z(pitch)
-                * Quat::from_rotation_x(if v.craft == Craft::Airship {
+                * Quat::from_rotation_x(if v.craft.rigid() {
                     v.bank * 0.15
                 } else {
                     v.bank

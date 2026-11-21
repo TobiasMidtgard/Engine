@@ -293,6 +293,7 @@ pub fn slots(c: Craft) -> usize {
         Craft::Brig | Craft::Barque | Craft::Gunboat | Craft::Steamer | Craft::Clipper => 3,
         Craft::Airship => 3,
         Craft::Frigate | Craft::Liner => 4,
+        Craft::Dreadnought | Craft::Leviathan | Craft::SkyCarrier => 4,
     }
 }
 
@@ -313,6 +314,7 @@ pub fn base_hull(c: Craft) -> f32 {
         Craft::Biplane | Craft::Seaplane => 30.0,
         Craft::FlyingBoat => 60.0,
         Craft::Airship => 120.0,
+        c => crate::flagships::hull_points(c).unwrap_or(100.0),
     }
 }
 
@@ -421,6 +423,9 @@ pub fn stats(c: Craft, fit: &Fit) -> Stats {
         s.sight += d.sight;
         s.postage += d.postage;
     }
+    let (guns, reach) = crate::flagships::battery(c);
+    s.firepower += guns;
+    s.range = s.range.max(reach);
     s.speed *= 1.0 + fast;
     s.hull *= 1.0 + strong;
     s.per_hold = (per as f32 * room_left(fit)).round() as u32;
@@ -441,6 +446,9 @@ pub fn usual(c: Craft) -> Fit {
         Craft::Liner => &[Compound, MailRoom, Hold],
         Craft::FlyingBoat => &[Spotter],
         Craft::Clipper => &[Canvas, Copper],
+        Craft::Dreadnought => &[Plate, Compound],
+        Craft::Leviathan => &[Compound, MailRoom],
+        Craft::SkyCarrier => &[Engines, Spotter],
         _ => &[],
     })
 }

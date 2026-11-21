@@ -25,6 +25,7 @@ pub fn gear_slots(c: Craft) -> usize {
         Craft::Schooner | Craft::Barque | Craft::PaddleSteamer | Craft::Brig => 2,
         Craft::FlyingBoat => 2,
         Craft::Clipper | Craft::Steamer | Craft::Airship | Craft::Frigate | Craft::Liner => 3,
+        Craft::Dreadnought | Craft::Leviathan | Craft::SkyCarrier => 3,
     }
 }
 
@@ -111,6 +112,7 @@ pub fn apply(world: &mut World) {
             }
         }
         crate::fittings::add_to_kit(&v.fit, &mut kit);
+        crate::flagships::innate(v.craft, &mut kit);
         if v.kit != kit {
             v.kit = kit;
         }

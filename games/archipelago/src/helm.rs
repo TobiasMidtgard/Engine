@@ -45,6 +45,7 @@ const LISTED: usize = 7;
 const GREEN: [f32; 3] = [0.38, 1.0, 0.48];
 const AMBER: [f32; 3] = [1.0, 0.74, 0.25];
 const CREAM: [f32; 3] = [0.95, 0.9, 0.75];
+const GOLD: [f32; 3] = [1.0, 0.82, 0.3];
 
 /// The picked craft, the control groups and the box being drawn.
 #[derive(Resource, Default)]
@@ -903,6 +904,8 @@ fn status(world: &World, v: &Vessel) -> (String, [f32; 3]) {
                     format!("Sailing for {} · {:.1} km", waters(to), d / 1000.0),
                     GREEN,
                 )
+            } else if v.craft.flies() {
+                (format!("Holding over {}", waters(here)), CREAM)
             } else {
                 (format!("Lying in {}", waters(here)), CREAM)
             }
@@ -929,6 +932,9 @@ fn craft_icon(c: Craft) -> &'static str {
         Craft::Gunboat => "isle_craft_gunboat",
         Craft::Liner => "isle_craft_liner",
         Craft::FlyingBoat => "isle_craft_flying_boat",
+        Craft::Dreadnought => "isle_craft_dreadnought",
+        Craft::Leviathan => "isle_craft_leviathan",
+        Craft::SkyCarrier => "isle_craft_sky_carrier",
     }
 }
 
@@ -1335,6 +1341,17 @@ fn draw_marks(world: &mut World, dt: f32) {
             [col[0], col[1], col[2], 0.95],
             0,
         );
+        // A dreadnought's convoy ring.
+        if x.craft == Craft::Dreadnought {
+            let w = (zoom * 0.003).max(4.0);
+            marks.ring(
+                x.at.with_y(1.3),
+                crate::flagships::ESCORT_M as f64,
+                w,
+                [GOLD[0], GOLD[1], GOLD[2], 0.7],
+                40,
+            );
+        }
         // Her course ahead, and where it ends.
         if x.doing == Doing::Sailing && x.path.len() >= 2 {
             let course_col = if x.route.is_some() { CREAM } else { col };
@@ -1666,14 +1683,10 @@ fn harbour_site(world: &World, i: usize) -> Option<(IVec2, u8)> {
     None
 }
 
-/// `--helm-shots [keys]`: a new game, Haverholm settled and a small fleet off it, then the
-/// helm's pictures into `screenshots/archipelago/helm/`: a box being drawn round the fleet
-/// (`helm_box`), the fleet picked and sent (`helm_send`), two scouts at work over the fog
-/// (`helm_scout`), the home isles from high up after they have charted it (`helm_charted`).
-pub fn shots(mut app: App, only: Option<&str>) {
-    let out = "screenshots/archipelago/helm";
+/// For the pictures: a new game, headless on a fixed clock, Haverholm settled with the barque
+/// of the start. Returns the new harbour's mooring.
+fn new_game_settled(app: &mut App, out: &str) -> Option<DVec2> {
     let _ = std::fs::create_dir_all(out);
-    let only: Option<Vec<String>> = only.map(|s| s.split(',').map(str::to_string).collect());
     app.world.resource_mut::<EngineConfig>().headless = true;
     if let Some(mut i) = app.world.get_resource_mut::<crate::incidents::Incidents>() {
         i.rolls = false;
@@ -1683,34 +1696,44 @@ pub fn shots(mut app: App, only: Option<&str>) {
         .set_source(engine::core::time::TimeSource::Manual {
             step_secs: 1.0 / 30.0,
         });
-    play(&mut app, 2.0, 1.0);
-    // Settle Haverholm with the barque of the start.
+    play(app, 2.0, 1.0);
     let world = &mut app.world;
     let Some((o, rot)) = harbour_site(world, 0) else {
-        engine::core::log::warn!("helm shots: no harbour site on Haverholm");
-        return;
+        engine::core::log::warn!("shots: no harbour site on Haverholm");
+        return None;
     };
     if let Err(e) = crate::build::place(world, Kind::Harbour, o, rot, true) {
-        engine::core::log::warn!("helm shots: {e}");
+        engine::core::log::warn!("shots: {e}");
     }
     for _ in 0..40 {
         if !app.world.resource::<crate::settle::Settled>().0.is_empty() {
             break;
         }
-        play(&mut app, 30.0, 8.0);
+        play(app, 30.0, 8.0);
     }
-    // A small fleet lying off the new harbour.
     let world = &mut app.world;
-    let quay = {
-        let mut q = world.query::<&Building>();
-        q.iter(world)
-            .find(|b| b.kind == Kind::Harbour && b.island == 0)
-            .map(|b| crate::fleet::mooring(b).0)
-    };
-    let Some(quay) = quay else {
-        engine::core::log::warn!("helm shots: Haverholm was not settled");
+    let mut q = world.query::<&Building>();
+    let quay = q
+        .iter(world)
+        .find(|b| b.kind == Kind::Harbour && b.island == 0)
+        .map(|b| crate::fleet::mooring(b).0);
+    if quay.is_none() {
+        engine::core::log::warn!("shots: Haverholm was not settled");
+    }
+    quay
+}
+
+/// `--helm-shots [keys]`: a new game, Haverholm settled and a small fleet off it, then the
+/// helm's pictures into `screenshots/archipelago/helm/`: a box being drawn round the fleet
+/// (`helm_box`), the fleet picked and sent (`helm_send`), two scouts at work over the fog
+/// (`helm_scout`), the home isles from high up after they have charted it (`helm_charted`).
+pub fn shots(mut app: App, only: Option<&str>) {
+    let out = "screenshots/archipelago/helm";
+    let only: Option<Vec<String>> = only.map(|s| s.split(',').map(str::to_string).collect());
+    let Some(quay) = new_game_settled(&mut app, out) else {
         return;
     };
+    let world = &mut app.world;
     let out_dir = (quay - island::islands()[0].center).normalize_or_zero();
     let side = DVec2::new(-out_dir.y, out_dir.x);
     let fleet = [
@@ -1826,6 +1849,141 @@ pub fn shots(mut app: App, only: Option<&str>) {
         "helm shots: done; {:.2} % of the planet seen",
         share * 100.0
     );
+}
+
+/// `--flagship-shots [keys]`: a new game with Haverholm settled, then the flagships at work,
+/// into `screenshots/archipelago/flagships/`: a dreadnought leading a convoy across the
+/// strait with her ring shown (`flag_convoy`), her close by under way (`flag_dreadnought`),
+/// a leviathan off the new quay (`flag_leviathan`), a sky carrier with her escorts over the
+/// island (`flag_carrier`).
+pub fn flagship_shots(mut app: App, only: Option<&str>) {
+    let out = "screenshots/archipelago/flagships";
+    let only: Option<Vec<String>> = only.map(|s| s.split(',').map(str::to_string).collect());
+    let Some(quay) = new_game_settled(&mut app, out) else {
+        return;
+    };
+    // The ships, not the build bar, fill the lower half of these.
+    let shoot = |app: &mut App, out: &str, key: &str, only: &Option<Vec<String>>| {
+        let mut q = app
+            .world
+            .query::<(&engine_ui::node::Screen, &mut engine_ui::node::Node)>();
+        for (s, mut node) in q.iter_mut(&mut app.world) {
+            if s.key == "isle_bar" {
+                node.style.opacity = Some(0.0);
+            }
+        }
+        shoot(app, out, key, only);
+    };
+    let out_dir = (quay - island::islands()[0].center).normalize_or_zero();
+    let side = DVec2::new(-out_dir.y, out_dir.x);
+    let heading = -(out_dir.y.atan2(out_dir.x) as f32);
+    let spawn = |world: &mut World, craft: Craft, name: &str, p: DVec2, y: f64, h: f32, k: u64| {
+        let at = DVec3::new(p.x, y, p.y);
+        let e = crate::fleet::spawn_vessel(world, craft, name, at, h, None, Roam::Idle { at }, k);
+        if let Some(mut v) = world.get_mut::<Vessel>(e) {
+            v.doing = Doing::Moored(60.0);
+        }
+        e
+    };
+    let world = &mut app.world;
+    // The convoy: the dreadnought and four traders in two columns behind her.
+    let lead = quay + out_dir * 420.0;
+    let dread = spawn(
+        world,
+        Craft::Dreadnought,
+        "Stormcrown",
+        lead,
+        0.0,
+        heading,
+        950,
+    );
+    let mut convoy = vec![dread];
+    for (k, craft) in [Craft::Steamer, Craft::Clipper, Craft::Barque, Craft::Brig]
+        .into_iter()
+        .enumerate()
+    {
+        let p = lead - side * 200.0 * (1 + k / 2) as f64
+            + out_dir * if k % 2 == 0 { 110.0 } else { -110.0 };
+        convoy.push(spawn(
+            world,
+            craft,
+            craft.name(),
+            p,
+            0.0,
+            heading,
+            951 + k as u64,
+        ));
+    }
+    // The leviathan off the quay, the carrier over the island behind it.
+    let lev_at = quay + out_dir * 260.0 + side * 520.0;
+    let lev = spawn(
+        world,
+        Craft::Leviathan,
+        "Great Meridian",
+        lev_at,
+        0.0,
+        heading + 1.4,
+        960,
+    );
+    let sky_at = quay - out_dir * 350.0 - side * 300.0;
+    let sky = spawn(
+        world,
+        Craft::SkyCarrier,
+        "Cloud Citadel",
+        sky_at,
+        240.0,
+        heading + 0.6,
+        961,
+    );
+    play(&mut app, 6.0, 1.0);
+    // 1. The convoy under way, her ring round them.
+    pick(&mut app.world, convoy.clone(), false);
+    let to = lead - side * 2_600.0 + out_dir * 900.0;
+    send(&mut app.world, &convoy, to);
+    play(&mut app, 50.0, 1.0);
+    let at = |app: &mut App, e: Entity| {
+        app.world
+            .get::<Vessel>(e)
+            .map_or(quay, |v| DVec2::new(v.at.x, v.at.z))
+    };
+    let d = at(&mut app, dread);
+    aim(&mut app.world, d, 0.5, 3_600.0, Some(66.0));
+    shoot(&mut app, out, "flag_convoy", &only);
+    // 2. Her close by, smoking, the HUD and her card up.
+    pick(&mut app.world, vec![dread], false);
+    play(&mut app, 4.0, 1.0);
+    let d = at(&mut app, dread);
+    let h = app.world.get::<Vessel>(dread).map_or(0.0, |v| v.heading);
+    aim(&mut app.world, d, -h + 0.75, 330.0, Some(15.0));
+    shoot(&mut app, out, "flag_dreadnought", &only);
+    // 3. The leviathan lying off the quay.
+    clear(&mut app.world);
+    let l = at(&mut app, lev);
+    let h = app.world.get::<Vessel>(lev).map_or(0.0, |v| v.heading);
+    aim(&mut app.world, l, -h + 0.6, 380.0, Some(20.0));
+    shoot(&mut app, out, "flag_leviathan", &only);
+    // 4. The carrier and her two fighters.
+    pick(&mut app.world, vec![sky], false);
+    play(&mut app, 3.0, 1.0);
+    let (c, h) = app
+        .world
+        .get::<Vessel>(sky)
+        .map_or((DVec3::ZERO, 0.0), |v| (v.at, v.heading));
+    // Level with her, the island and the sea below.
+    {
+        let world = &mut app.world;
+        let mut q = world.query::<&mut StrategyCam>();
+        if let Some(mut cam) = q.iter_mut(world).next() {
+            cam.goal_focus = c - DVec3::Y * 20.0;
+            cam.goal_yaw = -h + 0.9;
+            cam.goal_dist = 560.0;
+            cam.pitch_override = Some(14f32.to_radians());
+            cam.free_height = true;
+            cam.snap();
+        }
+    }
+    shoot(&mut app, out, "flag_carrier", &only);
+    engine::core::log::info!("flagship shots: done");
 }
 
 #[cfg(test)]

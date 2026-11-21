@@ -28,6 +28,7 @@ mod draw;
 mod effects;
 mod fields;
 mod fittings;
+mod flagships;
 mod fleet;
 mod fog;
 mod gear;
@@ -156,6 +157,12 @@ fn main() {
         helm::shots(app, only.as_deref());
         return;
     }
+    // `--flagship-shots [keys]`: pictures of the flagships at work (helm.rs).
+    if let Some(i) = args.iter().position(|a| a == "--flagship-shots") {
+        let only = args.get(i + 1).filter(|s| !s.starts_with("--")).cloned();
+        helm::flagship_shots(app, only.as_deref());
+        return;
+    }
     match tour {
         Some(only) => tour::run(app, only.as_deref()),
         None => {
@@ -227,7 +234,13 @@ pub fn add_game(app: &mut App) {
                 draw::spin_parts,
                 draw::follow_bodies,
                 effects::follow_riders,
-                (fog::update, tradelines::update, helm::update).chain(),
+                (
+                    fog::update,
+                    tradelines::update,
+                    helm::update,
+                    flagships::update,
+                )
+                    .chain(),
                 tools::ghost,
                 hud::update_data,
             )

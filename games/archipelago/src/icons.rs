@@ -202,6 +202,18 @@ const CRAFT: &[(&str, &str)] = &[
         include_str!("../assets/icons/isle_craft_flying_boat.svg"),
     ),
     (
+        "isle_craft_dreadnought",
+        include_str!("../assets/icons/isle_craft_dreadnought.svg"),
+    ),
+    (
+        "isle_craft_leviathan",
+        include_str!("../assets/icons/isle_craft_leviathan.svg"),
+    ),
+    (
+        "isle_craft_sky_carrier",
+        include_str!("../assets/icons/isle_craft_sky_carrier.svg"),
+    ),
+    (
         "isle_fire_watch",
         include_str!("../assets/icons/isle_fire_watch.svg"),
     ),

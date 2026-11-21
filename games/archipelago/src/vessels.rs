@@ -44,10 +44,16 @@ pub enum Craft {
     Liner,
     /// Four-engined flying boat, 32 m span: a hull for a fuselage, lands on any water.
     FlyingBoat,
+    /// Flagship: an armoured battleship, 150 m, five twin turrets and two tripod masts.
+    Dreadnought,
+    /// Flagship: a five-funnelled, six-masted giant steamship with paddles, 180 m.
+    Leviathan,
+    /// Flagship: a 220 m rigid airship with a hangar of escort planes in her belly.
+    SkyCarrier,
 }
 
 impl Craft {
-    pub const ALL: [Craft; 15] = [
+    pub const ALL: [Craft; 18] = [
         Craft::Schooner,
         Craft::Steamer,
         Craft::Smack,
@@ -63,6 +69,9 @@ impl Craft {
         Craft::Gunboat,
         Craft::Liner,
         Craft::FlyingBoat,
+        Craft::Dreadnought,
+        Craft::Leviathan,
+        Craft::SkyCarrier,
     ];
 
     pub fn name(self) -> &'static str {
@@ -82,6 +91,9 @@ impl Craft {
             Craft::Gunboat => "Steam gunboat",
             Craft::Liner => "Ocean liner",
             Craft::FlyingBoat => "Flying boat",
+            Craft::Dreadnought => "Dreadnought",
+            Craft::Leviathan => "Leviathan",
+            Craft::SkyCarrier => "Sky carrier",
         }
     }
 
@@ -103,6 +115,9 @@ impl Craft {
             Craft::Gunboat => 15.0,
             Craft::Liner => 21.0,
             Craft::FlyingBoat => 40.0,
+            Craft::Dreadnought => 23.0,
+            Craft::Leviathan => 22.0,
+            Craft::SkyCarrier => 36.0,
         }
     }
 
@@ -124,6 +139,9 @@ impl Craft {
             Craft::Gunboat => (1, 20),
             Craft::Liner => (3, 40),
             Craft::FlyingBoat => (1, 20),
+            Craft::Dreadnought => (1, 30),
+            Craft::Leviathan => (8, 80),
+            Craft::SkyCarrier => (4, 60),
         }
     }
 
@@ -145,13 +163,33 @@ impl Craft {
             Craft::Gunboat => 15.0,
             Craft::Liner => 40.0,
             Craft::FlyingBoat => 12.0,
+            Craft::Dreadnought => 75.0,
+            Craft::Leviathan => 90.0,
+            Craft::SkyCarrier => 110.0,
         }
     }
 
     pub fn flies(self) -> bool {
         matches!(
             self,
-            Craft::Airship | Craft::Biplane | Craft::Seaplane | Craft::FlyingBoat
+            Craft::Airship
+                | Craft::Biplane
+                | Craft::Seaplane
+                | Craft::FlyingBoat
+                | Craft::SkyCarrier
+        )
+    }
+
+    /// A rigid airship: hangs nose to a mast, bobs, banks little.
+    pub fn rigid(self) -> bool {
+        matches!(self, Craft::Airship | Craft::SkyCarrier)
+    }
+
+    /// One of the flagships ([`crate::flagships`]).
+    pub fn flagship(self) -> bool {
+        matches!(
+            self,
+            Craft::Dreadnought | Craft::Leviathan | Craft::SkyCarrier
         )
     }
 
@@ -186,7 +224,7 @@ impl Craft {
 /// `topside` above. Returns its sections, stern to bow, each from the keel up to the sheer
 /// on the +Z side, for [`strake`].
 #[allow(clippy::too_many_arguments)]
-fn hull(
+pub(crate) fn hull(
     p: &mut Parts,
     mat: Mat,
     len: f32,
@@ -311,7 +349,15 @@ fn hull(
 /// A painted band on both sides of a hull (`rows` from [`hull`]): from `y0` to `y1` m above
 /// the waterline, between `x0` and `x1`, standing 8 cm proud of the planking (any less and
 /// the hull's own facets break it up).
-fn strake(p: &mut Parts, rows: &[Vec<Vec3>], x0: f32, x1: f32, y0: f32, y1: f32, col: Vec4) {
+pub(crate) fn strake(
+    p: &mut Parts,
+    rows: &[Vec<Vec3>],
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    col: Vec4,
+) {
     // Where a section's side is at height `y` (clamped to the keel and the sheer).
     let at = |row: &[Vec3], y: f32| -> Vec3 {
         let j = row.iter().rposition(|q| q.y <= y).unwrap_or(0);
@@ -337,7 +383,7 @@ fn strake(p: &mut Parts, rows: &[Vec<Vec3>], x0: f32, x1: f32, y0: f32, y1: f32,
 }
 
 /// A gaff sail on a mast at `x`: luff from `y0` to `y1`, foot `foot` long aft.
-fn gaff_sail(p: &mut Parts, mat: Mat, x: f32, y0: f32, y1: f32, foot: f32, belly: f32) {
+pub(crate) fn gaff_sail(p: &mut Parts, mat: Mat, x: f32, y0: f32, y1: f32, foot: f32, belly: f32) {
     let a = v3(x, y0, 0.0);
     let b = v3(x - foot, y0 + 0.3, 0.0);
     let c = v3(x - foot * 0.95, y1 - 0.6, 0.0);
@@ -368,7 +414,7 @@ fn gaff_sail(p: &mut Parts, mat: Mat, x: f32, y0: f32, y1: f32, foot: f32, belly
     p.beam(Mat::Timber, d, c, 0.12, Vec4::ONE);
 }
 
-fn jib(p: &mut Parts, mat: Mat, tack: Vec3, head: Vec3, clew: Vec3) {
+pub(crate) fn jib(p: &mut Parts, mat: Mat, tack: Vec3, head: Vec3, clew: Vec3) {
     let mid = (tack + head + clew) / 3.0 + v3(0.0, 0.0, 0.5);
     p.tri(mat, tack, clew, mid, Vec4::ONE);
     p.tri(mat, clew, head, mid, Vec4::ONE);
@@ -376,7 +422,7 @@ fn jib(p: &mut Parts, mat: Mat, tack: Vec3, head: Vec3, clew: Vec3) {
 }
 
 /// A square sail hung from a yard at `y` on a mast at `x`, `w` wide and `h` deep.
-fn square_sail(p: &mut Parts, x: f32, y: f32, w: f32, h: f32) {
+pub(crate) fn square_sail(p: &mut Parts, x: f32, y: f32, w: f32, h: f32) {
     let belly = 0.8;
     let rows = 3;
     for r in 0..rows {
@@ -408,7 +454,7 @@ fn square_sail(p: &mut Parts, x: f32, y: f32, w: f32, h: f32) {
     );
 }
 
-fn mast(p: &mut Parts, x: f32, deck: f32, h: f32, r: f32) {
+pub(crate) fn mast(p: &mut Parts, x: f32, deck: f32, h: f32, r: f32) {
     p.cylinder(
         Mat::Timber,
         v3(x, deck, 0.0),
@@ -421,7 +467,7 @@ fn mast(p: &mut Parts, x: f32, deck: f32, h: f32, r: f32) {
     );
 }
 
-fn shrouds(p: &mut Parts, x: f32, deck: f32, h: f32, beam: f32) {
+pub(crate) fn shrouds(p: &mut Parts, x: f32, deck: f32, h: f32, beam: f32) {
     for s in [1.0f32, -1.0] {
         for dx in [-0.6, 0.0, 0.6] {
             p.rod(
@@ -1058,6 +1104,9 @@ pub fn craft_model(c: Craft) -> Parts {
         Craft::Gunboat => gunboat(),
         Craft::Liner => liner(),
         Craft::FlyingBoat => flying_boat(),
+        Craft::Dreadnought => crate::flagships::dreadnought(),
+        Craft::Leviathan => crate::flagships::leviathan(),
+        Craft::SkyCarrier => crate::flagships::sky_carrier(),
     }
 }
 
@@ -1471,7 +1520,15 @@ pub fn seaplane() -> Parts {
 
 /// A row of gun ports along both sides, from `x0` to `x1` at height `y`, with a gun muzzle
 /// out of each.
-fn gun_ports(p: &mut Parts, x0: f32, x1: f32, n: u32, y: f32, half_beam: f32, band: Vec4) {
+pub(crate) fn gun_ports(
+    p: &mut Parts,
+    x0: f32,
+    x1: f32,
+    n: u32,
+    y: f32,
+    half_beam: f32,
+    band: Vec4,
+) {
     p.cuboid(
         Mat::Paint,
         v3(x0 - 1.0, y - 0.45, -half_beam - 0.03),
@@ -2179,7 +2236,7 @@ mod tests {
         const STEP: f32 = 0.5;
         const OFF: f32 = 0.013;
         for c in Craft::ALL {
-            if matches!(c, Craft::Airship | Craft::Biplane) {
+            if matches!(c, Craft::Airship | Craft::Biplane | Craft::SkyCarrier) {
                 continue;
             }
             // Each triangle in the columns of the grid its x range covers: (corners, its

@@ -706,6 +706,35 @@ fn views() -> Vec<View> {
             fog: false,
             ..v("flying_boat", Aim::Craft(Craft::FlyingBoat), 2.2, 80.0)
         },
+        View {
+            pitch_deg: Some(14.0),
+            clean: true,
+            fog: false,
+            ..v("dreadnought", Aim::Craft(Craft::Dreadnought), 2.3, 210.0)
+        },
+        View {
+            pitch_deg: Some(16.0),
+            clean: true,
+            fog: false,
+            ..v("leviathan", Aim::Craft(Craft::Leviathan), 2.2, 250.0)
+        },
+        View {
+            pitch_deg: Some(12.0),
+            clean: true,
+            fog: false,
+            ..v("sky_carrier", Aim::Craft(Craft::SkyCarrier), 2.4, 380.0)
+        },
+        // The yard's card, with the flagships at the foot of its list.
+        View {
+            card: true,
+            pitch_deg: Some(30.0),
+            ..v("yard_card", Aim::Front(K::Shipyard, 0), 0.6, 140.0)
+        },
+        View {
+            card: true,
+            pitch_deg: Some(30.0),
+            ..v("mast_card", Aim::Front(K::AirshipMast, 0), 0.6, 160.0)
+        },
         // The three that answer incidents, then incidents (these leave fires and ruins
         // behind, so they come last).
         View {

@@ -181,6 +181,52 @@ pub const PLANS: &[Plan] = &[
         upkeep: 16.0,
         blurb: "One hold of 20 and a long reach: lands on any water, sees far over the ocean.",
     },
+    // The flagships (`flagships`): the top of the yard, a fortune each.
+    Plan {
+        craft: Craft::Leviathan,
+        at: Kind::Shipyard,
+        coins: 60_000,
+        cost: &[
+            (Good::Iron, 180),
+            (Good::Planks, 120),
+            (Good::Glass, 80),
+            (Good::Clocks, 20),
+        ],
+        build_s: 840.0,
+        tier: Tier::Masters,
+        upkeep: 90.0,
+        blurb: "The giant of the seas: eight holds of 80, and she loads and lands half again as fast.",
+    },
+    Plan {
+        craft: Craft::Dreadnought,
+        at: Kind::Shipyard,
+        coins: 90_000,
+        cost: &[
+            (Good::Iron, 250),
+            (Good::Bricks, 120),
+            (Good::Glass, 40),
+            (Good::Clocks, 30),
+        ],
+        build_s: 960.0,
+        tier: Tier::Patricians,
+        upkeep: 120.0,
+        blurb: "Ten great guns that outrange anything afloat; your ships near her sail a third faster.",
+    },
+    Plan {
+        craft: Craft::SkyCarrier,
+        at: Kind::AirshipMast,
+        coins: 100_000,
+        cost: &[
+            (Good::Silk, 200),
+            (Good::Iron, 150),
+            (Good::Glass, 40),
+            (Good::Jewellery, 20),
+        ],
+        build_s: 1_020.0,
+        tier: Tier::Patricians,
+        upkeep: 140.0,
+        blurb: "A flying fortress with two escort fighters: sees 6 km, four holds of 60, over any land.",
+    },
 ];
 
 pub fn plan(craft: Craft) -> Option<&'static Plan> {
@@ -356,8 +402,8 @@ pub fn cancel(world: &mut World, e: Entity) -> Result<Craft, String> {
 fn slip(b: &Building, craft: Craft) -> (DVec3, f32) {
     if craft.flies() {
         let m = mast_point(b);
-        let at = if craft == Craft::Airship {
-            m + DVec3::new(-48.0, 4.0, 0.0)
+        let at = if craft.rigid() {
+            m + DVec3::new(-(craft.half_length() as f64).max(48.0), 4.0, 0.0)
         } else {
             // Planes stand on the ground beside the mast.
             DVec3::new(m.x + 14.0, b.base_y + 1.2, m.z + 10.0)
@@ -368,7 +414,9 @@ fn slip(b: &Building, craft: Craft) -> (DVec3, f32) {
     let f = grid::front_dir(b.rot).as_dvec2();
     let side = DVec2::new(-f.y, f.x);
     // The left slip, the hull's middle a little seaward of the yard's.
-    let p = c + side * SLIP_X as f64 + f * (craft.half_length() as f64 * 0.35 + 2.0);
+    // (A flagship is longer than the yard: she stands out over the water.)
+    let out = if craft.flagship() { 0.8 } else { 0.35 };
+    let p = c + side * SLIP_X as f64 + f * (craft.half_length() as f64 * out + 2.0);
     let heading = (-f.y).atan2(f.x) as f32;
     (DVec3::new(p.x, b.base_y + 2.4, p.y), heading)
 }
@@ -499,7 +547,9 @@ pub fn launch(world: &mut World, e: Entity) {
     };
     clear_slip(world, e);
     let owner = world.resource::<Economy>().islands[b.island].owner;
-    let names = if owner == crate::sim::PLAYER {
+    let names = if craft.flagship() {
+        crate::flagships::names(craft)
+    } else if owner == crate::sim::PLAYER {
         NAMES
     } else {
         crate::rivals::ship_names(owner)
@@ -518,7 +568,10 @@ pub fn launch(world: &mut World, e: Entity) {
     };
     let (at, heading) = if craft.flies() {
         let m = mast_point(&b);
-        (m + DVec3::new(-48.0, 4.0, 0.0), 0.0)
+        (
+            m + DVec3::new(-(craft.half_length() as f64).max(48.0), 4.0, 0.0),
+            0.0,
+        )
     } else {
         // Off the yard's front, clear of the slip.
         let c = grid::footprint_center(b.kind, b.origin, b.rot);

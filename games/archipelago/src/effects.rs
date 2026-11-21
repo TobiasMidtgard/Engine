@@ -605,7 +605,26 @@ pub fn riders(craft: Craft) -> Vec<(Vec3, &'static str)> {
             (Vec3::new(-14.0, 24.0, 0.0), "isle.funnel"),
             (Vec3::new(stern, 0.15, 0.0), "isle.wake"),
         ],
-        Craft::Airship | Craft::Biplane | Craft::Seaplane | Craft::FlyingBoat => vec![],
+        Craft::Dreadnought => vec![
+            (Vec3::new(10.0, 31.4, 0.0), "isle.funnel"),
+            (Vec3::new(-22.0, 31.6, 0.0), "isle.funnel"),
+            (Vec3::new(stern, 0.15, 0.0), "isle.wake"),
+        ],
+        Craft::Leviathan => [38.0f32, 23.0, -26.0, -40.0, -54.0]
+            .into_iter()
+            .map(|x| {
+                (
+                    Vec3::new(x, 31.5 + (x / 90.0).powi(2) * 4.0, 0.0),
+                    "isle.funnel",
+                )
+            })
+            .chain([(Vec3::new(stern, 0.15, 0.0), "isle.wake")])
+            .collect(),
+        Craft::Airship
+        | Craft::Biplane
+        | Craft::Seaplane
+        | Craft::FlyingBoat
+        | Craft::SkyCarrier => vec![],
         _ => vec![(Vec3::new(stern, 0.15, 0.0), "isle.wake")],
     }
 }
