@@ -128,15 +128,42 @@ pub fn begin(world: &mut World) {
     world.insert_resource(made);
 }
 
-/// What a rival at `level` is like, in a line.
+/// What a rival at `level` is like, before its character shapes it.
 pub fn level_note(level: Level) -> &'static str {
     match level {
-        Level::Deckhand => "Slow and forgiving: one island and short chains.",
-        Level::Mate => "Takes its time, two islands at most.",
-        Level::Captain => "A fair match, up to three islands.",
-        Level::Commodore => "Races you for islands, and one house starts in your waters.",
-        Level::Admiral => "Plays to win, buys abroad, and one house starts in your waters.",
+        Level::Deckhand => "slow and forgiving, with short chains",
+        Level::Mate => "takes its time",
+        Level::Captain => "a fair match",
+        Level::Commodore => "quick and sharp",
+        Level::Admiral => "plays to win and misses nothing",
     }
+}
+
+/// How character `ci` plays at `level`, in a line: the level's note, then what the character
+/// makes of it (how many islands it holds, whether it races you, buys abroad, and whether it
+/// starts in your waters, which only the `first` house can).
+pub fn seat_note(ci: usize, level: Level, first: bool, rules: &Rules) -> String {
+    let k = characters::shape(level.knobs(), &characters::ALL[ci].traits);
+    let mut facts = vec![match k.isles {
+        1 => "keeps to one island".to_string(),
+        n if n >= 99 => "takes every island it can".to_string(),
+        n => format!("up to {n} islands"),
+    }];
+    if k.race {
+        facts.push("races you for the best ones".into());
+    }
+    if k.abroad {
+        facts.push("buys at other harbours".into());
+    }
+    if first && rules.rival_near(level) {
+        facts.push("starts in your waters".into());
+    }
+    format!(
+        "{}: {}; {}.",
+        level.name(),
+        level_note(level),
+        facts.join(", ")
+    )
 }
 
 /// The houses a new game offers when nothing else says: the first three characters, at
@@ -517,7 +544,7 @@ fn dim(text: impl Into<String>, size: f32) -> El {
 }
 
 /// A seat: the character who leads the house, how it plays and its level; or an empty seat.
-fn seat(i: usize, pick: Option<(usize, Level)>) -> El {
+fn seat(i: usize, pick: Option<(usize, Level)>, first: bool, rules: &Rules) -> El {
     let card = El::new().with_style(|s| {
         s.direction(Direction::Column)
             .gap(8.0)
@@ -587,21 +614,29 @@ fn seat(i: usize, pick: Option<(usize, Level)>) -> El {
                 .wrap(true)
                 .pick(Pick::Ignore)
         })
-        .children(trait_words(&c.traits).into_iter().map(|t| {
-            El::new()
-                .with_style(|s| {
-                    s.padding([1.0, 8.0, 2.0, 8.0])
-                        .radius(Corners::all(9.0))
-                        .background(Fill::Solid(Color::hexa(0x6a53391c)))
-                        .pick(Pick::Ignore)
-                })
-                .child(
-                    El::text(t)
-                        .text_style(|t| t.nowrap().bold())
-                        .with_style(|s| s.font_size(13.5).color(Colors::ink_dim()))
-                        .pick_ignore(),
+        .children(
+            trait_words(&c.traits)
+                .into_iter()
+                .chain(
+                    (characters::shape(level.knobs(), &c.traits).top == crate::defs::Tier::Masters)
+                        .then_some("Stops at Masters"),
                 )
-        }));
+                .map(|t| {
+                    El::new()
+                        .with_style(|s| {
+                            s.padding([1.0, 8.0, 2.0, 8.0])
+                                .radius(Corners::all(9.0))
+                                .background(Fill::Solid(Color::hexa(0x6a53391c)))
+                                .pick(Pick::Ignore)
+                        })
+                        .child(
+                            El::text(t)
+                                .text_style(|t| t.nowrap().bold())
+                                .with_style(|s| s.font_size(13.5).color(Colors::ink_dim()))
+                                .pick_ignore(),
+                        )
+                }),
+        );
     let info = El::new()
         .with_style(|s| {
             s.direction(Direction::Column)
@@ -651,12 +686,13 @@ fn seat(i: usize, pick: Option<(usize, Level)>) -> El {
                 *l == level,
             )
         }));
-    let note = El::text(format!("{}: {}", level.name(), level_note(level)))
-        .text_style(|t| t.nowrap())
+    let note = El::text(seat_note(ci, level, first, rules))
+        .text_style(|t| t.line_height(1.25))
         .with_style(|s| {
             s.font_size(14.0)
                 .color(Colors::ink_dim())
                 .margin([0.0, 0.0, 0.0, 78.0])
+                .shrink(1.0)
         })
         .pick_ignore();
     card.child(
@@ -728,8 +764,9 @@ fn body(s: &Setup) -> Vec<El> {
                 .shrink(0.0)
         })
         .child(heading("Rival houses"));
+    let first = s.seats.iter().position(|p| p.is_some());
     for (i, p) in s.seats.iter().enumerate() {
-        left = left.child(seat(i, *p));
+        left = left.child(seat(i, *p, first == Some(i), &s.rules));
     }
     let n = s.picks().len();
     left = left.child(dim(
@@ -926,6 +963,32 @@ mod tests {
             w.resource::<Setup>().seats,
             [Some((5, Level::Mate)), None, None]
         );
+    }
+
+    /// A seat's line counts the islands its character holds at that level, not the level's
+    /// bare cap, and only the first house can start in your waters.
+    #[test]
+    fn a_seat_note_reads_as_the_character_plays() {
+        let rules = Rules::default();
+        let vane = characters::find("vane").unwrap();
+        let quill = characters::find("quill").unwrap();
+        let v = seat_note(vane, Level::Captain, true, &rules);
+        assert!(
+            v.starts_with("Captain: a fair match; up to 5 islands"),
+            "{v}"
+        );
+        let q = seat_note(quill, Level::Captain, true, &rules);
+        assert!(q.contains("up to 2 islands"), "{q}");
+        let near = seat_note(vane, Level::Commodore, true, &rules);
+        assert!(near.ends_with("starts in your waters."), "{near}");
+        let far = seat_note(vane, Level::Commodore, false, &rules);
+        assert!(!far.contains("your waters"), "{far}");
+        for ci in 0..characters::ALL.len() {
+            for l in Level::ALL {
+                let n = seat_note(ci, l, true, &rules);
+                assert!(!n.contains("99"), "{n}");
+            }
+        }
     }
 
     /// Every character has words for how it plays, and every rule's choice shows a name and
