@@ -1,7 +1,8 @@
 # Painted-style icons for the build bar's tier tabs, in the same hand as make_icons.py: a
 # fisher's oilskin sou'wester (isle_tier_fisherfolk), a labourer's flat cap over a hammer
 # (isle_tier_labourers) and a burgher's top hat (isle_tier_burghers); and the pedlar's stall
-# (isle_pedlar): a striped awning over an open chest of wares.
+# (isle_pedlar): a striped awning over an open chest of wares; and a padlock for buildings
+# not open yet (isle_padlock).
 # Usage: python3 make_build_icons.py <out dir>
 import os, sys
 def o(w):
@@ -62,6 +63,14 @@ I['isle_pedlar'] = svg(WOOD + lg('aw', (0, '#ff7a5a'), (.6, '#c8321e'), (1, '#7a
     f'<g {o(1.8)} fill="none"><path d="M17 46 L47 46"/></g>'
     '<rect x="29" y="44" width="6" height="6" rx="1" fill="url(#gd)" stroke="#2a1708" stroke-width="1.6"/>'
     '<path d="M30 35.5 L32 33.5" stroke="#fff" stroke-width="1.6" opacity=".8" stroke-linecap="round"/>')
+
+# A padlock: an iron shackle over a brass body with a keyhole.
+I['isle_padlock'] = svg(IRON + lg('br', (0, '#ffe7a0'), (.5, '#d0a040'), (1, '#6a4410')),
+    shadow(32, 59, 18, 3) +
+    f'<g {o(2.6)}><path d="M18 30 L18 20 C18 10 24 5 32 5 C40 5 46 10 46 20 L46 30 L39 30 L39 20 C39 14 36 11 32 11 C28 11 25 14 25 20 L25 30 Z" fill="url(#ir)"/>'
+    '<rect x="11" y="28" width="42" height="29" rx="5" fill="url(#br)"/></g>'
+    '<path d="M32 36 C29 36 27.5 38 27.5 40.5 C27.5 42.5 28.6 43.8 30 44.4 L29 51 L35 51 L34 44.4 C35.4 43.8 36.5 42.5 36.5 40.5 C36.5 38 35 36 32 36 Z" fill="#2a1708"/>'
+    '<path d="M15 33 L15 46" stroke="#fff" stroke-width="2.4" opacity=".55" stroke-linecap="round"/>')
 
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)

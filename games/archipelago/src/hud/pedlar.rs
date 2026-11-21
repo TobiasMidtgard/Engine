@@ -11,13 +11,14 @@ use engine_ui::kit::brass::{self, Colors};
 use engine_ui::style::{Align, Direction, Enter, Fill, Justify, Pick};
 
 use super::shelf;
-use crate::fleet::{Doing, Roam, Vessel};
+use crate::fleet::{Roam, Vessel};
 use crate::items::{self, ItemView, OfferView};
 use crate::sim::Economy;
 
 pub const SCREEN: &str = "isle_pedlar";
 const BODY_ID: &str = "isle.ped.body";
 const STATUS_ID: &str = "isle.ped.status";
+const BACK_ID: &str = "isle.ped.back";
 
 /// The stall's state.
 #[derive(Resource, Default)]
@@ -40,13 +41,13 @@ pub fn here(world: &World) -> bool {
         .is_some_and(|i| i.market_open)
 }
 
-/// The pedlar's barque: its name and what it is doing.
-fn barque(world: &mut World) -> Option<(String, Doing)> {
+/// The pedlar's barque's name.
+fn barque(world: &mut World) -> Option<String> {
     world
         .query::<&Vessel>()
         .iter(world)
         .find(|v| matches!(v.roam, Roam::Pedlar { .. }))
-        .map(|v| (v.name.clone(), v.doing.clone()))
+        .map(|v| v.name.clone())
 }
 
 fn clock(s: f32) -> String {
@@ -54,20 +55,29 @@ fn clock(s: f32) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// The line under the title: moored and how long for, or away.
-fn status(world: &mut World) -> (String, bool) {
+/// The line under the title (moored and how long for, or away and when he is back), whether
+/// he is in, and the away card's "back in" line.
+fn status(world: &mut World) -> (String, bool, String) {
     let at = here(world);
-    let b = barque(world);
-    let name = b
-        .as_ref()
-        .map_or("His barque".to_string(), |(n, _)| n.clone());
-    match (at, b.map(|(_, d)| d)) {
-        (true, Some(Doing::Moored(s))) => (
+    let name = barque(world).unwrap_or_else(|| "His barque".to_string());
+    let times = items::pedlar_times(world);
+    match (at, times) {
+        (true, Some((_, s))) => (
             format!("{name} lies off the quay · sails in {}", clock(s)),
             true,
+            String::new(),
         ),
-        (true, _) => (format!("{name} lies off the quay"), true),
-        (false, _) => (format!("{name} is away at sea, fetching more wares"), false),
+        (true, None) => (format!("{name} lies off the quay"), true, String::new()),
+        (false, Some((_, s))) => (
+            format!("{name} is away at sea · back in about {}", clock(s)),
+            false,
+            format!("Back in about {}", clock(s)),
+        ),
+        (false, None) => (
+            format!("{name} is away at sea, fetching more wares"),
+            false,
+            "Back before long".to_string(),
+        ),
     }
 }
 
@@ -261,6 +271,14 @@ fn away_card() -> El {
                 .text_style(|t| t.size(26.0))
                 .pick_ignore(),
         )
+        .child(
+            El::text("")
+                .id(BACK_ID)
+                .class("ink")
+                .text_style(|t| t.size(18.0).bold().tabular())
+                .with_style(|s| s.color(Colors::good_ink()))
+                .pick_ignore(),
+        )
         .child(dim(
             "He comes back to the home quay before long with five new items, never a specialist the company already has. A note goes up when he is in.",
             15.0,
@@ -374,7 +392,7 @@ fn sig(world: &World) -> String {
 }
 
 fn el(world: &mut World) -> El {
-    let (line, at) = status(world);
+    let (line, at, _) = status(world);
     let book = brass::plate()
         .with_style(|s| {
             s.direction(Direction::Column)
@@ -473,9 +491,12 @@ pub fn toggle(world: &mut World) {
     let el = el(world);
     let sig = sig(world);
     if engine_ui::screens::spawn_screen(world, screen, &el).is_ok() {
-        let mut s = world.resource_mut::<Stall>();
-        s.open = true;
-        s.sig = sig;
+        {
+            let mut s = world.resource_mut::<Stall>();
+            s.open = true;
+            s.sig = sig;
+        }
+        update(world);
     }
 }
 
@@ -484,22 +505,26 @@ pub fn update(world: &mut World) {
     if !world.resource::<Stall>().open {
         return;
     }
-    let (line, at) = status(world);
-    let text = status_markup(&line, at);
-    if let Some(e) = engine_ui::input::find_id(world, STATUS_ID)
+    let (line, at, back) = status(world);
+    set_text(world, STATUS_ID, status_markup(&line, at));
+    let sig = sig(world);
+    if world.resource::<Stall>().sig != sig {
+        let els = body(world);
+        if let Some(e) = engine_ui::input::find_id(world, BODY_ID) {
+            let _ = engine_ui::el::replace_children(world, e, &els);
+            world.resource_mut::<Stall>().sig = sig;
+        }
+    }
+    set_text(world, BACK_ID, back);
+}
+
+/// Change a text node's words in place.
+fn set_text(world: &mut World, id: &str, text: String) {
+    if let Some(e) = engine_ui::input::find_id(world, id)
         && let Some(mut t) = world.get_mut::<engine_ui::node::Text>(e)
         && t.text != text
     {
         t.text = text;
-    }
-    let sig = sig(world);
-    if world.resource::<Stall>().sig == sig {
-        return;
-    }
-    let els = body(world);
-    if let Some(e) = engine_ui::input::find_id(world, BODY_ID) {
-        let _ = engine_ui::el::replace_children(world, e, &els);
-        world.resource_mut::<Stall>().sig = sig;
     }
 }
 

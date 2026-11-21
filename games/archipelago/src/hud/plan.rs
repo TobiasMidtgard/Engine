@@ -1,6 +1,7 @@
 //! The build bar's tabs and the plan card: by tier (Fisherfolk, Labourers, Burghers) or by
 //! type, what each building costs set out large, greyed tiles for what the company can't
-//! afford yet, and a card over the bar for the tile under the pointer (or the building in
+//! afford yet, pad-locks on what the company has not opened yet (crate::unlocks), and a card
+//! over the bar for the tile under the pointer (or the building in
 //! hand) with its costs against what the island has, its upkeep, workers, chain and reach.
 
 use engine::prelude::*;
@@ -9,11 +10,12 @@ use engine_ui::data::UiData;
 use engine_ui::el::El;
 use engine_ui::kit::brass::{self, Colors};
 use engine_ui::node::{Interaction, Node};
-use engine_ui::style::{Align, Direction, Enter, Justify, Pick};
+use engine_ui::style::{Align, Direction, Enter, Justify, Pick, Position};
 
 use crate::defs::{Category, DEFS, Good, Kind, Need, Tier};
 use crate::sim::Economy;
 use crate::tools::Tool;
+use crate::unlocks::{Lock, lock_of};
 
 pub const PLAN_ID: &str = "isle.plan";
 pub const SORT_ID: &str = "isle.bar.sort";
@@ -35,6 +37,55 @@ pub struct Plan {
     /// The building the plan card shows, and what it was drawn from.
     shown: Option<Kind>,
     sig: String,
+    /// Tour shots (`--hud-locks`): the people to judge the locks by, as at the start of a
+    /// game, in place of the company's own.
+    pub demo_people: Option<[f32; Tier::COUNT]>,
+}
+
+/// The pad-lock over tile `k` (shown while the building is not open yet).
+pub fn lock_id(k: Kind) -> String {
+    format!("isle.lock.{k:?}")
+}
+
+/// The pad-lock over tab `i`.
+pub fn tab_lock_id(i: usize) -> String {
+    format!("isle.tablock.{i}")
+}
+
+/// The pad-lock a tile or tab wears while locked, hidden until [`refresh_prices`] shows it.
+pub fn padlock(id: String, size: f32, top: f32, right: f32) -> El {
+    El::new()
+        .id(id)
+        .with_style(move |s| {
+            s.position(Position::Absolute)
+                .top(top)
+                .right(right)
+                .opacity(0.0)
+                .pick(Pick::Ignore)
+        })
+        .child(brass::badge("isle_padlock", size))
+}
+
+/// Whether each of `kinds` is open to the company giving orders (judged by the tour shots'
+/// people instead when they are set).
+pub fn locks(world: &World, kinds: &[Kind]) -> Vec<Lock> {
+    let me = crate::sim::acting(world);
+    let econ = world.resource::<Economy>();
+    match world.resource::<Plan>().demo_people {
+        Some(p) => {
+            let home = (0..econ.islands.len()).find(|i| econ.owns(me, *i));
+            let mut e = econ.clone();
+            for (i, b) in e.islands.iter_mut().enumerate() {
+                b.population = if Some(i) == home {
+                    p
+                } else {
+                    [0.0; Tier::COUNT]
+                };
+            }
+            kinds.iter().map(|k| lock_of(&e, me, *k)).collect()
+        }
+        None => kinds.iter().map(|k| lock_of(econ, me, *k)).collect(),
+    }
 }
 
 /// The tier a building belongs to: the people who work it, or the first tier that asks for
@@ -221,17 +272,44 @@ pub fn refresh_prices(world: &mut World, kinds: &[Kind], isle: usize) {
             faded.push((k, !lacks.is_empty() || !grows(k, isle)));
         }
     }
+    let locked: Vec<bool> = locks(world, kinds).iter().map(|l| l.locked).collect();
     let tiles = world.resource::<Plan>().tiles.clone();
     for (k, e) in tiles {
-        let Some(&(_, dim)) = faded.iter().find(|(x, _)| *x == k) else {
+        let Some(at) = faded.iter().position(|(x, _)| *x == k) else {
             continue;
         };
-        let want = if dim { 0.48 } else { 1.0 };
-        if let Some(mut n) = world.get_mut::<Node>(e)
-            && n.style.opacity != Some(want)
-        {
-            n.style.opacity = Some(want);
+        let shut = locked[at];
+        let want = if shut {
+            0.62
+        } else if faded[at].1 {
+            0.48
+        } else {
+            1.0
+        };
+        set_opacity(world, e, want);
+        if let Some(l) = engine_ui::input::find_id(world, &lock_id(k)) {
+            set_opacity(world, l, if shut { 1.0 } else { 0.0 });
         }
+    }
+    // A tab whose every building is locked wears a pad-lock too.
+    let by_type = world.resource::<Plan>().by_type;
+    for i in 0..tabs(by_type).len() {
+        let ks: Vec<Kind> = tab_kinds(by_type, i, isle)
+            .into_iter()
+            .filter(|k| grows(*k, isle))
+            .collect();
+        let shut = !ks.is_empty() && locks(world, &ks).iter().all(|l| l.locked);
+        if let Some(l) = engine_ui::input::find_id(world, &tab_lock_id(i)) {
+            set_opacity(world, l, if shut { 1.0 } else { 0.0 });
+        }
+    }
+}
+
+fn set_opacity(world: &mut World, e: Entity, want: f32) {
+    if let Some(mut n) = world.get_mut::<Node>(e)
+        && n.style.opacity != Some(want)
+    {
+        n.style.opacity = Some(want);
     }
 }
 
@@ -269,11 +347,12 @@ pub fn update(world: &mut World, isle: usize) {
     let econ = world.resource::<Economy>();
     let sig = match k {
         Some(k) => format!(
-            "{k:?}|{isle}|{:?}",
+            "{k:?}|{isle}|{:?}|{}",
             short(econ, isle, k)
                 .iter()
                 .map(|(g, n)| (*g, (*n).ceil() as i64))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            locks(world, &[k])[0].why
         ),
         None => String::new(),
     };
@@ -421,7 +500,10 @@ pub fn card(world: &World, k: Kind, isle: usize) -> El {
         "Takes",
         format!("{} by {} cells", d.size.0, d.size.1),
     ));
-    let verdict = if !grows(k, isle) {
+    let lock = locks(world, &[k]).remove(0);
+    let verdict = if lock.locked {
+        Some(format!("Not open yet. {}", lock.why))
+    } else if !grows(k, isle) {
         Some(format!(
             "Does not grow on {here}: settle an island that suits it."
         ))
@@ -482,6 +564,19 @@ pub fn card(world: &World, k: Kind, isle: usize) -> El {
         )
         .child(brass::divider(240.0))
         .children(facts)
+        .child_opt(lock.locked.then(|| {
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(10.0).align_items(Align::Center).pick(Pick::Ignore))
+                .child(brass::badge("isle_padlock", 34.0))
+                .child(brass::meter(300.0, lock.progress))
+                .child(
+                    El::text(format!("{:.0}%", lock.progress * 100.0))
+                        .class("ink")
+                        .text_style(|t| t.size(14.0).bold().tabular().nowrap())
+                        .pick_ignore(),
+                )
+        }))
         .child(
             El::text(verdict.unwrap_or_else(|| format!("You can build it on {here} now.")))
                 .class("ink")

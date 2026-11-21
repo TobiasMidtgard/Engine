@@ -226,6 +226,7 @@ fn item_tile(k: Kind, selected: bool, i: usize, compact: bool, grows: Option<&st
     // (Costs, upkeep, workers and the chain are on the plan card over the bar.)
     tile(kind_icon(k), d.name, price, action, selected, i, compact)
         .id(format!("isle.build:{k:?}"))
+        .child(plan::padlock(plan::lock_id(k), 36.0, 2.0, 2.0))
         .with_style(move |s| s.opacity(if grows.is_some() { 0.48 } else { 1.0 }))
 }
 
@@ -300,6 +301,7 @@ fn tab_row(category: usize, by_type: bool, demolish: bool) -> Vec<El> {
                 .id(format!("isle.cat:{i}"))
                 .selected(i == category)
                 .tooltip(t.name, "")
+                .child(plan::padlock(plan::tab_lock_id(i), 26.0, -6.0, -6.0))
         })
         .chain([
             El::new().with_style(|s| s.width(10.0)),
@@ -663,6 +665,13 @@ pub fn setup(world: &mut World) {
     // `--hud-shelf`: open the item shelf (tour shots).
     if std::env::args().any(|a| a == "--hud-shelf") {
         shelf::toggle(world);
+    }
+    // `--hud-locks`: judge the build bar's locks by the people of a new game's first years
+    // (63 Fisherfolk, no Labourers or Burghers) instead of the finished town's (tour shots).
+    if std::env::args().any(|a| a == "--hud-locks") {
+        let mut p = [0.0; Tier::COUNT];
+        p[Tier::Fisherfolk.index()] = 63.0;
+        world.resource_mut::<plan::Plan>().demo_people = Some(p);
     }
     // `--hud-pedlar`: open the pedlar's stall (tour shots).
     if std::env::args().any(|a| a == "--hud-pedlar") {
