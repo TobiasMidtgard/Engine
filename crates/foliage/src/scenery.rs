@@ -32,8 +32,9 @@ use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::wgpu;
 use engine_render::{
     AlphaMode, FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, InstanceRow,
-    MaxDrawDistance, Mesh, MeshInstances, MeshRenderer, RenderFeature, RenderPhase, RenderSettings,
-    StandardMaterial, ViewData,
+    MaxDrawDistance, Mesh, MeshInstances, MeshRenderer, RayClass, RayGeometryState, RayKey,
+    RayLook, RaySceneOut, RaySource, RaySphere, RayView, RenderFeature, RenderPhase,
+    RenderSettings, StandardMaterial, ViewData,
 };
 use engine_world::Ground;
 
@@ -4618,19 +4619,27 @@ fn push_f32s(out: &mut Vec<u8>, v: &[f32]) {
 struct GpuCover {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
+    vertex_count: u32,
     index_count: u32,
+    /// Bounds around its vertices, local: center and radius.
+    bounds: (Vec3, f32),
     version: u64,
     uniform: wgpu::Buffer,
     group: wgpu::BindGroup,
     slots: [GroundLayer; 8],
     /// Camera-relative origin this frame.
     offset: Vec3,
+    /// Its origin in the world (the ray scene's place for it).
+    at: DVec3,
+    /// Mean albedo, linear (what a ray that meets it reflects).
+    albedo: [f32; 3],
     seen: u64,
 }
 
 struct GpuRockMesh {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
+    vertex_count: u32,
     index_count: u32,
 }
 
@@ -4650,6 +4659,27 @@ struct RockBatch {
     first: u32,
     count: u32,
 }
+
+/// A rock or cave chamber for the frame's ray scene (`SceneryFeature::ray_scene`).
+#[derive(Clone, Copy)]
+struct RayRock {
+    /// Its entity's bits.
+    id: u64,
+    /// Its mesh in `rock_meshes`: a rock's middle level (320 triangles), a chamber's own.
+    mesh: u32,
+    to_world: DAffine3,
+    sphere: RaySphere,
+    albedo: [f32; 3],
+}
+
+/// Ray scene keys: geometries and instances of rocks, and of ground covers.
+const RAY_ROCKS: u64 = 1;
+const RAY_GROUND: u64 = 2;
+/// A thing in the ray scene stays this far past the reach that brought it in (no churn on
+/// the edge), meters.
+const RAY_KEEP_M: f32 = 16.0;
+/// Rocks smaller than this in radius stay out of the rays, meters.
+const RAY_MIN_RADIUS_M: f32 = 0.3;
 
 /// The ground layers at [`LAYER_SIZE`], painted once per process.
 static GROUND_LAYERS: std::sync::OnceLock<Vec<LayerTexture>> = std::sync::OnceLock::new();
@@ -4696,6 +4726,9 @@ pub struct SceneryFeature {
     /// this frame (the static images are drawn again: `shadow_static_changed`).
     rock_state: u64,
     rocks_changed: bool,
+    /// The rocks and chambers the ray scene may take (main view), and the ids placed there.
+    ray_rocks: Vec<RayRock>,
+    ray_placed: HashSet<RayKey>,
     frame: u64,
     stats: FeatureStats,
 }
@@ -4890,26 +4923,31 @@ impl SceneryFeature {
                             gpu,
                             "ground vertices",
                             &bytes,
-                            wgpu::BufferUsages::VERTEX,
+                            wgpu::BufferUsages::VERTEX | ray_input(gpu),
                         ),
                         index: buffer_init(
                             gpu,
                             "ground indices",
                             &index,
-                            wgpu::BufferUsages::INDEX,
+                            wgpu::BufferUsages::INDEX | ray_input(gpu),
                         ),
+                        vertex_count: surface.vertices.len() as u32,
                         index_count: surface.indices.len() as u32,
+                        bounds: cover_bounds(surface),
                         version: surface.version,
                         uniform,
                         group,
                         slots: surface.slots,
                         offset,
+                        at: t.translation(),
+                        albedo: cover_albedo(surface),
                         seen: frame,
                     },
                 );
             }
             if let Some(c) = self.covers.get_mut(&e) {
                 c.offset = offset;
+                c.at = t.translation();
                 c.seen = frame;
                 let mut u = Vec::with_capacity(96);
                 push_f32s(&mut u, &[offset.x, offset.y, offset.z, parallax]);
@@ -4966,9 +5004,14 @@ impl SceneryFeature {
 
     fn prepare_rocks(&mut self, world: &mut World, gpu: &GpuShared, view: &ViewData) {
         self.items.clear();
+        let main = !view.extra_view;
+        if main {
+            self.ray_rocks.clear();
+        }
         let mut state = 0;
         self.prepare_chambers(world, gpu, view, &mut state);
-        let mut q = world.query::<(&Rock, &GlobalTransform)>();
+        let means = self.textures.is_some().then(layer_means);
+        let mut q = world.query::<(Entity, &Rock, &GlobalTransform)>();
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
         // The shadow maps whose static image is drawn again this frame.
         let cascades = if view.sun_shadows {
@@ -4984,7 +5027,7 @@ impl SceneryFeature {
             }
         });
         let any_redraw = redraw.contains(&true);
-        for (rock, t) in q.iter(world) {
+        for (entity, rock, t) in q.iter(world) {
             let scale = t.scale();
             let size = scale.max_element();
             let base = (t.translation() - view.origin).as_vec3();
@@ -4992,6 +5035,20 @@ impl SceneryFeature {
             let radius = size * 0.75;
             let dist = center.length();
             let casts = shadows && size > 0.2;
+            // The ray scene takes rocks by their distance to the eye, seen or not (it picks
+            // the ones in reach); its own level is the middle one.
+            if main && radius >= RAY_MIN_RADIUS_M && dist < RAY_GATHER_M {
+                self.ray_rocks.push(RayRock {
+                    id: entity.to_bits(),
+                    mesh: (rock.shape % ROCK_SHAPES) * ROCK_LODS as u32 + 1,
+                    to_world: t.affine(),
+                    sphere: RaySphere {
+                        center: view.origin + center.as_dvec3(),
+                        radius,
+                    },
+                    albedo: rock_albedo(means, rock.tint, rock.moss),
+                });
+            }
             if size > 0.2 {
                 state = stands(state, rock.shape as u64, t);
             }
@@ -5135,8 +5192,19 @@ fn upload_rock_mesh(gpu: &GpuShared, m: &RockMesh) -> GpuRockMesh {
     }
     let index: Vec<u8> = m.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
     GpuRockMesh {
-        vertex: buffer_init(gpu, "rock vertices", &bytes, wgpu::BufferUsages::VERTEX),
-        index: buffer_init(gpu, "rock indices", &index, wgpu::BufferUsages::INDEX),
+        vertex: buffer_init(
+            gpu,
+            "rock vertices",
+            &bytes,
+            wgpu::BufferUsages::VERTEX | ray_input(gpu),
+        ),
+        index: buffer_init(
+            gpu,
+            "rock indices",
+            &index,
+            wgpu::BufferUsages::INDEX | ray_input(gpu),
+        ),
+        vertex_count: m.vertices.len() as u32,
         index_count: m.indices.len() as u32,
     }
 }
@@ -5152,8 +5220,9 @@ impl SceneryFeature {
         state: &mut u64,
     ) {
         use std::hash::{Hash, Hasher};
-        let mut q = world.query::<(&crate::cave::CaveChamber, &GlobalTransform)>();
-        for (chamber, t) in q.iter(world) {
+        let means = self.textures.is_some().then(layer_means);
+        let mut q = world.query::<(Entity, &crate::cave::CaveChamber, &GlobalTransform)>();
+        for (entity, chamber, t) in q.iter(world) {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             format!("{chamber:?}").hash(&mut h);
             let key = h.finish();
@@ -5181,6 +5250,19 @@ impl SceneryFeature {
             let base = (t.translation() - view.origin).as_vec3();
             let center = base + Vec3::Y * chamber.height_m * 0.5;
             let radius = Vec3::new(hx + 2.0, chamber.height_m * 0.5 + 2.0, hz + 2.0).length();
+            // Chambers are in the still shadow images as rocks are: solid in the rays too.
+            if !view.extra_view && center.length() < RAY_GATHER_M + radius {
+                self.ray_rocks.push(RayRock {
+                    id: entity.to_bits(),
+                    mesh,
+                    to_world: t.affine(),
+                    sphere: RaySphere {
+                        center: view.origin + center.as_dvec3(),
+                        radius,
+                    },
+                    albedo: rock_albedo(means, chamber.tint, chamber.moss),
+                });
+            }
             let visible = view.frustum.intersects_sphere(center, radius);
             let casts = view.sun_shadows || view.sky_occlusion.enabled;
             if !visible && !casts {
@@ -5208,6 +5290,211 @@ impl SceneryFeature {
                 instance: inst,
             });
         }
+    }
+}
+
+/// What the frame's ray scene builds from a buffer: `BLAS_INPUT` where the device has ray
+/// queries (wgpu refuses the usage elsewhere).
+fn ray_input(gpu: &GpuShared) -> wgpu::BufferUsages {
+    if gpu.ray_queries() {
+        wgpu::BufferUsages::BLAS_INPUT
+    } else {
+        wgpu::BufferUsages::empty()
+    }
+}
+
+/// Rocks and chambers farther than this from the camera are not offered to the ray scene at
+/// all (its far reach is 384 m), meters.
+const RAY_GATHER_M: f32 = 1_000.0;
+
+/// The mean linear albedo of each ground layer as painted.
+fn layer_means() -> &'static [[f32; 3]] {
+    static MEANS: std::sync::OnceLock<Vec<[f32; 3]>> = std::sync::OnceLock::new();
+    MEANS.get_or_init(|| {
+        let lin = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        ground_layers()
+            .iter()
+            .map(|l| {
+                let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
+                for px in l.albedo_height.as_chunks::<4>().0.iter().step_by(61) {
+                    for k in 0..3 {
+                        sum[k] += lin(px[k]);
+                    }
+                    n += 1.0;
+                }
+                sum.map(|v| v / n.max(1.0))
+            })
+            .collect()
+    })
+}
+
+/// A rock's mean albedo as the rock shader paints it: its stone layer darkened by the
+/// shader's noise (0.68 on average) and tinted, with moss over part of it.
+fn rock_albedo(means: Option<&[[f32; 3]]>, tint: [f32; 3], moss: f32) -> [f32; 3] {
+    let (stone, mossy) = means.map_or(([0.3, 0.29, 0.27], [0.06, 0.08, 0.03]), |m| {
+        (m[GroundLayer::Rock as usize], m[GroundLayer::Moss as usize])
+    });
+    let w = (moss * 0.35).clamp(0.0, 1.0);
+    std::array::from_fn(|k| {
+        let a = stone[k] * 0.68 * tint[k];
+        (a + (mossy[k] - a) * w).clamp(0.0, 0.95)
+    })
+}
+
+/// A ground cover's mean albedo: its layers by their weights at every few vertices, times
+/// the vertices' tint.
+fn cover_albedo(surface: &GroundSurface) -> [f32; 3] {
+    let means = layer_means();
+    let (mut sum, mut total) = ([0.0f32; 3], 0.0f32);
+    for v in surface.vertices.iter().step_by(17) {
+        for (slot, &w) in v.weights.iter().enumerate() {
+            if w == 0 {
+                continue;
+            }
+            let w = w as f32;
+            let m = means[surface.slots[slot] as usize];
+            for k in 0..3 {
+                sum[k] += m[k] * w * v.tint[k] as f32 / 128.0;
+            }
+            total += w;
+        }
+    }
+    if total <= 0.0 {
+        return [0.1, 0.08, 0.05];
+    }
+    sum.map(|v| (v / total).clamp(0.0, 0.95))
+}
+
+/// The local box around a ground cover's vertices, as a center and a radius.
+fn cover_bounds(surface: &GroundSurface) -> (Vec3, f32) {
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for v in surface.vertices.iter() {
+        let p = Vec3::from(v.position);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    if lo.x > hi.x {
+        return (Vec3::ZERO, 0.0);
+    }
+    ((lo + hi) * 0.5, (hi - lo).length() * 0.5)
+}
+
+impl SceneryFeature {
+    /// The rocks, cave chambers and forest floors in the frame's ray scene (the ray-traced
+    /// lighting round, step 5): every rock of 0.3 m radius or more within the caster reach of
+    /// the eye, and larger ones out to the far reach that are at least `cut` times their
+    /// distance across, at their middle level of detail, solid; each ground cover whole, as
+    /// ground. Nothing here moves (`still_from` 0); what leaves the reach (16 m past it) or
+    /// the world is taken out.
+    fn fill_ray_scene(&mut self, view: &RayView, out: &mut RaySceneOut<'_>) {
+        let eye = view.eye;
+        let placed = std::mem::take(&mut self.ray_placed);
+        let mut kept = HashSet::with_capacity(placed.len() + 8);
+        let in_reach = |sphere: &RaySphere, id: &RayKey| {
+            let keep = if placed.contains(id) { RAY_KEEP_M } else { 0.0 };
+            let d = sphere.distance(eye);
+            d <= view.caster_reach + keep
+                || (d <= view.far_reach + keep && sphere.radius >= view.cut * d)
+        };
+        let mut states: HashMap<u32, RayGeometryState> = HashMap::new();
+        for r in &self.ray_rocks {
+            let id = RayKey(RAY_ROCKS, r.id);
+            if !in_reach(&r.sphere, &id) {
+                continue;
+            }
+            let Some(m) = self.rock_meshes.get(r.mesh as usize) else {
+                continue;
+            };
+            let class = RayClass::Solid;
+            let key = RayKey(RAY_ROCKS, r.mesh as u64);
+            let state = *states.entry(r.mesh).or_insert_with(|| {
+                out.geometry(
+                    key,
+                    1,
+                    class.opaque(),
+                    RaySource::Buffers {
+                        vertex: &m.vertex,
+                        first_vertex: 0,
+                        vertex_count: m.vertex_count,
+                        vertex_stride: ROCK_VERTEX_BYTES as u32,
+                        index: &m.index,
+                        index_format: wgpu::IndexFormat::Uint32,
+                        first_index: 0,
+                        index_count: m.index_count,
+                    },
+                )
+            });
+            match state {
+                RayGeometryState::Ready | RayGeometryState::Older => {
+                    let look = RayLook {
+                        albedo: r.albedo,
+                        roughness: 0.85,
+                        ..Default::default()
+                    };
+                    out.place(id, key, &r.to_world, r.sphere, class, 0, &look);
+                    kept.insert(id);
+                }
+                RayGeometryState::Building if placed.contains(&id) => {
+                    kept.insert(id);
+                }
+                _ => {}
+            }
+        }
+        for (e, c) in &self.covers {
+            let id = RayKey(RAY_GROUND, e.to_bits());
+            let (center, radius) = c.bounds;
+            let sphere = RaySphere {
+                center: c.at + center.as_dvec3(),
+                radius,
+            };
+            if !in_reach(&sphere, &id) {
+                continue;
+            }
+            let class = RayClass::Ground;
+            // A floor rebuilt is a new version under the same key.
+            let state = out.geometry(
+                id,
+                c.version,
+                class.opaque(),
+                RaySource::Buffers {
+                    vertex: &c.vertex,
+                    first_vertex: 0,
+                    vertex_count: c.vertex_count,
+                    vertex_stride: GROUND_VERTEX_BYTES as u32,
+                    index: &c.index,
+                    index_format: wgpu::IndexFormat::Uint32,
+                    first_index: 0,
+                    index_count: c.index_count,
+                },
+            );
+            match state {
+                RayGeometryState::Ready | RayGeometryState::Older => {
+                    let look = RayLook {
+                        albedo: c.albedo,
+                        roughness: 0.95,
+                        ..Default::default()
+                    };
+                    let to_world = DAffine3::from_translation(c.at);
+                    out.place(id, id, &to_world, sphere, class, 0, &look);
+                    kept.insert(id);
+                }
+                RayGeometryState::Building if placed.contains(&id) => {
+                    kept.insert(id);
+                }
+                _ => {}
+            }
+        }
+        for id in placed.difference(&kept) {
+            out.remove(*id);
+        }
+        self.ray_placed = kept;
     }
 }
 
@@ -5479,6 +5766,7 @@ impl RenderFeature for SceneryFeature {
             if !view.extra_view {
                 self.rocks_changed = self.rock_state != 0;
                 self.rock_state = 0;
+                self.ray_rocks.clear();
             }
             self.stats = FeatureStats::default();
             return;
@@ -5527,6 +5815,10 @@ impl RenderFeature for SceneryFeature {
             self.ground_pipeline.as_ref(),
             self.rock_pipeline.as_ref(),
         );
+    }
+
+    fn ray_scene(&mut self, _gpu: &GpuShared, view: &RayView, out: &mut RaySceneOut<'_>) {
+        self.fill_ray_scene(view, out);
     }
 
     fn draw_shadow_static(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, _ctx: &FrameContext) {
