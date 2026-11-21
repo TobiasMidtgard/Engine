@@ -54,7 +54,7 @@ pub fn opens_at(kind: Kind) -> Vec<(Tier, f32)> {
                 .map(move |w| {
                     (
                         t,
-                        if t == Tier::Fisherfolk {
+                        if t.rank() == 0 {
                             w.unlock
                         } else {
                             w.unlock.max(1.0)
@@ -63,11 +63,17 @@ pub fn opens_at(kind: Kind) -> Vec<(Tier, f32)> {
                 })
         })
         .collect();
+    // (A works opens with people of its workers' rank on any region's ladder: Labourers at
+    // home, Freeholders, Caravaners or Whalers abroad.)
     if ways.is_empty()
         && let Some((t, _)) = kind.def().workers
-        && t != Tier::Fisherfolk
+        && t.rank() != 0
     {
-        ways.push((t, 1.0));
+        ways.extend(
+            (0..4)
+                .filter_map(|r| Tier::of(r, t.rank()))
+                .map(|t| (t, 1.0)),
+        );
     }
     if ways.iter().any(|(_, n)| *n <= 0.0) {
         ways.clear();
@@ -90,26 +96,38 @@ pub fn lock_of(econ: &Economy, c: Company, kind: Kind) -> Lock {
         progress
     };
     let locked = progress < 1.0;
-    let why = if !locked {
-        String::new()
-    } else if kind.def().workers.is_some_and(|(t, _)| ways == [(t, 1.0)]) {
-        let t = ways[0].0;
-        format!("Worked by {0}: move a house up to {0} first.", t.name())
-    } else {
-        let need: Vec<String> = ways
-            .iter()
-            .map(|(t, n)| format!("{n:.0} {}", t.name()))
-            .collect();
-        let got: Vec<String> = ways
-            .iter()
-            .map(|(t, _)| format!("{:.0} {}", have[t.index()].floor(), t.name()))
-            .collect();
-        format!(
-            "Opens at {} (you have {}).",
-            need.join(" or "),
-            got.join(", ")
-        )
-    };
+    let why =
+        if !locked {
+            String::new()
+        } else if kind.def().workers.is_some_and(|(t, _)| {
+            ways.first() == Some(&(t, 1.0)) && ways.iter().all(|w| w.1 == 1.0)
+        }) {
+            let t = ways[0].0;
+            let abroad: Vec<&str> = ways[1..].iter().map(|w| w.0.name()).collect();
+            if abroad.is_empty() {
+                format!("Worked by {0}: move a house up to {0} first.", t.name())
+            } else {
+                format!(
+                    "Worked by {0} (or {1} abroad): move a house up to {0} first.",
+                    t.name(),
+                    abroad.join(", ")
+                )
+            }
+        } else {
+            let need: Vec<String> = ways
+                .iter()
+                .map(|(t, n)| format!("{n:.0} {}", t.name()))
+                .collect();
+            let got: Vec<String> = ways
+                .iter()
+                .map(|(t, _)| format!("{:.0} {}", have[t.index()].floor(), t.name()))
+                .collect();
+            format!(
+                "Opens at {} (you have {}).",
+                need.join(" or "),
+                got.join(", ")
+            )
+        };
     Lock {
         kind,
         name: kind.def().name,

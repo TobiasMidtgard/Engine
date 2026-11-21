@@ -213,7 +213,7 @@ impl Rules {
 
     /// Whether houses may move up into `t`.
     pub fn allows_tier(&self, t: Tier) -> bool {
-        t <= self.top_tier
+        t.within(self.top_tier)
     }
 
     /// Change one rule: `key` as [`OPTIONS`] names it, `value` one of its choices.

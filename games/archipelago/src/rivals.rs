@@ -754,8 +754,20 @@ mod tests {
             let mut econ = w.resource_mut::<Economy>();
             *econ.coins_mut(2) = 4_000.0;
             for (i, c, people) in [
-                (0, 0, [80.0, 40.0, 0.0, 0.0, 0.0]),
-                (5, 2, [30.0, 0.0, 0.0, 0.0, 0.0]),
+                (
+                    0,
+                    0,
+                    [
+                        80.0, 40.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    ],
+                ),
+                (
+                    5,
+                    2,
+                    [
+                        30.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    ],
+                ),
             ] {
                 let b = &mut econ.islands[i];
                 b.harbours = 1;
@@ -767,7 +779,10 @@ mod tests {
         let rows = compare(&mut w);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].company, 0);
-        assert_eq!((rows[0].people, rows[0].tiers), (120, [80, 40, 0, 0, 0]));
+        assert_eq!(
+            (rows[0].people, rows[0].tiers),
+            (120, [80, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
         assert_eq!(rows[0].makes.first(), Some(&(Good::Fish, 3.0)));
         assert_eq!(
             (rows[2].people, rows[2].islands, rows[2].coins),

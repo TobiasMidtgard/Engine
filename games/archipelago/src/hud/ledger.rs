@@ -734,7 +734,11 @@ const PATRICIANS: Color = Color {
     a: 1.0,
 };
 /// Each tier's line in the people chart, in [`Tier::ALL`] order.
-const TIER_INKS: [Color; Tier::COUNT] = [FISHERFOLK, LABOURERS, BURGHERS, MASTERS, PATRICIANS];
+/// (The far peoples take their rank's ink at home, three to a region.)
+const TIER_INKS: [Color; Tier::COUNT] = [
+    FISHERFOLK, LABOURERS, BURGHERS, MASTERS, PATRICIANS, FISHERFOLK, LABOURERS, MASTERS,
+    FISHERFOLK, LABOURERS, MASTERS, FISHERFOLK, LABOURERS, MASTERS,
+];
 
 fn set_width(world: &mut World, id: &str, frac: f32) {
     if let Some(e) = engine_ui::input::find_id(world, id)

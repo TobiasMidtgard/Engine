@@ -50,6 +50,7 @@ mod looks;
 mod market;
 mod orders;
 mod patrician;
+mod peoples;
 mod placing;
 mod playtest;
 mod regional;

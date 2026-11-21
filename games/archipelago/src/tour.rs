@@ -457,41 +457,102 @@ fn views() -> Vec<View> {
             pitch_deg: Some(22.0),
             ..v("patricians", Aim::Home(T::Patricians, 0), -0.45, 50.0)
         },
+        // The far regions' own peoples: three to a region, their houses and their works.
         View {
             clean: true,
             fog: false,
-            pitch_deg: Some(20.0),
-            ..v("veranda_houses", Aim::Home(T::Masters, 5), 0.5, 48.0)
+            pitch_deg: Some(36.0),
+            ..v("riverfolk", Aim::Home(T::Riverfolk, 5), 0.3, 64.0)
         },
         View {
             clean: true,
             fog: false,
-            pitch_deg: Some(20.0),
-            ..v("plantation_hall", Aim::Home(T::Patricians, 5), 0.5, 52.0)
+            pitch_deg: Some(36.0),
+            ..v("freeholders", Aim::Home(T::Freeholders, 5), 0.3, 70.0)
         },
         View {
             clean: true,
             fog: false,
-            pitch_deg: Some(20.0),
-            ..v("tower_houses", Aim::Home(T::Masters, 9), 0.5, 48.0)
+            pitch_deg: Some(36.0),
+            ..v("planters", Aim::Home(T::Planters, 5), 0.3, 78.0)
         },
         View {
             clean: true,
             fog: false,
-            pitch_deg: Some(20.0),
-            ..v("palace", Aim::Home(T::Patricians, 9), 0.5, 52.0)
+            pitch_deg: Some(36.0),
+            ..v("herders", Aim::Home(T::Herders, 9), 0.3, 64.0)
         },
         View {
             clean: true,
             fog: false,
-            pitch_deg: Some(20.0),
-            ..v("stave_halls", Aim::Home(T::Masters, 12), 0.5, 48.0)
+            pitch_deg: Some(36.0),
+            ..v("caravaners", Aim::Home(T::Caravaners, 9), 0.3, 70.0)
         },
         View {
             clean: true,
             fog: false,
-            pitch_deg: Some(20.0),
-            ..v("copper_manor", Aim::Home(T::Patricians, 12), 0.5, 52.0)
+            pitch_deg: Some(36.0),
+            ..v("scholars", Aim::Home(T::Scholars, 9), 0.3, 78.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(36.0),
+            ..v("trappers", Aim::Home(T::Trappers, 12), 0.3, 64.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(36.0),
+            ..v("whalers", Aim::Home(T::Whalers, 12), 0.3, 70.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(36.0),
+            ..v("wardens", Aim::Home(T::Wardens, 12), 0.3, 78.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(30.0),
+            ..v("plantain_grove", Aim::Front(K::PlantainGrove, 5), 0.5, 42.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(30.0),
+            ..v("cotton_field", Aim::Front(K::CottonField, 5), 0.5, 46.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(22.0),
+            ..v("calico_loom", Aim::Front(K::CalicoLoom, 5), 0.5, 34.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(32.0),
+            ..v("goat_pen", Aim::Front(K::GoatPen, 9), 0.5, 30.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(22.0),
+            ..v("robe_loom", Aim::Front(K::RobeLoom, 9), 0.5, 30.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(30.0),
+            ..v("tea_garden", Aim::Front(K::TeaGarden, 9), 0.5, 40.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(22.0),
+            ..v("carpet_loom", Aim::Front(K::CarpetLoom, 9), 0.5, 34.0)
         },
         View {
             clean: true,

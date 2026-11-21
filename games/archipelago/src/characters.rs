@@ -379,8 +379,10 @@ pub fn shape(mut k: Knobs, t: &Traits) -> Knobs {
         k.abroad = true;
         k.traders = true;
     }
+    // (One who trades little leaves the free traders alone, but still buys from other
+    // houses what it cannot make: without that a level would play worse, not differently.)
     if t.trade <= 0.8 {
-        k.abroad = false;
+        k.traders = false;
     }
     if t.ambition >= 1.4 {
         k.works += 1;
@@ -621,10 +623,14 @@ mod tests {
             // The player has grown big; house 1 is small.
             econ.islands[0].owner = PLAYER;
             econ.islands[0].harbours = 1;
-            econ.islands[0].population = [400.0, 400.0, 200.0, 0.0, 0.0];
+            econ.islands[0].population = [
+                400.0, 400.0, 200.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ];
             econ.islands[3].owner = 1;
             econ.islands[3].harbours = 1;
-            econ.islands[3].population = [300.0, 300.0, 0.0, 0.0, 0.0];
+            econ.islands[3].population = [
+                300.0, 300.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ];
             w.insert_resource(econ);
             w.insert_resource(Rivals::default());
             install(&mut w, 1, find("hask").unwrap());

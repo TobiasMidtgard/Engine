@@ -310,7 +310,8 @@ pub fn order_fitted(world: &mut World, e: Entity, craft: Craft, fit: Fit) -> Res
     }
     let econ = world.resource::<Economy>();
     let books = &econ.islands[b.island];
-    if books.population[p.tier.index()] < 1.0 {
+    // (Abroad, the people of that rank on the region's own ladder.)
+    if crate::sim::hands(p.tier, b.island).is_none_or(|t| books.population[t.index()] < 1.0) {
         return Err(format!(
             "Building a {} takes {} on {}.",
             craft.name(),

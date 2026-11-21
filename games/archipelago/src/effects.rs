@@ -444,6 +444,7 @@ pub struct Riding {
 
 /// Chimney tops of a building, in its own space, and which effect each one plays.
 pub fn chimneys(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<(Vec3, &'static str)> {
+    let tier = crate::looks::house_tier(tier, seed);
     let v = crate::looks::variant(seed);
     match kind {
         // Far houses: no hearth smoke in the heat; a stone chimney in the north.

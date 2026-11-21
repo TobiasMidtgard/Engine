@@ -349,7 +349,8 @@ pub fn place(
     let seed = (origin.x as u64).wrapping_mul(73_856_093)
         ^ (origin.y as u64).wrapping_mul(19_349_663)
         ^ (kind as u64) << 40;
-    let tier = Tier::Fisherfolk;
+    // (A new house takes the first people of its island's region.)
+    let tier = Tier::first(island::islands()[isle].region());
     let def = kind.def();
     let mut e = world.spawn((
         Name::new(format!("{} {}", def.name, id)),

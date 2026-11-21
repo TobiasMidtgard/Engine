@@ -110,7 +110,7 @@ pub fn houses(world: &mut World, at: &[usize], up: bool, top: Tier) -> Result<Va
         h.residents = h.tier.capacity();
         h.happiness = h.happiness.max(80.0);
         filled += 1;
-        if up && h.tier.next().is_some_and(|(t, _)| t <= top) {
+        if up && h.tier.next().is_some_and(|(t, _)| t.within(top)) {
             ups.push((b.island, h.clone()));
         }
     }
@@ -131,7 +131,7 @@ pub fn houses(world: &mut World, at: &[usize], up: bool, top: Tier) -> Result<Va
             if !at.contains(&b.island) {
                 continue;
             }
-            if h.tier.next().is_some_and(|(t, _)| t <= top)
+            if h.tier.next().is_some_and(|(t, _)| t.within(top))
                 && let Some(n) = it.next()
             {
                 *h = n;

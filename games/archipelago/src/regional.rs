@@ -119,6 +119,8 @@ pub fn house_model(biome: Biome, tier: Tier, v: usize) -> Option<ModelKey> {
         (Biome::Arid, Tier::Labourers) => ["riad_0", "riad_1", "riad_2"],
         (Biome::Arctic, Tier::Fisherfolk) => ["cabin_0", "cabin_1", "cabin_2"],
         (Biome::Arctic, Tier::Labourers) => ["lodge_0", "lodge_1", "lodge_2"],
+        // (A far people lives in the houses of its rank: see `Tier::look`.)
+        (_, t) => return house_model(biome, t.look(), v),
     };
     Some(set[v % 3])
 }

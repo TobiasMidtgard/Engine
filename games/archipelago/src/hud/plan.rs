@@ -131,6 +131,8 @@ pub fn tier_icon(t: Tier) -> &'static str {
         Tier::Burghers => "isle_tier_burghers",
         Tier::Masters => "isle_tier_masters",
         Tier::Patricians => "isle_tier_patricians",
+        // (The far peoples borrow the home tier of their rank until they have their own.)
+        t => tier_icon(t.look()),
     }
 }
 

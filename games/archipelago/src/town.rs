@@ -331,6 +331,12 @@ fn fill_houses(
             if grid::check(world.resource::<Grid>(), Kind::House, origin, rot).is_ok()
                 && let Ok(e) = place(world, Kind::House, origin, rot, false)
             {
+                // (Abroad, the region's own people of that rank.)
+                let region = world
+                    .get::<crate::sim::Building>(e)
+                    .map_or(0, |b| crate::island::islands()[b.island].region());
+                let l = Tier::ladder(region);
+                let tier = l[tier.rank().min(l.len() - 1)];
                 if let Some(mut h) = world.get_mut::<House>(e) {
                     h.tier = tier;
                     h.residents = tier.capacity();
@@ -659,7 +665,8 @@ fn far_town(
         // A patrician's house and two masters' among them.
         fill_houses(world, village, 45.0, 1, Tier::Patricians);
         fill_houses(world, village, 50.0, 2, Tier::Masters);
-        fill_houses(world, village, 55.0, burghers, Tier::Burghers);
+        // (Abroad these are the region's own peoples of those ranks: see `fill_houses`.)
+        fill_houses(world, village, 55.0, burghers, Tier::Labourers);
     }
     fill_houses(world, village, radius + 25.0, houses, Tier::Fisherfolk);
     if burghers > 0 {
@@ -712,6 +719,12 @@ fn far_lands(world: &mut World) -> FarLands {
         for (a, r) in [(-1.35, 150.0), (1.25, 165.0)] {
             place_near(world, Kind::Distillery, at(a, r), 30, true);
         }
+        // What the Riverfolk live on: plantains, and calico from their own cotton.
+        for (a, r) in [(-0.35, 200.0), (0.45, 205.0)] {
+            place_near(world, Kind::PlantainGrove, at(a, r), 40, true);
+        }
+        place_near(world, Kind::CottonField, at(-1.05, 300.0), 40, true);
+        place_near(world, Kind::CalicoLoom, at(-1.7, 110.0), 30, true);
         out.sarrow_mast = place_near(world, Kind::AirshipMast, at(-1.9, 150.0), 40, true);
     }
     if let Some((h, town)) = far_town(world, 6, 9, 50.0, 14, 0) {
@@ -719,6 +732,8 @@ fn far_lands(world: &mut World) -> FarLands {
         let at = ring(6, town);
         along_shore(world, h, Kind::Fishery, 1, 70.0);
         place_near(world, Kind::CanePlantation, at(0.2, 190.0), 40, true);
+        place_near(world, Kind::PlantainGrove, at(-0.9, 150.0), 40, true);
+        place_near(world, Kind::CottonField, at(1.0, 170.0), 40, true);
         woodcutters_near(world, 6, town, 1);
     }
     // --- The Amber Reach: mud-brick towns, dates under the palms, salt from the shore.
@@ -730,8 +745,14 @@ fn far_lands(world: &mut World) -> FarLands {
         for (a, r) in [(-0.8, 230.0), (0.75, 240.0)] {
             place_near(world, Kind::DateGrove, at(a, r), 40, true);
         }
-        place_near(world, Kind::SheepFarm, at(0.0, 330.0), 40, true);
-        place_near(world, Kind::Weaver, at(-1.5, 140.0), 30, true);
+        // Herders' robes from their goats, tea from the terraces, carpets of their own silk.
+        for (a, r) in [(0.0, 330.0), (-0.3, 420.0)] {
+            place_near(world, Kind::GoatPen, at(a, r), 40, true);
+        }
+        place_near(world, Kind::RobeLoom, at(-1.5, 140.0), 30, true);
+        place_near(world, Kind::TeaGarden, at(0.4, 300.0), 40, true);
+        place_near(world, Kind::SilkFarm, at(1.2, 300.0), 40, true);
+        place_near(world, Kind::CarpetLoom, at(-2.3, 105.0), 30, true);
         out.amber_mast = place_near(world, Kind::AirshipMast, at(1.7, 160.0), 40, true);
     }
     if let Some((h, town)) = far_town(world, 10, 9, 50.0, 16, 0) {
@@ -742,6 +763,7 @@ fn far_lands(world: &mut World) -> FarLands {
             place_near(world, Kind::SaltWorks, at(a, r), 40, true);
         }
         place_near(world, Kind::DateGrove, at(0.0, 210.0), 40, true);
+        place_near(world, Kind::GoatPen, at(0.6, 250.0), 40, true);
     }
     // --- Frostholm: cabins under snow, furs from the spruce woods, oil from the ice edge.
     if let Some((h, town)) = far_town(world, 12, 14, 85.0, 38, 5) {
@@ -1736,9 +1758,27 @@ pub mod tests {
         // Every far land has its town and its outpost, in the style of its climate, and
         // makes what only it can.
         for (isle, kinds) in [
-            (5, &[Kind::CanePlantation, Kind::Distillery][..]),
-            (6, &[Kind::CanePlantation]),
-            (9, &[Kind::DateGrove, Kind::Weaver]),
+            (
+                5,
+                &[
+                    Kind::CanePlantation,
+                    Kind::Distillery,
+                    Kind::PlantainGrove,
+                    Kind::CottonField,
+                    Kind::CalicoLoom,
+                ][..],
+            ),
+            (6, &[Kind::CanePlantation, Kind::PlantainGrove]),
+            (
+                9,
+                &[
+                    Kind::DateGrove,
+                    Kind::GoatPen,
+                    Kind::RobeLoom,
+                    Kind::TeaGarden,
+                    Kind::CarpetLoom,
+                ],
+            ),
             (10, &[Kind::SaltWorks]),
             (12, &[Kind::TrapperLodge, Kind::OilWorks]),
             (13, &[Kind::OilWorks]),

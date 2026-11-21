@@ -102,7 +102,7 @@ pub fn register(app: &mut App) {
                             json!({"need": name, "kind": what, "category": w.cat.name(), "points": w.points, "people": w.people, "coins": w.coins, "joy": w.joy, "unlocks_at": w.unlock})
                         })
                         .collect();
-                    json!({"tier": t.name(), "house": t.capacity(), "rent": t.rent(), "goodwill": t.goodwill(), "full_income": t.full_income(),
+                    json!({"tier": t.name(), "about": t.blurb(), "region": crate::globe::regions()[t.region()].name, "rank": t.rank(), "house": t.capacity(), "rent": t.rent(), "goodwill": t.goodwill(), "full_income": t.full_income(),
                         "thresholds": crate::defs::Cat::BASIC.map(|c| json!({"category": c.name(), "points": t.threshold(c)})), "wants": wants})
                 })
                 .collect();

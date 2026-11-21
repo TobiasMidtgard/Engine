@@ -246,7 +246,37 @@ pub const MODELS: &[ModelKey] = &[
     "theatre",
     "bank",
     "obelisk",
+    // peoples
+    "plantain",
+    "plantain_shed",
+    "cotton_bush",
+    "cotton_barn",
+    "calico_loom",
+    "dye_vat",
+    "cloth_rack",
+    "goat",
+    "goat_shelter",
+    "stone_wall_4",
+    "trough",
+    "robe_loom",
+    "robe_line",
+    "tea_row",
+    "terrace_6",
+    "tea_house",
+    "carpet_loom",
+    "carpet_frame",
 ];
+
+/// The home tier whose house a house of `tier` is drawn as ([`Tier::look`]); the richest
+/// of a far people's top rank (about one house in three) in the grandest of the climate.
+pub fn house_tier(tier: Tier, seed: u64) -> Tier {
+    let t = tier.look();
+    if t != tier && t == Tier::Masters && h01(seed, 7) < 0.3 {
+        Tier::Patricians
+    } else {
+        t
+    }
+}
 
 /// Which of a model's three variants a building with this seed gets.
 pub fn variant(seed: u64) -> usize {
@@ -256,6 +286,8 @@ pub fn variant(seed: u64) -> usize {
 /// The pieces a building is drawn with (without its moving parts), in the style of the
 /// climate it stands in.
 pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
+    // (The far peoples live in the climate's own houses of their rank.)
+    let tier = house_tier(tier, seed);
     let v = variant(seed);
     let (w, d) = kind.def().size;
     let (hw, hd) = (
@@ -310,6 +342,15 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
         // The far regions build their own quays, fisheries, markets and houses of worship.
         Kind::Harbour | Kind::Fishery | Kind::Market | Kind::Chapel
             if crate::civic::look(kind, biome, seed, &mut out) => {}
+        Kind::PlantainGrove
+        | Kind::CottonField
+        | Kind::CalicoLoom
+        | Kind::GoatPen
+        | Kind::RobeLoom
+        | Kind::TeaGarden
+        | Kind::CarpetLoom => {
+            crate::peoples::look(kind, seed, hw, hd, &mut out);
+        }
         Kind::CanePlantation
         | Kind::Distillery
         | Kind::DateGrove
@@ -2910,6 +2951,7 @@ pub fn build_model(key: ModelKey) -> Parts {
             .or_else(|| crate::civic::build(key))
             .or_else(|| crate::burgher::build(key))
             .or_else(|| crate::patrician::build(key))
+            .or_else(|| crate::peoples::build(key))
             .or_else(|| crate::halls::build(key))
             .or_else(|| crate::shipyard::build(key))
             .or_else(|| crate::incidents::build(key))
@@ -2964,6 +3006,7 @@ mod tests {
             .chain(crate::civic::MODELS)
             .chain(crate::burgher::MODELS)
             .chain(crate::patrician::MODELS)
+            .chain(crate::peoples::MODELS)
             .chain(crate::halls::MODELS)
             .chain(crate::shipyard::MODELS)
             .chain(crate::incidents::MODELS)

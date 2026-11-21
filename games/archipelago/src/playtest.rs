@@ -151,6 +151,17 @@ fn see_abroad(world: &World) {
             })
         })
         .collect();
+    // (With a deep purse, a captain who deals with the free traders counts what they sell as
+    // to be had too: coffee beans, cacao, silk and gold for a works at home.)
+    let mut goods = goods;
+    let k = knobs(world);
+    if k.traders && econ.rules.free_traders && econ.coins_of(me) >= k.reserve * 4.0 + 5_000.0 {
+        for g in Good::ALL.into_iter().filter(|g| crate::traders::sells(*g)) {
+            if !goods.contains(&g) {
+                goods.push(g);
+            }
+        }
+    }
     ABROAD.with(|a| *a.borrow_mut() = goods);
 }
 
@@ -340,6 +351,11 @@ pub(crate) fn turn(world: &mut World, log: &mut Log) {
             }
             continue;
         }
+        // (A far settlement's first works are its people's own goods, too small a want to
+        // show as short at first: lay out the rest of them.)
+        if fresh && islands()[i].region() != 0 {
+            bootstrap(world, log, now, i);
+        }
         let w = 100 + 10 * i as u64;
         if !slips(world, w) {
             supply(world, log, now, i);
@@ -398,6 +414,32 @@ fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
         let d = Kind::Furrier.def();
         [d.input, d.input2].into_iter().flatten().all(&can) || bought_abroad(Good::Coats)
     };
+    // (A far region's people climb their own ladder: each rank once the basic goods of the
+    // next can be had.)
+    let region = islands()[i].region();
+    if region != 0 {
+        let top = knobs(world).top;
+        let tiers: Vec<Tier> = Tier::ladder(region)
+            .iter()
+            .copied()
+            .take_while(|t| {
+                t.next().is_some_and(|(n, _)| {
+                    let (goods, basic) = n.needs();
+                    goods[..basic].iter().all(|g| can(*g))
+                })
+            })
+            .filter(|t| t.rank() < top.rank())
+            .collect();
+        let (moved, _) = crate::reports::move_up_all_of(world, i, &tiers);
+        if moved > 0 {
+            log.act("moved houses up");
+            log.line(
+                now,
+                format!("moved {moved} houses up on {}", islands()[i].name),
+            );
+        }
+        return;
+    }
     let burghers = coats && (can(Good::SaltFish) || can(Good::DateCakes));
     // Burghers move up to Masters once coffee can be had as well; Masters to Patricians
     // once chocolate and gowns can.
@@ -427,7 +469,7 @@ fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
         }
     }
     let tiers: &[Tier] = if patricians {
-        &Tier::ALL
+        &Tier::HOME
     } else if masters {
         &[Tier::Fisherfolk, Tier::Labourers, Tier::Burghers]
     } else if burghers {
@@ -445,7 +487,11 @@ fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
     }
     // (No higher than its character takes its towns.)
     let top = knobs(world).top;
-    let tiers: Vec<Tier> = tiers.iter().copied().filter(|t| *t < top).collect();
+    let tiers: Vec<Tier> = tiers
+        .iter()
+        .copied()
+        .filter(|t| t.rank() < top.rank())
+        .collect();
     let (moved, waiting) = crate::reports::move_up_all_of(world, i, &tiers);
     if moved > 0 {
         log.act("moved houses up");
@@ -1058,7 +1104,7 @@ fn build_within(
         Kind::Woodcutter | Kind::Sawmill | Kind::Fishery | Kind::Market | Kind::House
     ) || kind.def().output.is_some_and(|g| {
         // (And the chain of a good Fisherfolk or Labourers cannot do without.)
-        [Tier::Fisherfolk, Tier::Labourers].iter().any(|t| {
+        Tier::ALL.iter().filter(|t| t.rank() <= 1).any(|t| {
             t.wants().iter().any(|w| {
                 w.basic()
                     && matches!(w.need, crate::defs::Need::Good(x) if x == g || chain_has(x, g))
@@ -1590,7 +1636,7 @@ fn materials(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
         }
     }
     let books = world.resource::<Economy>().islands[i].clone();
-    let ff = Tier::Fisherfolk.index();
+    let ff = crate::sim::hands(Tier::Fisherfolk, i).map_or(0, Tier::index);
     if books.population[ff] - books.jobs[ff] < 10.0 {
         return;
     }
@@ -1608,7 +1654,10 @@ fn materials(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
 /// Labourers ask for.
 fn bricks_and_chapel(world: &mut World, log: &mut Log, now: f64, i: usize, at: DVec2) {
     let books = world.resource::<Economy>().islands[i].clone();
-    if books.population[Tier::Labourers.index()] < 40.0
+    // (Abroad, the people of the Labourers' and Burghers' rank on the region's own ladder.)
+    let lab = crate::sim::hands(Tier::Labourers, i).unwrap_or(Tier::Labourers);
+    let bur = crate::sim::hands(Tier::Burghers, i).unwrap_or(Tier::Burghers);
+    if books.population[lab.index()] < 40.0
         || log
             .last
             .get(&(i + 4000, None))
@@ -1626,7 +1675,7 @@ fn bricks_and_chapel(world: &mut World, log: &mut Log, now: f64, i: usize, at: D
     };
     // (One pair of brick works for every hundred Labourers at most.)
     let pairs = count(world, Kind::Brickworks) as f32;
-    let room = pairs < (books.population[Tier::Labourers.index()] / 100.0).max(1.0);
+    let room = pairs < (books.population[lab.index()] / 100.0).max(1.0);
     if islands()[i].fertility.clay && books.get(Good::Bricks) < 20.0 && room {
         if count(world, Kind::ClayPit) <= count(world, Kind::Brickworks) {
             build_for(world, log, now, Kind::ClayPit, i, at, "bricks");
@@ -1640,16 +1689,14 @@ fn bricks_and_chapel(world: &mut World, log: &mut Log, now: f64, i: usize, at: D
     let want_glass = world
         .query::<(&Building, &House)>()
         .iter(world)
-        .filter(|(b, h)| {
-            b.island == i && h.tier == Tier::Labourers && h.wait == crate::sim::Wait::NoMaterials
-        })
+        .filter(|(b, h)| b.island == i && h.tier == lab && h.wait == crate::sim::Wait::NoMaterials)
         .count();
     // (A careful player has it going before the first house is ready, once Burghers can be
     // fed at all.)
     let held = world
         .get_resource::<BotHolds>()
         .is_some_and(|x| x.0.contains(&i));
-    let soon = books.population[Tier::Labourers.index()] >= 250.0 && !held;
+    let soon = books.population[lab.index()] >= 250.0 && !held;
     if (want_glass >= 3 || soon) && books.get(Good::Glass) < 2.0 + crate::sim::BUILD_RESERVE {
         let (mut works, mut busy) = (0, 0);
         for (b, p) in world.query::<(&Building, &Producer)>().iter(world) {
@@ -1675,11 +1722,9 @@ fn bricks_and_chapel(world: &mut World, log: &mut Log, now: f64, i: usize, at: D
     let want_iron = world
         .query::<(&Building, &House)>()
         .iter(world)
-        .filter(|(b, h)| {
-            b.island == i && h.tier == Tier::Burghers && h.wait == crate::sim::Wait::NoMaterials
-        })
+        .filter(|(b, h)| b.island == i && h.tier == bur && h.wait == crate::sim::Wait::NoMaterials)
         .count();
-    let soon = books.population[Tier::Burghers.index()] >= 200.0;
+    let soon = books.population[bur.index()] >= 200.0;
     if (want_iron >= 3 || soon)
         && books.get(Good::Iron) < 4.0 + crate::sim::BUILD_RESERVE
         && crate::unlocks::refusal(world, Kind::Ironworks).is_none()
@@ -1828,8 +1873,12 @@ fn supply(world: &mut World, log: &mut Log, now: f64, i: usize) {
 fn grow(world: &mut World, log: &mut Log, now: f64, i: usize) {
     let books = world.resource::<Economy>().islands[i].clone();
     // Basic needs of the first tier met, and money in the bank: more houses.
-    let fed = Tier::Fisherfolk.wants().iter().all(|w| match w.need {
-        crate::defs::Need::Good(g) if w.people > 0.0 => books.supply[g.index()] > 0.9,
+    // (Only what they ask for yet: a need that opens at 60 people waits for the houses.)
+    let first = Tier::first(islands()[i].region());
+    let fed = first.wants().iter().enumerate().all(|(j, w)| match w.need {
+        crate::defs::Need::Good(g) if w.people > 0.0 && books.asks(first, j, w) => {
+            books.supply[g.index()] > 0.9
+        }
         _ => true,
     });
     let short_hands = (0..Tier::COUNT).any(|t| books.jobs[t] > 0.0 && books.workforce[t] < 0.9);
@@ -2230,12 +2279,49 @@ const FIRST_WORKS: &[(Kind, usize)] = &[
     (Kind::Weaver, 1),
 ];
 
+/// The same for each far region's first people: Riverfolk eat fish and plantains and wear
+/// calico, Herders dates and robes, Trappers fish and furs.
+const FIRST_WORKS_ABROAD: [&[(Kind, usize)]; 3] = [
+    &[
+        (Kind::Market, 1),
+        (Kind::Woodcutter, 1),
+        (Kind::Sawmill, 1),
+        (Kind::Fishery, 1),
+        (Kind::House, 8),
+        (Kind::PlantainGrove, 1),
+        (Kind::CottonField, 1),
+        (Kind::CalicoLoom, 1),
+    ],
+    &[
+        (Kind::Market, 1),
+        (Kind::Woodcutter, 1),
+        (Kind::Sawmill, 1),
+        (Kind::House, 8),
+        (Kind::DateGrove, 1),
+        (Kind::GoatPen, 1),
+        (Kind::RobeLoom, 1),
+    ],
+    &[
+        (Kind::Market, 1),
+        (Kind::Woodcutter, 1),
+        (Kind::Sawmill, 1),
+        (Kind::Fishery, 1),
+        (Kind::House, 8),
+        (Kind::TrapperLodge, 1),
+    ],
+];
+
 /// A settled island with nobody living there yet: lay out its first works and houses.
 fn bootstrap(world: &mut World, log: &mut Log, now: f64, i: usize) {
-    if log.last.get(&(i, None)).is_some_and(|t| now - t < 45.0) {
+    // (Its own clock: `grow` keeps the island's plain one.)
+    if log
+        .last
+        .get(&(i + 8800, None))
+        .is_some_and(|t| now - t < 45.0)
+    {
         return;
     }
-    log.last.insert((i, None), now);
+    log.last.insert((i + 8800, None), now);
     let Some(at) = heart(world, i) else { return };
     let have = |world: &mut World, k: Kind| {
         world
@@ -2245,7 +2331,24 @@ fn bootstrap(world: &mut World, log: &mut Log, now: f64, i: usize) {
             .count()
     };
     let mut built = 0;
-    for &(k, n) in FIRST_WORKS {
+    let first = match islands()[i].region() {
+        r @ 1..=3 => FIRST_WORKS_ABROAD[r - 1],
+        _ => FIRST_WORKS,
+    };
+    // (A loom needs its fibre grown here: else a ship brings the cloth.)
+    let abroad = islands()[i].region() != 0;
+    let grows = |k: Kind| {
+        let fibre = k.def().input;
+        !abroad
+            || fibre.is_none()
+            || first
+                .iter()
+                .any(|(m, _)| m.def().output == fibre && islands()[i].fertility.allows(*m))
+    };
+    for &(k, n) in first {
+        if !grows(k) {
+            continue;
+        }
         if built >= 4 {
             break;
         }
@@ -2630,7 +2733,8 @@ fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
                 let short = (p.upkeep as f64 - balance).max(0.0);
                 left >= short * 90.0
                     && left >= p.upkeep as f64 * 20.0
-                    && books.population[p.tier.index()] >= 1.0
+                    && crate::sim::hands(p.tier, b.island)
+                        .is_some_and(|t| books.population[t.index()] >= 1.0)
                     && p.cost.iter().all(|(g, n)| books.get(*g) >= *n as f64)
             })
     };

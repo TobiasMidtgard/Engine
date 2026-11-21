@@ -687,6 +687,11 @@ pub fn step(
         }
         if let Some((tier, w)) = b.kind.def().workers {
             let tier = boost.and_then(|x| x.workers).unwrap_or(tier);
+            // (Its island's own people of that rank work it; abroad nobody stands so high
+            // as a Master, and such a works finds no hands.)
+            let Some(tier) = hands(tier, b.island) else {
+                continue;
+            };
             let w = w as f32 * (1.0 - boost.map_or(0.0, |x| x.hands));
             let books = &mut econ.islands[b.island];
             if !p.asks_workers() {
@@ -1041,7 +1046,10 @@ pub fn step(
         p.idle_s = 0.0;
         p.crew = (p.crew + dt / STAFF_UP_S).min(1.0);
         let staff = def.workers.map_or(1.0, |(t, _)| {
-            let t = boost.workers.unwrap_or(t).index();
+            let Some(t) = hands(boost.workers.unwrap_or(t), b.island) else {
+                return 0.0;
+            };
+            let t = t.index();
             if p.first {
                 books.staff_first[t]
             } else {
@@ -1284,10 +1292,18 @@ pub fn appraise(h: &House, books: &IslandBooks, boost: Option<&Boost>) -> Apprai
     a
 }
 
+/// Who works a job asked of `t` (a home tier, as the building table names its workers) on
+/// island `isle`: the people of the same rank on its region's ladder, or nobody when that
+/// ladder stops lower.
+pub fn hands(t: Tier, isle: usize) -> Option<Tier> {
+    let region = island::islands().get(isle).map_or(0, |i| i.region());
+    Tier::of(region, t.rank())
+}
+
 /// What stops a ready house moving up now (`Wait::None`: nothing). `now` is the player's
 /// order for this one house: it ignores the job guard (the caller warns instead).
 pub fn up_wait(h: &House, books: &IslandBooks, free: bool, now: bool, top: Tier) -> Wait {
-    let Some((next, cost)) = h.tier.next().filter(|(t, _)| *t <= top) else {
+    let Some((next, cost)) = h.tier.next().filter(|(t, _)| t.within(top)) else {
         return Wait::Top;
     };
     if next.wants_paving() && !h.paved {

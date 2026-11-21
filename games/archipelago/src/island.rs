@@ -201,6 +201,8 @@ fn far_lands() -> Vec<Island> {
             0.78,
             // (Highland pasture above the jungle: a house can clothe its first town here.)
             Fertility {
+                plantains: true,
+                cotton: true,
                 clay: true,
                 grain: true,
                 cane: true,
@@ -220,6 +222,8 @@ fn far_lands() -> Vec<Island> {
             103,
             0.6,
             Fertility {
+                plantains: true,
+                cotton: true,
                 hops: true,
                 cane: true,
                 cacao: true,
@@ -237,6 +241,7 @@ fn far_lands() -> Vec<Island> {
             107,
             0.5,
             Fertility {
+                plantains: true,
                 coffee: true,
                 ..none
             },
@@ -252,6 +257,8 @@ fn far_lands() -> Vec<Island> {
             109,
             0.8,
             Fertility {
+                plantains: true,
+                cotton: true,
                 clay: true,
                 cane: true,
                 coffee: true,
@@ -270,6 +277,8 @@ fn far_lands() -> Vec<Island> {
             211,
             0.14,
             Fertility {
+                goats: true,
+                tea: true,
                 wool: true,
                 clay: true,
                 dates: true,
@@ -288,6 +297,7 @@ fn far_lands() -> Vec<Island> {
             223,
             0.08,
             Fertility {
+                goats: true,
                 wool: true,
                 salt: true,
                 dates: true,
@@ -306,6 +316,8 @@ fn far_lands() -> Vec<Island> {
             227,
             0.1,
             Fertility {
+                goats: true,
+                tea: true,
                 salt: true,
                 ore: true,
                 ..none
@@ -341,7 +353,12 @@ fn far_lands() -> Vec<Island> {
             (2.8, 0.5),
             311,
             0.2,
-            Fertility { oil: true, ..none },
+            // (Brine boiled over the try-works fires: the north's only salt.)
+            Fertility {
+                oil: true,
+                salt: true,
+                ..none
+            },
             Some((12, 230.0)),
         ),
         land(
