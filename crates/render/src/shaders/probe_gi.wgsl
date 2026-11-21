@@ -5,8 +5,8 @@
 //
 // What the rays trace comes first, composed before this file, one of three ways
 // (`probe_gi::shader_source`). All give the probes' buffers (`pass_`, `rays`, `probe_state`,
-// `atlas_out`, `updates`), `trace_scene`, `trace_reflect` (a world reflection's ray) and
-// `shade_hit`:
+// `atlas_out`, `updates`), `trace_scene`, `trace_reflect` (a world reflection's ray),
+// `trace_sun` (a sun's measuring ray) and `shade_hit`:
 // * the frame's ray scene: lib_ray.wgsl and probe_gi_rays.wgsl (ray queries against the scene
 //   every feature fills, ray_scene/mod.rs);
 // * the probes' own scene on ray-tracing hardware: probe_gi_trace_hw.wgsl and
@@ -366,10 +366,12 @@ fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // The sun's rays (`cs_sun`; `RenderSettings::ray_sun_shadows`, a measurement for now): one ray
-// toward the sun from every pixel the prepass drew, against the same scene, from the side of
-// the surface the sun is on (as the shadow maps are read). `sun_out`.r: 1 where the ray reached
-// the sky within `SUN_RAY_REACH`, 0 where something stopped it. Nothing reads it yet. The
-// normals and depth are `reflect_normal` and `reflect_depth`, at the view's full size.
+// toward the sun from every pixel the prepass drew, against the same scene (`trace_sun`: on the
+// frame's ray scene what casts at any size and the leaves through the holes of their texture),
+// from the side of the surface the sun is on (as the shadow maps are read). `sun_out`.r: 1
+// where the ray reached the sky within `SUN_RAY_REACH`, 0 where something stopped it. Nothing
+// reads it yet. The normals and depth are `reflect_normal` and `reflect_depth`, at the view's
+// full size.
 @group(2) @binding(5) var sun_out: texture_storage_2d<rgba8unorm, write>;
 // Rays shot and rays stopped, counted while `COUNT_SUN_RAYS` is set (cleared before the pass).
 @group(2) @binding(6) var<storage, read_write> sun_counts: array<atomic<u32>, 4>;
@@ -396,7 +398,7 @@ fn cs_sun(@builtin(global_invocation_id) id: vec3<u32>) {
     let rel = (frame.inv_view * vec4<f32>(pos, 1.0)).xyz;
     let n = sunlit_side(oct_decode(nr.xy));
     let origin = rel + n * (0.02 + 0.002 * -pos.z);
-    let stopped = trace_scene(origin, frame.sun_dir.xyz, SUN_RAY_REACH, true).instance != 0xffffffffu;
+    let stopped = trace_sun(origin, frame.sun_dir.xyz, SUN_RAY_REACH);
     if (shade_skip(COUNT_SUN_RAYS)) {
         atomicAdd(&sun_counts[0], 1u);
         if (stopped) { atomicAdd(&sun_counts[1], 1u); }

@@ -16,23 +16,40 @@
 // `cs_reflect` trace nothing in between); shadow rays leave it as it is.
 var<private> ray_last: RayHit;
 
+// The leaves for the probes' rays and their hits' shadow rays while the canopy map holds no
+// crown (`frame.canopy.w` 0: the setting is off, or no crown is near): the crowns as their
+// stand-ins' cards and the swaying cards that cast, every triangle whole, as the probes' own
+// scene then held the cards. While the map holds crowns, the leaves reach the probes through it
+// (`canopy_ray_transmittance`), never as cards.
+fn leaves_unless_canopy() -> u32 {
+    return select(RAY_LEAF, 0u, frame.canopy.w > 0.0);
+}
+
+// What a hit's shadow rays ask of a cut-out card's triangles (a fence, and the leaves while the
+// canopy map holds none): their texture, for the first 4 a ray meets, then their coverage. The
+// ground stops them from either side, as in the probes' own scene.
+const SHADOW_RULES: u32 = RULE_LEAF_TEXTURE | (4u << RULE_TESTS_SHIFT);
+
 // The nearest hit along a camera-relative ray within `t_max` (`instance` all ones: none)
-// among what holds its shape and is 0.3 m or more, as the probes' own scene held it: no face
-// is culled, every triangle is taken whole. `local_n` is the triangle's normal in the scene's
-// space here. `first_hit`: a shadow ray, which only tells what stopped it (`ray_stopped` in
-// lib_ray.wgsl; its `t` is the ray's end and its `local_n` zero): it passes what casts no
-// shadow and is stopped by a stand-in that casts for such a thing, where it goes into the
-// stand-in. (The probes' own scene, which holds no stand-in, stopped it at the thing itself.)
+// among what holds its shape and is 0.3 m or more (`RAY_SEES_SHAPES`, and the leaves while the
+// canopy map holds none), as the probes' own scene held it: no face is culled, every triangle
+// is taken whole. `local_n` is the triangle's normal in the scene's space here. `first_hit`: a
+// shadow ray from a hit, toward the sun or a lamp, which only tells what stopped it
+// (`ray_stopped` in lib_ray.wgsl; its `t` is the ray's end and its `local_n` zero): it is
+// stopped by what casts (`RAY_CASTS`, and the leaves while the canopy map holds none), cut-out
+// cards through the holes of their texture (`SHADOW_RULES`), and by a stand-in that casts for a
+// thing that casts none itself, where it goes into the stand-in. (The probes' own scene, which
+// holds no stand-in, stopped it at the thing itself, and took every card whole.)
 fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -> Hit {
     var hit: Hit;
     hit.triangle = 0u;
     if (first_hit) {
         hit.t = t_max;
-        hit.instance = ray_stopped(origin, dir, t_max);
+        hit.instance = ray_stopped(origin, dir, t_max, RAY_CASTS | leaves_unless_canopy(), SHADOW_RULES);
         hit.local_n = vec3<f32>(0.0);
         return hit;
     }
-    let found = ray_whole(origin, dir, t_max, RAY_SEES_SHAPES);
+    let found = ray_whole(origin, dir, t_max, RAY_SEES_SHAPES | leaves_unless_canopy());
     ray_last = found;
     hit.t = found.t;
     hit.instance = found.row;
@@ -40,13 +57,13 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
     return hit;
 }
 
-// What world reflections ask of a leaf card's triangles: their texture, for the first 4 a ray
-// meets, then their coverage; and the ground only at its front.
+// What world reflections ask of a cut-out card's triangles: their texture, for the first 4 a
+// ray meets, then their coverage; and the ground only at its front.
 const REFLECT_RULES: u32 = RULE_GROUND_FRONT | RULE_LEAF_TEXTURE | (4u << RULE_TESTS_SHIFT);
 
 // The nearest hit along a camera-relative ray within `t_max` that a world reflection sees
 // (`instance` all ones: none), as `trace_scene` gives a probe's: every class a view draws, of
-// any size, leaf cards through the holes of their texture.
+// any size, cut-out cards (leaves, fences) through the holes of their texture.
 fn trace_reflect(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> Hit {
     let found = ray_nearest(origin, dir, t_max, RAY_DRAWN, REFLECT_RULES);
     ray_last = found;
@@ -56,6 +73,17 @@ fn trace_reflect(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> Hit {
     hit.triangle = 0u;
     hit.local_n = found.n;
     return hit;
+}
+
+// What the sun's measuring rays ask: as world reflections, a cut-out card's texture for the
+// first 4 cards a ray meets, then its coverage, and the ground only at its front.
+const SUN_RULES: u32 = RULE_GROUND_FRONT | RULE_LEAF_TEXTURE | (4u << RULE_TESTS_SHIFT);
+
+// Whether something stops a sun's measuring ray (`cs_sun`) from camera-relative `origin`
+// along `dir` within `t_max`: what casts at any size and the leaves, cut-outs through the
+// holes of their texture (`RAY_SUN_CASTS`), and the stand-ins where the ray goes into one.
+fn trace_sun(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> bool {
+    return ray_stopped(origin, dir, t_max, RAY_SUN_CASTS, SUN_RULES) != RAY_NONE;
 }
 
 // Light leaving the surface a ray from `origin` along `dir` hit (`hit`, not a miss), toward

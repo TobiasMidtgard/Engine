@@ -915,7 +915,8 @@ impl Instances {
                 }
             }
         }
-        let build_still = self.levels[STILL].wanted && still_due;
+        // (The measuring fill builds it every frame, whether or not a member changed.)
+        let build_still = (self.levels[STILL].wanted && still_due) || self.every_frame;
         if build_still && !rested.is_empty() {
             // Nearest first, while the still structure has room (they stay where they are
             // otherwise).

@@ -69,12 +69,22 @@ const RAY_WATER: u32 = 16u;
 const RAY_NOCAST: u32 = 32u;
 const RAY_SMALL: u32 = 64u;
 const RAY_SHADOW_ONLY: u32 = 128u;
-// What probe light sees: what holds its shape and is 0.3 m or more (leaves reach the probes
-// through the canopy map).
-const RAY_SEES_SHAPES: u32 = 55u; // SOLID | GROUND | SWAY | WATER | NOCAST
+// What probe light sees: what holds its shape and is 0.3 m or more, every triangle whole (a
+// cut-out among them, such as a fence, as a whole card). Plants that move in the wind are not
+// in it: their leaves reach the probes through the canopy map while it holds crowns, and as
+// `RAY_LEAF` cards, whole, while it holds none (probe_gi_rays.wgsl); the `Sway` of trunks and
+// branches is out until the forest_trail pair decides (the plan's open question).
+const RAY_SEES_SHAPES: u32 = 51u; // SOLID | GROUND | WATER | NOCAST
 // What casts a shadow of those: every face of it stops light on its way from the sun or a
-// lamp (`ray_stopped`, which also asks the stand-ins that cast for things that cast none).
-const RAY_CASTS: u32 = 7u; // SOLID | GROUND | SWAY
+// lamp to a hit, a cut-out's only where its texture is opaque (`ray_stopped`, which also asks
+// the stand-ins that cast for things that cast none; the rules are `SHADOW_RULES` in
+// probe_gi_rays.wgsl).
+const RAY_CASTS: u32 = 3u; // SOLID | GROUND
+// What the sun's measuring rays see (`trace_sun` in probe_gi_rays.wgsl): what casts at any
+// size, and the leaves (a crown's stand-in, swaying cards that cast) through the holes of
+// their texture, which prices the leaves' candidates in the sun's trace. Not the `Sway` of
+// trunks and branches: within the cascades the shadow maps draw them moving.
+const RAY_SUN_CASTS: u32 = 75u; // SOLID | GROUND | LEAF | SMALL
 // Every class a view draws: all but `RAY_SHADOW_ONLY` (world reflections).
 const RAY_DRAWN: u32 = 127u;
 
@@ -93,27 +103,35 @@ const RAY_NONE: u32 = 0xffffffffu;
 const RAY_T_MIN: f32 = 1.17549435e-38;
 
 // The rules a ray asks the triangles that are asked by (`ray_first`, `ray_nearest`): those of
-// the `Ground` and of the `Leaf` cards, the geometries built to be asked (`RayClass::opaque`);
-// every other triangle stops a ray at any hit, as does one a rule leaves alone.
+// the `Ground` and of the cards cut out by their texture (every `Leaf`, and a cut-out of
+// another class such as a fence), the only geometries built to be asked; every other triangle
+// stops a ray at any hit, as does one a rule leaves alone.
 // The ground stops a ray only at its front (its corners counter-clockwise as the ray sees
 // them): a ray from below passes up through it.
 const RULE_GROUND_FRONT: u32 = 1u;
-// A leaf card stops a ray where its texture is opaque (the tile's alpha at least the row's
+// A cut-out card stops a ray where its texture is opaque (the tile's alpha at least the row's
 // cutoff), read for the first `(rules >> RULE_TESTS_SHIFT) & 255` of the ray's candidates, by
 // chance after them (`RULE_LEAF_CHANCE`). The back of a card drawn from one side never stops
 // it: the raster culls that face too.
 const RULE_LEAF_TEXTURE: u32 = 2u;
-// A leaf card stops a ray by chance: as often as its texture covers the card (the row's
+// A cut-out card stops a ray by chance: as often as its texture covers the card (the row's
 // coverage), the same draw for the same candidate within a frame.
 const RULE_LEAF_CHANCE: u32 = 4u;
 // `ray_first`: only the still structure is asked.
 const RULE_STILL_ONLY: u32 = 8u;
+// A cut-out card stops a ray wherever the ray meets a side it is drawn from, as if its texture
+// covered it: what `ray_rules` asks in place of the two leaf rules under the measuring rung
+// `ray_leaves_solid`.
+const RULE_LEAF_COVERED: u32 = 16u;
+// The rules that ask a cut-out card's candidates.
+const RULE_CUT_OUTS: u32 = 22u; // LEAF_TEXTURE | LEAF_CHANCE | LEAF_COVERED
 // The rules that ask candidates: without one, every triangle is taken whole (`ray_flags`).
-const RULE_ASKS: u32 = 7u;
+const RULE_ASKS: u32 = 23u;
 const RULE_TESTS_SHIFT: u32 = 8u;
-// `RayUniform.stand_ins.w`: the measuring rung `ray_leaves_solid` (`shade_skip`), every leaf
-// card's candidate kept at once, as if its texture covered the card (what the row prices: the
-// texture reads, the draws and what lies behind the holes).
+// `RayUniform.stand_ins.w`: the measuring rung `ray_leaves_solid` (`shade_skip`): a cut-out
+// card's candidate is kept at once where the ray meets a side the card is drawn from, as if
+// its texture covered the card (what the row prices: the texture reads, and the triangles
+// behind the holes).
 const RAY_SCENE_LEAVES_SOLID: u32 = 1u;
 
 // lowbias32 (Wellons): a well mixed hash of a word.
@@ -138,20 +156,21 @@ fn ray_chance(c: RayIntersection) -> f32 {
 }
 
 // Whether candidate `c` stops a ray that asks by `rules` (`RULE_*`, as `ray_rules` gives them).
-// `tests`: the texture reads the ray made so far, shared by its two structures. A leaf card
+// `tests`: the texture reads the ray made so far, shared by its two structures. A cut-out card
 // with no triangle records or no tile (a copy's geometry, a texture not in the tiles yet) is
 // taken by chance.
 fn ray_accepts(c: RayIntersection, rules: u32, tests: ptr<function, u32>) -> bool {
     let i = c.instance_custom_data;
     // (The row's fields one by one: the rest of it only where its texture is read.)
     let flags = ray_rows[i].flags;
-    let class_bit = flags & 255u;
-    if (class_bit == RAY_GROUND) { return (rules & RULE_GROUND_FRONT) == 0u || c.front_face; }
-    let by_texture = (rules & RULE_LEAF_TEXTURE) != 0u;
-    if (class_bit != RAY_LEAF || (!by_texture && (rules & RULE_LEAF_CHANCE) == 0u)) { return true; }
+    if ((flags & 255u) == RAY_GROUND) { return (rules & RULE_GROUND_FRONT) == 0u || c.front_face; }
+    // Else a card cut out by its texture: the only other geometry built to be asked.
+    if ((rules & RULE_CUT_OUTS) == 0u) { return true; }
     if (!c.front_face && (flags & RAY_ROW_DOUBLE_SIDED) == 0u) { return false; }
+    if ((rules & RULE_LEAF_COVERED) != 0u) { return true; }
     let needs = RAY_ROW_HAS_TRIS | RAY_ROW_HAS_TILE;
-    if (by_texture && (flags & needs) == needs && *tests < ((rules >> RULE_TESTS_SHIFT) & 255u)) {
+    if ((rules & RULE_LEAF_TEXTURE) != 0u && (flags & needs) == needs
+        && *tests < ((rules >> RULE_TESTS_SHIFT) & 255u)) {
         *tests += 1u;
         let tris = ray_rows[i].tris;
         let at = ray_tri_at(tris, c.primitive_index);
@@ -169,11 +188,12 @@ fn ray_flags(rules: u32) -> u32 {
 }
 
 // The rules a ray's candidates are asked by this frame: with the measuring rung
-// `ray_leaves_solid`, every leaf card's candidate is kept at once (they still come: the ray's
-// flags follow the rules it was given).
+// `ray_leaves_solid`, a ray that asks cut-out cards keeps each candidate on a side the card is
+// drawn from at once (`RULE_LEAF_COVERED`; the candidates still come: the ray's flags follow
+// the rules it was given).
 fn ray_rules(rules: u32) -> u32 {
-    if ((ray_scene.stand_ins.w & RAY_SCENE_LEAVES_SOLID) != 0u) {
-        return rules & ~(RULE_LEAF_TEXTURE | RULE_LEAF_CHANCE);
+    if ((ray_scene.stand_ins.w & RAY_SCENE_LEAVES_SOLID) != 0u && (rules & RULE_CUT_OUTS) != 0u) {
+        return (rules & ~(RULE_LEAF_TEXTURE | RULE_LEAF_CHANCE)) | RULE_LEAF_COVERED;
     }
     return rules;
 }
@@ -262,19 +282,22 @@ fn ray_whole(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32) -> Ray
 }
 
 // What stops light on its way along a camera-relative ray within `t_max` (a shadow ray, toward
-// the sun or a lamp): its row, `RAY_NONE` when the light arrives. Light is stopped by any face
-// of what casts a shadow, and by a stand-in that casts for a thing that casts none itself
-// (`RAY_SHADOW_ONLY`) where the ray goes into it: at a face whose corners run counter-clockwise
-// as the ray sees them, the outside of a closed shape. A stand-in is such a shape around the
-// thing it casts for or within it, and the thing's own surface may lie inside it (a far wall's
-// core 8 cm inside the block that casts for the wall): light that leaves a stand-in is not
-// stopped by it, else such a thing were shaded by its own stand-in at every hit. (The shadow
-// maps hide that with their bias; a ray has none.) What a shadow ray meets is what the shadow
-// maps draw. A structure with no stand-in is not asked for them.
-fn ray_stopped(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> u32 {
+// the sun or a lamp): its row, `RAY_NONE` when the light arrives. Light is stopped by the
+// instances of `classes` (what casts a shadow: `RAY_CASTS`, `RAY_SUN_CASTS`), their triangles
+// that are asked asked by `rules` (`ray_first`; 0: any face stops it), and by a stand-in that
+// casts for a thing that casts none itself (`RAY_SHADOW_ONLY`) where the ray goes into it: at a
+// face whose corners run counter-clockwise as the ray sees them, the outside of a closed
+// shape. A stand-in is such a shape around the thing it casts for or within it, and the
+// thing's own surface may lie inside it (a far wall's core 8 cm inside the block that casts
+// for the wall): light that leaves a stand-in is not stopped by it, else such a thing were
+// shaded by its own stand-in at every hit. (The shadow maps hide that with their bias; a ray
+// has none.) What a shadow ray meets is what the shadow maps draw, but for the classes the
+// caller has something else in place of (the canopy map's leaves at a probe's hit). A
+// structure with no stand-in is not asked for them.
+fn ray_stopped(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules: u32) -> u32 {
     var still: ray_query<vertex_return>;
     var moving: ray_query<vertex_return>;
-    let caster = ray_first(origin, dir, t_max, RAY_CASTS, 0u);
+    let caster = ray_first(origin, dir, t_max, classes, rules);
     if (caster != RAY_NONE || !(t_max > 0.0)) { return caster; }
     let o = origin - ray_scene.anchor.xyz;
     let flags = RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT | RAY_FLAG_CULL_BACK_FACING;

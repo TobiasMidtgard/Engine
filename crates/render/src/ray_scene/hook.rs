@@ -11,35 +11,43 @@ pub struct RayKey(pub u64, pub u64);
 /// What an instance is to a ray: a ray names the classes it sees (an instance's class is its
 /// mask in the top-level structures).
 ///
-/// The frame's rays name three sets (lib_ray.wgsl):
-/// * probe light sees what holds its shape and is 0.3 m or more: `Solid`, `Ground`, `Sway`,
-///   `Water` and `NoCast`, every triangle whole (leaves reach the probes through the canopy
-///   map, never as cards);
-/// * world reflections see every class a view draws, all but `ShadowOnly`, and ask a `Leaf`
-///   card's triangles one by one (a ray passes where the card's texture is clear) and the
-///   `Ground`'s (a ray passes its back);
-/// * a shadow ray from a hit (toward the sun or a lamp) sees `Solid`, `Ground` and `Sway`,
-///   and the `ShadowOnly` stand-ins, which stop it only where it goes into one (at its outer
-///   faces).
+/// The frame's rays name these sets (lib_ray.wgsl, probe_gi_rays.wgsl):
+/// * probe light sees what holds its shape and is 0.3 m or more: `Solid`, `Ground`, `Water`
+///   and `NoCast`, every triangle whole. Plants that move in the wind are out: their leaves
+///   reach the probes through the canopy map while it holds crowns (and as `Leaf` cards,
+///   whole, while it holds none), and `Sway` until a measurement decides (the plan's open
+///   question);
+/// * a shadow ray from a hit (toward the sun or a lamp) sees `Solid` and `Ground` (and `Leaf`
+///   while the canopy map holds no crown), whole, and the `ShadowOnly` stand-ins, which stop
+///   it only where it goes into one (at its outer faces);
+/// * world reflections see every class a view draws, all but `ShadowOnly`, and ask the
+///   triangles of a card cut out by its texture one by one (a ray passes where the texture is
+///   clear) and the `Ground`'s (a ray passes its back);
+/// * the sun's measuring rays (`RenderSettings::ray_sun_shadows`) see `Solid`, `Ground`,
+///   `Small` and `Leaf`, cut-outs through their holes, and the stand-ins.
 ///
-/// The sun's own rays (a later step) add `Small`, and `Leaf` and `Sway` where the shadow maps
-/// draw no swaying plants.
+/// A card cut out by its texture is a `Leaf` where it sways; one that holds still (a fence)
+/// keeps the class of its size, its triangles asked as a leaf's. The sun's own rays (a later
+/// step) add `Sway` where the shadow maps draw no swaying plants.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u8)]
 pub enum RayClass {
-    /// Casts a shadow and holds its shape: buildings, rocks, props of 0.3 m and more.
+    /// Casts a shadow and holds its shape: buildings, rocks, fences, props of 0.3 m and more.
     Solid = 1,
     /// The ground (its triangles will be asked one by one, so that a ray may pass its back).
     Ground = 2,
-    /// The opaque parts of plants that move in the wind (trunks, branches).
+    /// The opaque parts of plants that move in the wind (trunks, branches), at any size.
     Sway = 4,
-    /// Cards cut out by their texture: leaves, fences.
+    /// Cards cut out by their texture that move in the wind: a crown's stand-in (the crown's
+    /// one place in the rays) and swaying cards that cast, which the canopy map holds for the
+    /// probes while it is on.
     Leaf = 8,
     /// A body of water's surface: light passes it.
     Water = 16,
     /// Casts no shadow: probes and reflections see it, shadow rays pass.
     NoCast = 32,
-    /// A caster smaller than 0.3 m, for the sun's own rays and reflections; probes pass.
+    /// A caster smaller than 0.3 m that holds still, for the sun's rays and reflections;
+    /// probes pass.
     Small = 64,
     /// A stand-in that casts the shadow of a thing that casts none itself and is drawn in no
     /// view ([`crate::ShadowOnly`]): shadow rays alone see it, and it stops one only at a
@@ -74,8 +82,9 @@ impl RayClass {
     }
 
     /// Whether its triangles stop a ray without being asked: what a feature passes as
-    /// `opaque` for the geometries of its instances ([`RaySceneOut::geometry`]). Those of
-    /// the other classes are built to be asked one by one.
+    /// `opaque` for the geometries of its instances ([`RaySceneOut::geometry`]) but for a card
+    /// of another class cut out by its texture (a fence), which is built to be asked one by
+    /// one as a `Leaf`'s and the `Ground`'s are.
     pub const fn opaque(self) -> bool {
         !matches!(self, RayClass::Ground | RayClass::Leaf)
     }
@@ -177,9 +186,9 @@ pub struct RayLook {
     pub tile: Option<u16>,
     /// The texture's scale (xy) and offset (zw) over the mesh's coordinates.
     pub uv: [f32; 4],
-    /// Alpha below which a [`RayClass::Leaf`] texel is a hole.
+    /// Alpha below which a texel of a card cut out by its texture is a hole.
     pub cutoff: f32,
-    /// The share of a [`RayClass::Leaf`] card its texture covers.
+    /// The share of such a card its texture covers.
     pub coverage: f32,
     /// Lit from both sides; else a ray that meets its back is inside something.
     pub double_sided: bool,
@@ -227,8 +236,8 @@ pub struct RaySceneOut<'a> {
 
 impl RaySceneOut<'_> {
     /// Geometry `key` at `version`: built now if this frame's allowance holds it. `opaque`:
-    /// every triangle stops a ray ([`RayClass::opaque`] of the class its instances have); it
-    /// cannot change for a key. Cheap to ask every frame while the answer is
+    /// every triangle stops a ray ([`RayClass::opaque`] of the class its instances have,
+    /// false for a cut-out of any class); it cannot change for a key. Cheap to ask every frame while the answer is
     /// [`RayGeometryState::Building`].
     pub fn geometry(
         &mut self,

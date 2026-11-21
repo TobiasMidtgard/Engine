@@ -255,11 +255,12 @@ pub mod shade_skip {
     /// `fs_main_old`). The same picture: what lighting only the blades that show, and reading
     /// their sunlight once, saves in `scene: grass`. Read on the CPU.
     pub const GRASS_OLD_WAY: u32 = 268435456;
-    /// The frame's ray scene takes a leaf card (`RayClass::Leaf`) where a ray meets it, its
-    /// texture unasked: what testing the cards' texture costs the rays that ask it (`gpu_sweep`
-    /// row `ray_leaves_solid`: the texture reads, and the triangles behind the holes). The
-    /// cards stay triangles a ray is handed one by one, so the ground's are still asked. Read
-    /// on the CPU, which tells the shaders (`RayUniform`'s flags).
+    /// The frame's ray scene takes a card cut out by its texture (a leaf, a fence) where a ray
+    /// meets a side it is drawn from, its texture unasked: what testing the cards' texture
+    /// costs the rays that ask it (`gpu_sweep` row `ray_leaves_solid`: the texture reads, and
+    /// the triangles behind the holes). The cards stay triangles a ray is handed one by one,
+    /// so the ground's are still asked. Read on the CPU, which tells the shaders
+    /// (`RayUniform`'s flags).
     pub const RAY_LEAVES_SOLID: u32 = 536870912;
 }
 

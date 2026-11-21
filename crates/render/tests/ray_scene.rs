@@ -13,8 +13,8 @@
 //! wait their turn, and so do more things at rest than the still one holds; a mesh that takes
 //! another's handle is a geometry of its own; things that keep moving are lit as things at
 //! rest; a mirror keeps up while the probe grid scrolls; the switch can be thrown while the
-//! game runs; a mirror shows the wall behind a leaf card through the card's holes; each kind
-//! of thing is in the rays as its class; the reaches are settings; each row of a
+//! game runs; a mirror shows the wall behind a cut-out card through the card's holes; each
+//! kind of thing is in the rays as its class; the reaches are settings; each row of a
 //! `MeshInstances` slot is an instance of its own; and the measuring fill fills both
 //! structures to their caps. Needs a GPU with ray queries (lavapipe has them); passes with a
 //! note without.
@@ -370,6 +370,12 @@ fn mirror_parts(w: &mut World) -> (Entity, Entity) {
 /// [`mirror_parts`]. `stand_in`: the red wall casts no shadow itself and stands inside a
 /// closed stand-in that casts for it (`ShadowOnly`), 8 cm larger on every side.
 fn mirror_with(w: &mut World, stand_in: bool) -> (Entity, Entity) {
+    // From behind the mirror, onto the red wall's face.
+    mirror_lit(w, stand_in, DVec3::new(0.2, -0.8, 0.6))
+}
+
+/// [`mirror_with`], the sun's light going `toward`.
+fn mirror_lit(w: &mut World, stand_in: bool, toward: DVec3) -> (Entity, Entity) {
     ground(w);
     w.spawn((
         Transform::from_translation(DVec3::new(0.0, 1.5, -3.0)),
@@ -404,8 +410,7 @@ fn mirror_with(w: &mut World, stand_in: bool) -> (Entity, Entity) {
     } else {
         w.spawn((at, red)).id()
     };
-    // From behind the mirror, onto the red wall's face.
-    sun(w, 110_000.0, DVec3::new(0.2, -0.8, 0.6));
+    sun(w, 110_000.0, toward);
     let camera = camera(
         w,
         DVec3::new(0.0, 1.5, 1.0),
@@ -2240,51 +2245,67 @@ const CARD_CELLS: [[u32; 4]; 4] = [
 ];
 const WALL_BESIDE: [[u32; 4]; 2] = [[26, 36, 52, 68], [108, 36, 134, 68]];
 
-/// A leaf card (cut out by its texture, a `Leaf`) hangs between the camera and the red wall
-/// behind it: the mirror shows the wall through the card's clear cells, as bright as beside
-/// the card, and the card's green in its opaque ones (world reflections ask each of a leaf's
-/// triangles). With the measuring rung `ray_leaves_solid` every cell shows the card, and the
-/// opaque cells are as they were.
+/// The cut-out card of [`a_ray_passes_the_holes_of_a_cut_out_card`], its texture `texture`.
+fn cut_out_card(w: &mut World, texture: Handle<Image>) -> Entity {
+    let mut leaf = StandardMaterial::color(0.05, 0.8, 0.05)
+        .with_roughness(0.9)
+        .with_base_color_texture(texture)
+        .with_alpha_mask(0.5);
+    leaf.double_sided = true;
+    w.spawn((
+        Transform::from_xyz(0.0, 2.0, 2.8)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+        MeshRenderer::new(Shape::Quad { size: [2.4, 2.4] }, leaf),
+    ))
+    .id()
+}
+
+/// Turn the camera onto the card behind it and back to the mirror (`frames` frames there): a
+/// card's tile is filled from the texture the raster uploads.
+fn look_at_card_and_back(app: &mut App, camera: Entity, frames: usize) {
+    turn(app, camera, DVec3::new(0.0, 1.5, 4.0));
+    app.update_n(4);
+    turn(app, camera, DVec3::new(0.0, 1.5, -3.0));
+    app.update_n(frames);
+}
+
+/// A card cut out by its texture hangs between the camera and the red wall behind it: the
+/// mirror shows the wall through the card's clear cells, lit as through a card whose texture
+/// is clear everywhere, and the card's green in its opaque ones (world reflections ask each of
+/// a cut-out's triangles). (Probe light takes any cut-out whole: behind the card, the wall is
+/// darker than beside it either way.) The card holds still, a fence more than a leaf: it is
+/// `Solid`, its triangles asked as a leaf's, and no canopy map stands for it. A steep sun
+/// casts its shadow on the ground before the wall, not on the wall seen through its holes.
+/// With the measuring rung `ray_leaves_solid` every cell shows the card, and the opaque cells
+/// are as they were.
 #[test]
-fn a_ray_passes_the_holes_of_a_leaf_card() {
+fn a_ray_passes_the_holes_of_a_cut_out_card() {
     let mut app = app(true);
+    let checker = |a: u8, b: u8| Image::checker(64, 2, [255, 255, 255, a], [255, 255, 255, b]);
     let cutout = app
         .world
         .resource_mut::<Assets<Image>>()
-        .add(Image::checker(
-            64,
-            2,
-            [255, 255, 255, 255],
-            [255, 255, 255, 0],
-        ));
-    let (camera, _) = mirror_with(&mut app.world, false);
+        .add(checker(255, 0));
+    let (camera, _) = mirror_lit(&mut app.world, false, DVec3::new(0.2, -0.95, 0.25));
     *app.world.get_mut::<Camera>(camera).expect("camera") = Camera {
         exposure: Exposure::Manual { ev100: 14.0 },
         ..Camera::perspective(40.0)
     };
-    let mut leaf = StandardMaterial::color(0.05, 0.8, 0.05)
-        .with_roughness(0.9)
-        .with_base_color_texture(cutout)
-        .with_alpha_mask(0.5);
-    leaf.double_sided = true;
-    app.world.spawn((
-        Transform::from_xyz(0.0, 2.0, 2.8)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
-        MeshRenderer::new(Shape::Quad { size: [2.4, 2.4] }, leaf),
-    ));
-    // Looking at the card first: its tile is filled from the texture the raster uploads.
+    let card = cut_out_card(&mut app.world, cutout);
     turn(&mut app, camera, DVec3::new(0.0, 1.5, 4.0));
-    app.update_n(4);
+    app.update_n(1);
     if !can_run(&app) {
         return;
     }
-    turn(&mut app, camera, DVec3::new(0.0, 1.5, -3.0));
-    app.update_n(8);
-    assert_in_ray_scene(&app, "the leaf card");
+    look_at_card_and_back(&mut app, camera, 8);
+    assert_in_ray_scene(&app, "the cut-out card");
     assert_eq!(
-        diag(&app, "render.ray.class_leaf"),
-        1.0,
-        "the card is a leaf"
+        (
+            diag(&app, "render.ray.class_solid"),
+            diag(&app, "render.ray.class_leaf")
+        ),
+        (4.0, 0.0),
+        "the ground, the mirror, the wall and the card that holds still are solid"
     );
     assert_eq!(
         (
@@ -2298,22 +2319,42 @@ fn a_ray_passes_the_holes_of_a_leaf_card() {
     app.world.resource_mut::<RenderSettings>().debug_skip |= shade_skip::RAY_LEAVES_SOLID;
     app.update_n(2);
     let solid = picture(&mut app, "leaf_card_solid.png");
+    // The same card, clear everywhere.
+    app.world.resource_mut::<RenderSettings>().debug_skip &= !shade_skip::RAY_LEAVES_SOLID;
+    let clear_texture = app.world.resource_mut::<Assets<Image>>().add(checker(0, 0));
+    app.world.despawn(card);
+    cut_out_card(&mut app.world, clear_texture);
+    look_at_card_and_back(&mut app, camera, 8);
+    assert_in_ray_scene(&app, "the clear card");
+    let clear = picture(&mut app, "leaf_card_clear.png");
     let wall = WALL_BESIDE
         .map(|r| linear_mean(&holes, r))
         .iter()
         .sum::<f32>()
         / 2.0;
-    let red = CARD_CELLS.map(|r| share(&holes, r, 0));
+    let red = |p: &image::RgbImage| CARD_CELLS.map(|r| share(p, r, 0));
     let green = |p: &image::RgbImage| CARD_CELLS.map(|r| share(p, r, 1));
     let mean = |p: &image::RgbImage| CARD_CELLS.map(|r| linear_mean(p, r));
     eprintln!(
-        "the card's cells in the mirror: red share {red:?}, green {:?}, light {:?} (the wall \
-         beside it {wall:.4}); with the rung: green {:?}, light {:?}",
+        "the card's cells in the mirror: red share {:?}, green {:?}, light {:?} (the wall \
+         beside it {wall:.4}); with the rung: green {:?}, light {:?}; the clear card: red \
+         share {:?}, light {:?}",
+        red(&holes),
         green(&holes),
         mean(&holes),
         green(&solid),
-        mean(&solid)
+        mean(&solid),
+        red(&clear),
+        mean(&clear)
     );
+    for i in 0..4 {
+        assert!(
+            red(&clear)[i] > 0.25,
+            "cell {i}: the wall through the clear card, red {:?}",
+            red(&clear)
+        );
+    }
+    let red = red(&holes);
     // (Which diagonal is clear follows the card's uv, its turn and the mirror.)
     let (open, kept) = if red[0] > red[1] {
         ([0, 3], [1, 2])
@@ -2325,10 +2366,11 @@ fn a_ray_passes_the_holes_of_a_leaf_card() {
             red[i] > 0.25,
             "cell {i}: the wall through a hole, red {red:?}"
         );
-        let light = mean(&holes)[i] / wall;
+        let light = mean(&holes)[i] / mean(&clear)[i];
         assert!(
-            (light - 1.0).abs() < 0.1,
-            "cell {i}: the wall through a hole is {light:.3} times as bright as beside the card"
+            (light - 1.0).abs() < 0.06,
+            "cell {i}: the wall through a hole is {light:.3} times as bright as through the \
+             clear card"
         );
         assert!(
             green(&solid)[i] > 0.25,
@@ -2356,21 +2398,32 @@ fn a_ray_passes_the_holes_of_a_leaf_card() {
 }
 
 /// Each kind of thing is in the rays as its class (`RayClass`): what casts a shadow and holds
-/// its shape is `Solid`; a card cut out by its texture, and a crown's stand-in, `Leaf`; what
-/// sways in the wind `Sway`; a caster under 0.3 m `Small`; what casts no shadow `NoCast`; a
-/// stand-in that casts as a closed shape `ShadowOnly`. A small thing that casts nothing, and a
-/// swaying card that casts nothing (a crown beside its stand-in), are in no ray's way. One
-/// mesh placed opaque and cut out is two geometries.
+/// its shape is `Solid`, a fence cut out by its texture too, and a mask over no texture (drawn
+/// whole); a crown's stand-in (swaying cards) `Leaf`; what sways in the wind `Sway`; a caster
+/// under 0.3 m `Small`; what casts no shadow `NoCast`; a stand-in that casts as a closed shape
+/// `ShadowOnly`. A small thing that casts nothing, and a swaying card that casts nothing (a
+/// crown beside its stand-in), are in no ray's way. One mesh placed whole and cut out is two
+/// geometries.
 #[test]
 fn each_kind_of_thing_is_in_the_rays_as_its_class() {
     let mut app = app(true);
     set_probes(&mut app, FEW_PROBES);
+    let holes = app
+        .world
+        .resource_mut::<Assets<Image>>()
+        .add(Image::checker(
+            64,
+            2,
+            [255, 255, 255, 255],
+            [255, 255, 255, 0],
+        ));
     let w = &mut app.world;
     ground(w);
     sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
     camera(w, EYE, TARGET, 12.0);
     let gray = StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9);
-    let cut_out = gray.with_alpha_mask(0.5);
+    let cut_out = gray.with_base_color_texture(holes).with_alpha_mask(0.5);
+    let leaves = cut_out.with_wind_sway(0.2);
     let crate_mesh = w.resource_mut::<Assets<Mesh>>().add(
         Shape::Cuboid {
             size: [0.5, 1.0, 0.5],
@@ -2381,6 +2434,10 @@ fn each_kind_of_thing_is_in_the_rays_as_its_class() {
     let at = |x: f64| Transform::from_xyz(x, 0.5, -2.0);
     w.spawn((at(-4.0), MeshRenderer::new(crate_mesh, gray)));
     w.spawn((at(-3.0), MeshRenderer::new(crate_mesh, cut_out)));
+    w.spawn((
+        at(-5.0),
+        MeshRenderer::new(crate_mesh, gray.with_alpha_mask(0.5)),
+    ));
     w.spawn((at(-2.0), MeshRenderer::new(cube(0.2), gray)));
     w.spawn((
         at(-1.0),
@@ -2402,9 +2459,9 @@ fn each_kind_of_thing_is_in_the_rays_as_its_class() {
     // A crown and its stand-in, and a stand-in that casts as a closed shape.
     w.spawn((
         at(2.5),
-        MeshRenderer::new(cube(1.5), cut_out.with_wind_sway(0.2)).without_shadows(),
+        MeshRenderer::new(cube(1.5), leaves).without_shadows(),
     ));
-    w.spawn((at(2.5), MeshRenderer::new(cube(1.6), cut_out), ShadowOnly));
+    w.spawn((at(2.5), MeshRenderer::new(cube(1.6), leaves), ShadowOnly));
     w.spawn((at(4.5), MeshRenderer::new(cube(0.8), gray), ShadowOnly));
     app.update_n(6);
     if !can_run(&app) {
@@ -2412,10 +2469,10 @@ fn each_kind_of_thing_is_in_the_rays_as_its_class() {
     }
     assert_in_ray_scene(&app, "each kind");
     let classes = [
-        ("solid", 2.0),
+        ("solid", 4.0),
         ("ground", 0.0),
         ("sway", 1.0),
-        ("leaf", 2.0),
+        ("leaf", 1.0),
         ("water", 0.0),
         ("no_cast", 1.0),
         ("small", 1.0),
@@ -2428,9 +2485,10 @@ fn each_kind_of_thing_is_in_the_rays_as_its_class() {
             "class {class}"
         );
     }
-    assert_eq!(diag(&app, "render.ray.instances"), 8.0);
+    assert_eq!(diag(&app, "render.ray.instances"), 9.0);
     assert_eq!(diag(&app, "render.ray.stand_ins"), 1.0);
-    // The ground, the crate's mesh twice, and each of the five others in the rays.
+    // The ground, the crate's mesh twice (whole, and cut out: the crate under a mask over no
+    // texture is whole), and each of the five others in the rays.
     assert_eq!(diag(&app, "render.ray.geometries"), 8.0);
 }
 
@@ -2587,12 +2645,14 @@ fn the_ray_scene_fills_to_its_caps_for_a_measurement() {
     );
     for frame in 0..3 {
         app.update();
+        // (Bits: 1 the still structure, 2 the moving one.)
         assert_eq!(
             diag(&app, "render.ray.structures_built"),
-            2.0,
+            3.0,
             "frame {frame}: both structures are built every frame"
         );
     }
+    // (The copies could not open the valve if they counted: those that hold still fit.)
     assert_eq!(
         (
             diag(&app, "render.ray.class_solid"),

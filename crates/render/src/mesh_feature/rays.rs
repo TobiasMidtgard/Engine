@@ -4,19 +4,21 @@
 //! `RenderFeature::ray_scene`).
 //!
 //! A slot is in the scene when it is drawn at all (visible, its mesh loaded, not skinned),
-//! its material stops light (not blended, not unlit) and it is within the scene's reach of
-//! the camera ([`in_reach`]), as its class ([`class_of`]): what casts a shadow is a `Leaf`
-//! where its texture cuts it out (leaf cards, fences), `Sway` where it moves in the wind,
-//! `Small` under 0.3 m and `Solid` else; what casts none is `NoCast`, and out under 0.3 m or
-//! as a swaying card (a crown beside its stand-in: the canopy map holds its leaves for the
-//! probes). A stand-in drawn into the shadow maps only (`ShadowOnly`) is in the scene if it
-//! casts into the finest maps: a crown's (its cards, cut out) as a `Leaf`, the crown's one
-//! place in the rays; any other as `ShadowOnly`, for the shadow rays alone (the thing it casts
-//! for casts no shadow itself, so the light at a hit is shadowed as the frame draws that
-//! shadow; a shadow ray is stopped where it goes into a stand-in, not where it leaves one).
-//! Each row of a `MeshInstances` slot is an instance of its own (`RayKey(entity, row + 1)`)
-//! of the one geometry the rows share, its class by its own size and its look tinted by its
-//! row's tint.
+//! its material stops light (not blended, not unlit, not cut out everywhere) and it is within
+//! the scene's reach of the camera ([`in_reach`]), as its class ([`class_of`]): what casts a
+//! shadow is a `Leaf` where it is a swaying card cut out by its texture (the canopy map holds
+//! such cards for the probes), `Sway` where it moves in the wind otherwise, `Small` under 0.3 m
+//! and `Solid` else; what casts none is `NoCast`, and out under 0.3 m or as a swaying card (a
+//! crown beside its stand-in). A cut-out that holds still (a fence, a lattice) keeps the class
+//! of its size, and its triangles are asked like a leaf's ([`cut_out`]): reflections see
+//! through its holes, probes see it whole as their own scene does. A stand-in drawn into the
+//! shadow maps only (`ShadowOnly`) is in the scene if it casts into the finest maps: a crown's
+//! (its swaying cards) as a `Leaf`, the crown's one place in the rays; any other as
+//! `ShadowOnly`, for the shadow rays alone (the thing it casts for casts no shadow itself, so
+//! the light at a hit is shadowed as the frame draws that shadow; a shadow ray is stopped where
+//! it goes into a stand-in, not where it leaves one). Each row of a `MeshInstances` slot is an
+//! instance of its own (`RayKey(entity, row + 1)`) of the one geometry the rows share, its
+//! class by its own size and its look tinted by its row's tint.
 //!
 //! A slot's geometry is its mesh at its ray level, built by the GPU straight from the mesh's
 //! ranges of the pool: the coarsest of its levels of detail that strays at most 3 cm from it
@@ -25,14 +27,16 @@
 //! main thread copies its triangles when the scene asks. A geometry is named by its mesh's
 //! handle index and that index's generation (an index a streamed-out mesh left to another is
 //! another geometry), and by whether its triangles stop a ray at once or are asked one by one
-//! (`RayClass::opaque` of its instances' class): a mesh placed both ways is two geometries.
+//! (whether its instances' material cuts holes in it, [`cut_out`]): a mesh placed both ways
+//! is two geometries.
 //!
 //! The scene is not walked every frame. The mesh scene logs the entities whose slot a sync
 //! wrote, moved or dropped (`mesh_scene::SlotLog`), and a frame looks at those, at the
 //! meshes whose geometry was not ready, and at a share of all slots in turn (the camera
-//! brings slots into reach, and a material may change its look). After the camera jumped, or
-//! when more happened than the log keeps, it looks at every slot over a few frames and then
-//! drops what it did not find.
+//! brings slots into reach, and a material may change its look), counted in looks (a slot of
+//! rows takes a look a row) so that a round of every slot takes about [`ROLL_FRAMES`] frames
+//! however many rows there are. After the camera jumped, or when more happened than the log
+//! keeps, it looks at every slot over a few frames and then drops what it did not find.
 
 use super::*;
 use crate::ray_scene::look::{material_light, texture_mean};
@@ -41,11 +45,14 @@ use crate::ray_scene::{
     RayView,
 };
 
-/// Slots a frame looks at in turn, at least; every slot comes up within [`ROLL_FRAMES`].
-const ROLL_SLOTS: usize = 2_048;
+/// Looks a frame takes in turn (a slot of rows: one a row): the last round's looks spread
+/// over [`ROLL_FRAMES`] frames, at least this many, so that every slot comes up within about
+/// that many frames. A slot of more rows than a frame's share is looked at whole, and the
+/// frames after it take that much less.
+const ROLL_LOOKS: usize = 2_048;
 const ROLL_FRAMES: usize = 64;
-/// Slots a frame looks at while it looks at every slot.
-const SWEEP_SLOTS: usize = 10_000;
+/// Looks a frame takes while it looks at every slot.
+const SWEEP_LOOKS: usize = 10_000;
 /// The smallest thing the rays see (its bounding sphere's radius, meters), as probe GI's own
 /// scene has it.
 const MIN_RADIUS_M: f32 = crate::probe_gi::MIN_INSTANCE_RADIUS_M as f32;
@@ -169,9 +176,10 @@ pub(super) fn asset_of(version: u64) -> u64 {
 /// What a frame's fill did, for `render.meshes.ray_*`.
 #[derive(Default, Clone, Copy)]
 struct FillStats {
-    /// Slots looked at.
+    /// Looks taken: a slot that draws its mesh once is one, a slot of rows one a row (one
+    /// for a region wholly out of reach).
     looked: u32,
-    /// Of those, the ones in the scene after.
+    /// Instances placed by them.
     placed: u32,
     /// Meshes whose geometry is not there yet.
     waiting: u32,
@@ -198,6 +206,12 @@ pub(super) struct MeshRays {
     sweep_again: bool,
     /// The next slot of the walk in turn.
     cursor: usize,
+    /// The walk in turn: looks the frames to come may take (below 0 after a slot of more
+    /// rows than a frame's share), the looks of its last round of every slot, and of the
+    /// round under way so far.
+    credit: i64,
+    round_looks: usize,
+    round_so_far: usize,
     /// Meshes (by the handle index slots name) with a slot in reach whose geometry was not
     /// there: asked again every frame.
     waiting: FastSet<u32>,
@@ -275,8 +289,8 @@ impl MeshRays {
     }
 
     /// The scene's name for the geometry of the mesh at handle index `index`, built `opaque`
-    /// ([`RayClass::opaque`] of its instances' class) or to be asked triangle by triangle: a
-    /// mesh placed both ways is two geometries.
+    /// (its instances' material cuts no holes, [`cut_out`]) or to be asked triangle by
+    /// triangle: a mesh placed both ways is two geometries.
     fn key(&self, index: u32, opaque: bool) -> RayKey {
         let generation = self.generations.get(&index).copied().unwrap_or(0);
         RayKey(
@@ -286,13 +300,16 @@ impl MeshRays {
     }
 
     /// The rows of entity `bits` (`Entity::to_bits`) are out of the scene: it is gone, draws
-    /// its mesh once, or no row of it is in reach.
-    fn drop_rows(&mut self, bits: u64, out: &mut RaySceneOut<'_>) {
-        if let Some(held) = self.rows.remove(&bits) {
-            for k in 0..held.had {
-                out.remove(RayKey(bits, k as u64 + 1));
-            }
+    /// its mesh once, or no row of it is in reach. Returns how many rows the scene may have
+    /// held (each one taken out).
+    fn drop_rows(&mut self, bits: u64, out: &mut RaySceneOut<'_>) -> usize {
+        let Some(held) = self.rows.remove(&bits) else {
+            return 0;
+        };
+        for k in 0..held.had {
+            out.remove(RayKey(bits, k as u64 + 1));
         }
+        held.had as usize
     }
 
     /// Note what the scene holds of entity `bits`'s rows after a look in frame `frame`
@@ -524,7 +541,8 @@ struct NearRow {
 struct HeldRows {
     /// Rows `0..had` may be in the scene (as `RayKey(entity, row + 1)`); no other is.
     had: u32,
-    /// Of those, the ones placed at the last look.
+    /// Of those, the ones in the scene after the last look (counted again when a walk of
+    /// every slot ends).
     placed: u32,
     /// The frame of that look.
     seen: u64,
@@ -557,34 +575,44 @@ fn plant_sways(mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
     mesh.wind != 0 || mat.sways
 }
 
+/// Whether material `mat` cuts holes in what it covers, so that the triangles a ray meets of it
+/// are asked one by one (`RULE_LEAF_TEXTURE` in lib_ray.wgsl): masked, and its texture clear
+/// somewhere (its share kept by an alpha test at 0.5, measured once the image was uploaded; a
+/// mask without a texture, or over one with no clear texel, is drawn whole).
+fn cut_out(mat: &MaterialFrame) -> bool {
+    mat.masked && mat.coverage < 1.0
+}
+
 /// The class a slot (or a row of one) takes by what it is; `None`: no ray sees it.
 /// `stand_in`: it is drawn into the shadow maps only (and casts into the finest: the meshes
-/// leave out the others); `casts`: it casts a shadow; `masked`: its material is cut out by its
-/// texture; `sways`: it moves in the wind ([`plant_sways`]); `radius`: its bounding sphere's,
-/// meters.
+/// leave out the others); `casts`: it casts a shadow; `cut_out`: its material cuts holes in it
+/// ([`cut_out`]); `sways`: it moves in the wind ([`plant_sways`]); `radius`: its bounding
+/// sphere's, meters.
 fn class_of(
     stand_in: bool,
     casts: bool,
-    masked: bool,
+    cut_out: bool,
     sways: bool,
     radius: f32,
 ) -> Option<RayClass> {
+    // A swaying card: the leaves that the canopy map holds for the probes while it is on.
+    let leaf = cut_out && sways;
     Some(if stand_in {
         // A crown's stand-in is cards: the crown is in the rays once, through the holes of
         // its texture. Any other casts as a closed shape.
-        if masked {
+        if leaf {
             RayClass::Leaf
         } else {
             RayClass::ShadowOnly
         }
     } else if !casts {
-        // A swaying card that casts no shadow is a crown beside its stand-in (the canopy map
-        // holds its leaves for the probes), and a small thing that casts none no ray needs.
-        if (masked && sways) || radius < MIN_RADIUS_M {
+        // A swaying card that casts no shadow is a crown beside its stand-in, and a small
+        // thing that casts none no ray needs.
+        if leaf || radius < MIN_RADIUS_M {
             return None;
         }
         RayClass::NoCast
-    } else if masked {
+    } else if leaf {
         RayClass::Leaf
     } else if sways {
         // (Before `Small`: what moves in the wind is `Sway` at any size.)
@@ -594,12 +622,6 @@ fn class_of(
     } else {
         RayClass::Solid
     })
-}
-
-/// Whether the geometry of a slot's instances is opaque ([`RayClass::opaque`]): what
-/// [`class_of`] gives it at any size.
-fn opaque_for(stand_in: bool, casts: bool, masked: bool) -> bool {
-    !(masked && (stand_in || casts))
 }
 
 /// What a hit of an instance with material `mat` reads: class `class`, a shadow stand-in
@@ -670,12 +692,15 @@ impl Fill<'_> {
             return None;
         }
         let (mesh, mat) = self.tables(hot)?;
+        // (A mask over a colour whose alpha is below its cutoff is drawn nowhere: the raster
+        // tests the texel's alpha times the colour's.)
         if mesh.version == 0
             || mesh.skinned
             || self.skins.skins.contains_key(&mesh.index)
             || self.unusable.get(&mesh.index) == Some(&mesh.version)
             || mat.blend
             || mat.unlit
+            || (mat.masked && mat.ray_surface[2] > 1.0)
         {
             return None;
         }
@@ -759,7 +784,7 @@ impl Fill<'_> {
         };
         let casts = hot.flags & mesh_scene::CASTS != 0;
         let sways = plant_sways(&mesh, &mat);
-        let Some(class) = class_of(stand_in, casts, mat.masked, sways, radius) else {
+        let Some(class) = class_of(stand_in, casts, cut_out(&mat), sways, radius) else {
             return Seen::No;
         };
         self.reach(
@@ -775,12 +800,11 @@ impl Fill<'_> {
     /// rows take is opaque.
     fn rows_may_be_seen(&self, s: usize) -> Option<bool> {
         let hot = &self.scene.hot[s];
-        let (mesh, mat, stand_in) = self.usable(hot)?;
+        let (mesh, mat, _) = self.usable(hot)?;
         if self.region_out_of_reach(hot, &mesh) {
             return None;
         }
-        let casts = hot.flags & mesh_scene::CASTS != 0;
-        Some(opaque_for(stand_in, casts, mat.masked))
+        Some(!cut_out(&mat))
     }
 
     /// Whether a `MeshInstances` slot's region (all its rows, as the cull measured it) lies
@@ -807,7 +831,7 @@ impl Fill<'_> {
     }
 
     /// The scene's geometry of `mesh` at its version, built `opaque` or to be asked triangle
-    /// by triangle ([`RayClass::opaque`] of its instances' class): there already, built now
+    /// by triangle (its instances' material cuts holes, [`cut_out`]): there already, built now
     /// from its ranges of the pool at its ray level or from its copy, or waiting (its copy is
     /// asked for). `raw`, `scale`: the handle index slots name, and the largest scale of the
     /// slot that asks (0: no slot).
@@ -1041,18 +1065,26 @@ impl Fill<'_> {
     }
 
     /// Bring slot `s` up to date in the scene: placed as it stands, or removed. Returns how
-    /// many instances it looked at (a slot of rows: one a row).
+    /// many instances it looked at (a slot of rows: one a row, or one for a region it passes
+    /// over whole), which `render.meshes.ray_looked` counts.
     fn slot(&mut self, s: usize, out: &mut RaySceneOut<'_>) -> usize {
+        let looks = if self.scene.hot[s].flags & mesh_scene::ROWS != 0 {
+            self.rows(s, out)
+        } else {
+            self.single(s, out)
+        };
+        self.rays.stats.looked += looks as u32;
+        looks
+    }
+
+    /// [`slot`](Self::slot) for a slot that draws its mesh once.
+    fn single(&mut self, s: usize, out: &mut RaySceneOut<'_>) -> usize {
         let scene = self.scene;
         let (hot, cold) = (&scene.hot[s], &scene.cold[s]);
-        if hot.flags & mesh_scene::ROWS != 0 {
-            return self.rows(s, out);
-        }
         let bits = cold.entity.to_bits();
         // (Its entity may have drawn rows before.)
         self.rays.drop_rows(bits, out);
         let id = RayKey(bits, 0);
-        self.rays.stats.looked += 1;
         let (class, sphere, distance) = match self.seen(s, || out.has(id)) {
             Seen::No => {
                 out.remove(id);
@@ -1071,7 +1103,8 @@ impl Fill<'_> {
         let Some((&mesh, &mat)) = self.tables(hot) else {
             return 1;
         };
-        match self.geometry(&mesh, hot.mesh, hot.scale, class.opaque(), out) {
+        let opaque = !cut_out(&mat);
+        match self.geometry(&mesh, hot.mesh, hot.scale, opaque, out) {
             RayGeometryState::Ready => {}
             // Placed with the shape before, and asked again every frame until its own is
             // built.
@@ -1093,7 +1126,7 @@ impl Fill<'_> {
         let look = look_of(&mat, stand_in, tile, [1.0; 3]);
         out.place(
             id,
-            self.rays.key(mesh.index, class.opaque()),
+            self.rays.key(mesh.index, opaque),
             &cold.transform.0,
             sphere,
             class,
@@ -1106,31 +1139,31 @@ impl Fill<'_> {
 
     /// Bring the rows of `MeshInstances` slot `s` up to date in the scene, each an instance of
     /// its own (`RayKey(entity, row + 1)`) of the one geometry they share, its class by its
-    /// own size and its look tinted by its row's tint. Returns how many rows it looked at.
+    /// own size and its look tinted by its row's tint. Returns how many rows it looked at: one
+    /// for a region it passes over whole (it cannot be used, it is wholly out of reach, its
+    /// bounds are not known yet), and one for each row it took out of the scene.
     fn rows(&mut self, s: usize, out: &mut RaySceneOut<'_>) -> usize {
         let scene = self.scene;
         let (hot, cold) = (&scene.hot[s], &scene.cold[s]);
         let rows = scene.rows[s].as_deref().unwrap_or(&[]);
         let bits = cold.entity.to_bits();
         let looks = rows.len().max(1);
-        self.rays.stats.looked += looks as u32;
         // (Its entity may have drawn its mesh once before.)
         out.remove(RayKey(bits, 0));
         let Some((mesh, mat, stand_in)) = self.usable(hot) else {
-            self.rays.drop_rows(bits, out);
-            return looks;
+            return 1 + self.rays.drop_rows(bits, out);
         };
         if self.region_out_of_reach(hot, &mesh) {
-            self.rays.drop_rows(bits, out);
-            return 1;
+            return 1 + self.rays.drop_rows(bits, out);
         }
         let Some((center, radius)) = self.local_bounds(&mesh) else {
             self.rays.waiting.insert(hot.mesh);
-            return looks;
+            return 1;
         };
         let held = self.rays.rows.get(&bits).copied().unwrap_or_default();
         let casts = hot.flags & mesh_scene::CASTS != 0;
         let sways = plant_sways(&mesh, &mat);
+        let cut = cut_out(&mat);
         // Which rows are in reach (those that may be in the scene and are not go).
         let mut near = std::mem::take(&mut self.rays.near_rows);
         near.clear();
@@ -1142,7 +1175,7 @@ impl Fill<'_> {
                 center: to_world.transform_point3(center.as_dvec3()),
                 radius: radius * row.scale.abs() * hot.scale,
             };
-            let seen = match class_of(stand_in, casts, mat.masked, sways, sphere.radius) {
+            let seen = match class_of(stand_in, casts, cut, sways, sphere.radius) {
                 Some(class) => self.reach(class, sphere, hot.max_distance, || {
                     held.had > k as u32 && out.has(id)
                 }),
@@ -1179,17 +1212,21 @@ impl Fill<'_> {
             self.rays.hold_rows(bits, 0, 0, frame, near);
             return looks;
         }
-        let opaque = opaque_for(stand_in, casts, mat.masked);
+        let opaque = !cut;
         match self.geometry(&mesh, hot.mesh, largest, opaque, out) {
             RayGeometryState::Ready => {}
             RayGeometryState::Older => {
                 self.rays.waiting.insert(hot.mesh);
             }
             RayGeometryState::Building => {
-                // (Rows placed before stay as they are.)
+                // (Rows placed before and still in reach stay as they are; those this look
+                // took out are out.)
                 self.rays.waiting.insert(hot.mesh);
-                self.rays
-                    .hold_rows(bits, had, held.placed.min(had), frame, near);
+                let placed = near
+                    .iter()
+                    .filter(|r| r.row < had && out.has(RayKey(bits, r.row as u64 + 1)))
+                    .count() as u32;
+                self.rays.hold_rows(bits, had, placed, frame, near);
                 return looks;
             }
             RayGeometryState::Refused => {
@@ -1236,7 +1273,7 @@ impl Fill<'_> {
                 self.rows_may_be_seen(s)
             } else {
                 match self.seen(s, || false) {
-                    Seen::Yes { class, .. } => Some(class.opaque()),
+                    Seen::Yes { .. } => self.tables(&scene.hot[s]).map(|(_, mat)| !cut_out(mat)),
                     Seen::NotYet => {
                         unknown = true;
                         None
@@ -1371,7 +1408,7 @@ impl MeshFeature {
         match fill.rays.sweep {
             Some((next, began)) => {
                 let (mut end, mut looks) = (next.min(slots), 0);
-                while end < slots && looks < SWEEP_SLOTS {
+                while end < slots && looks < SWEEP_LOOKS {
                     looks += fill.slot(end, out);
                     end += 1;
                 }
@@ -1384,20 +1421,38 @@ impl MeshFeature {
                     let again = std::mem::take(&mut fill.rays.sweep_again);
                     if !again {
                         out.remove_unplaced_since(began);
-                        fill.rays.rows.retain(|_, held| held.seen >= began);
+                        // (Rows kept while their geometry was building, placed before the walk
+                        // began, are gone now: what is left of each slot is counted again.)
+                        fill.rays.rows.retain(|&bits, held| {
+                            held.placed = (0..held.had)
+                                .filter(|&k| out.has(RayKey(bits, k as u64 + 1)))
+                                .count() as u32;
+                            held.seen >= began
+                        });
                     }
                     fill.rays.sweep = again.then_some((0, view.frame + 1));
                     fill.rays.cursor = 0;
+                    fill.rays.round_so_far = 0;
                 } else {
                     fill.rays.sweep = Some((end, began));
                 }
             }
             None if slots > 0 => {
-                let count = (slots / ROLL_FRAMES).max(ROLL_SLOTS).min(slots);
+                // The last round's looks over `ROLL_FRAMES` frames: what a slot of many rows
+                // takes past a frame's share, the frames after it take less (at most one
+                // round a frame).
+                let share = (fill.rays.round_looks.max(slots) / ROLL_FRAMES).max(ROLL_LOOKS) as i64;
+                fill.rays.credit = (fill.rays.credit + share).min(share);
                 let first = fill.rays.cursor % slots;
-                let (mut k, mut looks) = (0, 0);
-                while k < count && looks < count {
-                    looks += fill.slot((first + k) % slots, out);
+                let mut k = 0;
+                while k < slots && fill.rays.credit > 0 {
+                    let at = (first + k) % slots;
+                    let looks = fill.slot(at, out);
+                    fill.rays.credit -= looks as i64;
+                    fill.rays.round_so_far += looks;
+                    if at + 1 == slots {
+                        fill.rays.round_looks = std::mem::take(&mut fill.rays.round_so_far);
+                    }
                     k += 1;
                 }
                 fill.rays.cursor = (first + k) % slots;
@@ -1418,50 +1473,70 @@ impl MeshFeature {
 mod tests {
     use super::*;
 
-    /// What each kind of slot is to the rays, and the geometry its class takes.
+    /// What each kind of slot is to the rays.
     #[test]
     fn a_slot_takes_its_class_by_what_it_is() {
         let (small, big) = (0.1, 1.0);
-        // (stand-in, casts, masked, sways, radius)
+        // (stand-in, casts, cut out, sways, radius)
         let cases = [
-            // A crown's stand-in: its cards, cut out; another stand-in casts as a closed shape.
+            // A crown's stand-in: its swaying cards; another stand-in casts as a closed shape.
             ((true, true, true, true, big), Some(RayClass::Leaf)),
             (
                 (true, true, false, false, small),
                 Some(RayClass::ShadowOnly),
             ),
+            ((true, true, true, false, big), Some(RayClass::ShadowOnly)),
             // The crown beside its stand-in, and small things that cast nothing.
             ((false, false, true, true, big), None),
             ((false, false, false, false, small), None),
             ((false, false, false, false, big), Some(RayClass::NoCast)),
             ((false, false, true, false, big), Some(RayClass::NoCast)),
-            // Fences and hedges at any size, saplings, pebbles, rocks.
-            ((false, true, true, false, small), Some(RayClass::Leaf)),
+            ((false, false, false, true, big), Some(RayClass::NoCast)),
+            // Swaying cards that cast, at any size; saplings; fences, pebbles, rocks.
+            ((false, true, true, true, small), Some(RayClass::Leaf)),
             ((false, true, true, true, big), Some(RayClass::Leaf)),
             ((false, true, false, true, small), Some(RayClass::Sway)),
+            ((false, true, true, false, big), Some(RayClass::Solid)),
+            ((false, true, true, false, small), Some(RayClass::Small)),
             ((false, true, false, false, small), Some(RayClass::Small)),
             ((false, true, false, false, big), Some(RayClass::Solid)),
         ];
-        for ((stand_in, casts, masked, sways, radius), class) in cases {
+        for ((stand_in, casts, cut, sways, radius), class) in cases {
             assert_eq!(
-                class_of(stand_in, casts, masked, sways, radius),
+                class_of(stand_in, casts, cut, sways, radius),
                 class,
                 "{:?}",
-                (stand_in, casts, masked, sways, radius)
+                (stand_in, casts, cut, sways, radius)
             );
         }
+        // A `Leaf` is a swaying card (what the canopy map holds), and a caster the probes see
+        // never sways (what casts none they see whole, as their own scene does).
         for bits in 0..32u32 {
-            let [stand_in, casts, masked, sways, large] =
-                [0, 1, 2, 3, 4].map(|b| bits >> b & 1 != 0);
+            let [stand_in, casts, cut, sways, large] = [0, 1, 2, 3, 4].map(|b| bits >> b & 1 != 0);
             let radius = if large { big } else { small };
-            if let Some(class) = class_of(stand_in, casts, masked, sways, radius) {
-                assert_eq!(
-                    class.opaque(),
-                    opaque_for(stand_in, casts, masked),
-                    "{bits:05b}"
-                );
+            match class_of(stand_in, casts, cut, sways, radius) {
+                Some(RayClass::Leaf) => assert!(cut && sways, "{bits:05b}"),
+                Some(RayClass::Solid) => assert!(!sways, "{bits:05b}"),
+                _ => {}
             }
         }
+    }
+
+    /// A mask cuts holes where its texture is clear somewhere; over no texture, or one with
+    /// no clear texel, it is drawn whole.
+    #[test]
+    fn a_mask_cuts_holes_only_where_its_texture_is_clear() {
+        let mask = |coverage| MaterialFrame {
+            masked: true,
+            coverage,
+            ..MaterialFrame::default()
+        };
+        assert!(cut_out(&mask(0.4)));
+        assert!(!cut_out(&mask(1.0)));
+        assert!(!cut_out(&MaterialFrame {
+            coverage: 0.4,
+            ..MaterialFrame::default()
+        }));
     }
 
     /// A mesh placed both opaque and asked is two geometries of one mesh.

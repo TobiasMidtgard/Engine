@@ -273,7 +273,7 @@ fn try_create(
         // only from ranges whose indices were checked against its vertices; the scene
         // starts over when a submission holding its builds fails. Probe GI's own queries
         // and the probes' rays of the ray scene force their triangles opaque; the queries
-        // that ask the triangles built to be asked (a leaf card's, lib_ray.wgsl's
+        // that ask the triangles built to be asked (a cut-out card's, lib_ray.wgsl's
         // `ray_first` and `ray_nearest`) read a candidate's row, triangle record and tile
         // only for a row the scene wrote, a record its geometry has and a layer a fill
         // filled, inside the query's loop and nowhere else. Their tests hold the pictures

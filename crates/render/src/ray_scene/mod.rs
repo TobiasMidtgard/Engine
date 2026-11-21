@@ -66,10 +66,17 @@ const VALVE_CUT: f32 = 0.05;
 const GROUND_PATCHES: u32 = 512;
 /// Frames the valve holds a step at least before it takes another, so that it cannot flap.
 const VALVE_HOLD_FRAMES: u64 = 240;
+/// Frames the still set stays past the cap, growing by no more than a 64th of it, before the
+/// valve opens (a fill under way passes the cap on its way to its full set, and the set the
+/// valve measures what it cut against is the full one), and frames a shut valve waits after a
+/// jump of the camera or a change of a reach (the new area's slots may come in before the old
+/// area's leave).
+const VALVE_SETTLE_FRAMES: u64 = 60;
 /// The valve closes once what it cut would fit again with this share of the cap to spare.
 const VALVE_CLOSE_SHARE: f32 = 0.95;
-/// `RayUniform::stand_ins` w (the scene's flags): leaf cards are taken as they are met, their
-/// texture unasked (`shade_skip::RAY_LEAVES_SOLID`, a measurement).
+/// `RayUniform::stand_ins` w (the scene's flags): cut-out cards are taken where a ray meets a
+/// side they are drawn from, their texture unasked (`shade_skip::RAY_LEAVES_SOLID`, a
+/// measurement).
 const FLAG_LEAVES_SOLID: u32 = 1;
 /// Frames between two sweeps for geometries nothing uses any more.
 const FORGET_EVERY: u64 = 64;
@@ -226,16 +233,23 @@ pub(crate) struct RayScene {
     /// The reaches as the features were last told them (caster, far; `None`: not yet).
     reach: Option<[f32; 2]>,
     valve: Valve,
+    /// A shut valve waits until this frame: a jump of the camera and a change of a reach
+    /// start a fill again ([`VALVE_SETTLE_FRAMES`]).
+    settle_until: u64,
 }
 
-/// The valve: while what belongs in the still structure is past its cap, the cut between the
-/// reaches rises ([`VALVE_CUT`]), and it falls again once what it cut would fit with room to
-/// spare. Each step is held [`VALVE_HOLD_FRAMES`] at least and starts a new epoch.
+/// The valve: while what belongs in the still structure is past its cap, once that set has
+/// settled ([`VALVE_SETTLE_FRAMES`]), the cut between the reaches rises ([`VALVE_CUT`]), and
+/// it falls again once what it cut would fit with room to spare. Each step is held
+/// [`VALVE_HOLD_FRAMES`] at least and starts a new epoch.
 #[derive(Default, Debug)]
 struct Valve {
     open: bool,
     /// The frame of the last step (`None`: none yet).
     stepped: Option<u64>,
+    /// While shut: the frame from which the still set has been past the cap without growing
+    /// by more than a 64th of it, and the set then.
+    over: Option<(u64, u32)>,
     /// The still set when it opened, and how much of it the raised cut took (read once the
     /// first hold since it opened had passed).
     before: u32,
@@ -245,17 +259,29 @@ struct Valve {
 impl Valve {
     /// Frame `frame` with `still_set` of the still structure's `cap` belonging in it: true
     /// when the valve took a step. `stress`: the measuring fill is on (it never opens then).
-    fn step(&mut self, still_set: u32, cap: u32, frame: u64, stress: bool) -> bool {
+    /// `settling`: the scene is filling again after a jump or a change of a reach (a shut
+    /// valve waits, and measures the set afresh after).
+    fn step(&mut self, still_set: u32, cap: u32, frame: u64, stress: bool, settling: bool) -> bool {
         let held = self
             .stepped
             .is_none_or(|at| frame >= at + VALVE_HOLD_FRAMES);
         if !self.open {
-            if held && !stress && still_set > cap {
-                self.open = true;
-                self.stepped = Some(frame);
-                self.before = still_set;
-                self.gain = None;
-                return true;
+            if stress || settling || still_set <= cap {
+                self.over = None;
+                return false;
+            }
+            match self.over {
+                Some((since, at)) if still_set <= at + cap / 64 => {
+                    if held && frame >= since + VALVE_SETTLE_FRAMES {
+                        self.open = true;
+                        self.stepped = Some(frame);
+                        self.before = still_set;
+                        self.gain = None;
+                        self.over = None;
+                        return true;
+                    }
+                }
+                _ => self.over = Some((frame, still_set)),
             }
             return false;
         }
@@ -420,6 +446,7 @@ impl RayScene {
             anchor_moves: 0,
             reach: None,
             valve: Valve::default(),
+            settle_until: 0,
         }
     }
 
@@ -528,12 +555,16 @@ impl RayScene {
         let reach = [caster_reach, settings.ray_far_reach.max(caster_reach)];
         let reach_changed = self.reach.is_some_and(|r| r != reach);
         self.reach = Some(reach);
+        if jumped || reach_changed {
+            self.settle_until = self.frame + VALVE_SETTLE_FRAMES;
+        }
         let stats = self.instances.stats();
         let valve_stepped = self.valve.step(
             stats.still_set,
             STILL_CAPACITY,
             self.frame,
             settings.ray_scene_stress > 0,
+            self.frame < self.settle_until,
         );
         if jumped || reach_changed || valve_stepped {
             self.epoch = self.epoch.wrapping_add(1);
@@ -866,32 +897,56 @@ impl RayScene {
 mod tests {
     use super::*;
 
-    /// The valve opens once what belongs in the still structure is past its cap, holds each
-    /// step, and closes once what it cut would fit again with room to spare; the measuring
-    /// fill closes it, and it never opens while that runs.
+    /// The valve opens once what belongs in the still structure has been past its cap for a
+    /// while without growing (a fill under way passes it), holds each step, and closes once
+    /// what it cut would fit again with room to spare; the measuring fill closes it, and it
+    /// never opens while that runs, nor while the scene settles after a jump.
     #[test]
     fn the_valve_cuts_far_things_while_the_still_structure_is_over_its_cap() {
         const HOLD: u64 = VALVE_HOLD_FRAMES;
+        const SETTLE: u64 = VALVE_SETTLE_FRAMES;
         let mut valve = Valve::default();
-        assert!(!valve.step(90, 100, 0, false));
-        assert!(valve.step(120, 100, 1, false));
+        assert!(!valve.step(90, 100, 0, false, false));
+        // Past the cap while still growing, then settled at 120 from frame 2.
+        assert!(!valve.step(110, 100, 1, false, false));
+        assert!(!valve.step(120, 100, 2, false, false));
+        assert!(!valve.step(120, 100, 1 + SETTLE, false, false));
+        assert!(valve.step(120, 100, 2 + SETTLE, false, false));
         assert!(valve.open);
+        let opened = 2 + SETTLE;
         // Each step is held.
-        assert!(!valve.step(10, 100, 2, false));
-        assert!(!valve.step(10, 100, HOLD, false));
+        assert!(!valve.step(10, 100, opened + 1, false, false));
+        assert!(!valve.step(10, 100, opened + HOLD - 1, false, false));
         // The first look past the hold measures what the cut took (120 - 90): 90 and that
         // would not fit with room to spare.
-        assert!(!valve.step(90, 100, 1 + HOLD, false));
-        assert!(!valve.step(66, 100, 2 + HOLD, false));
+        assert!(!valve.step(90, 100, opened + HOLD, false, false));
+        assert!(!valve.step(66, 100, opened + HOLD + 1, false, false));
         assert!(valve.open);
-        assert!(valve.step(64, 100, 3 + HOLD, false));
+        assert!(valve.step(64, 100, opened + HOLD + 2, false, false));
         assert!(!valve.open);
-        // Over its cap again at once: held first.
-        assert!(!valve.step(120, 100, 4 + HOLD, false));
-        assert!(valve.step(120, 100, 3 + 2 * HOLD, false));
-        assert!(valve.step(120, 100, 3 + 3 * HOLD, true));
+        let closed = opened + HOLD + 2;
+        // Over its cap again at once: held first (the set settles meanwhile).
+        assert!(!valve.step(120, 100, closed + 1, false, false));
+        assert!(valve.step(120, 100, closed + HOLD, false, false));
+        let reopened = closed + HOLD;
+        assert!(valve.step(120, 100, reopened + HOLD, true, false));
         assert!(!valve.open);
-        assert!(!valve.step(500, 100, 3 + 5 * HOLD, true));
+        assert!(!valve.step(500, 100, reopened + 3 * HOLD, true, false));
+        // A set that falls back under the cap before it settles opens nothing.
+        let mut valve = Valve::default();
+        assert!(!valve.step(120, 100, 0, false, false));
+        assert!(!valve.step(99, 100, SETTLE / 2, false, false));
+        assert!(!valve.step(120, 100, SETTLE, false, false));
+        assert!(!valve.step(120, 100, SETTLE + SETTLE / 2, false, false));
+        assert!(valve.step(120, 100, 2 * SETTLE, false, false));
+        // While the scene settles after a jump the valve waits, and it measures the set
+        // afresh after.
+        let mut valve = Valve::default();
+        assert!(!valve.step(120, 100, 0, false, true));
+        assert!(!valve.step(120, 100, SETTLE, false, true));
+        assert!(!valve.step(120, 100, SETTLE + 1, false, false));
+        assert!(!valve.step(120, 100, 2 * SETTLE, false, false));
+        assert!(valve.step(120, 100, 2 * SETTLE + 1, false, false));
     }
 
     #[test]

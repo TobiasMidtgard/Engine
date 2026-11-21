@@ -30,6 +30,11 @@ fn trace_reflect(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> Hit {
     return trace_scene(origin, dir, t_max, false);
 }
 
+// Whether something stops a sun's measuring ray (`cs_sun`): a hit's shadow ray in this scene.
+fn trace_sun(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> bool {
+    return trace_scene(origin, dir, t_max, true).instance != 0xffffffffu;
+}
+
 // Light leaving the surface a ray from `origin` along `dir` hit (`hit`, not a miss), toward
 // the ray (see `hit_radiance`), and -1 in w for the back of a single-sided surface (inside
 // something), else 1. `cone` (the ray's width where it started, and its widening) picks a

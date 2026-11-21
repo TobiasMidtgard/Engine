@@ -4295,10 +4295,9 @@ impl RenderFeature for MeshFeature {
                         material.metallic,
                         // A texel is a hole where its alpha times the colour's is below
                         // the cutoff, as the raster tests it; a ray tile holds the texel's.
+                        // (Above 1: drawn nowhere, and in no ray.)
                         match material.alpha_mode {
-                            AlphaMode::Mask(cutoff) => {
-                                (cutoff / material.base_color[3].max(1e-3)).min(1.0)
-                            }
+                            AlphaMode::Mask(cutoff) => cutoff / material.base_color[3].max(1e-3),
                             _ => 0.5,
                         },
                     ],
