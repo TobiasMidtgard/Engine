@@ -43,10 +43,12 @@ const IDLE_FRAMES: u64 = 128;
 #[derive(Clone, Copy, Default, Debug)]
 pub(super) struct TileStats {
     /// Layers holding a texture; asks waiting for a layer (or for new pixels in theirs);
-    /// layers filled this frame; MB of the array (0 until the first fill makes it).
+    /// layers filled this frame; layers given to another texture since the scene was made;
+    /// MiB of the array (0 until the first fill makes it).
     pub layers: u32,
     pub waiting: u32,
     pub filled: u32,
+    pub evicted: u32,
     pub mb: f32,
 }
 
@@ -78,6 +80,8 @@ pub(super) struct Book<S> {
     layers: Vec<Option<Layer>>,
     named: HashMap<Name, u16>,
     asks: HashMap<Name, Ask<S>>,
+    /// Layers given to another texture so far.
+    evicted: u32,
 }
 
 impl<S> Book<S> {
@@ -87,6 +91,7 @@ impl<S> Book<S> {
             layers: Vec::new(),
             named: HashMap::new(),
             asks: HashMap::new(),
+            evicted: 0,
         }
     }
 
@@ -207,6 +212,7 @@ impl<S> Book<S> {
                 && was.name != name
             {
                 self.named.remove(&was.name);
+                self.evicted += 1;
             }
             self.named.insert(name, layer);
             fills.push((layer, ask.source));
@@ -463,6 +469,7 @@ impl Tiles {
     ) -> bool {
         let fills = self.book.settle(users, frame);
         (self.stats.layers, self.stats.waiting) = self.book.counts();
+        self.stats.evicted = self.book.evicted;
         self.stats.filled = fills.len() as u32;
         if fills.is_empty() {
             return false;
@@ -479,7 +486,7 @@ impl Tiles {
                 ..Default::default()
             });
             let layer: u64 = (0..MIPS).map(|m| ((SIZE >> m) as u64).pow(2) * 4).sum();
-            self.stats.mb = (layer * LAYERS as u64) as f32 / 1e6;
+            self.stats.mb = (layer * LAYERS as u64) as f32 / (1u64 << 20) as f32;
         }
         // Every group first, then the pass.
         let mut runs: Vec<(wgpu::BindGroup, u32)> = Vec::with_capacity(fills.len() * MIPS as usize);
@@ -571,7 +578,9 @@ mod tests {
             assert!(book.settle(named, frame).is_empty(), "frame {frame}");
         }
         book.ask(name(0), 6.0, 1 + IDLE_FRAMES, || own(0, 0));
+        assert_eq!(book.evicted, 0);
         assert_eq!(book.settle(named, 1 + IDLE_FRAMES), [(2, 0)]);
+        assert_eq!(book.evicted, 1);
         let at = 2 + IDLE_FRAMES;
         assert_eq!(
             book.ask(name(3), 3.0, at, || own(3, 0)),
@@ -836,7 +845,8 @@ mod tests {
         gpu.queue.submit([encoder.finish()]);
         let stats = tiles.stats();
         assert_eq!((stats.layers, stats.waiting, stats.filled), (2, 0, 2));
-        assert!((stats.mb - 22.37).abs() < 0.01, "{} MB", stats.mb);
+        // (22.37 MB.)
+        assert!((stats.mb - 21.33).abs() < 0.01, "{} MiB", stats.mb);
         let first = read_level(&gpu, &tiles, 0, 0);
         let at = |x: usize, y: usize| first[y * SIZE as usize + x];
         // The cells, 64 texels each (two texels in from their edges: the bilinear upsample

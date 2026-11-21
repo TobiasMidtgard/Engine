@@ -2523,6 +2523,7 @@ impl MeshFeature {
                 break;
             }
             let profile = engine_core::profile::enabled();
+            let rays = device.features().contains(crate::gpu::RAY_QUERY_FEATURES);
             let job = std::thread::Builder::new()
                 .name("mesh lods".into())
                 .spawn(move || {
@@ -2535,9 +2536,14 @@ impl MeshFeature {
                             } else {
                                 [1.0; 3]
                             };
-                            // (Whether or not the ray scene is on: nothing on the CPU holds a
-                            // level's indices once they are uploaded.)
-                            let in_range = rays::levels_in_range(mesh, &levels);
+                            // (Whether or not the ray scene is on, where the device can
+                            // trace rays: nothing on the CPU holds a level's indices once they
+                            // are uploaded.)
+                            let in_range = if rays {
+                                rays::levels_in_range(mesh, &levels)
+                            } else {
+                                0
+                            };
                             (levels, movable, in_range)
                         })
                         .collect()

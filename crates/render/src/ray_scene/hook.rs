@@ -164,19 +164,19 @@ impl Default for RayLook {
 
 /// Where the pixels a layer of the ray tiles is filled from are ([`RaySceneOut::tile`]).
 #[derive(Clone)]
-pub struct RayTileSource {
+pub(crate) struct RayTileSource {
     /// A 2D view that samples as filterable float with its mips (an sRGB view of sRGB pixels:
     /// the colour as the raster reads it).
-    pub view: wgpu::TextureView,
+    pub(crate) view: wgpu::TextureView,
     /// The texture within the view as its uv: corner (xy) and size (zw); `[0, 0, 1, 1]`: the
     /// whole view.
-    pub rect: [f32; 4],
+    pub(crate) rect: [f32; 4],
     /// Changes when the pixels do: the layer is filled again (looked at every 64 frames).
-    pub version: u64,
+    pub(crate) version: u64,
     /// The pixels stay where they are while the view is held: a texture of their own. False
     /// for a place in a cache, which may hold another texture's pixels from the next frame
     /// on: such a source fills a layer only in the frame it was found in.
-    pub lasting: bool,
+    pub(crate) lasting: bool,
 }
 
 /// The scene, as one feature fills it in [`crate::RenderFeature::ray_scene`].
@@ -254,8 +254,9 @@ impl RaySceneOut<'_> {
     /// `source`: where its pixels are on the GPU now (`None`: not there), asked only for an
     /// ask (once a frame while it waits) and every 64 frames for a texture a layer holds, to
     /// see whether its pixels changed. A layer no instance's look has named for a while goes
-    /// to another texture.
-    pub fn tile(
+    /// to another texture. (In the crate: a hit reads a tile at its triangle record's uv, which
+    /// only geometry from the mesh pool has.)
+    pub(crate) fn tile(
         &mut self,
         key: RayKey,
         distance: f32,

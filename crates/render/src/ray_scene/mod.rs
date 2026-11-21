@@ -38,9 +38,8 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
-pub use hook::{
-    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayTileSource, RayView,
-};
+pub(crate) use hook::RayTileSource;
+pub use hook::{RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RayView};
 
 use crate::features::GpuShared;
 use crate::frame::ViewData;
@@ -103,15 +102,19 @@ pub(crate) struct RayStats {
     /// GPU memory under the bottom-level structures, MiB (`None`: not read yet).
     pub blas_mb: Option<f64>,
     /// Triangle records in use (a header a geometry with records, a record a triangle), the
-    /// records' buffer (MB), geometries that got none for want of room.
+    /// records' buffer (MiB), geometries that got none for want of room, and what the records
+    /// in use and the refused would take (MiB).
     pub tris: u32,
     pub tris_mb: f32,
     pub tris_refused: u32,
+    pub tris_wanted_mb: f32,
     /// Layers of the ray tiles holding a texture, textures waiting for one (or for new pixels
-    /// in theirs), layers filled this frame, the array (MB; 0 until a first fill makes it).
+    /// in theirs), layers filled this frame, layers given to another texture since the scene
+    /// was made, the array (MiB; 0 until a first fill makes it).
     pub tiles: u32,
     pub tiles_waiting: u32,
     pub tiles_filled: u32,
+    pub tiles_evicted: u32,
     pub tiles_mb: f32,
     pub instances: u32,
     pub still: u32,
@@ -522,7 +525,7 @@ impl RayScene {
     pub(crate) fn stats(&self) -> RayStats {
         let s = self.store.stats();
         let i = self.instances.stats();
-        let (tris, tris_mb, tris_refused) = self.tris.stats();
+        let (tris, tris_mb, tris_refused, tris_wanted_mb) = self.tris.stats();
         let tiles = self.tiles.stats();
         RayStats {
             geometries: s.geometries,
@@ -535,9 +538,11 @@ impl RayScene {
             tris,
             tris_mb,
             tris_refused,
+            tris_wanted_mb,
             tiles: tiles.layers,
             tiles_waiting: tiles.waiting,
             tiles_filled: tiles.filled,
+            tiles_evicted: tiles.evicted,
             tiles_mb: tiles.mb,
             instances: self.instances.len() as u32,
             still: i.still,
@@ -589,9 +594,11 @@ impl RayScene {
         d.set("render.ray.tris", s.tris as f64);
         d.set("render.ray.tris_mb", s.tris_mb as f64);
         d.set("render.ray.tris_refused", s.tris_refused as f64);
+        d.set("render.ray.tris_wanted_mb", s.tris_wanted_mb as f64);
         d.set("render.ray.tiles", s.tiles as f64);
         d.set("render.ray.tiles_waiting", s.tiles_waiting as f64);
         d.set("render.ray.tiles_filled", s.tiles_filled as f64);
+        d.set("render.ray.tiles_evicted", s.tiles_evicted as f64);
         d.set("render.ray.tiles_mb", s.tiles_mb as f64);
         d.set("render.ray.instances", s.instances as f64);
         d.set("render.ray.still_instances", s.still as f64);

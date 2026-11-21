@@ -51,9 +51,11 @@ pub(super) struct Records {
     wanted: u32,
     most: u32,
     ranges: Ranges,
-    /// Records in ranges, and ranges refused since the scene was made.
+    /// Records in ranges, and ranges refused since the scene was made, with the records they
+    /// would have held.
     used: u32,
     refused: u32,
+    refused_records: u64,
     max_binding: u64,
     pipelines: Option<Pipelines>,
 }
@@ -78,6 +80,7 @@ impl Records {
             ranges: Ranges::new(first),
             used: 0,
             refused: 0,
+            refused_records: 0,
             max_binding,
             pipelines: None,
         }
@@ -98,12 +101,15 @@ impl Records {
         &self.buffer
     }
 
-    /// Records in use, megabytes of the buffer, ranges refused so far.
-    pub(super) fn stats(&self) -> (u32, f32, u32) {
+    /// Records in use, the buffer (MiB), ranges refused so far, and what the records in use
+    /// and those refused take (MiB): the need, which may pass the 48 MB the buffer grows to.
+    pub(super) fn stats(&self) -> (u32, f32, u32, f32) {
+        let mib = |records: u64| (records * RECORD_BYTES) as f32 / (1u64 << 20) as f32;
         (
             self.used,
-            (self.capacity as u64 * RECORD_BYTES) as f32 / 1e6,
+            mib(self.capacity as u64),
             self.refused,
+            mib(self.used as u64 + self.refused_records),
         )
     }
 
@@ -128,6 +134,7 @@ impl Records {
             .filter(|&len| len <= self.most && bindable(vertex) && bindable(index));
         let Some(len) = len else {
             self.refused += 1;
+            self.refused_records += triangles as u64 + 1;
             return None;
         };
         loop {
@@ -137,6 +144,7 @@ impl Records {
             }
             if self.wanted >= self.most {
                 self.refused += 1;
+                self.refused_records += len as u64;
                 return None;
             }
             // Twice the room from this frame's `encode` on. The ranges know it at once: a
@@ -544,11 +552,15 @@ mod tests {
         check_job(&words, &sphere, headers[0]);
         check_job(&words, &quad, headers[1]);
         check_job(&words, &other, headers[2]);
-        let (used, mb, refused) = records.stats();
+        let (used, mb, refused, wanted_mb) = records.stats();
         let triangles = (sphere.indices.len() + quad.indices.len() + other.indices.len()) / 3;
         assert_eq!(used as usize, triangles + 3);
         assert_eq!(refused, 0);
-        assert!((mb - 12.0).abs() < 1e-3, "{mb} MB");
+        // (MiB: the 12 MB the buffer starts with.)
+        let mib = |bytes: f64| (bytes / (1u64 << 20) as f64) as f32;
+        assert!((mb - mib(12e6)).abs() < 1e-3, "{mb} MiB");
+        let need = mib((used as u64 * RECORD_BYTES) as f64);
+        assert!((wanted_mb - need).abs() < 1e-6, "{wanted_mb} MiB");
     }
 
     #[test]
@@ -639,5 +651,8 @@ mod tests {
         });
         assert!(records.take(1, &unbindable, &index).is_none());
         assert_eq!(records.stats().2, 2);
+        // The need counts what is held (64) and what was refused (1 and 2 records).
+        let need = (64 + 1 + 2) * RECORD_BYTES;
+        assert_eq!(records.stats().3, need as f32 / (1u64 << 20) as f32);
     }
 }

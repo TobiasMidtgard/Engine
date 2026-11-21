@@ -42,13 +42,16 @@ pub(crate) fn image_mean(image: &crate::Image) -> Option<Vec3> {
 /// `texture_mean`: the mean color of its base color texture, when known.
 pub(crate) fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Vec3) {
     let tint = Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2]);
-    let albedo = match m.preset {
-        Some(p) => tint * Vec3::from(p.mean_albedo()),
+    let plain = 1.0 - m.metallic.clamp(0.0, 1.0);
+    let albedo = match (m.base_color_texture.is_some(), m.preset) {
+        // The colour slot draws its image over a preset's map (`texture_set_for`); a preset's
+        // metallic scales its own map, so it does not darken the colour. Before the image's
+        // mean is known: the preset's.
+        (true, Some(p)) => tint * texture_mean.unwrap_or(Vec3::from(p.mean_albedo())),
+        (false, Some(p)) => tint * Vec3::from(p.mean_albedo()),
         // A texture's mean before it is uploaded: about half of the tint.
-        None if m.base_color_texture.is_some() => {
-            tint * texture_mean.unwrap_or(Vec3::splat(0.5)) * (1.0 - m.metallic.clamp(0.0, 1.0))
-        }
-        None => tint * (1.0 - m.metallic.clamp(0.0, 1.0)),
+        (true, None) => tint * texture_mean.unwrap_or(Vec3::splat(0.5)) * plain,
+        (false, None) => tint * plain,
     };
     let emissive = Vec3::from(m.emissive) * m.emissive_strength;
     (albedo.min(Vec3::splat(0.95)), emissive)
