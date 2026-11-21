@@ -230,7 +230,10 @@ fn skin_material() -> StandardMaterial {
         reflectance: 0.4,
         // Waves: bumps a dozen meters across (and finer ones seen from close by) that catch
         // the sun and the sky.
-        detail: 0.7,
+        detail: std::env::var("ARCH_SEA_SKIN_DETAIL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.7),
         detail_scale: 11.0,
         receives_wetness: false,
         ..Default::default()
@@ -388,7 +391,10 @@ fn ocean_piece(face: usize, pi: usize, pj: usize, skin: bool) -> Option<(DQuat, 
                     || left_out(qi - 1, qj)
                     || left_out(qi, qj));
             let h = if skin {
-                SKIN_OVER_M
+                std::env::var("ARCH_SEA_SKIN_UP")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(SKIN_OVER_M)
             } else if rim {
                 (island::ground(d) - 3.0).min(-OCEAN_UNDER_M)
             } else {
@@ -425,6 +431,9 @@ fn ocean_piece(face: usize, pi: usize, pj: usize, skin: bool) -> Option<(DQuat, 
 
 /// Spawn the sea: every region's waters, the ocean between and the skin over it all.
 pub fn spawn(world: &mut World) {
+    // SCRATCH (not for commit): ARCH_SEA_HIDE=sheets,ocean,skin leaves those layers out;
+    // ARCH_SEA_SKIN_DETAIL=<f32> sets the skin's detail; ARCH_SEA_SKIN_UP=<m> lifts the skin.
+    let hide = std::env::var("ARCH_SEA_HIDE").unwrap_or_default();
     let started = std::time::Instant::now();
     let frame = *world.resource::<Frame>();
     let mut pieces = 0;
@@ -436,6 +445,9 @@ pub fn spawn(world: &mut World) {
             .resource_mut::<Assets<StandardMaterial>>()
             .add(body_material((texture, side), AlphaMode::Blend));
         for (space, mesh) in sheet_pieces(k) {
+            if hide.contains("sheets") {
+                continue;
+            }
             let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
             let mut r = MeshRenderer::new(mesh, material);
             r.cast_shadows = false;
@@ -472,6 +484,9 @@ pub fn spawn(world: &mut World) {
         ocean_piece(f, i, j, skin).map(|p| (p, skin))
     });
     for ((rot, origin, mesh), is_skin) in built.into_iter().flatten() {
+        if (is_skin && hide.contains("skin")) || (!is_skin && hide.contains("ocean")) {
+            continue;
+        }
         let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
         let mut r = MeshRenderer::new(mesh, if is_skin { skin } else { ocean });
         r.cast_shadows = false;
