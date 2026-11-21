@@ -393,9 +393,32 @@ fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
     let coats = {
         // (The furrier is worked by Burghers themselves: its furs and wool are what count.)
         let d = Kind::Furrier.def();
-        [d.input, d.input2].into_iter().flatten().all(&can)
+        [d.input, d.input2].into_iter().flatten().all(&can) || bought_abroad(Good::Coats)
     };
     let burghers = coats && (can(Good::SaltFish) || can(Good::DateCakes));
+    // What no island of ours can make, a captain who trades buys at another house's
+    // harbour once there are Labourers enough to move up: the furs and salt Burghers wait
+    // for, or the coats and salt fish themselves.
+    if !burghers
+        && knobs(world).abroad
+        && world.resource::<Economy>().islands[i].population[Tier::Labourers.index()] >= 100.0
+    {
+        let missing: Vec<Good> = [
+            Good::Furs,
+            Good::Wool,
+            Good::Salt,
+            Good::Coats,
+            Good::SaltFish,
+        ]
+        .into_iter()
+        .filter(|g| !can(*g))
+        .collect();
+        for g in missing {
+            if buy_abroad(world, log, now, g, i) {
+                break;
+            }
+        }
+    }
     let tiers: &[Tier] = if burghers {
         &Tier::ALL
     } else {
@@ -1812,7 +1835,7 @@ fn buy_abroad(world: &mut World, log: &mut Log, now: f64, g: Good, to: usize) ->
             let b = &econ.islands[j];
             (j, b.get(g) - crate::market::keeps(b, g))
         })
-        .filter(|(_, spare)| *spare >= 15.0)
+        .filter(|(_, spare)| *spare >= 10.0)
         .max_by(|a, b| a.1.total_cmp(&b.1));
     let Some((from, _)) = best else {
         return false;
