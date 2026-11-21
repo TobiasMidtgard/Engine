@@ -61,7 +61,7 @@ Company
   Space  +  −       Pause; speed normal, double, four times
   L  T              Ledger, trade routes
   G  I              Fleet, items
-  F1  Esc           This page, the menu
+  F1  F10  Esc      This page, cheats, the menu
   F11               Window or fullscreen
 
 Options (Windows: make a shortcut to Brightsund.exe and add them after the path in Target)
