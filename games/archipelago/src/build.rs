@@ -197,28 +197,36 @@ pub fn place_paving(world: &mut World, c: IVec2, charge: bool) -> Result<(), Str
     if world.resource::<Grid>().is_paved(c) {
         return Ok(());
     }
-    if !world.resource::<Grid>().is_road(c) {
-        // The price of paving covers the road bed under it.
-        place_road(world, c, false)?;
-    }
+    // (Everything is checked before the road bed goes down, so a refusal leaves no road.)
+    let p = grid::cell_center(c);
+    let isle = island::island_at(p.x, p.y);
+    let me = crate::sim::acting(world);
+    let cost = Kind::PavedRoad.def().coins as f64;
     if charge {
-        let p = grid::cell_center(c);
-        let isle = island::island_at(p.x, p.y);
-        let me = crate::sim::acting(world);
         if let Some(i) = isle
             && !crate::settle::claimed(world, i)
         {
             return Err(crate::settle::unclaimed_text_in(world, i));
         }
-        let mut econ = world.resource_mut::<Economy>();
-        let cost = Kind::PavedRoad.def().coins as f64;
+        let econ = world.resource::<Economy>();
         if econ.coins_of(me) < cost {
             return Err("Not enough coins for paving.".into());
         }
-        if let Some(books) = isle.and_then(|i| econ.islands.get_mut(i))
-            && !books.take(Good::Bricks, PAVING_BRICKS)
+        if isle
+            .and_then(|i| econ.islands.get(i))
+            .is_some_and(|b| b.get(Good::Bricks) + 1e-6 < PAVING_BRICKS)
         {
             return Err("Paving needs bricks in this island's warehouse.".into());
+        }
+    }
+    if !world.resource::<Grid>().is_road(c) {
+        // The price of paving covers the road bed under it.
+        place_road(world, c, false)?;
+    }
+    if charge {
+        let mut econ = world.resource_mut::<Economy>();
+        if let Some(books) = isle.and_then(|i| econ.islands.get_mut(i)) {
+            books.take(Good::Bricks, PAVING_BRICKS);
         }
         *econ.coins_mut(me) -= cost;
     }
@@ -1002,6 +1010,15 @@ pub fn starting_stock() -> Vec<(Good, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_paving_lays_no_road_bed() {
+        let mut world = crate::town::tests::bare_world();
+        let c = grid::cell_of(island::islands()[0].center.x, island::islands()[0].center.y);
+        // Nobody holds Haverholm here: refused, and no dirt road is left behind.
+        assert!(place_paving(&mut world, c, true).is_err());
+        assert!(!world.resource::<Grid>().is_road(c));
+    }
 
     #[test]
     fn nothing_is_built_in_debt() {
