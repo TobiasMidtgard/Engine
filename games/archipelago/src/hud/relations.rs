@@ -775,7 +775,6 @@ fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
         .children(rows2)
         .child_opt(ships)
         .children(rows3)
-        .child_opt(both.then(|| goods_versus(us, them, c)))
 }
 
 /// One side's goods: the label, then each good's picture and its rate a minute.
@@ -796,13 +795,13 @@ fn goods_side(label: &str, goods: &[(Good, f32)], tint: Color) -> El {
     col.child(
         El::new()
             .class("row")
-            .with_style(|s| s.gap(8.0).wrap(true))
+            .with_style(|s| s.gap(4.0).wrap(true))
             .children(goods.iter().take(5).map(move |(g, n)| {
                 El::new()
                     .class("col")
-                    .with_style(|s| s.gap(0.0).align_items(Align::Center).width(54.0))
+                    .with_style(|s| s.gap(0.0).align_items(Align::Center).width(44.0))
                     .tooltip(g.name(), format!("{n:.1} a minute"))
-                    .child(brass::badge(g.icon(), 34.0))
+                    .child(brass::badge(g.icon(), 32.0))
                     .child(
                         El::text(format!("{n:.1}"))
                             .class("ink")
@@ -814,13 +813,15 @@ fn goods_side(label: &str, goods: &[(Good, f32)], tint: Color) -> El {
     )
 }
 
-/// What each side makes most of, and what each side's towns lack most, a minute.
-fn goods_versus(us: &Stand, them: &Stand, c: Color) -> El {
+/// What each side makes most of, and what each side's towns lack most, a minute (on the left
+/// page, under the standings, for the house picked).
+fn goods_versus(r: &Rival, us: &Stand, them: &Stand) -> El {
+    let c = r.color;
     let theirs = c.lerp(Colors::ink(), 0.35);
     El::new()
         .class("col")
         .with_style(|s| s.gap(8.0).margin([6.0, 0.0, 0.0, 0.0]))
-        .child(brass::divider(320.0))
+        .child(brass::label(&format!("Goods: you and {}", r.name), true))
         .child(
             El::new()
                 .class("row")
@@ -1222,7 +1223,15 @@ fn body(list: &[Rival], picked: Option<u64>, clock: f64, all: &[Stand]) -> Vec<E
                 .map(|r| rival_card(r, r.id == pick.id))
                 .collect::<Vec<_>>()
         })
-        .child(league(list, all));
+        .child(league(list, all))
+        .child_opt({
+            let us = all.first();
+            let them = all.get(pick.id as usize);
+            match (us, them) {
+                (Some(u), Some(t)) if u.known && t.known => Some(goods_versus(pick, u, t)),
+                _ => None,
+            }
+        });
     let spine = El::new().with_style(|s| {
         s.width(14.0)
             .background(Fill::Linear {
