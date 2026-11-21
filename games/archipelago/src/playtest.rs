@@ -122,9 +122,9 @@ fn my_books(world: &World) -> Economy {
             let b = &mut econ.islands[i];
             b.population = Default::default();
             b.stock = [0.0; Good::COUNT];
-            b.supply = Default::default();
-            b.wanted_per_min = Default::default();
-            b.made_per_min = Default::default();
+            b.supply = [0.0; Good::COUNT];
+            b.wanted_per_min = [0.0; Good::COUNT];
+            b.made_per_min = [0.0; Good::COUNT];
         }
     }
     econ
@@ -369,6 +369,8 @@ pub(crate) fn turn(world: &mut World, log: &mut Log) {
     if !slips(world, 4) {
         retrench(world, log, now);
     }
+    cancel_trader_orders(world, log, now);
+    sell_off(world, log, now);
     incidents_seen(world, log);
 }
 
@@ -397,6 +399,10 @@ fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
         [d.input, d.input2].into_iter().flatten().all(&can) || bought_abroad(Good::Coats)
     };
     let burghers = coats && (can(Good::SaltFish) || can(Good::DateCakes));
+    // Burghers move up to Masters once coffee can be had as well; Masters to Patricians
+    // once chocolate and gowns can.
+    let masters = burghers && can(Good::Coffee);
+    let patricians = masters && can(Good::Chocolate) && can(Good::Gowns);
     // What no island of ours can make, a captain who trades buys at another house's
     // harbour once there are Labourers enough to move up: the furs and salt Burghers wait
     // for, or the coats and salt fish themselves.
@@ -420,8 +426,12 @@ fn move_up(world: &mut World, log: &mut Log, now: f64, i: usize) {
             }
         }
     }
-    let tiers: &[Tier] = if burghers {
+    let tiers: &[Tier] = if patricians {
         &Tier::ALL
+    } else if masters {
+        &[Tier::Fisherfolk, Tier::Labourers, Tier::Burghers]
+    } else if burghers {
+        &[Tier::Fisherfolk, Tier::Labourers]
     } else {
         &[Tier::Fisherfolk]
     };
@@ -1162,6 +1172,115 @@ fn build_within(
     false
 }
 
+/// A purse in debt that pausing works has not saved: take down the dearest building the
+/// towns can do without (the watch, fire watch and infirmary, the halls, the masts and the
+/// chandler), one every ten minutes, until the books balance.
+fn sell_off(world: &mut World, log: &mut Log, now: f64) {
+    let me = me(world);
+    let econ = world.resource::<Economy>();
+    if econ.coins_of(me) > -200.0
+        || econ.balance_of(me) >= 0.0
+        || log.last.get(&(7950, None)).is_some_and(|t| now - t < 600.0)
+    {
+        return;
+    }
+    let econ = econ.clone();
+    let spare = |k: Kind| {
+        matches!(
+            k,
+            Kind::FireWatch
+                | Kind::WatchHouse
+                | Kind::Infirmary
+                | Kind::TradingUnion
+                | Kind::TownHall
+                | Kind::HarbourOffice
+                | Kind::AirshipMast
+                | Kind::Chandler
+                | Kind::Theatre
+                | Kind::Bank
+        )
+    };
+    let worst = world
+        .query::<(Entity, &Building)>()
+        .iter(world)
+        .filter(|(_, b)| econ.owns(me, b.island) && spare(b.kind))
+        .max_by(|a, b| a.1.kind.def().upkeep.total_cmp(&b.1.kind.def().upkeep))
+        .map(|(e, b)| (e, b.kind.def().name, b.island));
+    let Some((e, name, i)) = worst else { return };
+    log.last.insert((7950, None), now);
+    crate::build::demolish(world, e);
+    log.act("sold off");
+    log.line(
+        now,
+        format!(
+            "took down a {name} on {} to stop the losses (in debt)",
+            islands()[i].name
+        ),
+    );
+}
+
+/// A captain who uses the free traders leaves a standing order for raw good `g` at island
+/// `to` (twelve minutes of what it uses, 30 to 200) while its purse is deep; true when one
+/// stands. See [`crate::traders`].
+fn order_from_traders(world: &mut World, log: &mut Log, now: f64, g: Good, to: usize) -> bool {
+    if !knobs(world).traders || !crate::traders::sells(g) {
+        return false;
+    }
+    let me = me(world);
+    if crate::traders::orders_of(world, me)
+        .iter()
+        .any(|o| o.island == to && o.good == g)
+    {
+        return true;
+    }
+    if my_coins(world) < knobs(world).reserve * 4.0 + 5_000.0 || runs_dry_within(world, 60.0) {
+        return false;
+    }
+    let b = &world.resource::<Economy>().islands[to];
+    let gi = g.index();
+    let keep = (b.used_per_min[gi].max(b.wanted_per_min[gi]) as f64 * 12.0).clamp(30.0, 200.0);
+    match crate::traders::order(world, me, to, g, keep) {
+        Ok(()) => {
+            log.act("ordered from the free traders");
+            log.line(
+                now,
+                format!(
+                    "left an order with the free traders: {keep:.0} {} kept on {} ({:.0} coins each)",
+                    g.name(),
+                    islands()[to].name,
+                    crate::traders::price(g)
+                ),
+            );
+            true
+        }
+        Err(e) => {
+            log.refuse(now, "order from the free traders", &e);
+            false
+        }
+    }
+}
+
+/// A purse running low: a captain cancels its orders with the free traders.
+fn cancel_trader_orders(world: &mut World, log: &mut Log, now: f64) {
+    let me = me(world);
+    let orders = crate::traders::orders_of(world, me);
+    if orders.is_empty()
+        || (my_coins(world) > knobs(world).reserve * 2.0 + 2_000.0 && !runs_dry_within(world, 30.0))
+    {
+        return;
+    }
+    for o in &orders {
+        let _ = crate::traders::order(world, me, o.island, o.good, 0.0);
+    }
+    log.line(
+        now,
+        format!(
+            "cancelled {} orders with the free traders (purse low)",
+            orders.len()
+        ),
+    );
+}
+
 /// A full island: a captain who clears ground takes down one works it can spare to make room
 /// for houses and what they need. Spare means another of its kind is kept, its store is
 /// full at five times what the island keeps, and what the company makes of its good without
@@ -1548,6 +1667,41 @@ fn bricks_and_chapel(world: &mut World, log: &mut Log, now: f64, i: usize, at: D
             );
         }
     }
+    // Iron for Burghers moving up to Masters, the same way: an ironworks (and the ore for
+    // it, from wherever the rock holds it) once 200 Burghers live here or ready houses wait.
+    let want_iron = world
+        .query::<(&Building, &House)>()
+        .iter(world)
+        .filter(|(b, h)| {
+            b.island == i && h.tier == Tier::Burghers && h.wait == crate::sim::Wait::NoMaterials
+        })
+        .count();
+    let soon = books.population[Tier::Burghers.index()] >= 200.0;
+    if (want_iron >= 3 || soon)
+        && books.get(Good::Iron) < 4.0 + crate::sim::BUILD_RESERVE
+        && crate::unlocks::refusal(world, Kind::Ironworks).is_none()
+    {
+        let (mut works, mut busy) = (0, 0);
+        for (b, p) in world.query::<(&Building, &Producer)>().iter(world) {
+            if b.island == i && b.kind == Kind::Ironworks {
+                works += 1;
+                busy += usize::from(p.status == Status::Working);
+            }
+        }
+        if works == 0 || (want_iron >= 3 && busy == works && works < 3) {
+            let from = settled_islands(world);
+            build_chain(
+                world,
+                log,
+                now,
+                Kind::Ironworks,
+                i,
+                &from,
+                "iron for Masters",
+                2,
+            );
+        }
+    }
     if count(world, Kind::Chapel) == 0 && books.get(Good::Bricks) >= 6.0 {
         build_for(
             world,
@@ -1815,6 +1969,10 @@ fn trade(world: &mut World, log: &mut Log, now: f64) {
                     return;
                 }
                 if builders {
+                    continue;
+                }
+                // A raw good nobody can spare: the free traders sell it, dearly.
+                if order_from_traders(world, log, now, g, to) {
                     continue;
                 }
                 log.line(
@@ -2453,12 +2611,18 @@ fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
     // The first hull it can pay for now and keep 600 coins: a barque when rich, else a
     // schooner, else a paddle steamer (bricks instead of the clothes a young town lacks).
     let books = world.resource::<Economy>().islands[b.island].clone();
+    let balance = world.resource::<Economy>().balance_of(me);
     let can = |c: Craft| {
         crate::shipyard::PLANS
             .iter()
             .find(|p| p.craft == c)
             .is_some_and(|p| {
-                coins >= p.coins as f64 + 600.0
+                // (And what is left must carry the books with its upkeep on them for an
+                // hour and a half: a hull the town cannot keep sinks the purse.)
+                let left = coins - p.coins as f64 - 600.0;
+                let short = (p.upkeep as f64 - balance).max(0.0);
+                left >= short * 90.0
+                    && left >= p.upkeep as f64 * 20.0
                     && books.population[p.tier.index()] >= 1.0
                     && p.cost.iter().all(|(g, n)| books.get(*g) >= *n as f64)
             })
@@ -2468,11 +2632,9 @@ fn shipbuilding(world: &mut World, log: &mut Log, now: f64) {
     } else {
         &[Craft::Schooner, Craft::PaddleSteamer]
     };
-    let craft = wish
-        .iter()
-        .copied()
-        .find(|c| can(*c))
-        .unwrap_or(Craft::Schooner);
+    let Some(craft) = wish.iter().copied().find(|c| can(*c)) else {
+        return;
+    };
     match crate::shipyard::order(world, *e, craft) {
         Ok(()) => {
             log.act("ship ordered");

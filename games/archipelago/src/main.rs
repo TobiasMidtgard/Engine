@@ -45,6 +45,7 @@ mod logistics;
 mod looks;
 mod market;
 mod orders;
+mod patrician;
 mod placing;
 mod playtest;
 mod regional;
@@ -61,6 +62,7 @@ mod tools;
 mod tour;
 mod town;
 mod tradelines;
+mod traders;
 mod unlocks;
 mod vessels;
 mod walkers;
@@ -207,7 +209,7 @@ pub fn add_game(app: &mut App) {
                 hud::read_actions,
                 tools::input,
                 town::upgrade_looks,
-                (items::tick, incidents::tick, reports::alerts).chain(),
+                (items::tick, incidents::tick, traders::tick, reports::alerts).chain(),
                 build::refresh,
                 draw::redraw_buildings,
                 streets::redraw_streets,
@@ -236,6 +238,7 @@ pub fn add_game(app: &mut App) {
     reports::register(app);
     rivals::register(app);
     tradelines::register(app);
+    traders::register(app);
     settle::register(app);
     helm::register(app);
     incidents::register(app);

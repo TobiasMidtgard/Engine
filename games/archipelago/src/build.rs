@@ -752,7 +752,14 @@ fn stall_model(world: &mut World, k: usize, goods: Goods, variant: u64) -> Stall
 pub struct StallKit(pub engine_ui::demo::art::stall::StallMats);
 
 /// The public buildings houses ask for, in the order of `House::services`.
-pub const SERVICES: [Kind; MAX_SERVICES] = [Kind::Market, Kind::Chapel, Kind::School, Kind::Tavern];
+pub const SERVICES: [Kind; MAX_SERVICES] = [
+    Kind::Market,
+    Kind::Chapel,
+    Kind::School,
+    Kind::Tavern,
+    Kind::Theatre,
+    Kind::Bank,
+];
 
 /// How much further than its radius a public building reaches along a dirt road.
 pub const STREET_REACH: f32 = 1.25;

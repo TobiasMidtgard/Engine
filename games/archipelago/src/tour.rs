@@ -446,6 +446,93 @@ fn views() -> Vec<View> {
             pitch_deg: Some(20.0),
             ..v("merchants", Aim::Home(T::Burghers, 12), 0.5, 46.0)
         },
+        // Tiers 4 and 5: Masters' and Patricians' houses in each climate, their works.
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("masters", Aim::Home(T::Masters, 0), -0.45, 44.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("patricians", Aim::Home(T::Patricians, 0), -0.45, 50.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("veranda_houses", Aim::Home(T::Masters, 5), 0.5, 48.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("plantation_hall", Aim::Home(T::Patricians, 5), 0.5, 52.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("tower_houses", Aim::Home(T::Masters, 9), 0.5, 48.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("palace", Aim::Home(T::Patricians, 9), 0.5, 52.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("stave_halls", Aim::Home(T::Masters, 12), 0.5, 48.0)
+        },
+        View {
+            clean: true,
+            fog: false,
+            pitch_deg: Some(20.0),
+            ..v("copper_manor", Aim::Home(T::Patricians, 12), 0.5, 52.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("theatre", Aim::Front(K::Theatre, 0), 0.4, 62.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("bank", Aim::Front(K::Bank, 0), -0.4, 56.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("ironworks", Aim::Front(K::Ironworks, 0), 0.6, 52.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("roastery", Aim::Front(K::Roastery, 0), 0.5, 38.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("clockmaker", Aim::Front(K::Clockmaker, 0), 0.5, 34.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("chocolatier", Aim::Front(K::Chocolatier, 0), 0.5, 36.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("couturier", Aim::Front(K::Couturier, 0), 0.5, 40.0)
+        },
+        View {
+            clean: true,
+            pitch_deg: Some(22.0),
+            ..v("goldsmith", Aim::Front(K::Goldsmith, 0), 0.5, 32.0)
+        },
         // Round 7: the three buildings that hold items, their reach, and the pedlar.
         View {
             clean: true,

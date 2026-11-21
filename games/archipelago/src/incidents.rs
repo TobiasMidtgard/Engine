@@ -305,6 +305,8 @@ fn risk(b: &Building, house: Option<&House>, crowd: u32, paved: bool, ships: f32
             Tier::Fisherfolk => 0.0009,
             Tier::Labourers => 0.0006,
             Tier::Burghers => 0.0004,
+            Tier::Masters => 0.0003,
+            Tier::Patricians => 0.00025,
         };
         // Unhappy houses riot: the further below 40, the likelier; fisherfolk grumble less.
         let unhappy = ((40.0 - h.happiness) / 20.0).max(0.0);
@@ -1275,6 +1277,8 @@ fn roof_m(world: &World, e: Entity, b: &Building) -> f64 {
         Some(Tier::Fisherfolk) => 6.0,
         Some(Tier::Labourers) => 9.0,
         Some(Tier::Burghers) => 11.5,
+        Some(Tier::Masters) => 15.0,
+        Some(Tier::Patricians) => 17.0,
         None => {
             let (w, d) = b.kind.def().size;
             (6.0 + (w.max(d) as f64) * 0.8).min(11.0)

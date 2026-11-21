@@ -57,6 +57,8 @@ pub struct Knobs {
     pub isles: usize,
     /// On a full island it takes down a works it can spare to make room.
     pub clears: bool,
+    /// It buys raw goods from the free traders once its purse is deep.
+    pub traders: bool,
 }
 
 impl Level {
@@ -103,6 +105,7 @@ impl Level {
             works,
             isles,
             clears: self == Level::Admiral,
+            traders: matches!(self, Level::Commodore | Level::Admiral),
         }
     }
 

@@ -656,6 +656,9 @@ fn far_town(
             15,
             true,
         );
+        // A patrician's house and two masters' among them.
+        fill_houses(world, village, 45.0, 1, Tier::Patricians);
+        fill_houses(world, village, 50.0, 2, Tier::Masters);
         fill_houses(world, village, 55.0, burghers, Tier::Burghers);
     }
     fill_houses(world, village, radius + 25.0, houses, Tier::Fisherfolk);
@@ -838,7 +841,18 @@ pub fn build_start(world: &mut World) {
     ] {
         place_near(world, kind, town + off, 30, true);
     }
+    // The richest at the heart: Patricians and Masters, with their theatre and bank.
+    place_near(
+        world,
+        Kind::Theatre,
+        town + DVec2::new(-70.0, 60.0),
+        30,
+        true,
+    );
+    place_near(world, Kind::Bank, town + DVec2::new(70.0, 64.0), 30, true);
     let core = fill_houses(world, town, 75.0, 8, Tier::Burghers);
+    fill_houses(world, town, 90.0, 3, Tier::Patricians);
+    fill_houses(world, town, 95.0, 4, Tier::Masters);
     let inner = fill_houses(world, town, 100.0, 16, Tier::Labourers);
     let outer = fill_houses(world, town, 190.0, 44, Tier::Fisherfolk);
     let _ = (core, inner, outer);
@@ -878,6 +892,13 @@ pub fn build_start(world: &mut World) {
     place_near(world, Kind::Saltery, toward(0.25, 205.0), 30, true);
     place_near(world, Kind::Furrier, toward(2.0, 255.0), 30, true);
     place_near(world, Kind::LampMaker, toward(1.15, 205.0), 30, true);
+    // And the Masters' works: iron, coffee, clocks, chocolate, gowns and jewellery.
+    place_near(world, Kind::Ironworks, toward(4.9, 300.0), 40, true);
+    place_near(world, Kind::Roastery, toward(0.4, 260.0), 35, true);
+    place_near(world, Kind::Clockmaker, toward(1.3, 160.0), 30, true);
+    place_near(world, Kind::Chocolatier, toward(0.8, 170.0), 30, true);
+    place_near(world, Kind::Couturier, toward(1.9, 180.0), 30, true);
+    place_near(world, Kind::Goldsmith, toward(2.3, 170.0), 30, true);
     // The Trading Union among the manufactories: glass, lamps, furs, a weaver and a sawmill
     // are in its reach.
     let union = place_facing(world, Kind::TradingUnion, toward(1.65, 205.0), 16, town);
@@ -1786,7 +1807,11 @@ pub mod tests {
         for (b, h) in w.query::<(&Building, &House)>().iter(&w) {
             if h.tier == Tier::Burghers {
                 assert!(h.paved, "a Burghers' house off the paving on {}", b.island);
-                assert_eq!(h.services, [true; 4], "house {} lacks a service", b.id);
+                assert!(
+                    h.services[..4].iter().all(|s| *s),
+                    "house {} lacks a service",
+                    b.id
+                );
             }
         }
         // The sea joins the two ends of every shipping route.

@@ -462,6 +462,7 @@ pub fn chimneys(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<(Vec3, &
             }
             Tier::Labourers => vec![(Vec3::new(2.4, 9.9, -0.4), "isle.chimney")],
             Tier::Burghers => burgher_smoke(biome),
+            t => crate::patrician::house_smoke(t, biome),
         },
         Kind::Distillery => vec![(Vec3::new(6.6, 13.7, -7.0), "isle.stack")],
         Kind::OilWorks => vec![(Vec3::new(6.9, 12.2, -6.9), "isle.stack")],
@@ -473,7 +474,17 @@ pub fn chimneys(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<(Vec3, &
             }
             Tier::Labourers => vec![(Vec3::new(3.7, 10.9, 0.8), "isle.chimney")],
             Tier::Burghers => burgher_smoke(biome),
+            t => crate::patrician::house_smoke(t, biome),
         },
+        Kind::Ironworks => vec![
+            (Vec3::new(-8.2, 16.2, -5.8), "isle.stack"),
+            (Vec3::new(2.0, 18.2, -6.2), "isle.stack"),
+            (Vec3::new(5.6, 14.8, -2.4), "isle.stack"),
+        ],
+        Kind::GoldMine => vec![(Vec3::new(-6.0, 16.2, -6.0), "isle.stack")],
+        Kind::OreMine => vec![(Vec3::new(-6.0, 9.8, -5.6), "isle.chimney")],
+        Kind::Roastery => vec![(Vec3::new(0.0, 11.2, 4.2), "isle.chimney")],
+        Kind::Chocolatier => vec![(Vec3::new(-4.6, 13.8, -3.2), "isle.chimney")],
         Kind::Bakery => vec![(Vec3::new(-4.1, 9.2, 0.0), "isle.stack")],
         Kind::Brewery => vec![(Vec3::new(4.6, 16.2, -3.6), "isle.stack")],
         Kind::Brickworks => vec![(Vec3::new(5.5, 19.5, -1.5), "isle.stack")],

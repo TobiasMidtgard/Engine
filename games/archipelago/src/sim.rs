@@ -319,9 +319,18 @@ impl House {
     }
 }
 
+/// Serialises an array of any length as a list (serde's own stop at 32).
+pub fn ser_list<S: serde::Serializer, T: Serialize, const N: usize>(
+    a: &[T; N],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    a.as_slice().serialize(s)
+}
+
 /// One island's books.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct IslandBooks {
+    #[serde(serialize_with = "ser_list")]
     pub stock: [f64; Good::COUNT],
     /// Warehouse room for each good.
     pub capacity: f64,
@@ -331,11 +340,15 @@ pub struct IslandBooks {
     /// Share of those jobs filled, per tier.
     pub workforce: [f32; Tier::COUNT],
     /// Share of each good's demand met lately, 0..1.
+    #[serde(serialize_with = "ser_list")]
     pub supply: [f32; Good::COUNT],
     /// Goods made and used per minute lately (smoothed).
+    #[serde(serialize_with = "ser_list")]
     pub made_per_min: [f32; Good::COUNT],
+    #[serde(serialize_with = "ser_list")]
     pub used_per_min: [f32; Good::COUNT],
     /// Goods per minute the houses ask for lately, met or not (smoothed).
+    #[serde(serialize_with = "ser_list")]
     pub wanted_per_min: [f32; Good::COUNT],
     pub harbours: u32,
     /// Warehouse room that items add (see `items::apply`).
@@ -344,6 +357,7 @@ pub struct IslandBooks {
     /// Per tier, the bits of [`Tier::wants`] unlocked here (they stay unlocked).
     pub unlocked: [u32; Tier::COUNT],
     /// Goods the player stopped handing out here: nobody uses them and they give nothing.
+    #[serde(serialize_with = "ser_list")]
     pub paused: [bool; Good::COUNT],
     /// Ready houses here move up on their own. Off unless the player turns it on: moving up
     /// is the player's order, so a town never loses the workers of a tier by surprise.
@@ -362,6 +376,34 @@ pub struct IslandBooks {
     /// its taxes and upkeep go to that company's purse, and nobody else builds here.
     #[serde(default)]
     pub owner: Company,
+}
+
+impl Default for IslandBooks {
+    fn default() -> Self {
+        IslandBooks {
+            stock: [0.0; Good::COUNT],
+            capacity: 0.0,
+            population: Default::default(),
+            jobs: Default::default(),
+            workforce: Default::default(),
+            supply: [0.0; Good::COUNT],
+            made_per_min: [0.0; Good::COUNT],
+            used_per_min: [0.0; Good::COUNT],
+            wanted_per_min: [0.0; Good::COUNT],
+            harbours: 0,
+            extra_room: 0.0,
+            unlocked: Default::default(),
+            paused: [false; Good::COUNT],
+            auto_up: false,
+            next_up_s: 0.0,
+            let_go: Default::default(),
+            staff_first: Default::default(),
+            staff_rest: Default::default(),
+            moods: Default::default(),
+            ready: Default::default(),
+            owner: Default::default(),
+        }
+    }
 }
 
 impl IslandBooks {

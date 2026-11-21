@@ -127,6 +127,7 @@ pub fn islands() -> &'static [Island] {
                 fertility: Fertility {
                     grain: true,
                     wool: true,
+                    ore: true,
                     ..Default::default()
                 },
                 woods: 0.55,
@@ -204,6 +205,7 @@ fn far_lands() -> Vec<Island> {
                 grain: true,
                 cane: true,
                 wool: true,
+                cacao: true,
                 ..none
             },
             Some((6, 520.0)),
@@ -220,6 +222,7 @@ fn far_lands() -> Vec<Island> {
             Fertility {
                 hops: true,
                 cane: true,
+                cacao: true,
                 ..none
             },
             Some((5, 260.0)),
@@ -233,7 +236,10 @@ fn far_lands() -> Vec<Island> {
             (5.0, 0.1),
             107,
             0.5,
-            none,
+            Fertility {
+                coffee: true,
+                ..none
+            },
             None,
         ),
         land(
@@ -248,6 +254,7 @@ fn far_lands() -> Vec<Island> {
             Fertility {
                 clay: true,
                 cane: true,
+                coffee: true,
                 ..none
             },
             None,
@@ -266,6 +273,7 @@ fn far_lands() -> Vec<Island> {
                 wool: true,
                 clay: true,
                 dates: true,
+                silk: true,
                 ..none
             },
             Some((10, 560.0)),
@@ -283,6 +291,7 @@ fn far_lands() -> Vec<Island> {
                 wool: true,
                 salt: true,
                 dates: true,
+                gold: true,
                 ..none
             },
             Some((9, 280.0)),
@@ -296,7 +305,11 @@ fn far_lands() -> Vec<Island> {
             (0.0, 0.8),
             227,
             0.1,
-            Fertility { salt: true, ..none },
+            Fertility {
+                salt: true,
+                ore: true,
+                ..none
+            },
             None,
         ),
         // --- Frostholm: ice and dark spruce (islands 12..=15).
@@ -343,6 +356,7 @@ fn far_lands() -> Vec<Island> {
             Fertility {
                 furs: true,
                 oil: true,
+                ore: true,
                 ..none
             },
             None,
@@ -356,7 +370,11 @@ fn far_lands() -> Vec<Island> {
             (3.3, 0.7),
             317,
             0.1,
-            Fertility { oil: true, ..none },
+            Fertility {
+                oil: true,
+                gold: true,
+                ..none
+            },
             None,
         ),
     ]

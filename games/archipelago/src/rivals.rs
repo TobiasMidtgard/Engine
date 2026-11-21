@@ -720,7 +720,10 @@ mod tests {
         {
             let mut econ = w.resource_mut::<Economy>();
             *econ.coins_mut(2) = 4_000.0;
-            for (i, c, people) in [(0, 0, [80.0, 40.0, 0.0]), (5, 2, [30.0, 0.0, 0.0])] {
+            for (i, c, people) in [
+                (0, 0, [80.0, 40.0, 0.0, 0.0, 0.0]),
+                (5, 2, [30.0, 0.0, 0.0, 0.0, 0.0]),
+            ] {
                 let b = &mut econ.islands[i];
                 b.harbours = 1;
                 b.owner = c;

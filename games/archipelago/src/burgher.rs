@@ -282,7 +282,7 @@ pub(crate) fn face(p: &mut Parts, m: Mat, q: [Vec3; 4], col: Vec4, out: Vec3) {
 
 /// A mansard roof: four steep slopes from the eaves of an `l × w` rectangle at `c` up `h` to
 /// a deck `inset` smaller all round.
-fn mansard(p: &mut Parts, c: Vec3, l: f32, w: f32, h: f32, inset: f32, col: Vec4) {
+pub(crate) fn mansard(p: &mut Parts, c: Vec3, l: f32, w: f32, h: f32, inset: f32, col: Vec4) {
     let (hl, hw) = (l * 0.5 + 0.25, w * 0.5 + 0.25);
     let (tl, tw) = (l * 0.5 - inset, w * 0.5 - inset);
     let lo = |x: f32, z: f32| c + v3(x, 0.0, z);
@@ -427,7 +427,7 @@ pub(crate) fn hanging_sign(p: &mut Parts, at: Vec3, w: f32, h: f32, col: Vec4, m
 
 /// A striped awning over a shop front: from the wall at `at` (left end, top edge) `w` along
 /// +X, hanging out `d` and down `drop`.
-fn awning(p: &mut Parts, at: Vec3, w: f32, d: f32, drop: f32, cols: [Vec4; 2]) {
+pub(crate) fn awning(p: &mut Parts, at: Vec3, w: f32, d: f32, drop: f32, cols: [Vec4; 2]) {
     let n = (w / 0.55).round().max(2.0) as usize;
     let sw = w / n as f32;
     for i in 0..n {
@@ -505,7 +505,7 @@ pub(crate) fn steps(p: &mut Parts, x: f32, z0: f32, w: f32, n: usize, top: f32, 
 /// Windows on all four walls of a box `l × w` centred on `c`, at height `y`: `nf` on the
 /// front and back, `ns` on each side.
 #[allow(clippy::too_many_arguments)]
-fn window_band(
+pub(crate) fn window_band(
     p: &mut Parts,
     c: Vec3,
     l: f32,

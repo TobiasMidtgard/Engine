@@ -110,7 +110,9 @@ pub fn build(key: ModelKey) -> Option<Parts> {
 pub fn house_model(biome: Biome, tier: Tier, v: usize) -> Option<ModelKey> {
     let set: [ModelKey; 3] = match (biome, tier) {
         // (Burghers' houses of every climate are in `burgher`.)
-        (Biome::Temperate, _) | (_, Tier::Burghers) => return None,
+        (Biome::Temperate, _) | (_, Tier::Burghers | Tier::Masters | Tier::Patricians) => {
+            return None;
+        }
         (Biome::Tropical, Tier::Fisherfolk) => ["stilt_0", "stilt_1", "stilt_2"],
         (Biome::Tropical, Tier::Labourers) => ["gallery_0", "gallery_1", "gallery_2"],
         (Biome::Arid, Tier::Fisherfolk) => ["adobe_0", "adobe_1", "adobe_2"],

@@ -204,6 +204,48 @@ pub const MODELS: &[ModelKey] = &[
     "tavern",
     "sand_heap",
     "glass_rack",
+    "guild_0",
+    "guild_1",
+    "guild_2",
+    "palazzo_0",
+    "palazzo_1",
+    "palazzo_2",
+    "veranda_0",
+    "veranda_1",
+    "veranda_2",
+    "plantation_0",
+    "plantation_1",
+    "plantation_2",
+    "tower_house_0",
+    "tower_house_1",
+    "tower_house_2",
+    "palace_0",
+    "palace_1",
+    "palace_2",
+    "stave_hall_0",
+    "stave_hall_1",
+    "stave_hall_2",
+    "copper_manor_0",
+    "copper_manor_1",
+    "copper_manor_2",
+    "ore_mine",
+    "ore_heap",
+    "ironworks",
+    "coffee_bush",
+    "shade_tree",
+    "drying_floor",
+    "roastery",
+    "clockmaker",
+    "cacao_tree",
+    "chocolatier",
+    "mulberry_row",
+    "silk_shed",
+    "couturier",
+    "gold_mine",
+    "goldsmith",
+    "theatre",
+    "bank",
+    "obelisk",
 ];
 
 /// Which of a model's three variants a building with this seed gets.
@@ -226,6 +268,25 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
         // Burghers' houses of every climate, the manufactories, the school and the tavern.
         Kind::House if tier == Tier::Burghers => {
             crate::burgher::house_look(biome, seed, &mut out);
+        }
+        // Masters' and Patricians' houses, their works, the theatre and the bank.
+        Kind::House if tier >= Tier::Masters => {
+            crate::patrician::house_look(tier, biome, seed, &mut out);
+        }
+        Kind::OreMine
+        | Kind::Ironworks
+        | Kind::CoffeeGrove
+        | Kind::Roastery
+        | Kind::Clockmaker
+        | Kind::CacaoGrove
+        | Kind::Chocolatier
+        | Kind::SilkFarm
+        | Kind::Couturier
+        | Kind::GoldMine
+        | Kind::Goldsmith
+        | Kind::Theatre
+        | Kind::Bank => {
+            crate::patrician::look(kind, seed, &mut out);
         }
         Kind::Glassworks
         | Kind::Saltery
@@ -264,6 +325,7 @@ pub fn look(kind: Kind, tier: Tier, seed: u64, biome: Biome) -> Vec<Piece> {
                 (Tier::Labourers, 1) => "townhouse_1",
                 (Tier::Labourers, _) => "townhouse_2",
                 (Tier::Burghers, _) => crate::burgher::house_model(biome, v),
+                (t, _) => crate::patrician::house_model(t, biome, v),
             };
             let t = 0.9 + 0.2 * h01(seed, 2);
             out.push(Piece::at(key, Vec3::ZERO).tint([t, t * (0.97 + 0.06 * h01(seed, 3)), t]));
@@ -2847,6 +2909,7 @@ pub fn build_model(key: ModelKey) -> Parts {
         _ => crate::regional::build(key)
             .or_else(|| crate::civic::build(key))
             .or_else(|| crate::burgher::build(key))
+            .or_else(|| crate::patrician::build(key))
             .or_else(|| crate::halls::build(key))
             .or_else(|| crate::shipyard::build(key))
             .or_else(|| crate::incidents::build(key))
@@ -2900,6 +2963,7 @@ mod tests {
             .iter()
             .chain(crate::civic::MODELS)
             .chain(crate::burgher::MODELS)
+            .chain(crate::patrician::MODELS)
             .chain(crate::halls::MODELS)
             .chain(crate::shipyard::MODELS)
             .chain(crate::incidents::MODELS)

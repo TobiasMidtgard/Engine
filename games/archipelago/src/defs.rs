@@ -33,11 +33,23 @@ pub enum Good {
     DateCakes,
     Coats,
     Lamps,
+    // Goods of the Masters and Patricians (tiers 4 and 5).
+    Ore,
+    Iron,
+    CoffeeBeans,
+    Coffee,
+    Clocks,
+    Cacao,
+    Chocolate,
+    Silk,
+    Gowns,
+    Gold,
+    Jewellery,
 }
 
 impl Good {
     /// How many goods there are.
-    pub const COUNT: usize = 23;
+    pub const COUNT: usize = 34;
 
     pub const ALL: [Good; Good::COUNT] = [
         Good::Fish,
@@ -63,6 +75,17 @@ impl Good {
         Good::DateCakes,
         Good::Coats,
         Good::Lamps,
+        Good::Ore,
+        Good::Iron,
+        Good::CoffeeBeans,
+        Good::Coffee,
+        Good::Clocks,
+        Good::Cacao,
+        Good::Chocolate,
+        Good::Silk,
+        Good::Gowns,
+        Good::Gold,
+        Good::Jewellery,
     ];
 
     pub fn index(self) -> usize {
@@ -94,10 +117,22 @@ impl Good {
             Good::DateCakes => "Date cakes",
             Good::Coats => "Coats",
             Good::Lamps => "Lamps",
+            Good::Ore => "Ore",
+            Good::Iron => "Iron",
+            Good::CoffeeBeans => "Coffee beans",
+            Good::Coffee => "Coffee",
+            Good::Clocks => "Clocks",
+            Good::Cacao => "Cacao",
+            Good::Chocolate => "Chocolate",
+            Good::Silk => "Silk",
+            Good::Gowns => "Gowns",
+            Good::Gold => "Gold",
+            Good::Jewellery => "Jewellery",
         }
     }
 
-    /// The `ui` icon that stands for it.
+    /// The `ui` icon that stands for it. (The Masters' and Patricians' goods borrow a
+    /// neighbour's until the interface paints their own.)
     pub fn icon(self) -> &'static str {
         match self {
             Good::Fish => "fish",
@@ -123,6 +158,17 @@ impl Good {
             Good::DateCakes => "isle_datecakes",
             Good::Coats => "isle_coats",
             Good::Lamps => "isle_lamps",
+            Good::Ore => "isle_clay",
+            Good::Iron => "isle_bricks",
+            Good::CoffeeBeans => "isle_dates",
+            Good::Coffee => "isle_ale",
+            Good::Clocks => "isle_lamps",
+            Good::Cacao => "isle_dates",
+            Good::Chocolate => "isle_datecakes",
+            Good::Silk => "isle_wool",
+            Good::Gowns => "isle_coats",
+            Good::Gold => "isle_salt",
+            Good::Jewellery => "isle_glass",
         }
     }
 
@@ -139,7 +185,8 @@ impl Good {
         match self {
             g if g.overseas() => 0.25,
             Good::SaltFish | Good::Coats | Good::DateCakes => 0.25,
-            Good::Lamps => 0.125,
+            Good::Coffee | Good::Chocolate | Good::Gowns => 0.25,
+            Good::Lamps | Good::Clocks | Good::Jewellery => 0.125,
             _ => 1.0,
         }
     }
@@ -267,10 +314,14 @@ pub enum Tier {
     Fisherfolk,
     Labourers,
     Burghers,
+    /// Guild masters, ship's masters and engineers.
+    Masters,
+    /// Shipowners and bankers.
+    Patricians,
 }
 
 /// The most services a tier asks for (the size of [`crate::sim::House::services`]).
-pub const MAX_SERVICES: usize = 4;
+pub const MAX_SERVICES: usize = 6;
 
 /// The most needs a tier has (bits of [`crate::sim::IslandBooks::unlocked`]).
 pub const MAX_WANTS: usize = 16;
@@ -279,9 +330,15 @@ use Cat::{Clothing, Food};
 
 impl Tier {
     /// How many tiers there are.
-    pub const COUNT: usize = 3;
+    pub const COUNT: usize = 5;
 
-    pub const ALL: [Tier; Tier::COUNT] = [Tier::Fisherfolk, Tier::Labourers, Tier::Burghers];
+    pub const ALL: [Tier; Tier::COUNT] = [
+        Tier::Fisherfolk,
+        Tier::Labourers,
+        Tier::Burghers,
+        Tier::Masters,
+        Tier::Patricians,
+    ];
 
     pub fn index(self) -> usize {
         self as usize
@@ -292,6 +349,8 @@ impl Tier {
             Tier::Fisherfolk => "Fisherfolk",
             Tier::Labourers => "Labourers",
             Tier::Burghers => "Burghers",
+            Tier::Masters => "Masters",
+            Tier::Patricians => "Patricians",
         }
     }
 
@@ -342,6 +401,45 @@ impl Tier {
                     luxury(Need::Good(G::Ale), 3.0, 15.0, 0.0),
                     luxury(Need::Good(G::Rum), 3.0, 15.0, 150.0),
                     luxury(Need::Good(G::Lamps), 4.0, 20.0, 300.0),
+                    luxury(Need::Good(G::Coffee), 2.5, 10.0, 300.0),
+                ];
+                W
+            }
+            Tier::Masters => {
+                const W: &[Want] = &[
+                    good(G::SaltFish, Food, 1.0, 5.0, 3.0, 0.0, 0.0),
+                    good(G::DateCakes, Food, 1.0, 5.0, 3.4, 5.0, 0.0),
+                    good(G::Coffee, Food, 2.0, 10.0, 5.0, 10.0, 0.0),
+                    good(G::Coats, Clothing, 2.0, 8.0, 4.0, 5.0, 0.0),
+                    service(K::Market, 1.0, 2.0, 1.2, 5.0, 0.0),
+                    service(K::Chapel, 1.0, 2.0, 1.2, 5.0, 0.0),
+                    service(K::School, 1.0, 2.0, 1.6, 5.0, 0.0),
+                    service(K::Tavern, 1.0, 2.0, 1.6, 5.0, 0.0),
+                    service(K::Theatre, 1.0, 4.0, 3.0, 15.0, 100.0),
+                    luxury(Need::Good(G::Lamps), 4.0, 10.0, 0.0),
+                    luxury(Need::Good(G::Rum), 3.0, 10.0, 0.0),
+                    luxury(Need::Good(G::Clocks), 6.0, 20.0, 200.0),
+                    luxury(Need::Good(G::Chocolate), 6.5, 10.0, 250.0),
+                    luxury(Need::Good(G::Gowns), 8.5, 10.0, 400.0),
+                ];
+                W
+            }
+            Tier::Patricians => {
+                const W: &[Want] = &[
+                    good(G::DateCakes, Food, 1.0, 4.0, 3.6, 0.0, 0.0),
+                    good(G::Coffee, Food, 2.0, 8.0, 5.6, 5.0, 0.0),
+                    good(G::Chocolate, Food, 2.0, 8.0, 7.0, 10.0, 0.0),
+                    good(G::Coats, Clothing, 1.0, 4.0, 4.0, 0.0, 0.0),
+                    good(G::Gowns, Clothing, 2.0, 8.0, 10.0, 10.0, 0.0),
+                    service(K::Market, 1.0, 2.0, 1.4, 5.0, 0.0),
+                    service(K::Chapel, 1.0, 2.0, 1.4, 5.0, 0.0),
+                    service(K::School, 1.0, 2.0, 1.8, 5.0, 0.0),
+                    service(K::Tavern, 1.0, 2.0, 1.8, 5.0, 0.0),
+                    service(K::Theatre, 1.0, 4.0, 3.6, 10.0, 0.0),
+                    service(K::Bank, 1.0, 4.0, 6.0, 15.0, 50.0),
+                    luxury(Need::Good(G::Lamps), 4.0, 10.0, 0.0),
+                    luxury(Need::Good(G::Clocks), 6.0, 15.0, 0.0),
+                    luxury(Need::Good(G::Jewellery), 10.0, 25.0, 150.0),
                 ];
                 W
             }
@@ -354,6 +452,8 @@ impl Tier {
             Tier::Fisherfolk => [1.0, 1.0, 1.0],
             Tier::Labourers => [2.0, 1.0, 2.0],
             Tier::Burghers => [3.0, 2.0, 3.0],
+            Tier::Masters => [3.0, 2.0, 4.0],
+            Tier::Patricians => [4.0, 3.0, 5.0],
         };
         if cat == Cat::Luxury {
             0.0
@@ -364,17 +464,17 @@ impl Tier {
 
     /// People in a full house of this tier.
     pub fn capacity(self) -> f32 {
-        [10.0, 20.0, 30.0][self.index()]
+        [10.0, 20.0, 30.0, 40.0, 50.0][self.index()]
     }
 
     /// Coins a minute every lived-in house pays (none while Angry).
     pub fn rent(self) -> f32 {
-        [0.3, 0.6, 1.0][self.index()]
+        [0.3, 0.6, 1.0, 1.6, 2.5][self.index()]
     }
 
     /// Coins a minute a Happy house adds (twice as much when Euphoric).
     pub fn goodwill(self) -> f32 {
-        [0.3, 0.8, 1.5][self.index()]
+        [0.3, 0.8, 1.5, 2.4, 3.5][self.index()]
     }
 
     /// Coins a minute a full, Euphoric house pays with every need met.
@@ -413,6 +513,34 @@ impl Tier {
                     Good::Ale,
                     Good::Rum,
                     Good::Lamps,
+                    Good::Coffee,
+                ],
+                5,
+            ),
+            Tier::Masters => (
+                &[
+                    Good::SaltFish,
+                    Good::DateCakes,
+                    Good::Coffee,
+                    Good::Coats,
+                    Good::Lamps,
+                    Good::Rum,
+                    Good::Clocks,
+                    Good::Chocolate,
+                    Good::Gowns,
+                ],
+                4,
+            ),
+            Tier::Patricians => (
+                &[
+                    Good::DateCakes,
+                    Good::Coffee,
+                    Good::Chocolate,
+                    Good::Coats,
+                    Good::Gowns,
+                    Good::Lamps,
+                    Good::Clocks,
+                    Good::Jewellery,
                 ],
                 5,
             ),
@@ -426,6 +554,21 @@ impl Tier {
             Tier::Fisherfolk => &[Kind::Market, Kind::Chapel],
             Tier::Labourers => &[Kind::Market, Kind::Chapel],
             Tier::Burghers => &[Kind::Market, Kind::Chapel, Kind::School, Kind::Tavern],
+            Tier::Masters => &[
+                Kind::Market,
+                Kind::Chapel,
+                Kind::School,
+                Kind::Tavern,
+                Kind::Theatre,
+            ],
+            Tier::Patricians => &[
+                Kind::Market,
+                Kind::Chapel,
+                Kind::School,
+                Kind::Tavern,
+                Kind::Theatre,
+                Kind::Bank,
+            ],
         }
     }
 
@@ -435,6 +578,8 @@ impl Tier {
             Tier::Fisherfolk => None,
             Tier::Labourers => Some(Tier::Fisherfolk),
             Tier::Burghers => Some(Tier::Labourers),
+            Tier::Masters => Some(Tier::Burghers),
+            Tier::Patricians => Some(Tier::Masters),
         }
     }
 
@@ -449,13 +594,26 @@ impl Tier {
                 Tier::Burghers,
                 &[(Good::Planks, 3.0), (Good::Bricks, 4.0), (Good::Glass, 2.0)],
             )),
-            Tier::Burghers => None,
+            Tier::Burghers => Some((
+                Tier::Masters,
+                &[
+                    (Good::Planks, 4.0),
+                    (Good::Bricks, 6.0),
+                    (Good::Glass, 3.0),
+                    (Good::Iron, 3.0),
+                ],
+            )),
+            Tier::Masters => Some((
+                Tier::Patricians,
+                &[(Good::Bricks, 8.0), (Good::Glass, 4.0), (Good::Iron, 6.0)],
+            )),
+            Tier::Patricians => None,
         }
     }
 
     /// The house must stand on a paved road to be of this tier.
     pub fn wants_paving(self) -> bool {
-        self == Tier::Burghers
+        self >= Tier::Burghers
     }
 }
 
@@ -556,6 +714,20 @@ pub enum Kind {
     FireWatch,
     WatchHouse,
     Infirmary,
+    // What Masters and Patricians (tiers 4 and 5) ask for, and what makes it.
+    OreMine,
+    Ironworks,
+    CoffeeGrove,
+    Roastery,
+    Clockmaker,
+    CacaoGrove,
+    Chocolatier,
+    SilkFarm,
+    Couturier,
+    GoldMine,
+    Goldsmith,
+    Theatre,
+    Bank,
 }
 
 /// Where a building may stand.
@@ -874,8 +1046,8 @@ pub const DEFS: &[Def] = &[
     },
     Def {
         blurb: "Melts sand to window glass. Houses need glass to become Burghers' houses.",
-        coins: 300,
-        cost: &[(Good::Planks, 4), (Good::Bricks, 6)],
+        coins: 600,
+        cost: &[(Good::Planks, 4), (Good::Bricks, 9)],
         workers: Some((Tier::Labourers, 20)),
         output: Some(Good::Glass),
         cycle_s: 45.0,
@@ -884,8 +1056,8 @@ pub const DEFS: &[Def] = &[
     },
     Def {
         blurb: "Packs fish in salt from the Amber Reach: salt fish keeps, and Burghers eat it.",
-        coins: 250,
-        cost: &[(Good::Planks, 4), (Good::Bricks, 2)],
+        coins: 500,
+        cost: &[(Good::Planks, 4), (Good::Bricks, 3)],
         workers: Some((Tier::Labourers, 20)),
         input: Some(Good::Fish),
         input2: Some(Good::Salt),
@@ -896,8 +1068,8 @@ pub const DEFS: &[Def] = &[
     },
     Def {
         blurb: "Bakes flour and dates into date cakes, a Burgher's treat.",
-        coins: 300,
-        cost: &[(Good::Planks, 2), (Good::Bricks, 6)],
+        coins: 600,
+        cost: &[(Good::Planks, 2), (Good::Bricks, 9)],
         workers: Some((Tier::Labourers, 20)),
         input: Some(Good::Flour),
         input2: Some(Good::Dates),
@@ -913,8 +1085,8 @@ pub const DEFS: &[Def] = &[
     },
     Def {
         blurb: "Lines woollen cloth with Frostholm furs: coats for Burghers.",
-        coins: 350,
-        cost: &[(Good::Planks, 4), (Good::Bricks, 6)],
+        coins: 700,
+        cost: &[(Good::Planks, 4), (Good::Bricks, 9)],
         workers: Some((Tier::Burghers, 20)),
         input: Some(Good::Wool),
         input2: Some(Good::Furs),
@@ -925,8 +1097,8 @@ pub const DEFS: &[Def] = &[
     },
     Def {
         blurb: "Glass chimneys and brass founts filled with lamp oil: light for the parlour.",
-        coins: 400,
-        cost: &[(Good::Planks, 4), (Good::Bricks, 6), (Good::Glass, 2)],
+        coins: 800,
+        cost: &[(Good::Planks, 4), (Good::Bricks, 9), (Good::Glass, 2)],
         workers: Some((Tier::Burghers, 20)),
         input: Some(Good::Glass),
         input2: Some(Good::Oil),
@@ -937,16 +1109,16 @@ pub const DEFS: &[Def] = &[
     },
     Def {
         blurb: "Burghers want a school within reach.",
-        coins: 400,
-        cost: &[(Good::Planks, 6), (Good::Bricks, 8), (Good::Glass, 2)],
+        coins: 800,
+        cost: &[(Good::Planks, 6), (Good::Bricks, 12), (Good::Glass, 2)],
         upkeep: 20.0,
         reach: 20,
         ..def(Kind::School, "School", Category::Public, (4, 4))
     },
     Def {
         blurb: "Burghers want a tavern within reach.",
-        coins: 300,
-        cost: &[(Good::Planks, 6), (Good::Bricks, 4)],
+        coins: 600,
+        cost: &[(Good::Planks, 6), (Good::Bricks, 6)],
         upkeep: 15.0,
         reach: 16,
         ..def(Kind::Tavern, "Tavern", Category::Public, (4, 3))
@@ -955,8 +1127,8 @@ pub const DEFS: &[Def] = &[
         blurb: "Holds items that act on every works and farm in its reach: specialists, \
                 devices and charters that speed batches, spare workers or change what a works \
                 takes and gives.",
-        coins: 600,
-        cost: &[(Good::Planks, 10), (Good::Bricks, 8)],
+        coins: 1_200,
+        cost: &[(Good::Planks, 10), (Good::Bricks, 12)],
         upkeep: 25.0,
         reach: 26,
         ..def(
@@ -969,8 +1141,8 @@ pub const DEFS: &[Def] = &[
     Def {
         blurb: "Holds items that act on every house in its reach: more coins for a met need, \
                 room for more people, a need or a public building done without.",
-        coins: 800,
-        cost: &[(Good::Planks, 10), (Good::Bricks, 12)],
+        coins: 1_600,
+        cost: &[(Good::Planks, 10), (Good::Bricks, 18)],
         upkeep: 30.0,
         reach: 24,
         ..def(Kind::TownHall, "Town Hall", Category::Public, (5, 5))
@@ -978,8 +1150,8 @@ pub const DEFS: &[Def] = &[
     Def {
         blurb: "Holds items that act on the quay, fisheries and masts in its reach: ships turn \
                 round sooner and sail faster, the warehouse holds more, customs take a duty.",
-        coins: 600,
-        cost: &[(Good::Planks, 12), (Good::Bricks, 6)],
+        coins: 1_200,
+        cost: &[(Good::Planks, 12), (Good::Bricks, 9)],
         upkeep: 25.0,
         reach: 40,
         ..def(
@@ -991,8 +1163,8 @@ pub const DEFS: &[Def] = &[
     },
     Def {
         blurb: "Mooring mast for cargo airships that fly routes over land and sea.",
-        coins: 800,
-        cost: &[(Good::Planks, 10), (Good::Bricks, 10)],
+        coins: 1_600,
+        cost: &[(Good::Planks, 10), (Good::Bricks, 15)],
         upkeep: 30.0,
         ..def(Kind::AirshipMast, "Airship mast", Category::Harbour, (5, 5))
     },
@@ -1045,6 +1217,154 @@ pub const DEFS: &[Def] = &[
         upkeep: 8.0,
         reach: 30,
         ..def(Kind::Infirmary, "Infirmary", Category::Public, (5, 5))
+    },
+    // --- Tiers 4 and 5: Masters and Patricians.
+    Def {
+        blurb: "Shafts and a winding gear over a seam of iron ore. Only where the rock holds it.",
+        coins: 600,
+        cost: &[(Good::Planks, 6), (Good::Bricks, 4)],
+        workers: Some((Tier::Labourers, 25)),
+        output: Some(Good::Ore),
+        cycle_s: 30.0,
+        upkeep: 20.0,
+        needs_fertility: true,
+        ..def(Kind::OreMine, "Ore mine", Category::Production, (4, 4))
+    },
+    Def {
+        blurb: "Smelts ore over charcoal from logs: the iron that late buildings and Masters' houses take.",
+        coins: 1_200,
+        cost: &[(Good::Planks, 6), (Good::Bricks, 12)],
+        workers: Some((Tier::Burghers, 30)),
+        input: Some(Good::Ore),
+        input2: Some(Good::Logs),
+        output: Some(Good::Iron),
+        cycle_s: 45.0,
+        upkeep: 40.0,
+        ..def(Kind::Ironworks, "Ironworks", Category::Production, (5, 4))
+    },
+    Def {
+        blurb: "Coffee bushes under shade trees. Only on the wet keys of Sarrowmere's waters.",
+        coins: 500,
+        cost: &[(Good::Planks, 4)],
+        workers: Some((Tier::Labourers, 15)),
+        output: Some(Good::CoffeeBeans),
+        cycle_s: 45.0,
+        upkeep: 12.0,
+        needs_fertility: true,
+        ..def(Kind::CoffeeGrove, "Coffee grove", Category::Farms, (6, 6))
+    },
+    Def {
+        blurb: "Roasts and grinds coffee beans: what Masters and Patricians start the day on.",
+        coins: 1_500,
+        cost: &[(Good::Planks, 4), (Good::Bricks, 10), (Good::Glass, 2)],
+        workers: Some((Tier::Burghers, 20)),
+        input: Some(Good::CoffeeBeans),
+        output: Some(Good::Coffee),
+        cycle_s: 40.0,
+        upkeep: 35.0,
+        ..def(Kind::Roastery, "Roastery", Category::Production, (3, 4))
+    },
+    Def {
+        blurb: "Iron wheels and glass faces: clocks for the Masters' mantels.",
+        coins: 2_500,
+        cost: &[(Good::Bricks, 12), (Good::Glass, 6), (Good::Iron, 6)],
+        workers: Some((Tier::Masters, 20)),
+        input: Some(Good::Iron),
+        input2: Some(Good::Glass),
+        output: Some(Good::Clocks),
+        cycle_s: 60.0,
+        upkeep: 50.0,
+        ..def(Kind::Clockmaker, "Clockmaker", Category::Production, (3, 3))
+    },
+    Def {
+        blurb: "Cacao trees in the jungle's shade. Only on Sarrowmere and Palm Key.",
+        coins: 500,
+        cost: &[(Good::Planks, 4)],
+        workers: Some((Tier::Labourers, 15)),
+        output: Some(Good::Cacao),
+        cycle_s: 45.0,
+        upkeep: 12.0,
+        needs_fertility: true,
+        ..def(Kind::CacaoGrove, "Cacao grove", Category::Farms, (6, 6))
+    },
+    Def {
+        blurb: "Grinds cacao with cane sugar: chocolate for Patricians.",
+        coins: 3_000,
+        cost: &[(Good::Bricks, 14), (Good::Glass, 4), (Good::Iron, 6)],
+        workers: Some((Tier::Masters, 25)),
+        input: Some(Good::Cacao),
+        input2: Some(Good::Cane),
+        output: Some(Good::Chocolate),
+        cycle_s: 50.0,
+        upkeep: 60.0,
+        ..def(
+            Kind::Chocolatier,
+            "Chocolatier",
+            Category::Production,
+            (4, 3),
+        )
+    },
+    Def {
+        blurb: "Mulberry rows and worm sheds. Only on Amberland and The Kettle.",
+        coins: 600,
+        cost: &[(Good::Planks, 6)],
+        workers: Some((Tier::Labourers, 20)),
+        output: Some(Good::Silk),
+        cycle_s: 50.0,
+        upkeep: 15.0,
+        needs_fertility: true,
+        ..def(Kind::SilkFarm, "Silk farm", Category::Farms, (6, 5))
+    },
+    Def {
+        blurb: "Silk gowns trimmed with fur: what Patricians wear to the theatre.",
+        coins: 3_500,
+        cost: &[(Good::Bricks, 14), (Good::Glass, 6), (Good::Iron, 6)],
+        workers: Some((Tier::Masters, 25)),
+        input: Some(Good::Silk),
+        input2: Some(Good::Furs),
+        output: Some(Good::Gowns),
+        cycle_s: 60.0,
+        upkeep: 70.0,
+        ..def(Kind::Couturier, "Couturier", Category::Production, (4, 4))
+    },
+    Def {
+        blurb: "A deep shaft after a gold reef. Only on Little Skarn and Saltholm.",
+        coins: 2_000,
+        cost: &[(Good::Planks, 8), (Good::Bricks, 8), (Good::Iron, 4)],
+        workers: Some((Tier::Labourers, 30)),
+        output: Some(Good::Gold),
+        cycle_s: 60.0,
+        upkeep: 40.0,
+        needs_fertility: true,
+        ..def(Kind::GoldMine, "Gold mine", Category::Production, (4, 4))
+    },
+    Def {
+        blurb: "Gold set with cut glass: jewellery, the Patricians' dearest want.",
+        coins: 4_000,
+        cost: &[(Good::Bricks, 12), (Good::Glass, 8), (Good::Iron, 8)],
+        workers: Some((Tier::Masters, 20)),
+        input: Some(Good::Gold),
+        input2: Some(Good::Glass),
+        output: Some(Good::Jewellery),
+        cycle_s: 80.0,
+        upkeep: 80.0,
+        ..def(Kind::Goldsmith, "Goldsmith", Category::Production, (3, 3))
+    },
+    Def {
+        blurb: "Masters want a theatre within reach once there are 100 of them; Patricians always.",
+        coins: 6_000,
+        cost: &[(Good::Bricks, 30), (Good::Glass, 10), (Good::Iron, 10)],
+        upkeep: 70.0,
+        reach: 24,
+        ..def(Kind::Theatre, "Theatre", Category::Public, (6, 5))
+    },
+    Def {
+        blurb: "Patricians want a bank within reach once there are 50 of them.",
+        coins: 10_000,
+        cost: &[(Good::Bricks, 30), (Good::Glass, 12), (Good::Iron, 16)],
+        upkeep: 100.0,
+        reach: 26,
+        ..def(Kind::Bank, "Bank", Category::Public, (5, 5))
     },
 ];
 
@@ -1104,6 +1424,16 @@ pub struct Fertility {
     pub furs: bool,
     #[serde(default)]
     pub oil: bool,
+    #[serde(default)]
+    pub ore: bool,
+    #[serde(default)]
+    pub coffee: bool,
+    #[serde(default)]
+    pub cacao: bool,
+    #[serde(default)]
+    pub silk: bool,
+    #[serde(default)]
+    pub gold: bool,
 }
 
 impl Fertility {
@@ -1118,6 +1448,11 @@ impl Fertility {
             Kind::SaltWorks => self.salt,
             Kind::TrapperLodge => self.furs,
             Kind::OilWorks => self.oil,
+            Kind::OreMine => self.ore,
+            Kind::CoffeeGrove => self.coffee,
+            Kind::CacaoGrove => self.cacao,
+            Kind::SilkFarm => self.silk,
+            Kind::GoldMine => self.gold,
             _ => true,
         }
     }
@@ -1208,7 +1543,7 @@ mod tests {
                 .sum();
             assert!(first >= 0.5 * t.capacity(), "{t:?}: {first}");
             // Every need pays something, and a full house holds a round number of people.
-            assert_eq!(t.capacity(), [10.0, 20.0, 30.0][t.index()]);
+            assert_eq!(t.capacity(), [10.0, 20.0, 30.0, 40.0, 50.0][t.index()]);
         }
         // Labourers meet every basic category from goods made at home (Burghers' homes
         // are fed from them too, so nobody needs the far continents to reach them).
