@@ -25,6 +25,10 @@ struct Instance {
 // first, then a share of the rest in turn), then the cleared ones.
 @group(1) @binding(8) var<storage, read> updates: array<u32>;
 
+// A world reflection's ray that meets nothing may still pass what this scene lacks (it holds
+// the meshes near the probes, not all that the sky cover map does): the map's march dims it.
+const REFLECT_MISS_SEES_SKY: bool = false;
+
 // A world reflection's ray: what a probe's sees (this scene holds no leaf card and no stand-in).
 fn trace_reflect(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> Hit {
     return trace_scene(origin, dir, t_max, false);

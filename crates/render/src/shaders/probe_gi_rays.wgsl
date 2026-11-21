@@ -59,6 +59,12 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
     return hit;
 }
 
+// A world reflection's ray that meets nothing within its reach sees the sky there (cs_reflect):
+// the ray scene holds the meshes the sky cover map draws around the camera. (What draws into
+// the map without a place in the rays yet, such as the foliage's rocks, cloth and characters,
+// then no longer dims that sky.)
+const REFLECT_MISS_SEES_SKY: bool = true;
+
 // What world reflections ask of a cut-out card's triangles: their texture, for the first 4 a
 // ray meets, then their coverage, a card drawn from one side only at that side, as the view
 // draws it; and the ground only at its front.

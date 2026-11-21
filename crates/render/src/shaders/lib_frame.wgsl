@@ -194,6 +194,14 @@ fn screen_ao(rel: vec3<f32>) -> f32 {
 // pre-exposed) and how much of the reflection it covers (0 = reflect the sky only). Zero when
 // reflections are off or the surface wasn't in the prepass.
 fn screen_reflection(rel: vec3<f32>) -> vec4<f32> {
+    let r = screen_reflection_traced(rel);
+    return vec4<f32>(r.rgb, abs(r.a));
+}
+
+// `screen_reflection` as ssr.wgsl wrote it: its coverage is negative where the world rays
+// traced the reflection, so that what they missed within their reach is open sky (they hold
+// what the sky cover map does around the camera; ssr.wgsl, `cs_reflect`).
+fn screen_reflection_traced(rel: vec3<f32>) -> vec4<f32> {
     if (frame.reflections.x <= 0.0) { return vec4<f32>(0.0); }
     let pixel = vec2<i32>(floor(pixel_of(rel)));
     if (!in_prepass(rel, pixel)) { return vec4<f32>(0.0); }
@@ -1965,8 +1973,15 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         if (!lit.on) { around = specular_sky_visibility(rel, dominant, smooth_n, roughness); }
         spec_sky = min(spec_sky, mix(around, 1.0, lobe_wide));
     }
+    let ssr_traced = screen_reflection_traced(rel);
+    let ssr = vec4<f32>(ssr_traced.rgb, abs(ssr_traced.a));
+    if (ssr_traced.a < 0.0) {
+        // The world rays traced the reflection: the sky they missed is open but for the cover
+        // overhead. (The cover map's march would dim it beside each thing they met, which the
+        // map sees a little wider than it is: a rim of dark specks.)
+        spec_sky = sky_vis;
+    }
     spec_sky *= specular_horizon_fade(r, smooth_n) * reflection_scale;
-    let ssr = screen_reflection(rel);
     let spec_env = mix(sample_env_rough(dominant, s.roughness) * spec_sky + fill, ssr.rgb, ssr.a);
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel)) * capsules.y;

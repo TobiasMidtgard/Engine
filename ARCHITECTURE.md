@@ -413,8 +413,14 @@ count, so open water stays bright to the horizon. `specular_horizon_fade(r, smoo
 (Russell's horizon occlusion) fades reflections that a normal map tilts below the surface's own
 horizon. `shade_surface` takes the smaller of `sky_visibility` and the directional value for
 glossy surfaces (rough ones, whose lobe is wide, use the cover overhead alone; the march is
-skipped from perceptual roughness 0.71) and applies the fade to all. `RenderSettings::debug_view =
-SkyVisibility` shows the result.
+skipped from perceptual roughness 0.71) and applies the fade to all. Where the world
+reflections traced every texel around a pixel against the frame's ray scene with a reach of
+64 m or more (`SKY_MARCH_REACH_M` in probe_gi.wgsl), their answer stands in for the march: a ray
+that met nothing saw open sky, ssr.wgsl writes that pixel's cover negative, and `shade_surface`
+then takes the cover overhead alone (`screen_reflection_traced`), so the edges of a thing seen in
+a mirror don't pick up the coarse map's dark texels (what draws into the map without a place in
+the rays yet, such as the foliage's rocks, cloth and characters, then doesn't dim that sky).
+`RenderSettings::debug_view = SkyVisibility` shows the result.
 
 **Ground weather** (built): `SurfaceLayers` (the weather's 512 m grid of 1 m cells around the
 focus: wetness, standing water, snow, scorch) is uploaded as a texture (frame binding 21,

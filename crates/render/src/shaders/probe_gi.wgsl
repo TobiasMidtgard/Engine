@@ -298,7 +298,9 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
 @group(2) @binding(0) var reflect_normal: texture_2d<f32>; // prepass normals (octahedral xy, roughness, written)
 @group(2) @binding(1) var reflect_depth: texture_depth_2d; // prepass depth (reverse-Z)
 // Reflected radiance (cd/m^2, not pre-exposed) and the distance to what the ray hit; 0 where
-// it hit nothing (the sky, which `shade_surface` reflects already) or wasn't traced.
+// it hit nothing (the sky, which `shade_surface` reflects already) or wasn't traced, and -1 in
+// w where it was traced and met nothing within a reach the sky cover map's march lies in
+// (`REFLECT_MISS_SEES_SKY`; ssr.wgsl tells `shade_surface`).
 @group(2) @binding(2) var reflect_out: texture_storage_2d<rgba16float, write>;
 // With `CUT_REFLECTIONS_ALTERNATE`: last frame's `reflect_out` and the screen motion (uv,
 // current - previous). Half the texels are traced a frame, in a checkerboard that swaps each
@@ -306,6 +308,10 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
 // while the camera rests.
 @group(2) @binding(3) var reflect_last: texture_2d<f32>;
 @group(2) @binding(4) var reflect_motion: texture_2d<f32>;
+
+// How far the sky cover map's march along a reflection reaches (`specular_sky_visibility`:
+// its last tap at 1.25^18 m, its gathers two texels past), rounded up.
+const SKY_MARCH_REACH_M: f32 = 64.0;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -361,6 +367,10 @@ fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
         if (shaded.w > 0.0) {
             out = vec4<f32>(min(shaded.rgb, vec3<f32>(60000.0)), max(hit.t, 1e-3));
         }
+    } else if (REFLECT_MISS_SEES_SKY && t_max >= SKY_MARCH_REACH_M) {
+        // Nothing within the reach of the cover map's march (`specular_sky_visibility`): the
+        // sky there is open as far as the scene's things go.
+        out = vec4<f32>(0.0, 0.0, 0.0, -1.0);
     }
     textureStore(reflect_out, id.xy, out);
 }
