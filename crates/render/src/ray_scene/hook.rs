@@ -173,6 +173,10 @@ pub struct RayTileSource {
     pub rect: [f32; 4],
     /// Changes when the pixels do: the layer is filled again (looked at every 64 frames).
     pub version: u64,
+    /// The pixels stay where they are while the view is held: a texture of their own. False
+    /// for a place in a cache, which may hold another texture's pixels from the next frame
+    /// on: such a source fills a layer only in the frame it was found in.
+    pub lasting: bool,
 }
 
 /// The scene, as one feature fills it in [`crate::RenderFeature::ray_scene`].

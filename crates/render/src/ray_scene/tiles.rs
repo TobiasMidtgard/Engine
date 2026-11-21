@@ -62,6 +62,9 @@ struct Layer {
 struct Ask<S> {
     source: S,
     version: u64,
+    /// Its pixels stay where they are while `source` is held (`RayTileSource::lasting`), so it
+    /// may be filled in a later frame than it was found in.
+    lasting: bool,
     /// The nearest instance that asked in the frame `asked` (meters).
     distance: f32,
     asked: u64,
@@ -87,40 +90,43 @@ impl<S> Book<S> {
         }
     }
 
-    /// See `RaySceneOut::tile`; `source` gives the pixels and their version, asked only for an
-    /// ask's first call of a frame, and every `CHECK_FRAMES` for a texture a layer holds.
+    /// See `RaySceneOut::tile`; `source` gives the pixels, their version and whether they are
+    /// lasting, asked at an ask's first call of a frame (where its pixels are now: a cache may
+    /// since have put another texture's where they were), and every `CHECK_FRAMES` for a
+    /// texture a layer holds.
     pub(super) fn ask(
         &mut self,
         name: Name,
         distance: f32,
         frame: u64,
-        source: impl FnOnce() -> Option<(S, u64)>,
+        source: impl FnOnce() -> Option<(S, u64, bool)>,
     ) -> Option<u16> {
         if let Some(&layer) = self.named.get(&name) {
             let held = self.layers[layer as usize].as_mut().expect("a named layer");
-            if frame >= held.checked + CHECK_FRAMES {
+            let waiting = self.asks.get(&name).map(|ask| ask.asked);
+            if waiting == Some(frame) {
+                let ask = self.asks.get_mut(&name).expect("waiting");
+                ask.distance = ask.distance.min(distance);
+            } else if waiting.is_some() || frame >= held.checked + CHECK_FRAMES {
                 held.checked = frame;
-                // New pixels: filled into its layer, which its rows go on naming meanwhile.
-                // (Gone from the GPU: the layer keeps what it has.)
-                if let Some((source, version)) = source()
-                    && version != held.version
-                {
-                    let ask = Ask {
-                        source,
-                        version,
-                        distance,
-                        asked: frame,
-                        refill: Some(layer),
-                    };
-                    self.asks.insert(name, ask);
+                match source() {
+                    // New pixels: filled into its layer, which its rows go on naming meanwhile.
+                    Some((source, version, lasting)) if version != held.version => {
+                        let ask = Ask {
+                            source,
+                            version,
+                            lasting,
+                            distance,
+                            asked: frame,
+                            refill: Some(layer),
+                        };
+                        self.asks.insert(name, ask);
+                    }
+                    // The pixels it holds, or none on the GPU: the layer keeps what it has.
+                    _ => {
+                        self.asks.remove(&name);
+                    }
                 }
-            } else if let Some(ask) = self.asks.get_mut(&name) {
-                ask.distance = if ask.asked == frame {
-                    ask.distance.min(distance)
-                } else {
-                    distance
-                };
-                ask.asked = frame;
             }
             return Some(layer);
         }
@@ -129,10 +135,11 @@ impl<S> Book<S> {
             // A new ask, or its first call of a frame: where its pixels are now (a view kept
             // from frames ago might show what a cache has since put in its place).
             _ => match source() {
-                Some((source, version)) => {
+                Some((source, version, lasting)) => {
                     let ask = Ask {
                         source,
                         version,
+                        lasting,
                         distance,
                         asked: frame,
                         refill: None,
@@ -149,7 +156,9 @@ impl<S> Book<S> {
 
     /// The frame's fills, the nearest asks first, each with its layer: its own for new pixels
     /// of a texture it holds, else a free one, else the one no row has named the longest (for
-    /// `IDLE_FRAMES` at least). `users`: the rows that name a layer now.
+    /// `IDLE_FRAMES` at least). An ask whose pixels are a place in a cache is filled only in
+    /// the frame it was found in (the cache may give that place to another texture after),
+    /// else at its next ask, where they are then. `users`: the rows that name a layer now.
     pub(super) fn settle(&mut self, users: impl Fn(u16) -> u32, frame: u64) -> Vec<(u16, S)> {
         self.asks.retain(|_, ask| ask.asked + ASK_FRAMES > frame);
         for (i, layer) in self.layers.iter_mut().enumerate() {
@@ -162,6 +171,7 @@ impl<S> Book<S> {
         let mut order: Vec<(f32, Name)> = self
             .asks
             .iter()
+            .filter(|(_, ask)| ask.lasting || ask.asked == frame)
             .map(|(&name, ask)| (ask.distance, name))
             .collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -436,7 +446,7 @@ impl Tiles {
                     view: s.view,
                     rect: s.rect,
                 };
-                (source, s.version)
+                (source, s.version, s.lasting)
             })
         })
     }
@@ -518,6 +528,15 @@ mod tests {
         (0, RayKey(n, 0))
     }
 
+    /// A source of `n`'s pixels at `version` in a texture of their own, and in a cache's place.
+    fn own(n: u64, version: u64) -> Option<(u64, u64, bool)> {
+        Some((n, version, true))
+    }
+
+    fn cached(n: u64, version: u64) -> Option<(u64, u64, bool)> {
+        Some((n, version, false))
+    }
+
     #[test]
     fn shader_validates() {
         let code = crate::features::compose_shader(SHADER, false);
@@ -533,34 +552,34 @@ mod tests {
         let none = |_: u16| 0u32;
         // Six textures 6 m .. 1 m away: the four nearest, into layers 0-3.
         for n in 0..6 {
-            assert_eq!(book.ask(name(n), 6.0 - n as f32, 1, || Some((n, 0))), None);
+            assert_eq!(book.ask(name(n), 6.0 - n as f32, 1, || own(n, 0)), None);
         }
         assert_eq!(book.settle(none, 1), [(0, 5), (1, 4), (2, 3), (3, 2)]);
         // Then the next nearest into the last free layer; the farthest waits.
         for n in 2..6 {
-            assert!(book.ask(name(n), 1.0, 2, || Some((n, 0))).is_some());
+            assert!(book.ask(name(n), 1.0, 2, || own(n, 0)).is_some());
         }
         for n in 0..2 {
-            assert_eq!(book.ask(name(n), 6.0 - n as f32, 2, || Some((n, 0))), None);
+            assert_eq!(book.ask(name(n), 6.0 - n as f32, 2, || own(n, 0)), None);
         }
         assert_eq!(book.settle(none, 2), [(4, 1)]);
         assert_eq!(book.counts(), (5, 1));
         // From frame 3 every layer but 2 (texture 3, filled at frame 1) is named by a row.
         let named = |layer: u16| (layer != 2) as u32;
         for frame in 3..1 + IDLE_FRAMES {
-            book.ask(name(0), 6.0, frame, || Some((0, 0)));
+            book.ask(name(0), 6.0, frame, || own(0, 0));
             assert!(book.settle(named, frame).is_empty(), "frame {frame}");
         }
-        book.ask(name(0), 6.0, 1 + IDLE_FRAMES, || Some((0, 0)));
+        book.ask(name(0), 6.0, 1 + IDLE_FRAMES, || own(0, 0));
         assert_eq!(book.settle(named, 1 + IDLE_FRAMES), [(2, 0)]);
         let at = 2 + IDLE_FRAMES;
         assert_eq!(
-            book.ask(name(3), 3.0, at, || Some((3, 0))),
+            book.ask(name(3), 3.0, at, || own(3, 0)),
             None,
             "texture 3 lost its layer"
         );
         // Texture 5's new pixels are seen at its next look and filled into its layer.
-        assert_eq!(book.ask(name(5), 1.0, at, || Some((50, 1))), Some(0));
+        assert_eq!(book.ask(name(5), 1.0, at, || own(50, 1)), Some(0));
         assert_eq!(book.settle(named, at), [(0, 50)]);
         // An ask nobody renews is dropped.
         assert_eq!(book.counts(), (5, 1));
@@ -573,14 +592,74 @@ mod tests {
     fn new_pixels_are_filled_while_every_layer_is_taken() {
         let mut book: Book<u64> = Book::new(1);
         let all = |_: u16| 1u32;
-        assert_eq!(book.ask(name(1), 1.0, 1, || Some((1, 0))), None);
+        assert_eq!(book.ask(name(1), 1.0, 1, || own(1, 0)), None);
         assert_eq!(book.settle(all, 1), [(0, 1)]);
         // A nearer texture waits for the one layer; the held one gets new pixels.
         let at = 1 + CHECK_FRAMES;
-        assert_eq!(book.ask(name(2), 0.5, at, || Some((2, 0))), None);
-        assert_eq!(book.ask(name(1), 3.0, at, || Some((10, 1))), Some(0));
+        assert_eq!(book.ask(name(2), 0.5, at, || own(2, 0)), None);
+        assert_eq!(book.ask(name(1), 3.0, at, || own(10, 1)), Some(0));
         assert_eq!(book.settle(all, at), [(0, 10)]);
         assert_eq!(book.counts(), (1, 1));
+    }
+
+    /// An ask whose pixels are a place in a cache is filled only in the frame it was found in
+    /// (the place may hold another texture's pixels after), and found again at its next ask;
+    /// one whose pixels are a texture of their own waits for a layer as long as it lasts.
+    #[test]
+    fn a_place_in_a_cache_is_filled_only_in_the_frame_it_was_found_in() {
+        let mut book: Book<u64> = Book::new(8);
+        let none = |_: u16| 0u32;
+        // Six textures 1 m .. 6 m away, the one at 5 m in a cache: the four nearest are filled.
+        for n in 0..6 {
+            let found = if n == 4 { cached(n, 0) } else { own(n, 0) };
+            assert_eq!(book.ask(name(n), 1.0 + n as f32, 1, || found), None);
+        }
+        assert_eq!(book.settle(none, 1), [(0, 0), (1, 1), (2, 2), (3, 3)]);
+        // Not asked at frame 2: the one of its own is filled, the cached one waits.
+        assert_eq!(book.settle(none, 2), [(4, 5)]);
+        assert_eq!(book.counts(), (5, 1));
+        assert!(book.settle(none, 3).is_empty());
+        // Asked again, from where its pixels are now.
+        assert_eq!(book.ask(name(4), 5.0, 4, || cached(40, 0)), None);
+        assert_eq!(book.settle(none, 4), [(5, 40)]);
+        assert_eq!(book.counts(), (6, 0));
+    }
+
+    /// New pixels of a texture a layer holds that wait for their fill are looked for again at
+    /// each frame's first ask (a cache's place serves only its frame); gone from the GPU, the
+    /// layer keeps what it has.
+    #[test]
+    fn new_pixels_are_looked_for_again_while_they_wait() {
+        let mut book: Book<u64> = Book::new(16);
+        let none = |_: u16| 0u32;
+        assert_eq!(book.ask(name(9), 9.0, 1, || cached(9, 0)), None);
+        assert_eq!(book.settle(none, 1), [(0, 9)]);
+        // Its new pixels are seen at its next look, but four nearer textures fill first.
+        let at = 1 + CHECK_FRAMES;
+        for n in 0..4 {
+            assert_eq!(book.ask(name(n), 1.0 + n as f32, at, || own(n, 0)), None);
+        }
+        assert_eq!(book.ask(name(9), 9.0, at, || cached(90, 1)), Some(0));
+        assert_eq!(book.settle(none, at), [(1, 0), (2, 1), (3, 2), (4, 3)]);
+        // The next frame they are where the cache has them then.
+        assert_eq!(book.ask(name(9), 9.0, at + 1, || cached(91, 1)), Some(0));
+        assert_eq!(book.settle(none, at + 1), [(0, 91)]);
+        // Newer pixels again, which wait behind four nearer textures and are not asked for
+        // the next frame: the place found is not filled from.
+        let next = at + 1 + CHECK_FRAMES;
+        for n in 10..14 {
+            assert_eq!(book.ask(name(n), (n - 9) as f32, next, || own(n, 0)), None);
+        }
+        assert_eq!(book.ask(name(9), 9.0, next, || cached(92, 2)), Some(0));
+        assert_eq!(
+            book.settle(none, next),
+            [(5, 10), (6, 11), (7, 12), (8, 13)]
+        );
+        assert!(book.settle(none, next + 1).is_empty());
+        // Asked again, gone from the GPU: its layer keeps the pixels it has.
+        assert_eq!(book.ask(name(9), 9.0, next + 2, || None), Some(0));
+        assert!(book.settle(none, next + 2).is_empty());
+        assert_eq!(book.counts(), (9, 0));
     }
 
     fn device() -> Option<crate::gpu::Gpu> {
@@ -742,6 +821,7 @@ mod tests {
                     view: view.clone(),
                     rect: [0.0, 0.0, 1.0, 1.0],
                     version: 0,
+                    lasting: true,
                 })
             });
             assert_eq!(asked, None, "filled at the frame's end");

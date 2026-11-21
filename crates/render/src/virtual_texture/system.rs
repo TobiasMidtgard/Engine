@@ -1002,13 +1002,16 @@ impl VirtualTextureSystem {
     /// through as colour (`srgb`: through the sRGB cache, as `texture_for` gives a colour slot of
     /// an sRGB image): the whole texture at 128 texels or fewer across. The cache texture's
     /// view, the tile's corner and size in it (uv), and the version of what it shows (the
-    /// registration's generation, or the image's version); `None` when the image is not virtual
-    /// here or its root tile is not in. A lookup for the ray tiles (`ray_scene/tiles.rs`): it
-    /// neither loads nor keeps anything.
+    /// registration's generation with the top bit set, or the image's version); `None` when the
+    /// image is not virtual here, its root tile is not in, or it shows other pixels than the
+    /// image's asset version `version` (an image's older ones, or those of the image that held
+    /// the index before). A lookup for the ray tiles (`ray_scene/tiles.rs`): it neither loads
+    /// nor keeps anything.
     pub(crate) fn root_tile(
         &self,
         index: u32,
         srgb: bool,
+        version: u64,
     ) -> Option<(wgpu::TextureView, [f32; 4], u64)> {
         if self.by_key.is_empty() {
             return None;
@@ -1018,19 +1021,19 @@ impl VirtualTextureSystem {
                 .as_ref()
                 .map_or(0, |t| t.last_used)
         };
-        // (An image whose pixels changed may have its old texture here still: the one drawn
-        // last.)
+        // (A registration stands for whatever image holds its index, as it does for drawing.)
         let (version, id) = self
             .by_key
             .iter()
             .filter_map(|(&(key, view_srgb), &id)| {
-                let (i, version) = match key {
-                    SourceKey::Registered(i, generation) => (i, generation),
-                    SourceKey::Image(i, version) => (i, version),
+                let (i, shows) = match key {
+                    SourceKey::Registered(i, generation) => (i, generation | (1 << 63)),
+                    SourceKey::Image(i, shows) if shows == version => (i, shows),
+                    SourceKey::Image(..) => return None,
                 };
-                (i == index && view_srgb == srgb).then_some((version, id))
+                (i == index && view_srgb == srgb).then_some((shows, id))
             })
-            .max_by_key(|&(version, id)| (last_used(id), version))?;
+            .max_by_key(|&(shows, id)| (last_used(id), shows))?;
         let tex = self.textures[id as usize - 1].as_ref()?;
         if tex.failed || !tex.residency.ready() {
             return None;

@@ -4231,6 +4231,9 @@ impl RenderFeature for MeshFeature {
                 }
                 self.mesh_frames[i] = entry;
             }
+            if let Some(images) = image_assets {
+                self.rays.follow_images(images);
+            }
             steps.step("meshes: gather materials");
             for raw in scene.materials_used() {
                 let handle = Handle::from_index(raw);

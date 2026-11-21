@@ -63,9 +63,16 @@ pub(super) enum RayTileName {
     /// None: its hits take their row's colour.
     #[default]
     None,
-    /// Its base colour image (the canonical handle index), RGBA8; `srgb`: read as sRGB, as a
-    /// colour slot reads an sRGB image.
-    Image { index: u32, srgb: bool },
+    /// Its base colour image, RGBA8: the canonical handle index, the generation of that index
+    /// (a zone streamed in may be given an index another image held), and the image's version
+    /// (only a GPU copy of these pixels fills its tile); `srgb`: read as sRGB, as a colour slot
+    /// reads an sRGB image.
+    Image {
+        index: u32,
+        generation: u32,
+        srgb: bool,
+        version: u64,
+    },
     /// Its preset's generated base colour at `size` texels.
     Preset { preset: MaterialPreset, size: u32 },
 }
@@ -196,6 +203,9 @@ pub(super) struct MeshRays {
     /// were read at.
     generations: FastMap<u32, u32>,
     allocations: u64,
+    /// The same for image handle indices (the tiles' names), and the image store's count.
+    image_generations: FastMap<u32, u32>,
+    image_allocations: u64,
     /// The mesh scene's log, as the last fill took it (kept for the allocations).
     touched: Vec<Entity>,
     gone: Vec<Entity>,
@@ -274,6 +284,27 @@ impl MeshRays {
         self.allocations = allocations;
     }
 
+    /// [`Self::follow_assets`] for images: a tile is named by its image's index and that
+    /// index's generation, so an image given a freed index never takes the layer that holds
+    /// the image before it.
+    pub(super) fn follow_images(&mut self, images: &Assets<Image>) {
+        if !self.on {
+            return;
+        }
+        let allocations = images.allocations();
+        if allocations == self.image_allocations {
+            return;
+        }
+        if images.removals() > 0 {
+            for handle in images.added_between(self.image_allocations, allocations) {
+                if let Some(generation) = handle.generation().filter(|&g| g != 0) {
+                    self.image_generations.insert(handle.index(), generation);
+                }
+            }
+        }
+        self.image_allocations = allocations;
+    }
+
     /// What a ray's hit reads of `material`: its mean diffuse colour and its glow. Only
     /// worked out while the scene is on.
     pub(super) fn light(
@@ -319,9 +350,12 @@ impl MeshRays {
                 let handle = images.canonical(handle);
                 match images.get(handle) {
                     Some(image) if image.format == crate::PixelFormat::Rgba8 => {
+                        let index = handle.index();
                         RayTileName::Image {
-                            index: handle.index(),
+                            index,
+                            generation: self.image_generations.get(&index).copied().unwrap_or(0),
                             srgb: image.srgb,
+                            version: images.version(handle),
                         }
                     }
                     _ => return none,
@@ -715,21 +749,33 @@ impl Fill<'_> {
         let (gpu, vt) = (self.gpu, self.vt);
         match name {
             RayTileName::None => None,
-            RayTileName::Image { index, srgb } => {
-                out.tile(RayKey(index as u64, 0), distance, || {
-                    if let Some((view, rect, version)) = vt.and_then(|vt| vt.root_tile(index, srgb))
+            RayTileName::Image {
+                index,
+                generation,
+                srgb,
+                version,
+            } => {
+                let key = RayKey(index as u64, generation as u64);
+                out.tile(key, distance, || {
+                    // Only a copy of the pixels the image has now (a cache may still hold the
+                    // pixels before an edit, or those of the image the index held before).
+                    if let Some((view, rect, version)) =
+                        vt.and_then(|vt| vt.root_tile(index, srgb, version))
                     {
+                        // (A place in the cache's atlas.)
                         return Some(RayTileSource {
                             view,
                             rect,
                             version,
+                            lasting: false,
                         });
                     }
-                    let (texture, since) = gpu.images.uploaded_color(index, srgb)?;
+                    let texture = gpu.images.uploaded_color(index, srgb, version)?;
                     Some(RayTileSource {
                         view: texture.view.clone(),
                         rect: [0.0, 0.0, 1.0, 1.0],
-                        version: since,
+                        version,
+                        lasting: true,
                     })
                 })
             }
@@ -742,6 +788,7 @@ impl Fill<'_> {
                         rect: [0.0, 0.0, 1.0, 1.0],
                         // (A preset at a size has one look; its compressed copy shows it too.)
                         version: 0,
+                        lasting: true,
                     })
                 })
             }
@@ -1053,5 +1100,42 @@ mod tests {
             vertices: added,
         };
         assert_eq!(levels_in_range(&mesh, &lods), 0b1011);
+    }
+
+    /// An image given the index of one removed before is a tile of its own (its name holds the
+    /// index's generation), so it never reads the layer with the image before's pixels; an
+    /// edit keeps the name's generation and moves its version.
+    #[test]
+    fn an_image_at_a_freed_index_is_a_tile_apart_from_the_one_before() {
+        let mut images = Assets::<Image>::default();
+        let mut rays = MeshRays::default();
+        rays.set_on(true);
+        let checker = |v: u8| Image::checker(8, 2, [v, v, v, 255], [0, 0, 0, 255]);
+        let material = |image| StandardMaterial {
+            base_color_texture: Some(image),
+            ..Default::default()
+        };
+        let parts = |name: RayTileName| match name {
+            RayTileName::Image {
+                index,
+                generation,
+                version,
+                ..
+            } => (index, generation, version),
+            other => panic!("{other:?}"),
+        };
+        let a = images.add(checker(200));
+        rays.follow_images(&images);
+        let (index, first, version) = parts(rays.tile_name(&material(a), Some(&images), 64).0);
+        images.get_mut(a).expect("there").data[0] = 10;
+        let (_, same, edited) = parts(rays.tile_name(&material(a), Some(&images), 64).0);
+        assert_eq!(same, first);
+        assert_ne!(edited, version);
+        images.remove(a);
+        let b = images.add(checker(50));
+        assert_eq!(b.index(), index, "the freed index is given out again");
+        rays.follow_images(&images);
+        let (_, second, _) = parts(rays.tile_name(&material(b), Some(&images), 64).0);
+        assert_ne!(second, first);
     }
 }
