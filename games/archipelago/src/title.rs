@@ -143,7 +143,119 @@ pub fn add(app: &mut App) {
     if !headless && !scripted && !has("--windowed") {
         app.world.resource_mut::<Window>().fullscreen = true;
     }
+    if !headless {
+        keep_crash_reports();
+    }
     app.add_systems(Update, front);
+}
+
+// ------------------------------------------------------------------------------ crash reports
+
+/// Where a crash report goes: `%APPDATA%\Brightsund\crash.txt` (`BRIGHTSUND_CRASH` names
+/// another file).
+fn crash_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("BRIGHTSUND_CRASH") {
+        return Some(PathBuf::from(p));
+    }
+    if let Ok(a) = std::env::var("APPDATA") {
+        return Some(PathBuf::from(a).join(NAME).join("crash.txt"));
+    }
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .ok()?;
+    Some(base.join("brightsund").join("crash.txt"))
+}
+
+/// `secs` since 1970 as a UTC date and time, `2026-11-21 18:57:03 UTC`.
+fn utc_text(secs: u64) -> String {
+    let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
+    // Days to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        rest / 3_600,
+        rest / 60 % 60,
+        rest % 60
+    )
+}
+
+/// The words of a crash report: what broke, where, on which thread, in which build, when
+/// and with which options, then the call stack.
+fn crash_report(what: &str, place: &str, thread: &str, when: u64, stack: &str) -> String {
+    let build = option_env!("GITHUB_SHA").map_or("local", |s| s.get(..7).unwrap_or(s));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    format!(
+        "{NAME} crashed\n\n\
+         What: {what}\n\
+         Where: {place}\n\
+         Thread: {thread}\n\
+         Build: {build}\n\
+         When: {}\n\
+         Options: {}\n\n\
+         Call stack:\n{stack}\n",
+        utc_text(when),
+        if args.is_empty() {
+            "none".to_string()
+        } else {
+            args.join(" ")
+        }
+    )
+}
+
+/// On a crash (a panic on any thread), write a report to [`crash_path`] before the usual
+/// message, and say where it is. The file keeps the last crash first and the one before it
+/// after, so a crash at quit does not hide the one that mattered.
+fn keep_crash_reports() {
+    let usual = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic with no message".to_string());
+        let place = info.location().map_or("unknown".to_string(), |l| {
+            format!("{}:{}:{}", l.file(), l.line(), l.column())
+        });
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let stack = std::backtrace::Backtrace::force_capture().to_string();
+        let report = crash_report(&what, &place, &thread, when, &stack);
+        if let Some(path) = crash_path() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            // The crash before this one stays below it (only the last one: the file stays small).
+            let before = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| {
+                    t.split("\n\n----- the crash before -----\n\n")
+                        .next()
+                        .map(str::to_string)
+                })
+                .map(|t| format!("\n\n----- the crash before -----\n\n{t}"))
+                .unwrap_or_default();
+            if std::fs::write(&path, format!("{report}{before}")).is_ok() {
+                eprintln!("{NAME}: a crash report is in {}", path.display());
+            }
+        }
+        usual(info);
+    }));
 }
 
 /// Menu actions, keys, the title's drift and Esc's state.
@@ -1526,6 +1638,26 @@ mod tests {
 
     fn flat(s: &str) -> String {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// A crash report says what broke, where, on which thread and when, in plain words.
+    #[test]
+    fn a_crash_report_says_what_where_and_when() {
+        assert_eq!(utc_text(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(utc_text(1_795_287_423), "2026-11-21 18:57:03 UTC");
+        assert_eq!(utc_text(951_782_400), "2000-02-29 00:00:00 UTC");
+        let r = crash_report(
+            "index out of bounds",
+            "games/archipelago/src/sim.rs:10:5",
+            "main",
+            1_795_287_423,
+            "0: here",
+        );
+        assert!(r.starts_with("Brightsund crashed\n\nWhat: index out of bounds\n"));
+        assert!(r.contains("Where: games/archipelago/src/sim.rs:10:5\n"));
+        assert!(r.contains("Thread: main\n"));
+        assert!(r.contains("When: 2026-11-21 18:57:03 UTC\n"));
+        assert!(r.ends_with("Call stack:\n0: here\n"));
     }
 
     /// The title's rival choice turns into the flags a restart passes on, and its line.
