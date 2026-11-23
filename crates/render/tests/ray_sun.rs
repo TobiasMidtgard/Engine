@@ -1,16 +1,28 @@
-//! The sun's trace (`trial_cut_more::RAY_SUN`, ray_sun.wgsl), step 7 of the ray-traced lighting
-//! round: a ray toward the sun's disc from each pixel of the prepass within the reach that faces
-//! the sun, through the frame's ray scene's still structure. Counted
-//! (`shade_skip::COUNT_MESH_RUNS`): over open ground no ray is stopped and under a roof those its
-//! shadow falls on are, as many as the pixels the shadow maps leave dark, and the still images
-//! agree with the rays; a swaying mesh's pixels are left to the shadow maps (not traced), in
-//! both of the prepass's ways of drawing a mesh, and marking them changes no picture; a pixel on
-//! the drawn ground just under a ground another feature brings through the hook is lit (the rays
-//! pass up through its back), and that ground turned down as a roof stops them. Nothing reads
-//! the trace yet. Needs a GPU with ray queries (lavapipe has them); passes with a note without.
+//! The sun's trace (`trial_cut_more::RAY_SUN`, ray_sun.wgsl), steps 7 and 8 of the ray-traced
+//! lighting round: a ray toward the sun's disc from each pixel of the prepass within the reach
+//! that faces the sun, through the frame's ray scene's still structure, kept over the frames
+//! (ray_filters.wgsl) and joined with the shadow maps in the screen light pass
+//! (screen_light.wgsl `sun_joined`).
+//!
+//! The trace, counted (`shade_skip::COUNT_MESH_RUNS`): over open ground no ray is stopped and
+//! under a roof those its shadow falls on are, as many as the pixels the shadow maps leave
+//! dark, and the still images agree with the rays; a swaying mesh's pixels are left to the
+//! shadow maps (not traced), in both of the prepass's ways of drawing a mesh, and the picture
+//! is the one without the trace; a pixel on the drawn ground just under a ground another
+//! feature brings through the hook is lit (the rays pass up through its back), and that ground
+//! turned down as a roof stops them.
+//!
+//! The join, against the same scene drawn with the shadow maps alone
+//! (`shade_skip::RAY_SUN_TRACE_ONLY`): a post the maps leave out casts its shadow; a roof's
+//! shadow is the maps' but at its edge; a caster that moves is shadowed by the maps alone and
+//! leaves no trail where it stood still; a caster farther up-sun than the rays reach still
+//! shades the ground; a roof the rays leave out, and one past the traced pixels' reach, keep
+//! the maps' shadow; and a camera cut drops the trace's history. Needs a GPU with ray queries
+//! (lavapipe has them); passes with a note without.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
+use engine_render::settings::shade_skip::RAY_SUN_TRACE_ONLY;
 use engine_render::settings::trial_cut::MESHES_ONCE;
 use engine_render::settings::trial_cut_more::{RAY_SUN, RAY_WORLD};
 use engine_render::{
@@ -231,7 +243,9 @@ fn the_suns_trace_is_stopped_where_the_shadow_falls() {
         .sum::<f32>()
         / (W * H) as f32;
 
+    // (The picture with the shadow maps alone: the rays are compared with the maps.)
     let mut roofed = open_ground(true);
+    roofed.world.resource_mut::<RenderSettings>().debug_skip |= RAY_SUN_TRACE_ONLY;
     slab(
         &mut roofed.world,
         DVec3::new(0.0, 2.0, 0.0),
@@ -301,7 +315,8 @@ fn the_suns_trace_is_stopped_where_the_shadow_falls() {
 /// A swaying mesh's pixels are left to the shadow maps, which draw it moving: the prepass marks
 /// them (`prepass_sway_mark`) and the trace shoots no ray from them, through the prepass's
 /// shared material step and through its own program alike (`trial_cut::MESHES_ONCE` on and
-/// off). The mark changes nothing else: the picture is the one drawn without the trace.
+/// off). The mark changes nothing else, and the light pass takes the maps alone where nothing
+/// was traced: the picture is the one drawn without the trace.
 #[test]
 fn a_swaying_plant_pixel_keeps_the_maps() {
     // A box whose top fills the view, standing on the ground.
@@ -463,4 +478,383 @@ fn a_pixel_below_the_rays_ground_is_not_shadowed_by_it() {
         "a hooked ground's front stops the rays: {:.4} stopped under the roof",
         stopped[1]
     );
+}
+
+// ---------------------------------------------------------------- the join (step 8)
+
+/// Ground seen from `eye` (looking at `target`), the sun from the side as in `open_ground`, the
+/// trace joined with the shadow maps (`join`) or measured alone, the light pass then taking the
+/// maps alone (`RAY_SUN_TRACE_ONLY`). With the camera's entity.
+fn ground_from(join: bool, eye: DVec3, target: DVec3) -> (App, Entity) {
+    let mut app = app(true);
+    if !join {
+        app.world.resource_mut::<RenderSettings>().debug_skip |= RAY_SUN_TRACE_ONLY;
+    }
+    let w = &mut app.world;
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, GROUND_Y, 0.0)),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [400.0, 400.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::color(0.3, 0.3, 0.3),
+        ),
+    ));
+    sun(w, 110_000.0, DVec3::new(1.0, -1.0, 0.0));
+    let camera = camera(w, eye, target, 14.0);
+    (app, camera)
+}
+
+/// `ground_from` with `open_ground`'s view.
+fn ground(join: bool) -> App {
+    ground_from(join, DVec3::new(0.0, 7.0, 5.0), DVec3::ZERO).0
+}
+
+/// A roof 2 m up over the ground at `x`, `z`, as in the trace's own tests.
+fn roof(app: &mut App, x: f64, z: f64) -> Entity {
+    slab(
+        &mut app.world,
+        DVec3::new(x, 2.0, z),
+        DVec3::new(3.0, 0.1, 3.0),
+        gray(0.3),
+    )
+}
+
+/// Checks that a frame of `app` traced in the frame's ray scene and was joined (`join`) or not.
+fn assert_joined(app: &App, join: bool, what: &str) {
+    assert_in_ray_scene(app, what);
+    assert_eq!(
+        diag(app, "render.ray.sun_joined"),
+        f64::from(u8::from(join)),
+        "{what}: the trace is joined with the shadow maps: {join}"
+    );
+}
+
+/// The scene `build` makes over `ground_from`'s ground, drawn after `frames` frames with the
+/// shadow maps alone and joined with the trace (`None`: no GPU that traces).
+fn maps_and_joined(
+    name: &str,
+    eye: DVec3,
+    target: DVec3,
+    frames: usize,
+    build: impl Fn(&mut App),
+) -> Option<[image::RgbImage; 2]> {
+    let mut pictures = Vec::new();
+    for join in [false, true] {
+        let (mut app, _) = ground_from(join, eye, target);
+        build(&mut app);
+        app.update_n(frames);
+        if !can_run(&app) {
+            return None;
+        }
+        assert_joined(&app, join, name);
+        let way = if join { "joined" } else { "maps" };
+        pictures.push(picture(&mut app, &format!("{name}_{way}.png")));
+    }
+    let joined = pictures.pop().expect("two");
+    Some([pictures.pop().expect("two"), joined])
+}
+
+/// How bright the ground in full sun is in `p`: the brightest tenth of its pixels begins there.
+fn lit_level(p: &image::RgbImage) -> f32 {
+    let mut values: Vec<f32> = p.pixels().map(mean).collect();
+    values.sort_by(f32::total_cmp);
+    values[values.len() * 9 / 10]
+}
+
+/// Pixels in shadow in both pictures, in the first alone, and in the second alone (darker
+/// than half of `lit`).
+fn shadow_overlap(a: &image::RgbImage, b: &image::RgbImage, lit: f32) -> [u32; 3] {
+    let mut n = [0u32; 3];
+    for (p, q) in a.pixels().zip(b.pixels()) {
+        let (x, y) = (mean(p) < lit * 0.5, mean(q) < lit * 0.5);
+        n[0] += (x && y) as u32;
+        n[1] += (x && !y) as u32;
+        n[2] += (!x && y) as u32;
+    }
+    n
+}
+
+/// A post too thin for the shadow maps (the lists leave out casters under 60 of cascade 0's
+/// texels across, 1.3 m in these tests, from every map) is in the rays: its shadow falls on the
+/// ground in the joined picture and not in the maps' one, and nothing else changes.
+#[test]
+fn a_thin_post_casts_a_shadow_the_maps_lose() {
+    // Closer than `open_ground`'s eye: a pixel about 4 cm at the post, its shadow (1 m long
+    // along +x, 10 cm wide) about 25 by 2.5 pixels.
+    let eye = DVec3::new(0.5, 2.5, 2.0);
+    let target = DVec3::new(0.5, GROUND_Y, 0.0);
+    let Some([maps, joined]) = maps_and_joined("thin_post", eye, target, 16, |app| {
+        {
+            let mut s = app.world.resource_mut::<RenderSettings>();
+            s.shadow_caster_min_texels = 60.0;
+            s.contact_shadow_length = 0.0;
+        }
+        slab(
+            &mut app.world,
+            DVec3::new(0.0, GROUND_Y + 0.5, 0.0),
+            DVec3::new(0.1, 1.0, 0.1),
+            gray(0.5),
+        );
+    }) else {
+        return;
+    };
+    let lit = lit_level(&maps);
+    let [both, maps_only, rays_only] = shadow_overlap(&maps, &joined, lit);
+    eprintln!(
+        "thin post: {both} pixels dark in both, {maps_only} in the maps' picture alone, \
+         {rays_only} in the joined one alone (lit {lit:.1})"
+    );
+    assert!(
+        rays_only >= 30,
+        "the post's shadow by ray: {rays_only} pixels dark in the joined picture alone"
+    );
+    assert!(
+        maps_only <= 4,
+        "the join takes no shadow away: {maps_only} pixels dark in the maps' picture alone"
+    );
+}
+
+/// A roof's shadow traced (the roof stands still: it is in the rays and in the still images, so
+/// the join leaves it to the rays) is the maps' shadow but at its edge, and as dark.
+#[test]
+fn a_ray_shadow_and_a_map_shadow_agree_outside_the_penumbra() {
+    let eye = DVec3::new(0.0, 7.0, 5.0);
+    let Some([maps, joined]) = maps_and_joined("roof", eye, DVec3::ZERO, 16, |app| {
+        roof(app, 0.0, 0.0);
+    }) else {
+        return;
+    };
+    let lit = lit_level(&maps);
+    let [both, maps_only, rays_only] = shadow_overlap(&maps, &joined, lit);
+    // How far apart the two are where both see shadow and where both see sun.
+    let (mut shade_gap, mut sun_gap, mut shade_n, mut sun_n) = (0.0, 0.0, 0u32, 0u32);
+    for (p, q) in maps.pixels().zip(joined.pixels()) {
+        let (a, b) = (mean(p), mean(q));
+        if a < lit * 0.5 && b < lit * 0.5 {
+            shade_gap += (a - b).abs();
+            shade_n += 1;
+        } else if a > lit * 0.8 && b > lit * 0.8 {
+            sun_gap += (a - b).abs();
+            sun_n += 1;
+        }
+    }
+    let shade_gap = shade_gap / shade_n.max(1) as f32;
+    let sun_gap = sun_gap / sun_n.max(1) as f32;
+    eprintln!(
+        "roof: {both} pixels dark in both, {maps_only} in the maps' alone, {rays_only} in the \
+         joined alone; apart by {shade_gap:.2} in shadow, {sun_gap:.2} in sun (lit {lit:.1})"
+    );
+    assert!(both > 300, "the roof's shadow is in view: {both} pixels");
+    assert!(
+        (maps_only + rays_only) * 8 <= both,
+        "the shadows differ at their edge alone: {maps_only} + {rays_only} of {both}"
+    );
+    assert!(
+        shade_gap <= 3.0 && sun_gap <= 3.0,
+        "as dark and as bright: {shade_gap:.2} apart in shadow, {sun_gap:.2} in sun"
+    );
+}
+
+/// A roof that moves is not in the still structure the trace asks: its shadow is the maps'
+/// alone (not darkened twice), and where it stood still before it moved, in the rays, its
+/// traced shadow kept over the frames leaves no trail.
+#[test]
+fn a_moving_caster_is_shadowed_once_and_leaves_no_trail() {
+    let mut pictures = Vec::new();
+    for join in [false, true] {
+        let mut app = ground(join);
+        let moving = roof(&mut app, 0.0, 1.0);
+        app.update_n(16);
+        if !can_run(&app) {
+            return;
+        }
+        // 4 m toward the view's top over 40 frames: the shadow leaves where it fell.
+        for _ in 0..40 {
+            app.world
+                .get_mut::<Transform>(moving)
+                .expect("the roof")
+                .translation
+                .z -= 0.1;
+            app.update();
+        }
+        assert_joined(&app, join, "a moving roof");
+        let way = if join { "joined" } else { "maps" };
+        pictures.push(picture(&mut app, &format!("moving_{way}.png")));
+    }
+    let [maps, joined] = [&pictures[0], &pictures[1]];
+    let lit = lit_level(maps);
+    let [both, maps_only, rays_only] = shadow_overlap(maps, joined, lit);
+    let (mut most, mut sum) = (0u8, 0u64);
+    for (a, b) in maps.pixels().zip(joined.pixels()) {
+        let d = (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
+        most = most.max(d);
+        sum += d as u64;
+    }
+    let gap = sum as f32 / (W * H) as f32;
+    eprintln!(
+        "moving roof: {both} pixels dark in both, {maps_only} in the maps' alone, {rays_only} \
+         in the joined alone; apart by {gap:.2} on average, {most} at most"
+    );
+    assert!(
+        both > 300,
+        "the moving roof's shadow is in view: {both} pixels"
+    );
+    assert!(
+        maps_only + rays_only <= both / 50,
+        "the same shadow, and no trail where the roof stood: {maps_only} + {rays_only} of {both}"
+    );
+    assert!(
+        gap <= 1.5,
+        "the moving roof's shadow is the maps' alone: apart by {gap:.2}"
+    );
+}
+
+/// A slab 75 m up-sun of the ground in view stands farther than the rays reach (64 m): the
+/// rays pass under it, the maps hold it, and the join takes its shadow from the maps
+/// (`shadow_rest` counts what stands past 0.9 of the rays' length).
+#[test]
+fn a_far_blocker_still_shades_a_traced_pixel() {
+    // Up-sun of the origin: (-1, 1, 0) / sqrt 2 (the sun shines toward (1, -1, 0)).
+    let up = 75.0 / 2f64.sqrt();
+    let eye = DVec3::new(0.0, 7.0, 5.0);
+    let Some([maps, joined]) = maps_and_joined("far_blocker", eye, DVec3::ZERO, 16, |app| {
+        // 40 m by 10 m: its shadow covers the ground at z between -5 and 5, the view's
+        // lower half.
+        slab(
+            &mut app.world,
+            DVec3::new(-up, GROUND_Y + up, 0.0),
+            DVec3::new(40.0, 1.0, 10.0),
+            gray(0.3),
+        );
+    }) else {
+        return;
+    };
+    let lit = lit_level(&maps);
+    let [both, maps_only, rays_only] = shadow_overlap(&maps, &joined, lit);
+    eprintln!(
+        "far blocker: {both} pixels dark in both, {maps_only} in the maps' alone, {rays_only} \
+         in the joined alone (lit {lit:.1})"
+    );
+    assert!(
+        both > W * H / 4,
+        "the far slab's shadow covers much of the view: {both} pixels"
+    );
+    assert!(
+        (maps_only + rays_only) * 10 <= both,
+        "the join keeps it: {maps_only} pixels dark in the maps' picture alone, {rays_only} in \
+         the joined one alone"
+    );
+}
+
+/// The trace's history goes on from frame to frame, and a camera cut drops it: the frame of a
+/// 10 m jump starts again (`render.ray.sun_history` 0, `render.history_cut` 1) and the next
+/// goes on; the roof's shadow is there from the frame after the cut.
+#[test]
+fn after_a_cut_no_shadow_history_survives() {
+    let (mut app, camera) = ground_from(true, DVec3::new(0.0, 7.0, 5.0), DVec3::ZERO);
+    roof(&mut app, 0.0, 0.0);
+    roof(&mut app, 10.0, 0.0);
+    app.update_n(12);
+    if !can_run(&app) {
+        return;
+    }
+    assert_joined(&app, true, "before the cut");
+    assert_eq!(
+        diag(&app, "render.ray.sun_history"),
+        1.0,
+        "the history goes on from frame to frame"
+    );
+    let jump = |app: &mut App| {
+        app.world
+            .get_mut::<Transform>(camera)
+            .expect("the camera")
+            .translation
+            .x += 10.0;
+        app.update();
+    };
+    jump(&mut app);
+    assert_eq!(
+        diag(&app, "render.history_cut"),
+        1.0,
+        "a 10 m jump is a cut"
+    );
+    assert_eq!(
+        diag(&app, "render.ray.sun_history"),
+        0.0,
+        "the frame of the cut starts the trace's history again"
+    );
+    assert_joined(&app, true, "the frame of the cut");
+    // (The picture is the frame after the cut, the second of the new history.)
+    let after = picture(&mut app, "cut_after.png");
+    assert_eq!(
+        diag(&app, "render.ray.sun_history"),
+        1.0,
+        "the frame after the cut goes on from it"
+    );
+    app.update_n(12);
+    let settled = picture(&mut app, "cut_settled.png");
+    let lit = lit_level(&settled);
+    let [both, early, late] = shadow_overlap(&after, &settled, lit);
+    eprintln!(
+        "after the cut: {both} pixels dark in both, {early} in the frame after alone, {late} \
+         settled alone"
+    );
+    assert!(
+        both > 300,
+        "the second roof's shadow is in view: {both} pixels"
+    );
+    assert!(
+        (early + late) * 8 <= both,
+        "the shadow is there from the frame after the cut: {early} + {late} of {both}"
+    );
+}
+
+/// What the rays don't hold keeps the shadow maps' shadow. A roof past the rays' reaches (cut
+/// to a meter: it is in no ray) is held by its still image, which holds a caster within the
+/// rays' length all round the pixels of its shadow (all but a texel at its edge); a roof whose
+/// shadow falls past the traced pixels' reach (`ray_sun_reach` 12 m, the shadow about 15 m
+/// away) is lit by the maps alone there.
+/// A case of `a_still_caster_the_rays_leave_out_keeps_its_map_shadow`: its name, the settings
+/// it changes, and where its roof stands (z).
+type LeftOut = (&'static str, fn(&mut RenderSettings), f64);
+
+#[test]
+fn a_still_caster_the_rays_leave_out_keeps_its_map_shadow() {
+    let eye = DVec3::new(0.0, 7.0, 5.0);
+    let cases: [LeftOut; 2] = [
+        (
+            "unreached",
+            |s| {
+                s.ray_caster_reach = 1.0;
+                s.ray_far_reach = 1.0;
+            },
+            0.0,
+        ),
+        ("untraced", |s| s.ray_sun_reach = 12.0, -8.0),
+    ];
+    for (name, set, z) in cases {
+        let Some([maps, joined]) = maps_and_joined(name, eye, DVec3::ZERO, 16, |app| {
+            set(&mut app.world.resource_mut::<RenderSettings>());
+            roof(app, 0.0, z);
+        }) else {
+            return;
+        };
+        let lit = lit_level(&maps);
+        let [both, maps_only, rays_only] = shadow_overlap(&maps, &joined, lit);
+        eprintln!(
+            "{name}: {both} pixels dark in both, {maps_only} in the maps' alone, {rays_only} in \
+             the joined alone (lit {lit:.1})"
+        );
+        assert!(
+            both > 150,
+            "{name}: the roof's shadow is in view: {both} pixels"
+        );
+        assert!(
+            (maps_only + rays_only) * 10 <= both,
+            "{name}: the maps' shadow stands: {maps_only} pixels dark in their picture alone, \
+             {rays_only} in the joined one alone"
+        );
+    }
 }

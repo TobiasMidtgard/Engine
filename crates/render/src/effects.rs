@@ -103,6 +103,9 @@ pub struct ScreenEffects {
     blur_group: wgpu::BindGroup,
     /// The screen light pass (screen_light.wgsl).
     light: wgpu::RenderPipeline,
+    /// Its group 1 where the sun's trace is not joined (an extra view, a frame without the
+    /// trace): 1x1 stand-ins and a join that is off (`sun_join_layout`).
+    no_sun_join: wgpu::BindGroup,
     /// Sorts the lamps into the screen's tiles (lamp_tiles.wgsl).
     lamp_tiles: wgpu::RenderPipeline,
     ssr_layout: wgpu::BindGroupLayout,
@@ -259,7 +262,9 @@ impl ScreenEffects {
             shared.formats.ao,
             None,
         );
-        let light = light_pipeline(shared);
+        let join_layout = sun_join_layout(shared);
+        let light = light_pipeline(shared, &join_layout);
+        let no_sun_join = no_sun_join_group(shared, &join_layout);
         let lamp_tiles = lamp_tiles_pipeline(shared);
         let ssr_module = shared.shader("ssr", include_str!("shaders/ssr.wgsl"), true);
         let ssr = fullscreen_pipeline(
@@ -352,6 +357,7 @@ impl ScreenEffects {
             gtao_group,
             blur_group,
             light,
+            no_sun_join,
             lamp_tiles,
             ssr_layout,
             ssr,
@@ -577,11 +583,14 @@ impl ScreenEffects {
     /// Record the screen light maps (`Targets::light_a`, `light_b`, `light_gi`) from the
     /// prepass. `light_group` is the frame group with the prepass's depth and normals bound and
     /// stand-ins for the maps drawn after it.
+    /// The screen light pass. `sun_join`: its group 1 with the sun's trace of this frame
+    /// (ray_scene/sun.rs `SunTrace::join_group`; `None`: not joined).
     pub fn encode_light(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         targets: &Targets,
         light_group: &wgpu::BindGroup,
+        sun_join: Option<&wgpu::BindGroup>,
     ) {
         let attachment = |view| {
             Some(wgpu::RenderPassColorAttachment {
@@ -607,6 +616,7 @@ impl ScreenEffects {
         });
         pass.set_pipeline(&self.light);
         pass.set_bind_group(0, light_group, &[]);
+        pass.set_bind_group(1, sun_join.unwrap_or(&self.no_sun_join), &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -1160,7 +1170,107 @@ fn lamp_tiles_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
 }
 
 /// The screen light pass's pipeline: one fullscreen triangle into the five light maps.
-fn light_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
+/// Group 1 of the screen light pass (screen_light.wgsl): the sun's trace kept over the frames,
+/// the shadow maps' still images, the join's uniform (ray_scene/sun.rs `JoinUniform`). One
+/// layout for every view (`GpuShared::bind_group_layout` keeps it), shared with the trace.
+pub(crate) fn sun_join_layout(shared: &GpuShared) -> wgpu::BindGroupLayout {
+    use wgpu::ShaderStages as S;
+    shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("screen light sun join"),
+        entries: &[
+            layout_entry(
+                0,
+                S::FRAGMENT,
+                wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+            ),
+            layout_entry(
+                1,
+                S::FRAGMENT,
+                wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+            ),
+            layout_entry(
+                2,
+                S::FRAGMENT,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ),
+        ],
+    })
+}
+
+/// The light pass's group 1 where nothing is joined: a 1x1 history, a 1x1 still image and a
+/// uniform of zeros (`sun_join.params.x` 0: the pass takes `shadow_factor`, as without it).
+fn no_sun_join_group(shared: &GpuShared, layout: &wgpu::BindGroupLayout) -> wgpu::BindGroup {
+    let device = &shared.device;
+    let one = |label, format, dimension| {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(dimension),
+                ..Default::default()
+            })
+    };
+    let history = one(
+        "screen light sun join (none): history",
+        crate::ray_scene::SUN_HISTORY_FORMAT,
+        wgpu::TextureViewDimension::D2,
+    );
+    let images = one(
+        "screen light sun join (none): still images",
+        wgpu::TextureFormat::Depth32Float,
+        wgpu::TextureViewDimension::D2Array,
+    );
+    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("screen light sun join (none)"),
+        size: crate::ray_scene::SUN_JOIN_UNIFORM_SIZE,
+        usage: wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: false,
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("screen light sun join (none)"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&history),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&images),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+fn light_pipeline(shared: &GpuShared, join_layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
     let module = shared.shader(
         "screen light",
         include_str!("shaders/screen_light.wgsl"),
@@ -1168,7 +1278,7 @@ fn light_pipeline(shared: &GpuShared) -> wgpu::RenderPipeline {
     );
     let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("screen light"),
-        bind_group_layouts: &[Some(&shared.frame_layout)],
+        bind_group_layouts: &[Some(&shared.frame_layout), Some(join_layout)],
         immediate_size: 0,
     });
     let target = |format| {

@@ -2,10 +2,11 @@
 //! (`ENGINE_RAY_QUERIES=off` leaves the device without them, as a GPU that has none is): the
 //! frame's ray scene (`trial_cut_more::RAY_WORLD`) is not made, nothing prepares for it, the
 //! sun's measuring rays are not shot nor its trace (`trial_cut_more::RAY_SUN`; its mark of
-//! what sways is still written, and every other reader takes it as before), the probes are not
-//! traced more often nor put to sleep when stuck (`trial_cut_more::RAY_PROBES`), and the rays
-//! walk the probes' own scene in software, so the picture is the one drawn with the switches
-//! off. A test binary of its own: the variable is the whole process's, read when the device is
+//! what sways is still written, and every other reader takes it as before), so the light pass
+//! joins nothing with the shadow maps (`shade_skip::RAY_SUN_TRACE_ONLY` or not), the probes
+//! are not traced more often nor put to sleep when stuck (`trial_cut_more::RAY_PROBES`), and
+//! the rays walk the probes' own scene in software, so the picture is the one drawn with the
+//! switches off. A test binary of its own: the variable is the whole process's, read when the device is
 //! made. Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
@@ -47,7 +48,8 @@ fn app(switches: bool) -> App {
             s.trial_cuts_more |= RAY_WORLD | RAY_PROBES | RAY_SUN;
             s.ray_sun_shadows = true;
             s.debug_skip |= engine_render::settings::shade_skip::RAY_LEAVES_SOLID
-                | engine_render::settings::shade_skip::COUNT_MESH_RUNS;
+                | engine_render::settings::shade_skip::COUNT_MESH_RUNS
+                | engine_render::settings::shade_skip::RAY_SUN_TRACE_ONLY;
             s.ray_caster_reach = 40.0;
             s.ray_far_reach = 90.0;
             s.ray_sun_reach = 60.0;
@@ -175,6 +177,8 @@ fn without_ray_queries_the_switches_change_nothing() {
             ("render.ray.sun_rays", -1.0),
             ("render.ray.sun_missed", -1.0),
             ("render.ray.sun_false", -1.0),
+            ("render.ray.sun_joined", -1.0),
+            ("render.ray.sun_history", -1.0),
             ("render.gi.sun_rays", -1.0),
         ] {
             assert_eq!(diag(app, name), expected, "{what}: {name}");

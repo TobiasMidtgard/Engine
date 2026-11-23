@@ -139,6 +139,11 @@ const RULE_TESTS_SHIFT: u32 = 8u;
 // reads, and the triangles behind the holes).
 const RAY_SCENE_LEAVES_SOLID: u32 = 1u;
 
+// The distance along the ray of the hit `ray_first` or `ray_stopped` last found (the ray's
+// `t_max` where they found none): the sun's trace keeps a blocker's distance for the penumbra
+// it casts (ray_sun.wgsl).
+var<private> ray_found_t: f32;
+
 // lowbias32 (Wellons): a well mixed hash of a word.
 fn ray_hash(v: u32) -> u32 {
     var h = v;
@@ -330,13 +335,19 @@ fn ray_stopped(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rule
         rayQueryInitialize(&still, ray_still, RayDesc(flags, RAY_SHADOW_ONLY, RAY_T_MIN, t_end, o, dir));
         while (rayQueryProceed(&still)) {}
         let hit = rayQueryGetCommittedIntersection(&still);
-        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+            ray_found_t = hit.t;
+            return hit.instance_custom_data;
+        }
     }
     if (ray_scene.stand_ins.y > 0u && (rules & RULE_STILL_ONLY) == 0u) {
         rayQueryInitialize(&moving, ray_moving, RayDesc(flags, RAY_SHADOW_ONLY, RAY_T_MIN, t_end, o, dir));
         while (rayQueryProceed(&moving)) {}
         let hit = rayQueryGetCommittedIntersection(&moving);
-        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+            ray_found_t = hit.t;
+            return hit.instance_custom_data;
+        }
     }
     return RAY_NONE;
 }
@@ -351,6 +362,7 @@ fn ray_first(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules:
     var still: ray_query<vertex_return>;
     var moving: ray_query<vertex_return>;
     var tests = 0u;
+    ray_found_t = t_max;
     if (!(t_max > 0.0)) { return RAY_NONE; }
     let o = origin - ray_scene.anchor.xyz;
     let flags = ray_flags(rules) | RAY_FLAG_TERMINATE_ON_FIRST_HIT;
@@ -364,7 +376,10 @@ fn ray_first(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules:
             }
         }
         let hit = rayQueryGetCommittedIntersection(&still);
-        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+            ray_found_t = hit.t;
+            return hit.instance_custom_data;
+        }
     }
     if (ray_scene.counts.y > 0u && (rules & RULE_STILL_ONLY) == 0u) {
         rayQueryInitialize(&moving, ray_moving, RayDesc(flags, classes, RAY_T_MIN, t_end, o, dir));
@@ -374,7 +389,10 @@ fn ray_first(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, classes: u32, rules:
             }
         }
         let hit = rayQueryGetCommittedIntersection(&moving);
-        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) { return hit.instance_custom_data; }
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+            ray_found_t = hit.t;
+            return hit.instance_custom_data;
+        }
     }
     return RAY_NONE;
 }

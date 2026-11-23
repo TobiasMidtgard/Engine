@@ -1,20 +1,24 @@
 // The sun's trace (`trial_cut_more::RAY_SUN`, ray_scene/sun.rs): a dispatch of the frame's one
 // ray pass. From every pixel the prepass drew within `ray_scene.sun.x` meters of the camera that
-// faces the sun (a thin sheet and skin whichever way they face: light reaches them through) and
-// is not a swaying mesh (`prepass_sways`: the shadow maps draw those moving), one ray toward a
-// point of the sun's disc, `ray_scene.sun.y` long, against the ray scene's still structure: what
-// casts at any size and the ground, and beyond `ray_scene.sun.z` the swaying plants' trunks and
-// leaves too (nearer, the maps draw them moving; farther, the still images hold them at rest, as
-// the rays do). A cut-out card is read in its texture for a ray's first two candidates, by chance
+// faces the sun (a thin sheet whichever way it faces: light reaches it through) and is not a
+// swaying mesh (`prepass_sways`: the shadow maps draw those moving), one ray toward a point of
+// the sun's disc, `ray_scene.sun.y` long, against the ray scene's still structure: what casts at
+// any size and the ground, and beyond `ray_scene.sun.z` the swaying plants' trunks and leaves
+// too (nearer, the maps draw them moving; farther, the still images hold them at rest, as the
+// rays do). A cut-out card is read in its texture for a ray's first two candidates, by chance
 // after them, and where the still structure holds shadow stand-ins a ray nothing stopped asks
-// them as well (`ray_stopped`). Nothing reads `sun_raw` yet: the light pass joins it in a later
-// step.
+// them as well (`ray_stopped`). The filter (ray_filters.wgsl) keeps `sun_raw` over the frames
+// and the screen light pass joins it with the shadow maps (screen_light.wgsl `sun_joined`).
+// Skin and, with `CUT_THIN_OWN_SUN`, thin sheets get no ray: their shaders read the shadow
+// maps themselves (skin.wgsl, `shade_surface_sides`), never the pass's sun.
 //
 // Composed after lib_ray (`ray_scene::shader_lib(1)`) and with lib_frame: the prepass's normal
 // and depth are the frame's own (group 0), as the light pass reads them.
 
 // r: the sun's visibility at the pixel (1 the ray reached the sun, 0 something stopped it; 1
-// where nothing was traced); g: the flags (`SUN_TRACED`, `SUN_PLANTS_BY_RAY`) over 255.
+// where nothing was traced); g: the flags (`SUN_TRACED`, `SUN_PLANTS_BY_RAY`) over 255; b: how
+// far the ray went before it was stopped, as the square root of its share of the rays' length
+// (finer near, where the penumbra a blocker casts is narrow; 1 where it reached the sun).
 @group(2) @binding(0) var sun_raw: texture_storage_2d<rgba8unorm, write>;
 // While `COUNT_SUN_TRACE` is set (cleared before the pass): rays, rays stopped, "missed" (the
 // still image holds a caster within the ray's length over every texel around the pixel, and a
@@ -159,16 +163,17 @@ fn sun_trace_pixel(pixel: vec2<u32>, counting: bool) -> vec4<u32> {
     let thin = nr.w > PREPASS_THIN - 0.5;
     let skin = nr.w > 1.0005 && nr.w < 2.5;
     // The sky, a pixel the prepass gave no normal, no sun, a swaying mesh, a face turned from
-    // the sun (its light is the sky's and the probes' alone): no ray.
-    if (z <= 0.0 || nr.w < 0.5 || frame.sun_color.w < 0.5 || prepass_sways(nr.w)
-        || !(thin || skin || dot(n_shade, l) > 0.0)) {
-        textureStore(sun_raw, pixel, vec4<f32>(1.0, 0.0, 0.0, 1.0));
+    // the sun (its light is the sky's and the probes' alone), skin and a thin sheet that read
+    // the shadow maps themselves: no ray.
+    if (z <= 0.0 || nr.w < 0.5 || frame.sun_color.w < 0.5 || prepass_sways(nr.w) || skin
+        || (thin && trial_cut(CUT_THIN_OWN_SUN)) || !(thin || dot(n_shade, l) > 0.0)) {
+        textureStore(sun_raw, pixel, vec4<f32>(1.0, 0.0, 1.0, 1.0));
         return vec4<u32>(0u);
     }
     let rel = sun_trace_point(px, z, size);
     let dist = length(rel);
     if (dist > ray_scene.sun.x) {
-        textureStore(sun_raw, pixel, vec4<f32>(1.0, 0.0, 0.0, 1.0));
+        textureStore(sun_raw, pixel, vec4<f32>(1.0, 0.0, 1.0, 1.0));
         return vec4<u32>(0u);
     }
     // The face's normal, toward the camera (along the view's axis when orthographic), on the
@@ -190,8 +195,11 @@ fn sun_trace_pixel(pixel: vec2<u32>, counting: bool) -> vec4<u32> {
     let classes = SUN_TRACE_CASTS | select(0u, SUN_TRACE_PLANTS, plants);
     let dir = sun_disc_dir(l, ray_scene.sun.w, pixel);
     let stopped = ray_stopped(origin, dir, ray_scene.sun.y, classes, SUN_TRACE_RULES) != RAY_NONE;
+    // (The first blocker the ray found, not always the nearest: the filter takes the mean of
+    // those around for the width of the penumbra.)
+    let went = select(1.0, sqrt(saturate(ray_found_t / ray_scene.sun.y)), stopped);
     let flags = SUN_TRACED | select(0u, SUN_PLANTS_BY_RAY, plants);
-    textureStore(sun_raw, pixel, vec4<f32>(select(1.0, 0.0, stopped), f32(flags) / 255.0, 0.0, 1.0));
+    textureStore(sun_raw, pixel, vec4<f32>(select(1.0, 0.0, stopped), f32(flags) / 255.0, went, 1.0));
     var counts = vec4<u32>(0u);
     if (counting) {
         counts.x = 1u;

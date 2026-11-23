@@ -45,6 +45,9 @@ pub(crate) use hook::RayTileSource;
 pub use hook::{
     RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere, RayView,
 };
+pub(crate) use sun::{
+    HISTORY_FORMAT as SUN_HISTORY_FORMAT, JOIN_UNIFORM_SIZE as SUN_JOIN_UNIFORM_SIZE,
+};
 
 use crate::features::GpuShared;
 use crate::frame::ViewData;
@@ -207,6 +210,9 @@ pub(crate) struct RayStats {
     /// The sun's trace as last read back: rays, rays stopped, "missed", "false" (ray_sun.wgsl;
     /// `None`: not counted, or no trace).
     pub sun: Option<[u32; 4]>,
+    /// Whether the last frame joined the trace with the shadow maps, and whether its filter
+    /// read the frame before's history (`None`: no trace).
+    pub sun_joined: Option<(bool, bool)>,
 }
 
 /// The frame's ray scene.
@@ -247,6 +253,8 @@ pub(crate) struct RayScene {
     settle_until: u64,
     /// The sun's trace, while `trial_cut_more::RAY_SUN` is on.
     sun: Option<sun::SunTrace>,
+    /// `RayUniform::sun` as [`finish`](Self::finish) filled it this frame.
+    sun_values: [f32; 4],
 }
 
 /// The valve: while what belongs in the still structure is past its cap, once that set has
@@ -468,6 +476,7 @@ impl RayScene {
             valve: Valve::default(),
             settle_until: 0,
             sun: None,
+            sun_values: [0.0; 4],
         }
     }
 
@@ -672,16 +681,17 @@ impl RayScene {
             n if n == count => f32::MAX,
             n => cascades.splits[n - 1],
         };
+        self.sun_values = [
+            settings.ray_sun_reach.max(0.0),
+            sun::RAY_LENGTH,
+            plants_from,
+            view.sun_angular_radius.tan() * settings.sun_penumbra_scale.max(0.0),
+        ];
         let uniform = RayUniform {
             anchor: [anchor.x, anchor.y, anchor.z, 0.0],
             counts: [still, moving, self.frame as u32, self.epoch],
             stand_ins: [still_stand_ins, moving_stand_ins, 0, flags],
-            sun: [
-                settings.ray_sun_reach.max(0.0),
-                sun::RAY_LENGTH,
-                plants_from,
-                view.sun_angular_radius.tan() * settings.sun_penumbra_scale.max(0.0),
-            ],
+            sun: self.sun_values,
             reach: [caster_reach, far_reach, self.cut(), 0.0],
             lights: [settings.gi_shadowed_lights as f32, 0.0, 0.0, 0.0],
             ground: [0.0; 4],
@@ -775,6 +785,55 @@ impl RayScene {
         }
     }
 
+    /// After the frame's ray pass and before the screen light pass, in a frame the trace ran
+    /// and is joined: the filter, which keeps the trace over the frames, and the light pass's
+    /// group 1 ([`sun_join_group`](Self::sun_join_group)). `still_images`: the shadow maps'
+    /// still images, kept this frame; `end`: where the join ends (meters); `depth_step`: one
+    /// step of the maps' depth; `carry`: no camera cut.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn filter_sun(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        light_group: &wgpu::BindGroup,
+        targets: &crate::targets::Targets,
+        still_images: &wgpu::TextureView,
+        end: f32,
+        depth_step: f32,
+        carry: bool,
+    ) {
+        let [reach, length, plants_from, tan_radius] = self.sun_values;
+        if let Some(sun) = &mut self.sun {
+            sun.filter(
+                &self.device,
+                &self.queue,
+                encoder,
+                light_group,
+                targets,
+                sun::JoinFrame {
+                    still_images,
+                    motion: &targets.motion.view,
+                    sun: [reach, plants_from, length, tan_radius],
+                    end,
+                    depth_step,
+                    carry,
+                },
+            );
+        }
+    }
+
+    /// A frame the trace is not joined in (see [`filter_sun`](Self::filter_sun)).
+    pub(crate) fn skip_sun_filter(&mut self) {
+        if let Some(sun) = &mut self.sun {
+            sun.skip_filter();
+        }
+    }
+
+    /// The light pass's group 1 with this frame's trace, once [`filter_sun`](Self::filter_sun)
+    /// ran (`None`: the pass takes the shadow maps alone).
+    pub(crate) fn sun_join_group(&self) -> Option<&wgpu::BindGroup> {
+        self.sun.as_ref().and_then(|s| s.join_group())
+    }
+
     /// After the frame's submit (`failed`: wgpu rejected it).
     pub(crate) fn after_submit(&mut self, failed: bool) {
         self.store.after_submit(&self.queue, failed, self.frame);
@@ -827,6 +886,7 @@ impl RayScene {
             anchor_moves: self.anchor_moves,
             epoch: self.epoch,
             sun: self.sun.as_ref().and_then(|s| s.counts()),
+            sun_joined: self.sun.as_ref().map(|s| s.joined()),
         }
     }
 
@@ -901,6 +961,14 @@ impl RayScene {
         d.set("render.ray.sun_hits", hits);
         d.set("render.ray.sun_missed", missed);
         d.set("render.ray.sun_false", wrong);
+        // Whether the last frame joined the trace with the shadow maps (the filter ran and the
+        // light pass read it), and whether the filter went on from the frame before's history
+        // (not after a cut, a new size, or a frame without it); -1 without a trace.
+        let (joined, carried) = s.sun_joined.map_or((-1.0, -1.0), |(j, c)| {
+            (f64::from(u8::from(j)), f64::from(u8::from(c)))
+        });
+        d.set("render.ray.sun_joined", joined);
+        d.set("render.ray.sun_history", carried);
     }
 
     // What the hook calls (`RaySceneOut`), each with the feature's number first.

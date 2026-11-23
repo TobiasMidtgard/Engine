@@ -3512,6 +3512,41 @@ impl Renderer {
         if !extra && !measured_sun {
             self.probe_gi.forget_sun_counts();
         }
+        // The sun's trace kept over the frames, for the screen light pass to join with the
+        // shadow maps (`trial_cut_more::RAY_SUN`, ray_filters.wgsl): in a frame it ran, the light
+        // pass runs and the maps keep their still images (the join tells what moves from them;
+        // `PutBack::Never` leaves trails, and a view without them has none), but not while
+        // `shade_skip::RAY_SUN_TRACE_ONLY` measures the trace alone.
+        if !extra && let Some(ray) = &mut self.ray_scene {
+            let trace_only =
+                settings.debug_skip & crate::settings::shade_skip::RAY_SUN_TRACE_ONLY != 0;
+            let still = self
+                .shadow
+                .statics
+                .as_ref()
+                .filter(|_| view.sun_shadows && PutBack::of(&settings) != PutBack::Never);
+            match still {
+                Some(still) if traced_sun && !trace_only && self.targets.screen_light => {
+                    self.perf.pass(&mut cpu, &mut encoder, "ray shadows filter");
+                    // (A restore drawn into 16-bit depth may round a texel by one step.)
+                    let depth_step = match self.shared.formats.shadow {
+                        wgpu::TextureFormat::Depth16Unorm => 1.5 / 65535.0,
+                        _ => 1e-6,
+                    };
+                    let end = settings.ray_sun_reach.min(0.9 * view.cascades.splits[3]);
+                    ray.filter_sun(
+                        &mut encoder,
+                        &self.light_group,
+                        &self.targets,
+                        &still.array,
+                        end,
+                        depth_step,
+                        view.history_valid,
+                    );
+                }
+                _ => ray.skip_sun_filter(),
+            }
+        }
         // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
         // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass
         // group).
@@ -3533,8 +3568,13 @@ impl Renderer {
         // once a pixel (shading loads them: lib_frame.wgsl `screen_light`).
         if self.targets.screen_light {
             self.perf.pass(&mut cpu, &mut encoder, "screen light");
+            let sun_join = self
+                .ray_scene
+                .as_ref()
+                .filter(|_| !extra)
+                .and_then(|r| r.sun_join_group());
             self.effects
-                .encode_light(&mut encoder, &self.targets, &self.light_group);
+                .encode_light(&mut encoder, &self.targets, &self.light_group, sun_join);
         }
         // Which lamps can reach each tile of the screen, from the prepass's depth (shading
         // goes through those instead of every lamp: lib_frame.wgsl `lamp_mask`).

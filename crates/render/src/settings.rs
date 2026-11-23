@@ -263,6 +263,11 @@ pub mod shade_skip {
     /// so the ground's are still asked. Read on the CPU, which tells the shaders
     /// (`RayUniform`'s flags).
     pub const RAY_LEAVES_SOLID: u32 = 536870912;
+    /// With `trial_cut_more::RAY_SUN`: the sun's trace runs and nothing reads it, as on 21 Nov
+    /// 2026 (no filter, the light pass takes the shadow maps alone): what the trace alone
+    /// costs, apart from its filter and its join (`gpu_sweep` row `ray_sun_trace_only`). Read
+    /// on the CPU.
+    pub const RAY_SUN_TRACE_ONLY: u32 = 1073741824;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the picture (lib_frame.wgsl
@@ -474,17 +479,25 @@ pub mod trial_cut_more {
     pub const RAY_PROBES: u32 = 32;
     /// The sun's rays from the prepass's pixels, with [`RAY_WORLD`] (ray_scene/sun.rs,
     /// ray_sun.wgsl; pass "ray shadows", in the frame's ray pass after the probes; `gpu_sweep`
-    /// rows `ray_sun_trace`, `count_ray_sun_trace`): one ray a pixel within
-    /// `RenderSettings::ray_sun_reach` that is not sky, faces the sun (a thin sheet and skin
-    /// whatever they face) and is not of a swaying mesh, toward a point of the sun's disc,
-    /// against the still structure, 64 m long. Within the cascades that draw plants swaying
-    /// it passes trunks, branches and leaves (the maps draw them moving); beyond, it meets
-    /// them. Each pixel's answer is kept in a texture nothing reads yet; the join with the
-    /// shadow maps is the round's next step. With `shade_skip::COUNT_MESH_RUNS` the rays are
-    /// counted against the still shadow images (`render.ray.sun_rays`, `sun_hits`,
-    /// `sun_missed`, `sun_false`). While it is on, swaying meshes mark their prepass pixels
-    /// (`prepass_sway_mark` in lib_frame.wgsl), and the sun's measuring rays
-    /// (`RenderSettings::ray_sun_shadows`) give way to it. Off by default.
+    /// rows `ray_sun_trace`, `ray_sun_trace_only`, `ray_sun_reach_160`, `count_ray_sun_trace`):
+    /// one ray a pixel within `RenderSettings::ray_sun_reach` that is not sky, faces the sun
+    /// (a thin sheet whatever it faces) and is not of a swaying mesh, skin or (with
+    /// `trial_cut::THIN_OWN_SUN`) a thin sheet, toward a point of the sun's disc, against the
+    /// still structure, 64 m long. Within the cascades that draw plants swaying it passes
+    /// trunks, branches and leaves (the maps draw them moving); beyond, it meets them. A
+    /// filter (pass "ray shadows filter", ray_filters.wgsl) keeps each pixel's rays over up to
+    /// 32 frames, and the screen light pass joins them with the shadow maps
+    /// (screen_light.wgsl `sun_joined`): a traced pixel's sun is its rays' times what the maps
+    /// hold that the rays don't (what moves, what stands farther up-sun than 57.6 m), and the
+    /// maps' answer where the rays saw the sun whole over a caster the still image holds
+    /// (one the rays left out); the maps alone in a frame whose still images are not kept,
+    /// and over the reach's last tenth they take over. `render.ray.sun_joined`,
+    /// `sun_history`. With `shade_skip::COUNT_MESH_RUNS` the rays are counted against the
+    /// still shadow images (`render.ray.sun_rays`, `sun_hits`, `sun_missed`, `sun_false`),
+    /// and `shade_skip::RAY_SUN_TRACE_ONLY` measures the trace without its filter and join.
+    /// While it is on, swaying meshes mark their prepass pixels (`prepass_sway_mark` in
+    /// lib_frame.wgsl), and the sun's measuring rays (`RenderSettings::ray_sun_shadows`) give
+    /// way to it. Off by default.
     pub const RAY_SUN: u32 = 128;
 }
 

@@ -379,7 +379,24 @@ fn variants() -> Vec<Variant> {
             "ray_sun_trace",
             r,
             json!({"trial_cuts_more": 144, "gi_hardware_rays": true}),
-            "ray_world with the sun's trace (in place of the measuring rays): a ray toward the sun's disc from each pixel within 80 m that faces the sun and does not sway, 64 m long, against the still structure (pass `ray shadows`, read against ray_world_sun; nothing reads what the rays find yet)",
+            "ray_world with the sun's trace (in place of the measuring rays) joined with the shadow maps: a ray toward the sun's disc from each pixel within 80 m that faces the sun and does not sway, 64 m long, against the still structure (pass `ray shadows`, read against ray_world_sun), kept over the frames (pass `ray shadows filter`) and joined in the screen light pass with what the maps hold that the rays don't (read `ray shadows filter` and `screen light` against ray_sun_trace_only)",
+        ),
+        v(
+            "ray_sun_trace_only",
+            r,
+            json!({"trial_cuts_more": 144, "gi_hardware_rays": true, "debug_skip": 1_073_741_824}),
+            "ray_sun_trace without the filter and the join: the trace alone, which nothing reads (the light pass takes the shadow maps alone, as at the baseline)",
+        ),
+        v(
+            "ray_sun_reach_160",
+            r,
+            json!({
+                "trial_cuts_more": 144,
+                "gi_hardware_rays": true,
+                "ray_sun_reach": 160.0,
+                "ray_caster_reach": 270.0
+            }),
+            "ray_sun_trace with the traced pixels out to 160 m in place of 80 m, and the casters the rays hold out to 270 m in place of 160 m (the join ends at 0.9 of the shadow distance where that is nearer)",
         ),
         v(
             "ray_sun_trace_leaves_solid",
