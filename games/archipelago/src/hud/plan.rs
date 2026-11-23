@@ -131,8 +131,15 @@ pub fn tier_icon(t: Tier) -> &'static str {
         Tier::Burghers => "isle_tier_burghers",
         Tier::Masters => "isle_tier_masters",
         Tier::Patricians => "isle_tier_patricians",
-        // (The far peoples borrow the home tier of their rank until they have their own.)
-        t => tier_icon(t.look()),
+        Tier::Riverfolk => "isle_tier_riverfolk",
+        Tier::Freeholders => "isle_tier_freeholders",
+        Tier::Planters => "isle_tier_planters",
+        Tier::Herders => "isle_tier_herders",
+        Tier::Caravaners => "isle_tier_caravaners",
+        Tier::Scholars => "isle_tier_scholars",
+        Tier::Trappers => "isle_tier_trappers",
+        Tier::Whalers => "isle_tier_whalers",
+        Tier::Wardens => "isle_tier_wardens",
     }
 }
 
@@ -152,7 +159,9 @@ pub fn tabs(by_type: bool) -> Vec<Tab> {
             })
             .collect();
     }
-    Tier::ALL
+    // (The building table names its workers by the home tiers; abroad the island's people
+    // of the same rank work them, so the home tiers' tabs serve every region.)
+    Tier::HOME
         .into_iter()
         .map(|t| {
             let mut kinds: Vec<Kind> = DEFS
@@ -168,6 +177,28 @@ pub fn tabs(by_type: bool) -> Vec<Tab> {
             }
         })
         .collect()
+}
+
+/// The people who work tier `t`'s jobs on island `isle`: its own people of that rank abroad
+/// (crate::sim::hands), or `t` itself where the island's ladder stops lower.
+pub fn local(t: Tier, isle: usize) -> Tier {
+    crate::sim::hands(t, isle).unwrap_or(t)
+}
+
+/// Tab `i`'s name and icon on island `isle`: a tier tab abroad wears the island's own people
+/// of that rank (Riverfolk for the first tab on Sarrowmere).
+pub fn tab_face(by_type: bool, i: usize, isle: usize) -> (&'static str, &'static str) {
+    let tabs = tabs(by_type);
+    let Some(tab) = tabs.get(i.min(tabs.len().saturating_sub(1))) else {
+        return ("", "");
+    };
+    match (by_type, Tier::HOME.get(i)) {
+        (false, Some(t)) => {
+            let t = local(*t, isle);
+            (t.name(), tier_icon(t))
+        }
+        _ => (tab.name, tab.icon),
+    }
 }
 
 /// Tab `i`'s tiles in the order shown for island `isle`: farms whose crop does not grow
@@ -500,7 +531,7 @@ pub fn card(world: &World, k: Kind, isle: usize) -> El {
     let lacks = short(econ, isle, k, cost);
     let lack_of = |g: Option<Good>| lacks.iter().find(|(x, _)| *x == g).map(|(_, n)| *n);
     let here = crate::island::islands().get(isle).map_or("", |i| i.name);
-    let tier = tier_of(k);
+    let tier = local(tier_of(k), isle);
     let mut chips = vec![cost_chip("coin", format!("{cost:.0}"), lack_of(None))];
     for (g, n) in d.cost {
         chips.push(cost_chip(g.icon(), n.to_string(), lack_of(Some(*g))));
@@ -517,7 +548,7 @@ pub fn card(world: &World, k: Kind, isle: usize) -> El {
         facts.push(fact(
             "isle_people",
             "Workers",
-            format!("{n} {}", t.name().to_lowercase()),
+            format!("{n} {}", local(t, isle).name().to_lowercase()),
         ));
     }
     if let Some(o) = d.output {

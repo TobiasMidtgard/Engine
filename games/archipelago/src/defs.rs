@@ -191,13 +191,13 @@ impl Good {
             Good::Gold => "isle_gold",
             Good::Jewellery => "isle_jewellery",
             // (Borrowed from a neighbour until the interface paints their own.)
-            Good::Plantains => "isle_dates",
-            Good::Cotton => "isle_wool",
-            Good::Calico => "isle_clothes",
-            Good::GoatHair => "isle_wool",
-            Good::Robes => "isle_clothes",
-            Good::Tea => "isle_coffee",
-            Good::Carpets => "isle_silk",
+            Good::Plantains => "isle_plantains",
+            Good::Cotton => "isle_cotton",
+            Good::Calico => "isle_calico",
+            Good::GoatHair => "isle_goat_hair",
+            Good::Robes => "isle_robes",
+            Good::Tea => "isle_tea",
+            Good::Carpets => "isle_carpets",
         }
     }
 

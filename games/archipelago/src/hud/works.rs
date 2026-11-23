@@ -415,17 +415,22 @@ pub fn refresh(world: &mut World) {
         .collect();
     // Its own share: works marked first are staffed before the rest, and a crew let go
     // comes back over a few seconds.
+    // (Abroad the island's own people of the same rank work it, or nobody when its ladder
+    // stops lower: crate::sim::hands.)
     let staff = d.workers.map(|(t, n)| {
         let t = boost.workers.unwrap_or(t);
-        let k = t.index();
-        let share = if !p.asks_workers() {
-            0.0
-        } else if p.first {
-            books.staff_first[k]
-        } else {
-            books.staff_rest[k]
+        let hands = crate::sim::hands(t, isle);
+        let share = match hands {
+            Some(h) if p.asks_workers() => {
+                if p.first {
+                    books.staff_first[h.index()]
+                } else {
+                    books.staff_rest[h.index()]
+                }
+            }
+            _ => 0.0,
         };
-        ((share * p.crew).clamp(0.0, 1.0), t, n)
+        ((share * p.crew).clamp(0.0, 1.0), hands.unwrap_or(t), n)
     });
     let shown = Shown {
         kind,

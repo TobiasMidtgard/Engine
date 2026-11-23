@@ -110,7 +110,13 @@ struct Stand {
 
 /// People of the Burghers and every tier above them.
 fn upper(s: &Stand) -> f32 {
-    s.tiers.iter().skip(2).sum()
+    // (Burghers and above on every region's ladder: the third rank up.)
+    s.tiers
+        .iter()
+        .zip(Tier::ALL)
+        .filter(|(_, t)| t.rank() >= 2)
+        .map(|(n, _)| n)
+        .sum()
 }
 
 /// Every company's standing, by company number (the player's first).
@@ -667,10 +673,12 @@ fn versus(r: &Rival, us: &Stand, them: &Stand) -> El {
         .map(|(_, e)| e)
         .collect();
     let shown = us.tiers.len().min(them.tiers.len());
+    // The home tiers always, a far people only where either side has some.
     let tiers: Vec<El> = Tier::ALL
         .iter()
         .take(if both { shown } else { 0 })
         .enumerate()
+        .filter(|(i, t)| t.region() == 0 || us.tiers[*i] + them.tiers[*i] > 0.5)
         .map(|(i, t)| {
             El::new()
                 .class("row")

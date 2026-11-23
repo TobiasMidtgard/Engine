@@ -93,8 +93,9 @@ fn why_not(
     queued: usize,
     coins: f64,
     books: &IslandBooks,
-    isle: &str,
+    at: usize,
 ) -> Option<String> {
+    let isle = crate::island::islands()[at].name;
     if let Err(e) = fittings::check(p.craft, fit) {
         return Some(e);
     }
@@ -102,12 +103,21 @@ fn why_not(
     if queued >= MAX_QUEUE {
         return Some(format!("The yard has {MAX_QUEUE} on its list already."));
     }
-    if books.population[p.tier.index()] < 1.0 {
-        return Some(format!(
-            "Building a {} takes {} on {isle}.",
-            p.craft.name(),
-            p.tier.name()
-        ));
+    // (Abroad the island's own people of that rank build it: crate::sim::hands.)
+    let hands = crate::sim::hands(p.tier, at);
+    if hands.is_none_or(|t| books.population[t.index()] < 1.0) {
+        return Some(match hands {
+            Some(t) => format!(
+                "Building a {} takes {} on {isle}.",
+                p.craft.name(),
+                t.name()
+            ),
+            None => format!(
+                "No people here rank as high as the {} a {} takes.",
+                p.tier.name(),
+                p.craft.name()
+            ),
+        });
     }
     if coins < price as f64 {
         return Some(format!(
@@ -758,7 +768,7 @@ fn section(
     saved: &[(usize, String, Fit)],
     coins: f64,
     books: &IslandBooks,
-    isle: &str,
+    isle: usize,
 ) -> Vec<El> {
     let mut out = vec![
         brass::label(
@@ -832,7 +842,7 @@ pub fn refresh(world: &mut World) {
     let Some(books) = econ.islands.get(b.island).cloned() else {
         return;
     };
-    let isle = crate::island::islands()[b.island].name;
+    let isle = b.island;
     // Flagships head the list, so the biggest craft is never below the fold.
     let mut plans: Vec<&Plan> = PLANS.iter().filter(|p| p.at == b.kind).collect();
     plans.sort_by_key(|p| !p.craft.flagship());

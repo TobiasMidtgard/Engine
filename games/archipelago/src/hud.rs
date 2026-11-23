@@ -53,6 +53,8 @@ pub struct Hud {
     /// The island the top bar shows.
     pub island: usize,
     info_open: bool,
+    /// The region whose peoples the tier tabs wear (see [`plan::tab_face`]).
+    tabs_region: usize,
     /// `--hud-demo`: after a moment, open a workshop's card and hover a build tile, so a
     /// headless tour's screenshots show the whole HUD at work.
     demo: Option<f32>,
@@ -329,17 +331,16 @@ fn plan_medal(icon: &str, action: &str, key: &str, title: &str, tip: &str) -> El
 }
 
 /// The tab medallions, the sort switch, Demolish, and the blueprint and stamp tools.
-fn tab_row(category: usize, by_type: bool, demolish: bool) -> Vec<El> {
-    plan::tabs(by_type)
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
+fn tab_row(category: usize, by_type: bool, demolish: bool, isle: usize) -> Vec<El> {
+    (0..plan::tabs(by_type).len())
+        .map(|i| {
+            let (name, icon) = plan::tab_face(by_type, i, isle);
             let key = crate::tools::tab_key(i);
-            brass::medallion(t.icon, 52.0, &format!("isle.cat:{i}"))
+            brass::medallion(icon, 52.0, &format!("isle.cat:{i}"))
                 .id(format!("isle.cat:{i}"))
                 .selected(i == category)
                 .tooltip(
-                    t.name,
+                    name,
                     format!("[b]Key[/b]  {key}, again to step through its buildings"),
                 )
                 .child(plan::padlock(plan::tab_lock_id(i), 26.0, -6.0, -6.0))
@@ -397,10 +398,12 @@ fn tab_row(category: usize, by_type: bool, demolish: bool) -> Vec<El> {
 /// The tiles row's width: one row up to ten tiles, then two even rows (so the bar stays
 /// clear of the map table).
 fn items_width(n: usize) -> f32 {
-    if n > 10 {
-        n.div_ceil(2) as f32 * 94.0
-    } else {
-        2000.0
+    // Two rows, or three once a tab holds more than twenty (the first tab abroad, with the
+    // far peoples' works besides the home ones), so the bar stays clear of the map table.
+    match n {
+        0..=10 => 2000.0,
+        11..=20 => n.div_ceil(2) as f32 * 94.0,
+        _ => n.div_ceil(3) as f32 * 94.0,
     }
 }
 
@@ -409,7 +412,7 @@ fn build_bar(category: usize, tool: Tool, isle: usize, by_type: bool) -> El {
         .class("row")
         .id("isle.tabs")
         .with_style(|s| s.gap(14.0).align_items(Align::Center))
-        .children(tab_row(category, by_type, tool == Tool::Demolish));
+        .children(tab_row(category, by_type, tool == Tool::Demolish, isle));
     let header = El::new()
         .class("row")
         .with_style(|s| s.gap(14.0).justify(Justify::Center))
@@ -784,7 +787,10 @@ pub fn setup(world: &mut World) {
             let econ = world.resource::<Economy>().clone();
             world.resource_mut::<ledger::Ledger>().record(&econ);
         }
-        let isle = world.resource::<Hud>().island;
+        // (`--hud-ledger-isle=5`: that island's page instead of the one in view.)
+        let isle = std::env::args()
+            .find_map(|a| a.strip_prefix("--hud-ledger-isle=")?.parse::<usize>().ok())
+            .unwrap_or(world.resource::<Hud>().island);
         ledger::show(world, Some(isle));
         // `--hud-ledger-filter=short`, `--hud-ledger-sort=net`: press those (tour shots).
         if let Some(f) =
@@ -993,7 +999,10 @@ fn toggle_ledger(world: &mut World) {
     if world.resource::<ledger::Ledger>().open {
         ledger::show(world, None);
     } else {
-        let isle = world.resource::<Hud>().island;
+        // (`--hud-ledger-isle=5`: that island's page instead of the one in view.)
+        let isle = std::env::args()
+            .find_map(|a| a.strip_prefix("--hud-ledger-isle=")?.parse::<usize>().ok())
+            .unwrap_or(world.resource::<Hud>().island);
         ledger::show(world, Some(isle));
         ledger::update(world);
     }
@@ -1070,6 +1079,10 @@ fn set_selected(world: &mut World, id: &str, on: bool) {
 fn refresh_items(world: &mut World) {
     let (cat, tool) = (world.resource::<Hud>().category, *world.resource::<Tool>());
     let isle = world.resource::<Hud>().island;
+    // A tier tab wears the island's own people, so a new region needs new medallions.
+    if world.resource::<Hud>().tabs_region != island::islands()[isle].region() {
+        refresh_tabs(world);
+    }
     let by_type = world.resource::<plan::Plan>().by_type;
     if let Some(e) = engine_ui::input::find_id(world, "isle.items") {
         let _ = engine_ui::el::replace_children(world, e, &bar_items(cat, tool, isle, by_type));
@@ -1104,10 +1117,12 @@ fn refresh_planning(world: &mut World) {
 /// Rebuild the tab medallions (after the sort changes).
 fn refresh_tabs(world: &mut World) {
     let cat = world.resource::<Hud>().category;
+    let isle = world.resource::<Hud>().island;
+    world.resource_mut::<Hud>().tabs_region = island::islands()[isle].region();
     let by_type = world.resource::<plan::Plan>().by_type;
     if let Some(e) = engine_ui::input::find_id(world, "isle.tabs") {
         let demolish = *world.resource::<Tool>() == Tool::Demolish;
-        let _ = engine_ui::el::replace_children(world, e, &tab_row(cat, by_type, demolish));
+        let _ = engine_ui::el::replace_children(world, e, &tab_row(cat, by_type, demolish, isle));
     }
 }
 
@@ -1231,8 +1246,7 @@ fn update_data_now(world: &mut World) {
         let by_type = world
             .get_resource::<plan::Plan>()
             .is_some_and(|p| p.by_type);
-        let tabs = plan::tabs(by_type);
-        tabs[category.min(tabs.len() - 1)].name
+        plan::tab_face(by_type, category, isle).0
     };
     {
         let mut data = world.resource_mut::<UiData>();
@@ -1256,10 +1270,12 @@ fn update_data_now(world: &mut World) {
             },
         );
         data.set("isle.island_people", {
-            // Every tier that lives here, lowest first (fisherfolk alone on a new isle).
+            // Every tier that lives here, lowest first (the region's first people alone on
+            // a new isle).
+            let first = Tier::first(island::islands()[isle].region());
             let tiers: Vec<String> = Tier::ALL
                 .into_iter()
-                .filter(|t| books.population[*t as usize] >= 0.5 || *t == Tier::Fisherfolk)
+                .filter(|t| books.population[*t as usize] >= 0.5 || *t == first)
                 .map(|t| {
                     format!(
                         "{:.0} {}",

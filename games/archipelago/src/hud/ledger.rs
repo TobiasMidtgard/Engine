@@ -526,7 +526,8 @@ fn workforce(t: Tier) -> El {
 /// The book.
 /// `goods`: the goods kept, made or used on the shown island (the others are listed in one
 /// line under the table).
-pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
+/// `jobs`: the tiers whose jobs-filled rows show (the island's own people with jobs here).
+pub fn el(shown: usize, settled: &[bool], goods: &[Good], jobs: &[Tier]) -> El {
     // Tabs for the shown island's region: its settled islands (and the shown one).
     let region = island::islands()[shown].region();
     let tabs = El::new().class("row").with_style(|s| s.gap(8.0)).children(
@@ -652,7 +653,7 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(12.0).wrap(true).justify(Justify::End))
-                .children(Tier::ALL.iter().map(|t| {
+                .children(Tier::ladder(region).iter().map(|t| {
                     legend(
                         TIER_INKS[t.index()],
                         &format!("{{isle.led.tier{}}}", t.index()),
@@ -666,9 +667,7 @@ pub fn el(shown: usize, settled: &[bool], goods: &[Good]) -> El {
                 .with_style(|s| s.margin([6.0, 0.0, 0.0, 0.0]))
                 .pick_ignore(),
         )
-        .child(workforce(Tier::Fisherfolk))
-        .child(workforce(Tier::Labourers))
-        .child(workforce(Tier::Burghers))
+        .children(jobs.iter().map(|t| workforce(*t)))
         .child(
             El::new()
                 .class("col")
@@ -1352,7 +1351,17 @@ pub fn show(world: &mut World, island: Option<usize>) {
         })
         .collect();
     let goods = island_goods(world.resource::<Economy>(), i);
-    if engine_ui::screens::spawn_screen(world, screen, &el(i, &settled, &goods)).is_ok() {
+    // Jobs filled: the island's own peoples (its region's ladder), each one that has work
+    // here, and at least the first three ranks.
+    let jobs: Vec<Tier> = {
+        let b = &world.resource::<Economy>().islands[i];
+        Tier::ladder(island::islands()[i].region())
+            .iter()
+            .copied()
+            .filter(|t| t.rank() < 3 || b.jobs[t.index()] > 0.0)
+            .collect()
+    };
+    if engine_ui::screens::spawn_screen(world, screen, &el(i, &settled, &goods, &jobs)).is_ok() {
         world.resource_mut::<Ledger>().open = true;
     }
 }
@@ -1523,7 +1532,8 @@ fn paint_people(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
             .map(|s| (s.clock_s, s.people.get(i).map_or(0.0, |p| p[k])))
             .collect()
     };
-    let series: Vec<(Vec<(f64, f32)>, Color)> = Tier::ALL
+    // (The island's own peoples: its region's ladder.)
+    let series: Vec<(Vec<(f64, f32)>, Color)> = Tier::ladder(island::islands()[i].region())
         .iter()
         .map(|t| (tier(t.index()), TIER_INKS[t.index()]))
         .collect();

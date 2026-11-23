@@ -520,6 +520,68 @@ const TIERS: &[(&str, &str)] = &[
 
 /// The fourth and fifth tiers' goods, hats and public buildings, painted by
 /// `assets/icons/make_late_icons.py`.
+/// The far regions' peoples and goods (make_far_icons.py).
+const FAR: &[(&str, &str)] = &[
+    (
+        "isle_tier_riverfolk",
+        include_str!("../assets/icons/isle_tier_riverfolk.svg"),
+    ),
+    (
+        "isle_tier_freeholders",
+        include_str!("../assets/icons/isle_tier_freeholders.svg"),
+    ),
+    (
+        "isle_tier_planters",
+        include_str!("../assets/icons/isle_tier_planters.svg"),
+    ),
+    (
+        "isle_tier_herders",
+        include_str!("../assets/icons/isle_tier_herders.svg"),
+    ),
+    (
+        "isle_tier_caravaners",
+        include_str!("../assets/icons/isle_tier_caravaners.svg"),
+    ),
+    (
+        "isle_tier_scholars",
+        include_str!("../assets/icons/isle_tier_scholars.svg"),
+    ),
+    (
+        "isle_tier_trappers",
+        include_str!("../assets/icons/isle_tier_trappers.svg"),
+    ),
+    (
+        "isle_tier_whalers",
+        include_str!("../assets/icons/isle_tier_whalers.svg"),
+    ),
+    (
+        "isle_tier_wardens",
+        include_str!("../assets/icons/isle_tier_wardens.svg"),
+    ),
+    (
+        "isle_plantains",
+        include_str!("../assets/icons/isle_plantains.svg"),
+    ),
+    (
+        "isle_cotton",
+        include_str!("../assets/icons/isle_cotton.svg"),
+    ),
+    (
+        "isle_calico",
+        include_str!("../assets/icons/isle_calico.svg"),
+    ),
+    (
+        "isle_goat_hair",
+        include_str!("../assets/icons/isle_goat_hair.svg"),
+    ),
+    ("isle_robes", include_str!("../assets/icons/isle_robes.svg")),
+    ("isle_tea", include_str!("../assets/icons/isle_tea.svg")),
+    (
+        "isle_carpets",
+        include_str!("../assets/icons/isle_carpets.svg"),
+    ),
+];
+
 const LATE: &[(&str, &str)] = &[
     ("isle_ore", include_str!("../assets/icons/isle_ore.svg")),
     ("isle_iron", include_str!("../assets/icons/isle_iron.svg")),
@@ -571,6 +633,7 @@ pub fn all() -> Vec<(&'static str, String)> {
         .chain(RELATIONS)
         .chain(TIERS)
         .chain(LATE)
+        .chain(FAR)
         .map(|(n, s)| (*n, s.to_string()))
         .collect();
     v.extend(vec![
