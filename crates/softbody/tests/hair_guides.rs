@@ -128,9 +128,25 @@ fn guides_from_another_module_are_simulated_and_handed_back_in_model_space() {
         );
         let tip = *p.last().unwrap();
         assert!(tip.y < p[0].y - 0.15, "tip {i} {tip} root {}", p[0]);
-        for q in &p[2..] {
-            assert!(q.distance(HEAD + SKULL) > 0.1, "point {q} inside the skull");
+        // Still hair is handed back as it was grown.
+        for (q, r) in p.iter().zip(&g.points) {
+            assert!(q.distance(*r) < 3e-3, "lock {i}: {q} was grown at {r}");
         }
+    }
+    // The simulated hair itself hangs outside the skull.
+    let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
+    let (_, body) = q.single(&app.world).unwrap();
+    let skull = app
+        .world
+        .get::<GlobalTransform>(person)
+        .unwrap()
+        .transform_point((HEAD + SKULL).as_dvec3());
+    for (i, w) in body.sim.inv_mass.iter().enumerate() {
+        let at = body.world_position(i);
+        assert!(
+            *w == 0.0 || at.distance(skull) > 0.1,
+            "particle {i} at {at} is inside the skull"
+        );
     }
 
     // The head moves 30 cm to the side: the roots go with it, the tips trail behind.
@@ -460,41 +476,105 @@ fn a_long_groom_built_near_too_big_to_settle_ahead_sags_into_place_without_flail
         .world
         .spawn((Transform::default(), pose(), grown.clone()))
         .id();
-    let mut last: Option<Vec<Vec3>> = None;
+    let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
     let mut fastest_seen = 0.0f32;
+    let mut stepped = false;
     for step in 0..80 {
         app.update();
-        let Some(posed) = app.world.get::<HairGuidesPosed>(person) else {
+        let Ok((_, b)) = q.single(&app.world) else {
             continue;
         };
+        stepped = true;
         for (i, g) in grown.guides.iter().enumerate() {
-            let tip = posed.guide(&grown, i).unwrap()[19];
+            let tip = b.world_position(i * 20 + 19);
             assert!(
-                tip.y < g.points[19].y + 0.05,
+                tip.y < f64::from(g.points[19].y) + 0.05,
                 "step {step}: lock {i}'s tip rose to {tip}"
             );
         }
-        if let Some(last) = &last {
-            let fastest = posed
-                .points
-                .iter()
-                .zip(last)
-                .map(|(a, b)| a.distance(*b) * 60.0)
-                .fold(0.0, f32::max);
-            fastest_seen = fastest_seen.max(fastest);
-            assert!(fastest < 2.0, "step {step}: hair swung at {fastest:.1} m/s");
-        }
-        last = Some(posed.points.clone());
+        let fastest = b.sim.vel.iter().map(|v| v.length()).fold(0.0, f32::max);
+        fastest_seen = fastest_seen.max(fastest);
+        assert!(fastest < 2.0, "step {step}: hair swung at {fastest:.1} m/s");
     }
-    assert!(last.is_some(), "never posed");
+    assert!(stepped, "never simulated");
     // It did fall (it is not just frozen in the grown shape), and it is settled by now.
-    let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
-    let tip = posed.guide(&grown, 0).unwrap()[19];
+    let (_, b) = q.single(&app.world).unwrap();
+    let tip = b.world_position(19);
     assert!(
-        tip.y < grown.guides[0].points[19].y - 0.2,
+        tip.y < f64::from(grown.guides[0].points[19].y) - 0.2,
         "the tip didn't sag: {tip} (fastest {fastest_seen:.2} m/s)"
     );
+    // What is handed back is the grown shape all the while: where the hair rests is its
+    // own business, and only its motion from there is drawn.
+    let posed = app.world.get::<HairGuidesPosed>(person).expect("posed");
+    for (i, g) in grown.guides.iter().enumerate() {
+        let tip = posed.guide(&grown, i).unwrap()[19];
+        assert!(
+            tip.distance(g.points[19]) < 0.01,
+            "lock {i}'s tip was handed back at {tip}, grown at {}",
+            g.points[19]
+        );
+    }
     let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
     let (_, b) = q.single(&app.world).unwrap();
     assert_eq!(b.pending_prewarm, 0, "still settling");
+}
+
+#[test]
+fn still_hair_is_handed_back_as_grown_and_its_motion_on_top() {
+    let mut app = app();
+    let grown = guides(1, 48);
+    let person = app
+        .world
+        .spawn((
+            Transform::from_xyz(-40.0, 3.0, 12.0).with_rotation(Quat::from_rotation_y(1.1)),
+            pose(),
+            BoneColliders {
+                capsules: vec![BoneCapsule::sphere("head", 0.1, SKULL.to_array())],
+                friction: 0.3,
+            },
+            grown.clone(),
+        ))
+        .id();
+    steps(&mut app, 90);
+    let worst = |app: &App| {
+        let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
+        posed
+            .points
+            .iter()
+            .zip(grown.guides.iter().flat_map(|g| &g.points))
+            .map(|(a, b)| a.distance(*b))
+            .fold(0.0, f32::max)
+    };
+    // Left alone the simulation rests centimetres off the grown shape (it sags, and the
+    // skull's sphere pushes it out); what it hands back is the grown shape to the millimetre.
+    let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
+    let (_, body) = q.single(&app.world).unwrap();
+    let t = *app.world.get::<GlobalTransform>(person).unwrap();
+    let off = grown
+        .guides
+        .iter()
+        .flat_map(|g| &g.points)
+        .enumerate()
+        .map(|(i, p)| {
+            body.world_position(i)
+                .distance(t.transform_point(p.as_dvec3()))
+        })
+        .fold(0.0, f64::max);
+    assert!(
+        off > 0.01,
+        "the simulation rests on the grown shape ({off} m)"
+    );
+    let still = worst(&app);
+    assert!(
+        still < 1.5e-3,
+        "still hair is {still} m off its grown shape"
+    );
+
+    // The head tips 60° to the side: the hair hangs away from the grown shape, and shows it.
+    app.world.get_mut::<SkeletonPose>(person).unwrap().bones[1].rotation =
+        Quat::from_rotation_z(60f32.to_radians());
+    steps(&mut app, 120);
+    let tipped = worst(&app);
+    assert!(tipped > 0.05, "tipped hair moved only {tipped} m");
 }

@@ -4,25 +4,132 @@
 //! capsules with the skull fitted to the hair's roots) and lying on the body where it was grown
 //! lying on it, and every fixed step the posed points go back as [`HairGuidesPosed`] in the
 //! person's model space. That module draws the hair, so these bodies aren't drawn here.
+//!
+//! The grown shape is the hair at rest. Left to itself the simulation rests a little off it
+//! (its soft hold on the grown shape gives under gravity, its spheres and capsules stand in
+//! for the head and body the hair was combed over), so each body learns where it rests with
+//! nothing moving ([`GroomedRest`], solved on a worker) and hands on the grown shape moved by
+//! how far the simulation is from there: still hair is exactly as grown, and every swing,
+//! drape and push of the simulation shows on top of it.
 
 use std::collections::HashMap;
 
+use engine_core::off_frame::OffFrameCommands;
 use engine_core::prelude::*;
 use engine_world::animation::SkeletonPose;
 use engine_world::{HairGuides, HairGuidesPosed};
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
 use crate::character::{BoneCapsule, BoneColliders};
+use crate::collide::LocalCollider;
 use crate::hair::{self, BoneBlend, Guide, HairGroom, HairStyle, Strands};
 use crate::settings::SoftMaterial;
 use crate::solver::{Sim, SkinCapsule};
-use crate::systems::SoftBodyFailed;
+use crate::systems::{SETTLE_DAMPING, SoftBodyFailed};
 
 /// On the child entity that simulates `person`'s [`HairGuides`] of `version`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuideHair {
     pub person: Entity,
     pub version: u32,
+}
+
+/// On the hair body: the grown shape it is handed on in at rest.
+///
+/// Drawn straight from the simulation, combed hair came out ruffled: guides that were grown
+/// side by side in ordered layers rested millimetres apart from where they were grown, each
+/// by its own amount (pushed out by the skull's sphere, sagging on its goal springs), so the
+/// hairs drawn between them crossed, and locks framing the face hung out from the temple.
+/// With the rest shape known, [`write_posed_guides`] hands on `grown + (simulated - rest)`.
+#[derive(Component, Debug, Clone, Default)]
+pub struct GroomedRest {
+    /// Every particle as grown, in its guide's frame.
+    grown: Vec<Vec3>,
+    /// Where the simulation leaves it with nothing moving, in the same frame. Empty until it
+    /// is solved; the hair is handed on as grown, riding its bones, until then.
+    rest: Vec<Vec3>,
+    /// 0..1: how much of the simulation's motion is handed on. It comes in over
+    /// [`SHOWN_OVER`] steps once the rest shape is known and the body has settled.
+    shown: f32,
+}
+
+impl GroomedRest {
+    /// Whether the simulation's motion is handed on in full.
+    pub fn shown(&self) -> bool {
+        self.shown >= 1.0
+    }
+}
+
+/// Fixed steps over which a body's motion comes in once its rest shape is known.
+const SHOWN_OVER: f32 = 24.0;
+/// Most steps the rest shape is solved for, and the speed (m/s) under which it is at rest.
+const REST_STEPS: u32 = 600;
+const REST_SPEED: f32 = 0.0005;
+/// Settling steps a body takes in its own pose once it is put in its rest shape.
+const SETTLE_IN_POSE: u32 = 12;
+
+/// Every particle of `guides` in its guide's frame.
+fn in_guide_frames(sim: &Sim, guides: &[Guide]) -> Vec<Vec3> {
+    let mut out = sim.pos.clone();
+    for g in guides {
+        let Some(f) = sim.frames.get(g.frame as usize) else {
+            continue;
+        };
+        let back = f.to_rot.conjugate();
+        let run = g.first as usize..(g.first + g.count) as usize;
+        for (local, at) in out[run.clone()].iter_mut().zip(&sim.pos[run]) {
+            *local = back * (*at - f.to_pos);
+        }
+    }
+    out
+}
+
+/// Where the simulation leaves `guides` with nothing moving: the person standing as the hair
+/// was grown (`grown`: its skeleton at [`HairGuides::grown_on`]), in still air, among
+/// `colliders`. Every particle in its guide's frame. Seconds of simulation: run on a worker.
+fn rest_shape(
+    guides: &HairGuides,
+    person: Entity,
+    grown: &SkeletonPose,
+    colliders: &BoneColliders,
+) -> Option<Vec<Vec3>> {
+    let stand = GlobalTransform::IDENTITY;
+    let mut body = build(guides, person, &stand, grown).ok()?;
+    let mut shapes = Vec::new();
+    colliders.resolve(&stand, grown, &mut shapes);
+    let origin = body.sim.origin;
+    let local: Vec<LocalCollider> = shapes
+        .into_iter()
+        .enumerate()
+        .map(|(k, (shape, pos, rot))| {
+            let pos = (pos - origin).as_vec3();
+            LocalCollider {
+                shape,
+                from_pos: pos,
+                from_rot: rot,
+                to_pos: pos,
+                to_rot: rot,
+                friction: colliders.friction,
+                id: k as u32,
+                dynamic: false,
+            }
+        })
+        .collect();
+    let sim = &mut body.sim;
+    // Damped as a body settling in view is: it sags into place instead of swinging there.
+    sim.params.damping = sim.params.damping.max(SETTLE_DAMPING);
+    for step in 0..REST_STEPS {
+        sim.step(1.0 / 60.0, &local);
+        let fastest = sim
+            .vel
+            .iter()
+            .fold(0.0f32, |m, v| m.max(v.length_squared()));
+        if step >= 30 && fastest < REST_SPEED * REST_SPEED {
+            break;
+        }
+    }
+    let strands = body.strands.as_ref()?;
+    Some(in_guide_frames(&body.sim, &strands.guides))
 }
 
 /// On a person whose [`BoneColliders`] this module made (refitted when the guides change).
@@ -343,7 +450,7 @@ pub fn build_guide_hair(
         &HairGuides,
         &GlobalTransform,
         &SkeletonPose,
-        Has<BoneColliders>,
+        Option<&BoneColliders>,
         Has<CollidersFittedToHair>,
     )>,
     sims: Query<(Entity, &GuideHair)>,
@@ -352,7 +459,7 @@ pub fn build_guide_hair(
         .iter()
         .map(|(e, g)| (g.person, (e, g.version)))
         .collect();
-    for (person, guides, t, pose, has_colliders, fitted) in &people {
+    for (person, guides, t, pose, own_colliders, fitted) in &people {
         match built.remove(&person) {
             Some((_, version)) if version == guides.version => continue,
             Some((stale, _)) => commands.entity(stale).despawn(),
@@ -361,11 +468,16 @@ pub fn build_guide_hair(
         if pose.bones.is_empty() {
             continue; // the pose isn't evaluated yet
         }
-        if !has_colliders || fitted {
-            commands
-                .entity(person)
-                .insert((colliders_for(guides, pose), CollidersFittedToHair));
-        }
+        let colliders = match own_colliders {
+            Some(own) if !fitted => own.clone(),
+            _ => {
+                let made = colliders_for(guides, pose);
+                commands
+                    .entity(person)
+                    .insert((made.clone(), CollidersFittedToHair));
+                made
+            }
+        };
         let mut child = commands.spawn((
             Name::new("Hair simulation"),
             Transform::default(),
@@ -377,7 +489,33 @@ pub fn build_guide_hair(
         ));
         match build(guides, person, t, pose) {
             Ok(body) => {
-                child.insert(body);
+                let grown = body
+                    .strands
+                    .as_ref()
+                    .map(|s| in_guide_frames(&body.sim, &s.guides))
+                    .unwrap_or_default();
+                child.insert((
+                    body,
+                    GroomedRest {
+                        grown,
+                        ..GroomedRest::default()
+                    },
+                ));
+                let hair = child.id();
+                let version = guides.version;
+                let guides = guides.clone();
+                let stand = SkeletonPose {
+                    names: pose.names.clone(),
+                    parents: pose.parents.clone(),
+                    bones: guides.grown_on.clone(),
+                };
+                commands.off_frame(
+                    "softbody hair at rest",
+                    move || rest_shape(&guides, person, &stand, &colliders),
+                    move |world: &mut World, rest: Option<Vec<Vec3>>| {
+                        rests_at(world, hair, version, rest);
+                    },
+                );
             }
             Err(reason) => {
                 engine_core::log::warn!(
@@ -393,28 +531,90 @@ pub fn build_guide_hair(
     }
 }
 
-/// Hand the simulated points back to the people, in their model space.
+/// The hair body `hair` (built from guides of `version`) rests at `rest`: it is put there
+/// now, in the pose its person is in, to settle the little that pose differs by, and its
+/// motion is handed on from then.
+fn rests_at(world: &mut World, hair: Entity, version: u32, rest: Option<Vec<Vec3>>) {
+    let Some(rest) = rest else {
+        return;
+    };
+    // The body may have gone or been rebuilt meanwhile.
+    if world.get::<GuideHair>(hair).map(|g| g.version) != Some(version) {
+        return;
+    }
+    let Some(mut body) = world.get_mut::<SoftBodySim>(hair) else {
+        return;
+    };
+    if rest.len() != body.sim.len() {
+        return;
+    }
+    let body = &mut *body;
+    if let Some(strands) = &body.strands {
+        for g in &strands.guides {
+            let Some(f) = body.sim.frames.get(g.frame as usize).copied() else {
+                continue;
+            };
+            let run = g.first as usize..(g.first + g.count) as usize;
+            for (at, local) in body.sim.pos[run.clone()].iter_mut().zip(&rest[run]) {
+                *at = f.to_pos + f.to_rot * *local;
+            }
+        }
+        body.sim.rest_here();
+        body.pending_prewarm = SETTLE_IN_POSE;
+        body.calm = 0;
+    }
+    if let Some(mut groomed) = world.get_mut::<GroomedRest>(hair)
+        && groomed.grown.len() == rest.len()
+    {
+        groomed.rest = rest;
+        groomed.shown = 0.0;
+    }
+}
+
+/// Hand the simulated points back to the people, in their model space: the grown shape,
+/// moved by how far the simulation is from where it rests ([`GroomedRest`]).
 pub fn write_posed_guides(
     mut commands: Commands,
-    sims: Query<(&GuideHair, &SoftBodySim)>,
+    mut sims: Query<(&GuideHair, &SoftBodySim, Option<&mut GroomedRest>)>,
     mut people: Query<(&GlobalTransform, Option<&mut HairGuidesPosed>)>,
 ) {
-    for (hair, body) in &sims {
+    for (hair, body, groomed) in &mut sims {
         let Ok((t, posed)) = people.get_mut(hair.person) else {
             continue;
         };
         let Some(strands) = &body.strands else {
             continue;
         };
+        let mut groomed = groomed.filter(|g| g.grown.len() == body.sim.len());
+        if let Some(g) = &mut groomed
+            && g.shown < 1.0
+            && g.rest.len() == g.grown.len()
+            && body.pending_prewarm == 0
+        {
+            g.shown = (g.shown + 1.0 / SHOWN_OVER).min(1.0);
+        }
+        let groomed = groomed.as_deref();
         let to_model = t.rotation().conjugate();
         let scale = t.scale().max(Vec3::splat(1e-6));
-        let model = |i: u32| {
-            to_model * (body.world_position(i as usize) - t.translation()).as_vec3() / scale
-        };
-        let points = strands
-            .guides
-            .iter()
-            .flat_map(|g| (g.first..g.first + g.count).map(model));
+        let sim = &body.sim;
+        let points = strands.guides.iter().flat_map(|g| {
+            let frame = sim.frames.get(g.frame as usize).copied();
+            (g.first as usize..(g.first + g.count) as usize).map(move |i| {
+                let at = match (groomed, frame) {
+                    (Some(groomed), Some(f)) => {
+                        // grown + shown * (simulated - rest), about the guide's frame.
+                        let w = groomed.shown;
+                        let rest = groomed.rest.get(i).copied().unwrap_or(Vec3::ZERO);
+                        f.to_pos * (1.0 - w)
+                            + sim.pos[i] * w
+                            + f.to_rot * (groomed.grown[i] - rest * w)
+                    }
+                    _ => sim.pos[i],
+                };
+                let world = sim.origin + at.as_dvec3();
+                to_model * (world - t.translation()).as_vec3() / scale
+            })
+        });
         match posed {
             Some(mut posed) => {
                 posed.version = hair.version;

@@ -2272,7 +2272,7 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
 /// creator's shots, 17 Nov 2026), in view, on everyone with long hair who streamed in near.
 /// At 6/s, about critical for a 60 cm lock, it sags into place at under 1.5 m/s (3.5
 /// undamped) and is nearly at rest when its settling is done and the damping goes back.
-const SETTLE_DAMPING: f32 = 6.0;
+pub(crate) const SETTLE_DAMPING: f32 = 6.0;
 
 /// A body's solve: its step and settling steps. Touches only its `Sim`, so it can run beside
 /// the frame ([`kick_heavy_bodies`]).

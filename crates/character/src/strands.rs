@@ -51,6 +51,9 @@ const CHUNK_GATHER: f32 = 0.6;
 /// How far each hanging hair waves on its own about its lock (m, a 5.6 mm child wave in
 /// Tobias's gta-hair-sim).
 const CHILD_WAVE: f32 = 0.005;
+/// How much denser hair grows right at a part than elsewhere (0: no denser), easing off over
+/// 12 mm either side.
+const PART_FULLER: f32 = 0.6;
 /// Passes of smoothing along every scalp hair after it is kept out of the skin and face.
 const SMOOTH_PASSES: usize = 3;
 
@@ -745,6 +748,7 @@ fn grow_scalp(
     }
     let recession = a.hair.recession.clamp(0.0, 1.0);
     let ragged = RaggedHairline::new(a.seed, recession);
+    let parted = matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long);
     let sampler = Sampler::new(skin, Mask::Scalp, |rest, m| {
         // A receded hairline: thinner front and temples (and the crown at the far end).
         let d = rest - head;
@@ -758,7 +762,14 @@ fn grow_scalp(
                 * recession
                 * 0.7
                 * smooth_bump(Vec3::new(d.x, d.y - 0.1, d.z + 0.03).length(), 0.05);
-        m * m * edge * crown
+        // Fuller beside the part: there the hair is seen from its roots, down between the
+        // hairs, and an even cover showed the scalp through a thin comb of them.
+        let part = if parted && d.z > PART_END_Z && d.y > 0.03 {
+            1.0 + PART_FULLER * (1.0 - ((d.x - PART_X).abs() / 0.012).clamp(0.0, 1.0))
+        } else {
+            1.0
+        };
+        m * m * edge * crown * part
     });
     let total = (sampler.total() * 1e4 * g.density) as usize;
     if total == 0 {
@@ -785,9 +796,15 @@ fn grow_scalp(
         let Some(sp) = sampler.sample(&mut gr) else {
             break;
         };
-        let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut gr, 1.0);
+        let inland = {
+            let d = sp.rest - head;
+            ((d.y - ragged.at(d.x.atan2(d.z))) / HAIRLINE_BAND).clamp(0.0, 1.0)
+        };
+        let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut gr, 1.0, inland);
         if g.gravity > 0.5 {
-            settle(&mut pts, sp, collider, lm, rest);
+            if !settle(&mut pts, sp, collider, lm, rest) {
+                continue;
+            }
             // Hanging hair waves as whole locks, shorter and deeper the curlier it is.
             // Neighboring locks wave nearly in step (as real waves set across the hair), with
             // enough difference that they catch the light apart; waves of their own would
@@ -807,7 +824,7 @@ fn grow_scalp(
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
                 let wave = (phase + t * waves * std::f32::consts::TAU).sin() - phase.sin();
-                *p += dir * (amp * t.min(0.5) * 2.0 * wave);
+                *p += dir * (amp * t.min(0.5) * 2.0 * wave * hangs_free(*p, lm));
             }
         }
         guides.push((sp, pts));
@@ -822,7 +839,6 @@ fn grow_scalp(
     // rooted near it (on its own side of the part), down from the crown and loosening a little
     // at the ends, so the hair falls in hanks with gaps between them.
     if g.gravity > 0.5 && CHUNK_GATHER > 0.0 {
-        let parted = matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long);
         let mut chunks: HashMap<([i32; 3], bool), Vec<usize>> = HashMap::new();
         for (i, (sp, _)) in guides.iter().enumerate() {
             let d = sp.rest - head;
@@ -847,7 +863,8 @@ fn grow_scalp(
                     let t = k as f32 / last as f32;
                     let w = CHUNK_GATHER
                         * smoothstep(0.1, 0.5, t)
-                        * (1.0 - 0.3 * smoothstep(0.8, 1.0, t));
+                        * (1.0 - 0.3 * smoothstep(0.8, 1.0, t))
+                        * hangs_free(*p, lm);
                     *p += (mean[k] - *p) * w;
                 }
             }
@@ -857,7 +874,6 @@ fn grow_scalp(
     // A hair takes its shape (and its motion) only from guides on its own side of the part:
     // a hair following a guide from across it is combed the other way, and the part zigzags
     // along the edges of the guides' patches instead of running straight.
-    let parted = matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long);
     let part_side = |rest: Vec3| {
         let d = rest - head;
         (parted && d.z > PART_END_Z).then_some(d.x > PART_X)
@@ -880,13 +896,19 @@ fn grow_scalp(
         let mut scale = r.range(spread, 1.08) * (0.3 + 0.7 * fine);
         // Hanging hair from the sideburn in front of the ear would fall across the cheek: there
         // it stays short, as a real sideburn's fine hairs do under the long hair over them.
+        let mut sideburn = 0.0;
         if g.gravity > 0.5 {
             let t = d.x.atan2(d.z).abs();
             let ramp = |a: f32, b: f32, x: f32| ((x - a) / (b - a)).clamp(0.0, 1.0);
-            let sideburn =
+            sideburn =
                 ramp(0.85, 0.95, t) * (1.0 - ramp(1.2, 1.3, t)) * (1.0 - ramp(0.02, 0.035, d.y));
             scale *= 1.0 - 0.9 * sideburn;
         }
+        // The sideburn's short hairs lie on the skin. (Lofted off it and held aside from the
+        // face like the long hair over them, hairs three centimetres long were moved a
+        // centimetre here and not there, and crumpled into a tuft in front of the ear: 180
+        // hairs of a long groom.)
+        let lies = sideburn > 0.5;
         let thin = 0.55 + 0.45 * fine;
         // A few hairs stray from the groom: flyaways.
         // (Not from the front hairline, where they would cross the forehead.)
@@ -906,7 +928,8 @@ fn grow_scalp(
         if broken {
             scale *= r.range(0.1, 0.4);
         }
-        let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale);
+        let inland = ((d.y - line) / HAIRLINE_BAND).clamp(0.0, 1.0);
+        let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale, inland);
         // No two hairs grow quite the same way (groomers' "crossover"): turned a little about
         // the scalp's normal, most at the hairline, where combed-back hair otherwise lines up
         // like the teeth of a comb.
@@ -984,7 +1007,15 @@ fn grow_scalp(
             let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
-                let own = off + to_strand * (tight * t.sqrt());
+                // (Hanging hair gathers into its strand gently from the root: gathered at once,
+                // the hairs over the top of the head crossed each other on their way to their
+                // strands instead of lying side by side as combed.)
+                let into_strand = if g.gravity > 0.5 {
+                    smoothstep(0.0, 0.35, t)
+                } else {
+                    t.sqrt()
+                };
+                let own = off + to_strand * (tight * into_strand);
                 // Hanging locks gather down their length but loosen again over the last
                 // third: gathered all the way, every lock ended in one point, a paintbrush,
                 // where real ends spread and thin out unevenly. Each hair's end strays its
@@ -1019,7 +1050,7 @@ fn grow_scalp(
                 let phase = r.range(0.0, std::f32::consts::TAU);
                 for (k, p) in pts.iter_mut().enumerate() {
                     let t = k as f32 / last as f32;
-                    let env = smoothstep(0.1, 0.45, t);
+                    let env = smoothstep(0.1, 0.45, t) * hangs_free(*p, lm);
                     *p += dir * (amp * env * (phase + t * waves * std::f32::consts::TAU).sin());
                 }
             }
@@ -1103,17 +1134,26 @@ fn grow_scalp(
         if g.gravity > 0.5 && !flyaway && pts.iter().skip(3).any(stray) {
             continue;
         }
+        let root = pts[0];
+        let off_skin = |t: f32| {
+            if lies {
+                0.0008
+            } else {
+                0.0008 + loft * t.min(0.4) / 0.4 * 0.6 * tuck(a, t)
+            }
+        };
         for (k, p) in pts.iter_mut().enumerate().skip(1) {
             let t = k as f32 / last as f32;
-            if g.gravity > 0.5 {
+            if g.gravity > 0.5 && !lies {
                 *p = keep_off_face(
                     keep_off_forehead(*p, jitter, lm),
                     &mut face_side,
                     jitter,
+                    root,
                     lm,
                 );
             }
-            *p = collider.push_out(*p, 0.0008 + loft * t.min(0.4) / 0.4 * 0.6 * tuck(a, t));
+            *p = collider.push_out(*p, off_skin(t));
         }
         // A point pushed out of the thin ear one way while its neighbours went the other way
         // spikes the hair out by centimetres: take it back to between them (inside the ear's
@@ -1139,7 +1179,7 @@ fn grow_scalp(
             }
             for (k, p) in pts.iter_mut().enumerate().skip(2) {
                 let t = k as f32 / last as f32;
-                *p = collider.push_out(*p, 0.0008 + loft * t.min(0.4) / 0.4 * 0.6 * tuck(a, t));
+                *p = collider.push_out(*p, off_skin(t));
             }
         }
         // Scalp hair is cut, so it keeps its width almost to the end and tapers only over its
@@ -1180,6 +1220,13 @@ fn grow_scalp(
     Some(set)
 }
 
+/// The length from its root over which a hanging hair holds its own direction, m.
+const STIFF_ROOT: f32 = 0.06;
+/// Hair lies held on the head down to this far under the head's center (about the jaw), m.
+const ON_HEAD_ABOVE: f32 = -0.11;
+/// How far hair on top of a shoulder slips toward its front or back each settling step, m.
+const OFF_SHOULDER: f32 = 0.0015;
+
 /// Hanging hair settled under gravity: the grown guide is a first guess (lifted off the head),
 /// and a short simulation lets it fall and drape over the scalp, the ears and the shoulders the
 /// way hair does, instead of standing out where the walk left it. The guide is a chain of
@@ -1193,16 +1240,21 @@ fn settle(
     collider: &SkinCollider,
     lm: &Landmarks,
     rest: &Landmarks,
-) {
+) -> bool {
     const STEPS: usize = 120;
     const ITERATIONS: usize = 4;
     // m per step²: how far gravity pulls each step.
     const GRAVITY: f32 = 0.0006;
     let n = pts.len();
     if n < 4 {
-        return;
+        return true;
     }
     let seg: Vec<f32> = pts.windows(2).map(|w| (w[1] - w[0]).length()).collect();
+    // How far along the hair each point is, m.
+    let mut arc = vec![0.0f32; n];
+    for k in 1..n {
+        arc[k] = arc[k - 1] + seg[k - 1];
+    }
     // How high the root sits on the head: higher roots lie on top.
     let d = sp.rest - rest.head;
     let layer = ((d.y + 0.04) / 0.14).clamp(0.0, 1.0);
@@ -1212,25 +1264,29 @@ fn settle(
     };
     let jitter = hash01(sp.rest);
     let mut face_side = Some(if d.x > PART_X { 1.0 } else { -1.0 });
-    let grown = pts.to_vec();
     let mut prev = pts.to_vec();
     // Points resting on the skin hold there by friction, so combed hair stays combed where it
     // lies on the head and only what hangs free falls.
     let mut touching = vec![false; n];
     for _ in 0..STEPS {
         // Move, damped (hair in air settles quickly).
+        // (On the head: hair lying on the shoulders held there the same way stayed where it
+        // landed, laid out along the shoulder toward the arm, its ends flipped out sideways.)
         let moving = pts[2..].iter_mut().zip(&mut prev[2..]).zip(&touching[2..]);
         for ((p, last), touch) in moving {
-            let (keep, pull) = if *touch { (0.2, 0.25) } else { (0.75, 1.0) };
+            let held = *touch && p.y > lm.head.y + ON_HEAD_ABOVE;
+            let (keep, pull) = if held { (0.2, 0.25) } else { (0.75, 1.0) };
             let v = (*p - *last) * keep;
             *last = *p;
             *p += v + Vec3::new(0.0, -GRAVITY * pull, 0.0);
         }
         for it in 0..ITERATIONS {
             // Bending: each point toward the middle of its neighbors (stiffer near the root).
+            // (Over its first centimetres, whatever its length: stiff over its first quarter,
+            // a 44 cm lock from the front hairline stood 11 cm out sideways before it fell,
+            // and hung 6 cm clear of the temple like a jug's handle.)
             for k in 2..n - 1 {
-                let t = k as f32 / (n - 1) as f32;
-                let stiff = 0.05 + 0.3 * (1.0 - t / 0.25).max(0.0);
+                let stiff = 0.05 + 0.3 * (1.0 - arc[k] / STIFF_ROOT).max(0.0);
                 let mid = (pts[k - 1] + pts[k + 1]) * 0.5;
                 pts[k] += (mid - pts[k]) * stiff;
             }
@@ -1245,19 +1301,32 @@ fn settle(
                 continue;
             }
             for k in 2..n {
-                let aside = keep_off_face(pts[k], &mut face_side, jitter, lm);
+                let aside = keep_off_face(pts[k], &mut face_side, jitter, pts[0], lm);
                 let p = pts[k] + (aside - pts[k]) * 0.35;
-                let out = collider.push_out(p, lie(k));
+                let mut out = collider.push_out(p, lie(k));
                 touching[k] = (out - p).length_squared() > 0.0;
+                // Hair that lands on top of a shoulder slips off it to the front or the back,
+                // whichever it is nearer, and never along it: the shoulder slopes away to the
+                // arm, so pushed out of it the way it faces, hair was laid along it toward
+                // the arm and its ends fanned out sideways.
+                if touching[k]
+                    && out.y < lm.head.y + ON_HEAD_ABOVE
+                    && let Some((i, _)) = collider.nearest(out)
+                    && collider.skin.normals[i].y > 0.3
+                {
+                    let front = if out.z > lm.head.z - 0.02 { 1.0 } else { -1.0 };
+                    out.x = p.x;
+                    out.z += front * OFF_SHOULDER;
+                }
                 pts[k] = out;
             }
         }
     }
-    // A guide that crumpled (caught between the face and the skin) keeps its grown shape.
-    let crumpled = pts.windows(3).any(|w| (w[1] - w[0]).dot(w[2] - w[1]) < 0.0);
-    if crumpled {
-        pts.copy_from_slice(&grown);
-    }
+    // A guide that crumpled (caught between the face and the skin, or on the ear) is no guide:
+    // its hair goes with the guides around it. (Left in its grown shape, which only starts
+    // the settling, one from the front hairline hung 6 cm clear of the temple with its 150
+    // hairs, like a jug's handle.)
+    !pts.windows(3).any(|w| (w[1] - w[0]).dot(w[2] - w[1]) < 0.0)
 }
 
 /// The guide whose root is nearest `p`, searching all of them.
@@ -1304,7 +1373,7 @@ fn keep_off_forehead(p: Vec3, jitter: f32, lm: &Landmarks) -> Vec3 {
     p
 }
 
-fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -> Vec3 {
+fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, root: Vec3, lm: &Landmarks) -> Vec3 {
     let d = p - lm.head;
     // In front of the ears, from the forehead down to the shoulders.
     if d.y > 0.06 || d.y < -0.26 || d.z < 0.025 {
@@ -1313,7 +1382,9 @@ fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -
     let t = ((0.06 - d.y) / 0.06).clamp(0.0, 1.0);
     let below = ((d.y + 0.26) / 0.06).clamp(0.0, 1.0);
     let fade = t * t * (3.0 - 2.0 * t) * below;
-    let half = (0.083 + 0.014 * jitter) * fade;
+    // (Beside the cheekbone, which is 65 to 70 mm from the middle of the face: at 83 to 97 the
+    // hair beside the face hung two or three centimetres out from the temple, in the air.)
+    let half = (0.072 + 0.012 * jitter) * fade;
     let s = *side.get_or_insert(if d.x < 0.0 { -1.0 } else { 1.0 });
     // Fading out over a centimetre beside the face: a point pulled back while its neighbours
     // just outside weren't kinked the hair into a spike (rungs of a ladder down the cheek).
@@ -1321,8 +1392,14 @@ fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -
     if near <= 0.0 {
         return p;
     }
-    // From the eyes down, also back toward the ears.
-    let back = ((0.01 - d.y) / 0.03).clamp(0.0, 1.0) * near;
+    // Also back toward the ears, onto the side of the head.
+    // (All the way down from the forehead, not only below the eyes: the head is narrower in
+    // front, so hair held this far aside but still forward of the temple touched nothing.)
+    // (Coming in over the hair's first three centimetres: hair rooted at the temple, a
+    // centimetre forward of where the rest is taken back to, had its first points pressed
+    // onto that line a millimetre apart, and came out as a crumpled tuft in front of the ear,
+    // 180 hairs of it on a long groom.)
+    let back = fade * near * smoothstep(0.0, 0.03, p.distance(root));
     let z = p.z.min(lm.head.z + 0.035 + 0.03 * jitter);
     let x = if d.x * s < half {
         lm.head.x + s * half
@@ -1330,6 +1407,18 @@ fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -
         p.x
     };
     Vec3::new(x, p.y, p.z + (z - p.z) * back)
+}
+
+/// The band behind the hairline over which hair turns from growing back off the face to its
+/// style's flow (m up the head).
+const HAIRLINE_BAND: f32 = 0.02;
+
+/// How freely hair hangs at `p` (0..1): over the head, down to the eyes, it lies combed on the
+/// scalp and the hair under it; from the jaw down it hangs free. Waves, chunks and each
+/// hair's own wander belong to the free lengths: on the head they lifted locks off it and
+/// crossed the hairs.
+fn hangs_free(p: Vec3, lm: &Landmarks) -> f32 {
+    1.0 - smoothstep(-0.08, 0.0, p.y - lm.head.y)
 }
 
 /// The length of a polyline.
@@ -1431,6 +1520,7 @@ fn grow_hair(
     rest: &Landmarks,
     r: &mut Rng,
     length_scale: f32,
+    inland: f32,
 ) -> Vec<Vec3> {
     let n = g.points as usize;
     let d = sp.rest - rest.head;
@@ -1457,6 +1547,11 @@ fn grow_hair(
             let hairline = ((d.z - 0.02) / 0.04).clamp(0.0, 1.0) * f32::max(side, 0.0);
             let swept =
                 Vec3::new(side * 0.9, -0.2, -0.65).lerp(Vec3::new(side, -0.3, -0.3), hairline);
+            // At the hairline itself hair grows up and back, away from the face, before it
+            // turns aside: growing along the hairline, its hairs lay across the bare forehead
+            // below it like the teeth of a comb, and the line was drawn by tips, not roots.
+            let at_line = (1.0 - inland) * ((d.z - 0.0) / 0.04).clamp(0.0, 1.0);
+            let swept = swept.lerp(Vec3::new(side * 0.45, 0.3, -0.85), at_line);
             let down = Vec3::new(d.x * 3.0, -1.0, -0.35);
             // Sideburn hair, low in front of the ear, grows down, not back toward the ear.
             let sideburn = ((0.035 - d.y) / 0.03).clamp(0.0, 1.0);
@@ -1517,7 +1612,12 @@ fn grow_hair(
     let lift = if a.hair_style() == HairStyle::Short {
         r.range(0.85, 1.0)
     } else if g.gravity > 0.5 {
-        r.range(0.7, 1.0)
+        // (...and in the order of their roots: hair from the top of the head lies over hair
+        // rooted lower, as it falls on a real head. Heights drawn at random wove the hairs
+        // through each other, and the top of the head showed short pieces of many hairs, a
+        // hatching, instead of long combed ones.)
+        let layer = ((d.y + 0.04) / 0.14).clamp(0.0, 1.0);
+        0.7 + 0.26 * layer + r.range(0.0, 0.04)
     } else {
         r.range(0.4, 1.0)
     };
@@ -1555,7 +1655,7 @@ fn grow_hair(
         }
         let mut p = p_prev + next_dir * seg;
         if g.gravity > 0.5 {
-            p = keep_off_face(p, &mut face_side, jitter, lm);
+            p = keep_off_face(p, &mut face_side, jitter, pts[0], lm);
         }
         let offset = 0.0008 + loft * (t / 0.4).min(1.0) * lift * tuck(a, t);
         p = collider.push_out(p, offset);
