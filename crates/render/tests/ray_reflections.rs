@@ -8,8 +8,9 @@
 //! reflections blur the stripes together); a mirror floor's reflection of a box keeps its colour
 //! when the box leaves the screen (screen first, then the ray's own light), and the hit a ray
 //! meets where the camera sees it is taken from last frame's picture; a rough floor reflects an
-//! overhead glow 6 m up and not one 40 m up, which a mirror floor reflects. Needs a GPU with ray
-//! queries (lavapipe has them); passes with a note without.
+//! overhead glow 6 m up and not one 40 m up, which a mirror floor reflects; indoors, a mirror
+//! floor shows the sky through a window. Needs a GPU with ray queries (lavapipe has them);
+//! passes with a note without.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -420,15 +421,119 @@ fn a_reflection_keeps_its_colour_as_its_subject_leaves_the_screen() {
             "{what}: the reflection is the box's green ({c:?})"
         );
     }
-    let close = |a: [f32; 3], b: [f32; 3], share: f32| (a[1] - b[1]).abs() <= share * a[1];
+    // Every channel: the box's own light (off the screen) is about 9% less green than its
+    // picture, 13% less red and 18% less blue here (outside the probes' grid it has no sky),
+    // so a green-only 10% could not tell the two apart (23 Nov).
+    let close = |a: [f32; 3], b: [f32; 3], share: f32| {
+        (0..3).all(|c| (a[c] - b[c]).abs() <= share * a[c].max(1.0))
+    };
     assert!(
-        close(in_view, by_rays, 0.1),
+        close(in_view, by_rays, 0.03),
         "a ray's hit the camera sees is last frame's picture ({in_view:?} against {by_rays:?})"
+    );
+    assert!(
+        !close(in_view, off_screen, 0.03),
+        "the check above tells last frame's picture from a hit's own light ({in_view:?} \
+         against {off_screen:?})"
     );
     assert!(
         close(in_view, off_screen, 0.3),
         "the reflection keeps its brightness off the screen ({in_view:?} against \
          {off_screen:?})"
+    );
+}
+
+/// A closed room (inside x -3..3, y 0..3, z -4..4) with a window in the far wall (x -1..1,
+/// y 1.2..2.6) and a polished metal floor, seen from near the back wall, an indoor volume
+/// around it (sky light 0.02): reflections.rs `room_app` with every pixel's reflection.
+fn room_with_window() -> App {
+    let mut app = app(true);
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 12.0 },
+            ..Camera::perspective((2.0 * HALF_FOV) as f32)
+        },
+        Transform::from_xyz(0.0, 1.6, 3.4).looking_at(DVec3::new(0.0, 1.0, -4.0), Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.2, -0.8, -0.5), Vec3::Y),
+    ));
+    let plaster = StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9);
+    let floor = StandardMaterial::color(0.6, 0.6, 0.6)
+        .with_metallic(1.0)
+        .with_roughness(0.1);
+    let boxes = [
+        // Floor, ceiling, side walls, back wall.
+        ((-3.3, -0.3, -4.3), (3.3, 0.0, 4.3), floor),
+        ((-3.3, 3.0, -4.3), (3.3, 3.3, 4.3), plaster),
+        ((-3.3, 0.0, -4.3), (-3.0, 3.0, 4.3), plaster),
+        ((3.0, 0.0, -4.3), (3.3, 3.0, 4.3), plaster),
+        ((-3.0, 0.0, 4.0), (3.0, 3.0, 4.3), plaster),
+        // The far wall around the window.
+        ((-3.0, 0.0, -4.3), (-1.0, 3.0, -4.0), plaster),
+        ((1.0, 0.0, -4.3), (3.0, 3.0, -4.0), plaster),
+        ((-1.0, 0.0, -4.3), (1.0, 1.2, -4.0), plaster),
+        ((-1.0, 2.6, -4.3), (1.0, 3.0, -4.0), plaster),
+    ];
+    for (min, max, material) in boxes {
+        let (min, max) = (DVec3::from(min), DVec3::from(max));
+        slab(w, (min + max) * 0.5, max - min, material);
+    }
+    w.spawn((
+        Transform::from_xyz(0.0, 1.5, 0.0),
+        SkyLightVolume::new([3.0, 1.5, 4.0])
+            .with_sky_light(0.02)
+            .with_fade(2.0),
+    ));
+    app
+}
+
+/// The mean colour of the 5x5 pixels around where world point `p` lands.
+fn colour_at(app: &App, p: &image::RgbImage, at: DVec3) -> [f32; 3] {
+    let view = app
+        .world
+        .resource::<engine_render::Renderer>()
+        .last_view()
+        .unwrap()
+        .clone();
+    let clip = view.unjittered_view_proj * (at - view.origin).as_vec3().extend(1.0);
+    let ndc = clip.truncate() / clip.w;
+    let x = ((ndc.x * 0.5 + 0.5) * W as f32) as u32;
+    let y = ((0.5 - ndc.y * 0.5) * H as f32) as u32;
+    mean_rgb(
+        p,
+        y.saturating_sub(2)..(y + 3).min(H),
+        x.saturating_sub(2)..(x + 3).min(W),
+    )
+}
+
+/// Indoors under a roof, a mirror floor shows the sky through the window as brightly as the
+/// screen-space reflections do (reflections.rs `a_floor_indoors_mirrors_the_sky_through_the_window`):
+/// the march passes over the window's sky and the ray meets nothing past it, so the sky there
+/// is open, whatever the cover overhead and the indoor volume's face across the window say.
+/// (Before, the reflection read as open sky under the roof's cover: a dark patch.)
+#[test]
+fn a_floor_indoors_mirrors_the_sky_through_the_window() {
+    let mut app = room_with_window();
+    app.update_n(8);
+    if !can_run(&app) {
+        return;
+    }
+    assert_traced(&app, true, "the room");
+    let shot = picture(&mut app, "room_window.png");
+    let window = colour_at(&app, &shot, DVec3::new(0.0, 0.0, -0.05));
+    let wall = colour_at(&app, &shot, DVec3::new(0.9, 0.0, 0.0));
+    eprintln!("floor mirroring the window: {window:?}, the floor beside it: {wall:?}");
+    let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    assert!(
+        luma(window) > luma(wall) * 3.0 + 20.0,
+        "the floor mirrors the sky through the window: {window:?} against {wall:?}"
+    );
+    assert!(
+        window[2] > window[0],
+        "the window's mirror image is sky blue: {window:?}"
     );
 }
 
@@ -505,5 +610,38 @@ fn a_rough_floor_reflects_only_what_is_near() {
     assert!(
         mirror_red > 0.6,
         "a mirror floor reflects what is far: {mirror_red:.2}"
+    );
+}
+
+/// Beside a rug too rough to reflect (roughness 0.95, past the limit: never traced), a glossy
+/// floor (roughness 0.4: its blur gathers about 10 pixels around) reflects the glow overhead as
+/// brightly as it does away from the rug. The rug's pixels say nothing of the floor's
+/// reflection; counted as misses, they gave the floor beside the rug, a lobe wide, the sky the
+/// red glow hides.
+#[test]
+fn a_rug_too_rough_to_reflect_leaves_the_floor_beside_it_as_it_is() {
+    let mut app = floor_under_glow(0.4, 6.0);
+    slab(
+        &mut app.world,
+        DVec3::new(0.0, 0.005, -1.5),
+        DVec3::new(0.3, 0.01, 3.0),
+        StandardMaterial::color(0.3, 0.3, 0.3).with_roughness(0.95),
+    );
+    app.update_n(8);
+    if !can_run(&app) {
+        return;
+    }
+    assert_traced(&app, true, "the rug");
+    let shot = picture(&mut app, "rug.png");
+    let beside = colour_at(&app, &shot, DVec3::new(0.24, 0.0, -1.2));
+    let away = colour_at(&app, &shot, DVec3::new(1.0, 0.0, -1.2));
+    eprintln!("the floor: {beside:?} beside the rug, {away:?} away from it");
+    assert!(
+        away[0] > 2.0 * away[2],
+        "the floor reflects the red glow: {away:?}"
+    );
+    assert!(
+        (0..3).all(|c| (beside[c] - away[c]).abs() <= 0.08 * away[c].max(10.0)),
+        "the floor beside the rug reflects as it does away from it: {beside:?} against {away:?}"
     );
 }

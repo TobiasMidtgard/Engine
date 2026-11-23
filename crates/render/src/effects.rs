@@ -122,6 +122,15 @@ pub struct ScreenEffects {
     /// `fs_reflect_resolve`). The chain is the picture's: a frame fills it one way or the other.
     chain_raw: wgpu::RenderPipeline,
     chain_cover: wgpu::RenderPipeline,
+    /// The chain's key (ssr_chain.wgsl `fs_key_raw`, `fs_key_cover`): the surface under each
+    /// of its texels, which tells the resolve whether a texel's average comes from a tap's
+    /// surface. Made the first time it is drawn (dropped with the targets).
+    key_layout: wgpu::BindGroupLayout,
+    key_raw: wgpu::RenderPipeline,
+    key_cover: wgpu::RenderPipeline,
+    key: Option<ChainKey>,
+    /// The resolve's inputs: `ssr_layout`'s and the key (binding 6).
+    resolve_layout: wgpu::BindGroupLayout,
     reflect_resolve: wgpu::RenderPipeline,
     gi_layout: wgpu::BindGroupLayout,
     gi_trace: wgpu::RenderPipeline,
@@ -210,6 +219,22 @@ impl ScreenEffects {
                     S::FRAGMENT,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 ),
+            ],
+        });
+        let key_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ray reflection chain key input"),
+            entries: &[depth_tex(2), float_tex(3)],
+        });
+        let resolve_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ray reflections resolve inputs"),
+            entries: &[
+                float_tex(0),
+                depth_tex(1),
+                float_tex(2),
+                float_tex(3),
+                float_tex(4),
+                float_tex(5),
+                float_tex(6),
             ],
         });
         let gi_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -316,13 +341,33 @@ impl ScreenEffects {
             shared.formats.hdr,
             None,
         );
+        let key_raw = fullscreen_pipeline(
+            shared,
+            "ray reflection chain key",
+            &chain_module,
+            "vs_chain",
+            "fs_key_raw",
+            &[&key_layout],
+            CHAIN_KEY_FORMAT,
+            None,
+        );
+        let key_cover = fullscreen_pipeline(
+            shared,
+            "ray reflection chain key level",
+            &chain_module,
+            "vs_chain",
+            "fs_key_cover",
+            &[&chain_layout],
+            CHAIN_KEY_FORMAT,
+            None,
+        );
         let reflect_resolve = fullscreen_pipeline(
             shared,
             "ray reflections resolve",
             &ssr_module,
             "vs_ssr",
             "fs_reflect_resolve",
-            &[&shared.frame_layout, &ssr_layout],
+            &[&shared.frame_layout, &resolve_layout],
             shared.formats.hdr,
             None,
         );
@@ -404,6 +449,11 @@ impl ScreenEffects {
             chain,
             chain_raw,
             chain_cover,
+            key_layout,
+            key_raw,
+            key_cover,
+            key: None,
+            resolve_layout,
             reflect_resolve,
             gi_layout,
             gi_trace,
@@ -577,12 +627,19 @@ impl ScreenEffects {
         self.taa_groups = taa_groups;
         self.reactive_group = Self::reactive_group(shared, targets, &self.reactive_layout);
         self.chain = ReflectionChain::new(shared, targets, &self.chain_layout);
+        self.key = None;
         self.ssr_groups = Self::ssr_groups(shared, targets, &self.ssr_layout, &self.chain.view);
         self.gi_groups = GiGroups::new(shared, targets, &self.gi_layout);
         self.gi_half = None;
         self.history_ready = false;
         self.gi_history_ready = false;
         self.accumulated = 0;
+    }
+
+    /// A frame without every pixel's reflection: the chain's key goes with them (9.8 MB at
+    /// 2560x1440), made again by the first frame that has them.
+    pub fn drop_reflect_key(&mut self) {
+        self.key = None;
     }
 
     /// Forget the history (camera cut, anti-aliasing turned off).
@@ -732,11 +789,11 @@ impl ScreenEffects {
     /// Record every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`) into `targets.ssr`,
     /// in place of [`encode_ssr`](Self::encode_ssr): the reflection chain built over `raw`
     /// (probe_gi ray_reflect.wgsl's trace, the view's size: radiance, distance to the hit)
-    /// with the share that met something, then each pixel's reflection blurred over its lobe
-    /// from the trace and the chain (ssr.wgsl `fs_reflect_resolve`). `prepass_group` as for
-    /// `encode_ao`.
+    /// with the share that met something, and its key (the surface under each texel), then
+    /// each pixel's reflection blurred over its lobe from the trace and the chain (ssr.wgsl
+    /// `fs_reflect_resolve`). `prepass_group` as for `encode_ao`.
     pub fn encode_reflect_resolve(
-        &self,
+        &mut self,
         shared: &GpuShared,
         encoder: &mut wgpu::CommandEncoder,
         targets: &Targets,
@@ -767,6 +824,25 @@ impl ScreenEffects {
             pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
         }
+        let key = self.key.get_or_insert_with(|| {
+            ChainKey::new(
+                shared,
+                targets,
+                self.chain.levels.len() as u32,
+                &self.key_layout,
+                &self.chain_layout,
+            )
+        });
+        for (level, target) in key.levels.iter().enumerate() {
+            let (pipeline, group) = match level {
+                0 => (&self.key_raw, &key.first),
+                _ => (&self.key_cover, &key.rest[level - 1]),
+            };
+            let mut pass = fullscreen_pass(encoder, "ray reflection chain key", target, true);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry {
                 binding,
@@ -776,7 +852,7 @@ impl ScreenEffects {
         // (The picture at 3 is read by `fs_ssr` alone.)
         let inputs = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ray reflection resolve inputs"),
-            layout: &self.ssr_layout,
+            layout: &self.resolve_layout,
             entries: &[
                 view(0, &targets.prepass_normal.view),
                 view(1, &targets.prepass_depth.view),
@@ -784,6 +860,7 @@ impl ScreenEffects {
                 view(3, &targets.history[1 - self.current].view),
                 view(4, &self.chain.view),
                 view(5, raw),
+                view(6, &key.view),
             ],
         });
         let mut pass = fullscreen_pass(encoder, "ray reflections resolve", &targets.ssr.view, true);
@@ -1075,6 +1152,101 @@ impl ReflectionChain {
         };
         let first = [0, 1].map(|current| group(&t.history[1 - current].view));
         let rest = levels[..levels.len() - 1].iter().map(group).collect();
+        Self {
+            _texture: texture,
+            view,
+            levels,
+            first,
+            rest,
+        }
+    }
+}
+
+/// The format of the reflection chain's key (ssr_chain.wgsl `fs_key_raw`).
+const CHAIN_KEY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The reflection chain's key (`trial_cut_more::RAY_REFLECTIONS`): the surface under each
+/// texel of the chain, as many levels as it, for ssr.wgsl `fs_reflect_resolve` to take a chain
+/// texel's average only where it comes from a tap's surface (ssr_chain.wgsl `fs_key_raw`,
+/// `fs_key_cover`).
+struct ChainKey {
+    _texture: wgpu::Texture,
+    /// All levels, for sampling.
+    view: wgpu::TextureView,
+    /// One view per level, for drawing into.
+    levels: Vec<wgpu::TextureView>,
+    /// Input of level 0: the prepass depth and normals.
+    first: wgpu::BindGroup,
+    /// Input of level `i + 1`: level `i`.
+    rest: Vec<wgpu::BindGroup>,
+}
+
+impl ChainKey {
+    fn new(
+        shared: &GpuShared,
+        t: &Targets,
+        count: u32,
+        first_layout: &wgpu::BindGroupLayout,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let texture = shared.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("reflection chain key"),
+            size: wgpu::Extent3d {
+                width: t.width.div_ceil(2).max(1),
+                height: t.height.div_ceil(2).max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: count.max(1),
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CHAIN_KEY_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let levels: Vec<_> = (0..count.max(1))
+            .map(|level| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("reflection chain key level"),
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let first = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("reflection chain key input"),
+            layout: first_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&t.prepass_depth.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&t.prepass_normal.view),
+                },
+            ],
+        });
+        let rest = levels[..levels.len() - 1]
+            .iter()
+            .map(|input| {
+                shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("reflection chain key level input"),
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(input),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&shared.linear_clamp),
+                        },
+                    ],
+                })
+            })
+            .collect();
         Self {
             _texture: texture,
             view,

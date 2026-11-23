@@ -3620,6 +3620,9 @@ impl Renderer {
             self.effects
                 .encode_lamp_tiles(&mut encoder, &self.targets, &self.light_group);
         }
+        if !(ssr && ray_work.full_reflections) {
+            self.effects.drop_reflect_key();
+        }
         if ssr
             && ray_work.full_reflections
             && let Some(raw) = self.probe_gi.full_reflections()

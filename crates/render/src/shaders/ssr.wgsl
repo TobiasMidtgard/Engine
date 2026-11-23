@@ -23,6 +23,10 @@
 @group(1) @binding(3) var previous_color: texture_2d<f32>; // last frame's image, pre-exposed by frame.reflections.y
 @group(1) @binding(4) var previous_blur: texture_2d<f32>;  // previous_color at half resolution, blurred more per mip
 @group(1) @binding(5) var world_input: texture_2d<f32>;    // world reflections, half resolution (every pixel's in `fs_reflect_resolve`): radiance, hit distance (0 = none; negative: traced, nothing within reach)
+// `fs_reflect_resolve` alone: the surface under the chain's texels (ssr_chain.wgsl
+// `fs_key_raw`, `fs_key_cover`): the prepass depth scaled by CHAIN_KEY_DEPTH and the world
+// normal's x and y, times the share of the pixels drawn, and that share.
+@group(1) @binding(6) var chain_key: texture_2d<f32>;
 
 const MAX_STEPS: i32 = 64;
 const REFINE_STEPS: i32 = 6;
@@ -311,13 +315,32 @@ fn fs_ssr(in: FullscreenOut) -> @location(0) vec4<f32> {
 // The lobe is about alpha radians wide at the distance of what it met, and on a flat surface
 // the pixels around reflect it that far apart where they are as far from the camera as its
 // mirror image (the surface's depth and the hit's distance). The taps are the pixels on the
-// same surface within that radius (in the surface's plane, facing about as it does): the
-// trace itself where the radius is a few pixels, its chain where it is wider (`previous_blur`
-// here: ssr_chain.wgsl `fs_chain_raw` and `fs_chain_cover`, radiance times the share that met
-// something, and that share), whose level spans about the taps' spacing. The coverage is the
-// share of the taps that met something (the rest is the sky's, `shade_surface`), negative
-// where every tap was traced to an end (`written`).
+// same surface within that radius (in the surface's plane, facing about as it does) that the
+// trace traced: the trace itself where the radius is a few pixels, its chain where it is wider
+// (`previous_blur` here: ssr_chain.wgsl `fs_chain_raw` and `fs_chain_cover`, radiance times
+// the share that met something, and that share), whose level spans about the taps' spacing.
+// The chain averages every pixel around that met something, whatever surface it lies on, so a
+// tap takes it only as far as its key (`chain_key`) says that it lies on the tap's surface:
+// as deep there, facing the same way. (Without it a small glossy thing in front of a floor
+// showed mostly the floor's reflection, and the floor beside a wall the wall's.) The coverage
+// is the share of the taps that met something (the rest is the sky's, `shade_surface`),
+// negative where every tap was traced to an end (`written`).
 const RESOLVE_TAPS: i32 = 12;
+// ssr_chain.wgsl `CHAIN_KEY_DEPTH`.
+const CHAIN_KEY_DEPTH: f32 = 1024.0;
+
+// How much of the chain's average at a tap lies on the tap's surface, from the chain's key
+// `key` there against the tap's prepass depth `qz` and the pixel's world normal `n`;
+// `tolerance` is the plane's, relative to the depth. The depth is reverse-Z, which is linear
+// across a flat surface on the screen, so a flat surface's mean is its depth at the tap; where
+// something nearer or farther shares the chain's texels the mean is off it, and a corner's
+// other face (a wall over a floor) moves the mean normal.
+fn chain_on_surface(key: vec4<f32>, qz: f32, n: vec3<f32>, tolerance: f32) -> f32 {
+    if (key.w <= 1e-3) { return 0.0; }
+    let mean = key.xyz / key.w;
+    let off = abs(mean.x / (qz * CHAIN_KEY_DEPTH) - 1.0) / max(tolerance, 1e-4);
+    return (1.0 - smoothstep(1.0, 2.0, off)) * (1.0 - smoothstep(0.25, 0.5, length(mean.yz - n.xy)));
+}
 
 @fragment
 fn fs_reflect_resolve(in: FullscreenOut) -> @location(0) vec4<f32> {
@@ -354,6 +377,7 @@ fn fs_reflect_resolve(in: FullscreenOut) -> @location(0) vec4<f32> {
     let angle0 = noise * TAU;
     // How far from the surface's plane a tap may lie (its own bumps, and the depth's steps).
     let plane = 0.02 * depth + 0.02;
+    let tolerance = plane / max(depth, 1e-3);
     var color = vec3<f32>(0.0);
     var hits = 0.0;
     var weight = 0.0;
@@ -364,10 +388,13 @@ fn fs_reflect_resolve(in: FullscreenOut) -> @location(0) vec4<f32> {
         let o = vec2<f32>(cos(a), sin(a)) * sqrt(t) * radius;
         let q = clamp(vec2<i32>(floor(vec2<f32>(px) + 0.5 + o)), vec2<i32>(0), size - 1);
         let qz = textureLoad(depth_input, q, 0);
-        if (qz <= 0.0) { continue; }
+        let q_nr = textureLoad(normal_input, q, 0);
+        // A pixel the trace skipped (rougher than the limit, or not drawn with a normal) tells
+        // nothing: counted as a miss it darkened the floor beside a rough rug.
+        if (qz <= 0.0 || q_nr.w < 0.5 || q_nr.z > max_roughness) { continue; }
         let q_uv = (vec2<f32>(q) + 0.5) * frame.viewport.zw;
         let q_pos = view_position(q_uv, qz);
-        let q_n = oct_decode(textureLoad(normal_input, q, 0).xy);
+        let q_n = oct_decode(q_nr.xy);
         let w = select(0.0, 1.0, abs(dot(q_pos - pos, n)) < plane)
             * pow(saturate(dot(q_n, world_n)), 16.0);
         if (w <= 0.0) { continue; }
@@ -378,7 +405,11 @@ fn fs_reflect_resolve(in: FullscreenOut) -> @location(0) vec4<f32> {
             var c = tap.rgb;
             if (blurred > 0.0) {
                 let chain = textureSampleLevel(previous_blur, linear_clamp, q_uv, lod);
-                if (chain.a > 1e-3) { c = mix(c, chain.rgb / chain.a, blurred); }
+                if (chain.a > 1e-3) {
+                    let key = textureSampleLevel(chain_key, linear_clamp, q_uv, lod);
+                    let on = chain_on_surface(key, qz, world_n, tolerance);
+                    c = mix(c, chain.rgb / chain.a, blurred * on);
+                }
             }
             color += c * w;
             hits += w;

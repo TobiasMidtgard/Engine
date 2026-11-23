@@ -8,6 +8,13 @@
 
 @group(0) @binding(0) var chain_source: texture_2d<f32>;
 @group(0) @binding(1) var chain_sampler: sampler;
+// `fs_key_raw` alone: the prepass's depth (reverse-Z) and normals (octahedral xy).
+@group(0) @binding(2) var chain_depth: texture_depth_2d;
+@group(0) @binding(3) var chain_normal: texture_2d<f32>;
+
+// The key's depth scale (ssr.wgsl `CHAIN_KEY_DEPTH`): reverse-Z falls as one over the distance,
+// under half-float's smallest normal value past a few hundred meters unscaled.
+const CHAIN_KEY_DEPTH: f32 = 1024.0;
 
 // A NaN, infinite or negative pixel would otherwise spread over every rough reflection that
 // gathers near it; such taps count as black. Checked on the bits, which no compiler optimizes
@@ -68,5 +75,40 @@ fn fs_chain_cover(in: FullscreenOut) -> @location(0) vec4<f32> {
     let t = 0.75 / vec2<f32>(textureDimensions(chain_source));
     let c = chain_tap_cover(in.uv + vec2(-t.x, -t.y)) + chain_tap_cover(in.uv + vec2(t.x, -t.y))
         + chain_tap_cover(in.uv + vec2(-t.x, t.y)) + chain_tap_cover(in.uv + vec2(t.x, t.y));
+    return c * 0.25;
+}
+
+// The chain's key (`trial_cut_more::RAY_REFLECTIONS`): the surface under each texel of
+// `fs_chain_raw`'s levels, for ssr.wgsl `fs_reflect_resolve` to tell whether a chain texel's
+// average comes from the surface a tap lies on. The first level weighs the 4x4 pixels around
+// as `fs_chain_raw` weighs their reflections, every pixel drawn: the prepass depth (scaled by
+// `CHAIN_KEY_DEPTH`) and the world normal's x and y, times the share of the pixels drawn, and
+// that share. The levels below average it (`fs_key_cover`).
+@fragment
+fn fs_key_raw(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let t = vec2<i32>(floor(in.position.xy));
+    let last = vec2<i32>(textureDimensions(chain_depth)) - 1;
+    var sum = vec4<f32>(0.0);
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            let w = select(1.0, 3.0, x == 1 || x == 2) * select(1.0, 3.0, y == 1 || y == 2);
+            let p = clamp(t * 2 + vec2<i32>(x - 1, y - 1), vec2<i32>(0), last);
+            let z = textureLoad(chain_depth, p, 0);
+            if (z > 0.0) {
+                let n = oct_decode(textureLoad(chain_normal, p, 0).xy);
+                sum += vec4<f32>(z * CHAIN_KEY_DEPTH, n.xy, 1.0) * w;
+            }
+        }
+    }
+    return sum / 64.0;
+}
+
+@fragment
+fn fs_key_cover(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let t = 0.75 / vec2<f32>(textureDimensions(chain_source));
+    let c = textureSampleLevel(chain_source, chain_sampler, in.uv + vec2(-t.x, -t.y), 0.0)
+        + textureSampleLevel(chain_source, chain_sampler, in.uv + vec2(t.x, -t.y), 0.0)
+        + textureSampleLevel(chain_source, chain_sampler, in.uv + vec2(-t.x, t.y), 0.0)
+        + textureSampleLevel(chain_source, chain_sampler, in.uv + vec2(t.x, t.y), 0.0);
     return c * 0.25;
 }

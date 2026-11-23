@@ -8,15 +8,17 @@
 // `cs_reflect` reflect, kept above the face the prepass drew (a normal map's bend can turn it
 // into the surface). The screen first: the march of ssr.wgsl `trace` through the prepass's
 // depth (64 steps, 6 to refine); a surface it meets that faces the reflection is what the
-// camera saw there last frame, found through the motion vectors. Otherwise a ray through the
-// ray scene (`trace_reflect`), as long as the roughness lets a reflection be told apart
+// camera saw there last frame, found through the motion vectors (within the screen's outer
+// 8%, where last frame's picture ends, mixed with the ray's answer). Otherwise a ray through
+// the ray scene (`trace_reflect`), as long as the roughness lets a reflection be told apart
 // (`min(384, 400 exp(-5 roughness))` m: a rough reflection's blur hides what is far). A hit the
 // camera sees now (it projects onto the screen where the prepass drew the same surface) is
-// taken from last frame's picture too, mixed with its own light over the screen's outer 8%,
-// where last frame's picture ends; any other hit is lit as a world reflection's: its tile, the
-// sun through a shadow ray and the leaves above, the two nearest lamps through shadow rays up
-// to roughness 0.3 (none above), last frame's probes. ssr.wgsl `fs_reflect_resolve` blurs the
-// result over each pixel's lobe.
+// taken from last frame's picture too, mixed with its own light over the screen's outer 8%;
+// any other hit is lit as a world reflection's: its tile, the sun through a shadow ray and the
+// leaves above, the two nearest lamps through shadow rays up to roughness 0.3 (none above),
+// last frame's probes. A ray that meets nothing past where the march passed over the sky (a
+// window, a gap in the trees) sees the sky. ssr.wgsl `fs_reflect_resolve` blurs the result over
+// each pixel's lobe.
 //
 // Last frame's picture exists from the second frame of a view on (`frame.reflections.y`, its
 // pre-exposure, is 0 before): until then every reflection is a ray's, lit by its own light.
@@ -53,10 +55,14 @@ const FULL_ABOVE_FACE: f32 = 0.05;
 
 var<workgroup> full_group_counts: array<atomic<u32>, 4>;
 
-// The march's answer: where on the screen it met a surface.
+// The march's answer: where on the screen it met a surface, or whether it passed over the sky
+// before it went behind anything (`escaped`: it left through open space the camera sees, a
+// window or a gap in the trees, `dist` meters from its start), as ssr.wgsl `trace` tells.
 struct FullMarch {
     uv: vec2<f32>,
     found: bool,
+    escaped: bool,
+    dist: f32,
 };
 
 // Screen uv and view depth (positive, meters) of view-space point `p` (ssr.wgsl `project`).
@@ -81,6 +87,7 @@ fn full_scene_depth(uv: vec2<f32>) -> f32 {
 fn full_march(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> FullMarch {
     var hit: FullMarch;
     hit.found = false;
+    hit.escaped = false;
     // Keep the end in front of the near plane.
     var len = max_len;
     if (dir.z > 0.0) {
@@ -96,6 +103,8 @@ fn full_march(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> F
     let dk = 1.0 / f32(steps);
     var prev_k = 0.0;
     var k = dk * (0.5 + jitter);
+    var hidden = false;
+    var open_k = -1.0;
     for (var i = 0; i < steps; i++) {
         let uv = mix(a.xy, b.xy, k);
         if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return hit; }
@@ -103,6 +112,11 @@ fn full_march(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> F
         let scene = full_scene_depth(uv);
         let step_span = abs(1.0 / mix(inv_a, inv_b, min(k + dk, 1.0)) - ray);
         let thickness = max(0.1 + 0.02 * scene, step_span * 1.5);
+        // Over the sky with nothing in the way so far, the ray is in open space the camera sees
+        // through to the sky; behind something from there on, it is beyond what that hides (a
+        // window's frame and wall seen from inside), still out in the open (ssr.wgsl `trace`).
+        if (scene <= 0.0 && !hidden && open_k < 0.0) { open_k = k; }
+        hidden = hidden || (scene > 0.0 && ray > scene);
         if (scene > 0.0 && ray > scene && ray - scene < thickness) {
             var lo = prev_k;
             var hi = k;
@@ -118,6 +132,12 @@ fn full_march(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> F
         }
         prev_k = k;
         k += dk;
+    }
+    if (open_k >= 0.0) {
+        hit.escaped = true;
+        // Depth changes linearly along the ray.
+        let depth = 1.0 / mix(inv_a, inv_b, open_k);
+        hit.dist = clamp(select(open_k * len, (-depth - origin.z) / dir.z, abs(dir.z) > 1e-3), 0.0, len);
     }
     return hit;
 }
@@ -237,7 +257,15 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
     let origin = rel + face * (0.02 + 0.002 * depth);
     let noise = interleaved_gradient_noise(vec2<f32>(px) + frame.time.w * 5.588238);
 
-    // The screen first, where last frame's picture exists.
+    // The screen first, where last frame's picture exists. A surface the march met within the
+    // screen's outer 8% is last frame's picture only by its share there (`screen`, at
+    // `screen_t` meters), the ray's answer the rest, as a ray's hit the camera sees mixes into
+    // its own light: answered at once, the picture ended in a seam where its subject left the
+    // screen.
+    var screen = vec4<f32>(0.0);
+    var screen_t = 0.0;
+    var escaped = false;
+    var escape_t = 0.0;
     let rays_only = (ray_scene.stand_ins.w & RAY_SCENE_REFLECT_RAYS_ONLY) != 0u;
     if (frame.reflections.y > 0.0 && !rays_only) {
         let origin_view = (frame.view * vec4<f32>(origin, 0.0)).xyz;
@@ -251,18 +279,26 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
             // last frame's picture holds it.
             if (dot(hit_n, dir) < -0.1 && all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0))) {
                 let hit_rel = (frame.inv_view * vec4<f32>(view_position(m.uv, textureLoad(full_depth, hit_px, 0)), 0.0)).xyz;
-                textureStore(full_out, pixel, vec4<f32>(full_seen_at(prev_uv), max(distance(hit_rel, origin), 1e-3)));
-                counts.y = 1u;
-                return counts;
+                screen = vec4<f32>(full_seen_at(prev_uv), full_edge(m.uv) * full_edge(prev_uv));
+                screen_t = max(distance(hit_rel, origin), 1e-3);
+                if (screen.a >= 1.0) {
+                    textureStore(full_out, pixel, vec4<f32>(screen.rgb, screen_t));
+                    counts.y = 1u;
+                    return counts;
+                }
             }
         }
+        escaped = m.escaped;
+        escape_t = m.dist;
     }
 
     // A ray through the ray scene.
     counts.z = 1u;
     let t_max = min(384.0, 400.0 * exp(-5.0 * roughness));
     let hit = trace_reflect(origin, dir, t_max);
-    let wall = sky_volume_wall(origin, dir, min(hit.t, t_max));
+    // Where the march saw open sky along the reflection, the camera sees through there: an
+    // indoor volume's closed face across a window doesn't stop it.
+    let wall = select(sky_volume_wall(origin, dir, min(hit.t, t_max)), NO_HIT, escaped);
     var out = vec4<f32>(0.0);
     if (wall < NO_HIT) {
         // A wall of an indoor volume (a cave's rock): lit by the probes around it.
@@ -279,21 +315,32 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
         // The back of a single-sided surface: the ray started inside something, so it
         // reflects nothing of its own.
         if (!s.inside) {
+            // (Where the march met it in the screen's outer band, its picture is `screen`'s.)
             var seen = vec4<f32>(0.0);
-            if (frame.reflections.y > 0.0) {
+            if (frame.reflections.y > 0.0 && screen.a <= 0.0) {
                 seen = full_seen(origin + dir * hit.t, s.face);
             }
             var lit = vec3<f32>(0.0);
             if (seen.a < 1.0) {
                 lit = full_hit_light(origin, dir, hit.t, s, roughness);
             }
-            if (seen.a > 0.0) { counts.w = 1u; }
+            if (seen.a > 0.0 || screen.a > 0.0) { counts.w = 1u; }
             out = vec4<f32>(min(mix(lit, seen.rgb, seen.a), vec3<f32>(60000.0)), max(hit.t, 1e-3));
         }
+    } else if (escaped) {
+        // The ray met nothing past an opening the camera sees the sky through (a window, a gap
+        // in the trees): the sky, which the cover overhead doesn't dim (it would under a roof
+        // or a canopy, `shade_surface`), as ssr.wgsl `fs_ssr` reflects an escaped march.
+        out = vec4<f32>(min(sample_env_rough(dir, roughness) + frame.ambient.rgb, vec3<f32>(60000.0)), max(escape_t, 1e-3));
     } else if (REFLECT_MISS_SEES_SKY && t_max >= SKY_MARCH_REACH_M) {
         // Nothing within the reach of the cover map's march (`specular_sky_visibility`): the
         // sky there is open as far as the scene's things go.
         out = vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    if (screen.a > 0.0) {
+        // The march's hit in the screen's outer band: over what the ray met by its share, or
+        // as it is where the ray met nothing (something the ray scene leaves out).
+        out = select(vec4<f32>(screen.rgb, screen_t), vec4<f32>(mix(out.rgb, screen.rgb, screen.a), out.w), out.w > 0.0);
     }
     textureStore(full_out, pixel, out);
     return counts;

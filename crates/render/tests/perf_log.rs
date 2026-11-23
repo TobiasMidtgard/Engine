@@ -155,14 +155,20 @@ fn ray_pass_parts(full: bool) {
     }
     assert_eq!(get("render.ray.on"), Some(1.0), "the ray scene is on");
     assert_eq!(get("render.ray.losses"), Some(0.0));
-    let (reflections, resolve, other) = if full {
+    // Every pixel's reflection replaces both the world reflections and the screen's (whose
+    // resolve is "reflections"); without it, neither of its own passes runs.
+    let (reflections, resolve, others) = if full {
         (
             "ray reflections",
             "ray reflections resolve",
-            "world reflections",
+            ["world reflections", "reflections"],
         )
     } else {
-        ("world reflections", "reflections", "ray reflections")
+        (
+            "world reflections",
+            "reflections",
+            ["ray reflections", "ray reflections resolve"],
+        )
     };
     for step in [
         "ray scene",
@@ -180,10 +186,12 @@ fn ray_pass_parts(full: bool) {
         );
     }
     // (A row that is gone reads 0.0: the publish keeps every row it has ever had.)
-    assert!(
-        get(&format!("render.cpu.{other}")).is_none_or(|ms| ms == 0.0),
-        "{other}: not in this frame"
-    );
+    for other in others {
+        assert!(
+            get(&format!("render.cpu.{other}")).is_none_or(|ms| ms == 0.0),
+            "{other}: not in this frame"
+        );
+    }
     let Some(ms) = get("render.gpu_ms") else {
         eprintln!("no GPU timestamps here: the CPU rows only");
         return;
