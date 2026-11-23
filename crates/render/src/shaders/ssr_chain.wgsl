@@ -33,3 +33,40 @@ fn fs_chain(in: FullscreenOut) -> @location(0) vec4<f32> {
         + chain_tap(in.uv + vec2(-t.x, t.y)) + chain_tap(in.uv + vec2(t.x, t.y));
     return vec4<f32>(c * 0.25, 1.0);
 }
+
+// Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`): its trace (ray_reflect.wgsl,
+// the view's size: radiance, the distance to what it met, 0 or -1 for nothing) into the
+// chain's first level, as radiance times the share of the 4x4 pixels around (weighed [1 3 3 1]
+// per axis, as `fs_chain` weighs them) that met something, and that share. The levels below
+// average both (`fs_chain_cover`): a level's radiance over its share is that of what was met
+// around, however much of it met nothing.
+@fragment
+fn fs_chain_raw(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let t = vec2<i32>(floor(in.position.xy));
+    let last = vec2<i32>(textureDimensions(chain_source)) - 1;
+    var sum = vec4<f32>(0.0);
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            let w = select(1.0, 3.0, x == 1 || x == 2) * select(1.0, 3.0, y == 1 || y == 2);
+            let p = clamp(t * 2 + vec2<i32>(x - 1, y - 1), vec2<i32>(0), last);
+            let s = textureLoad(chain_source, p, 0);
+            if (s.a > 0.0) {
+                sum += vec4<f32>(chain_finite(s.rgb), 1.0) * w;
+            }
+        }
+    }
+    return sum / 64.0;
+}
+
+fn chain_tap_cover(uv: vec2<f32>) -> vec4<f32> {
+    let c = textureSampleLevel(chain_source, chain_sampler, uv, 0.0);
+    return vec4<f32>(chain_finite(c.rgb), clamp(c.a, 0.0, 1.0));
+}
+
+@fragment
+fn fs_chain_cover(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let t = 0.75 / vec2<f32>(textureDimensions(chain_source));
+    let c = chain_tap_cover(in.uv + vec2(-t.x, -t.y)) + chain_tap_cover(in.uv + vec2(t.x, -t.y))
+        + chain_tap_cover(in.uv + vec2(-t.x, t.y)) + chain_tap_cover(in.uv + vec2(t.x, t.y));
+    return c * 0.25;
+}

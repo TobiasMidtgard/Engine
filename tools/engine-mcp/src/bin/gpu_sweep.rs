@@ -411,6 +411,30 @@ fn variants() -> Vec<Variant> {
             "a count of the sun's trace (render.ray.sun_rays, sun_hits, and sun_missed and sun_false: where the shadow maps' still images, sure of a pixel, and a ray toward the sun's center disagree)",
         ),
         v(
+            "ray_reflections",
+            r,
+            json!({"trial_cuts_more": 80, "gi_hardware_rays": true}),
+            "ray_world with a reflection for every pixel up to the reflections' roughness limit, in place of screen-space reflections over world reflections at half size: each marches the screen first and takes last frame's picture of what it meets, else a ray through the frame's ray scene up to 384 m (shorter as the surface roughens), lit as a world reflection's where the camera does not see its hit (pass `ray reflections`, read against ray_world's `world reflections`), then blurred over each pixel's reflection lobe (pass `ray reflections resolve`, read against ray_world's `reflections`)",
+        ),
+        v(
+            "ray_reflections_rays_only",
+            r,
+            json!({"trial_cuts_more": 80, "gi_hardware_rays": true, "debug_skip": 2_147_483_648u32}),
+            "ray_reflections with every pixel's reflection a ray's, without the screen's march first: what tracing them all costs (`ray reflections` against ray_reflections)",
+        ),
+        v(
+            "count_ray_reflections",
+            r,
+            json!({"trial_cuts_more": 80, "gi_hardware_rays": true, "debug_skip": 262_144}),
+            "a count of every pixel's reflection (render.ray.reflect_pixels: pixels under the roughness limit; reflect_screen: answered by the screen's march; reflect_rays: traced; reflect_reused: rays whose hit the camera sees, which take last frame's picture)",
+        ),
+        v(
+            "ray_round",
+            r,
+            json!({"trial_cuts_more": 240, "gi_hardware_rays": true}),
+            "every built step of the ray-traced lighting round at once: ray_world with the probes four times as often, the sun's trace joined with the shadow maps and a reflection for every pixel (what step 10 is to turn on by default; read the whole frame against the baseline)",
+        ),
+        v(
             "skip_lighting",
             r,
             json!({"debug_skip": 128}),

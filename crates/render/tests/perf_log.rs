@@ -87,6 +87,19 @@ fn frame_and_gpu_times_reach_diagnostics() {
 /// passes still add up to the frame. Passes with a note on a GPU without ray queries.
 #[test]
 fn the_ray_pass_reports_its_parts() {
+    ray_pass_parts(false);
+}
+
+/// The same with every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`): its rows are
+/// "ray reflections", the last of the ray pass, and "ray reflections resolve", in place of
+/// "world reflections" and "reflections".
+#[test]
+fn every_pixels_reflection_reports_its_parts() {
+    ray_pass_parts(true);
+}
+
+fn ray_pass_parts(full: bool) {
+    use engine_render::settings::trial_cut_more::{RAY_REFLECTIONS, RAY_WORLD};
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -101,7 +114,10 @@ fn the_ray_pass_reports_its_parts() {
         s.perf_log_secs = 0.01;
         s.probe_gi = true;
         s.gi_hardware_rays = true;
-        s.trial_cuts_more |= engine_render::settings::trial_cut_more::RAY_WORLD;
+        s.trial_cuts_more |= RAY_WORLD;
+        if full {
+            s.trial_cuts_more |= RAY_REFLECTIONS;
+        }
         s.ray_sun_shadows = true;
     }
     app.world.spawn((
@@ -139,13 +155,23 @@ fn the_ray_pass_reports_its_parts() {
     }
     assert_eq!(get("render.ray.on"), Some(1.0), "the ray scene is on");
     assert_eq!(get("render.ray.losses"), Some(0.0));
+    let (reflections, resolve, other) = if full {
+        (
+            "ray reflections",
+            "ray reflections resolve",
+            "world reflections",
+        )
+    } else {
+        ("world reflections", "reflections", "ray reflections")
+    };
     for step in [
         "ray scene",
         "ray scene build",
         "ray inputs",
         "probe gi",
         "ray shadows",
-        "world reflections",
+        reflections,
+        resolve,
         "probe gi copies",
     ] {
         assert!(
@@ -153,6 +179,11 @@ fn the_ray_pass_reports_its_parts() {
             "no CPU time for {step}"
         );
     }
+    // (A row that is gone reads 0.0: the publish keeps every row it has ever had.)
+    assert!(
+        get(&format!("render.cpu.{other}")).is_none_or(|ms| ms == 0.0),
+        "{other}: not in this frame"
+    );
     let Some(ms) = get("render.gpu_ms") else {
         eprintln!("no GPU timestamps here: the CPU rows only");
         return;
@@ -170,6 +201,7 @@ fn the_ray_pass_reports_its_parts() {
         "ray inputs",
         "probe gi",
         "probe gi copies",
+        resolve,
     ] {
         assert!(
             get(&format!("render.gpu.{pass}")).is_some_and(|ms| ms >= 0.0),
@@ -179,7 +211,7 @@ fn the_ray_pass_reports_its_parts() {
     // (Without such timestamps the two run under "probe gi"; the reflections still get a row
     // in a frame whose probe grid scrolled, where they have a pass of their own.)
     if inside {
-        for pass in ["ray shadows", "world reflections"] {
+        for pass in ["ray shadows", reflections] {
             assert!(
                 get(&format!("render.gpu.{pass}")).is_some_and(|ms| ms >= 0.0),
                 "{pass}: a GPU row of its own where the device times inside a pass"

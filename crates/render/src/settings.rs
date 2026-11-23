@@ -268,6 +268,11 @@ pub mod shade_skip {
     /// costs, apart from its filter and its join (`gpu_sweep` row `ray_sun_trace_only`). Read
     /// on the CPU.
     pub const RAY_SUN_TRACE_ONLY: u32 = 1073741824;
+    /// With `trial_cut_more::RAY_REFLECTIONS`: every pixel's reflection is a ray's, without
+    /// the screen's march first (a hit the camera sees still takes last frame's picture): what
+    /// tracing them all costs (`gpu_sweep` row `ray_reflections_rays_only`). Read on the CPU,
+    /// which tells the shaders (`RayUniform`'s flags).
+    pub const RAY_REFLECT_RAYS_ONLY: u32 = 2147483648;
 }
 
 /// Bits of [`RenderSettings::trial_cuts`]: cheaper ways to draw the picture (lib_frame.wgsl
@@ -499,6 +504,22 @@ pub mod trial_cut_more {
     /// lib_frame.wgsl), and the sun's measuring rays (`RenderSettings::ray_sun_shadows`) give
     /// way to it. Off by default.
     pub const RAY_SUN: u32 = 128;
+    /// A reflection for every pixel up to `RenderSettings::ssr_max_roughness`, with
+    /// [`RAY_WORLD`], in place of screen-space reflections over world reflections at half size
+    /// (ray_reflect.wgsl; pass "ray reflections", the last of the frame's ray pass; `gpu_sweep`
+    /// rows `ray_reflections`, `ray_reflections_rays_only`, `count_ray_reflections`). Each
+    /// pixel's reflection marches the screen first, as screen-space reflections did, and takes
+    /// what it meets from last frame's picture; otherwise a ray through the frame's ray scene,
+    /// `min(384, 400 exp(-5 roughness))` m long, whose hit is taken from last frame's picture
+    /// too where the camera sees it, and is lit as a world reflection's elsewhere (the sun
+    /// through a shadow ray, the two nearest lamps through shadow rays up to roughness 0.3,
+    /// the probes). A pass "ray reflections resolve" blurs them over each pixel's reflection
+    /// lobe into what shading reads (ssr.wgsl `fs_reflect_resolve`), from the first frame
+    /// on: a frame without last frame's picture has the rays alone. With
+    /// `shade_skip::COUNT_MESH_RUNS` they are counted (`render.ray.reflect_pixels`,
+    /// `reflect_screen`, `reflect_rays`, `reflect_reused`); `shade_skip::RAY_REFLECT_RAYS_ONLY`
+    /// traces every one as a ray. 29.5 MB at 2560x1440 while on. Off by default.
+    pub const RAY_REFLECTIONS: u32 = 64;
 }
 
 /// What the screen shows.

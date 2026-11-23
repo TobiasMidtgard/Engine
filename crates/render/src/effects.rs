@@ -116,6 +116,13 @@ pub struct ScreenEffects {
     chain_layout: wgpu::BindGroupLayout,
     chain_pipeline: wgpu::RenderPipeline,
     chain: ReflectionChain,
+    /// Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`): the chain's first level
+    /// from its trace, the levels below it with the share that met something, and the resolve
+    /// into `targets.ssr` (ssr_chain.wgsl `fs_chain_raw`, `fs_chain_cover`; ssr.wgsl
+    /// `fs_reflect_resolve`). The chain is the picture's: a frame fills it one way or the other.
+    chain_raw: wgpu::RenderPipeline,
+    chain_cover: wgpu::RenderPipeline,
+    reflect_resolve: wgpu::RenderPipeline,
     gi_layout: wgpu::BindGroupLayout,
     gi_trace: wgpu::RenderPipeline,
     gi_temporal: wgpu::RenderPipeline,
@@ -289,6 +296,36 @@ impl ScreenEffects {
             shared.formats.hdr,
             None,
         );
+        let chain_raw = fullscreen_pipeline(
+            shared,
+            "ray reflection chain",
+            &chain_module,
+            "vs_chain",
+            "fs_chain_raw",
+            &[&chain_layout],
+            shared.formats.hdr,
+            None,
+        );
+        let chain_cover = fullscreen_pipeline(
+            shared,
+            "ray reflection chain level",
+            &chain_module,
+            "vs_chain",
+            "fs_chain_cover",
+            &[&chain_layout],
+            shared.formats.hdr,
+            None,
+        );
+        let reflect_resolve = fullscreen_pipeline(
+            shared,
+            "ray reflections resolve",
+            &ssr_module,
+            "vs_ssr",
+            "fs_reflect_resolve",
+            &[&shared.frame_layout, &ssr_layout],
+            shared.formats.hdr,
+            None,
+        );
         let gi_module = shared.shader("ssgi", include_str!("shaders/ssgi.wgsl"), true);
         let gi_pipeline = |label, entry| {
             fullscreen_pipeline(
@@ -365,6 +402,9 @@ impl ScreenEffects {
             chain_layout,
             chain_pipeline,
             chain,
+            chain_raw,
+            chain_cover,
+            reflect_resolve,
             gi_layout,
             gi_trace,
             gi_temporal,
@@ -655,6 +695,13 @@ impl ScreenEffects {
         self.history_ready
     }
 
+    /// Last frame's finished picture (what `has_previous` says is there; another texture of
+    /// the history before), pre-exposed by the frame's `reflections.y`. Until this frame's
+    /// anti-aliasing or [`keep_frame`](Self::keep_frame).
+    pub fn previous_picture<'t>(&self, targets: &'t Targets) -> &'t crate::targets::Tex {
+        &targets.history[1 - self.current]
+    }
+
     /// Record screen-space reflections into `targets.ssr` from the prepass and the previous
     /// frame's image (`has_previous` must be true), after blurring that image into a mip chain
     /// for glossy reflections. `prepass_group` as for `encode_ao`.
@@ -679,6 +726,70 @@ impl ScreenEffects {
         pass.set_pipeline(&self.ssr);
         pass.set_bind_group(0, prepass_group, &[]);
         pass.set_bind_group(1, &self.ssr_groups[self.current], &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Record every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`) into `targets.ssr`,
+    /// in place of [`encode_ssr`](Self::encode_ssr): the reflection chain built over `raw`
+    /// (probe_gi ray_reflect.wgsl's trace, the view's size: radiance, distance to the hit)
+    /// with the share that met something, then each pixel's reflection blurred over its lobe
+    /// from the trace and the chain (ssr.wgsl `fs_reflect_resolve`). `prepass_group` as for
+    /// `encode_ao`.
+    pub fn encode_reflect_resolve(
+        &self,
+        shared: &GpuShared,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        prepass_group: &wgpu::BindGroup,
+        raw: &wgpu::TextureView,
+    ) {
+        let first = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray reflection chain input"),
+            layout: &self.chain_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(raw),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shared.linear_clamp),
+                },
+            ],
+        });
+        for (level, target) in self.chain.levels.iter().enumerate() {
+            let (pipeline, group) = match level {
+                0 => (&self.chain_raw, &first),
+                _ => (&self.chain_cover, &self.chain.rest[level - 1]),
+            };
+            let mut pass = fullscreen_pass(encoder, "ray reflection chain", target, true);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::TextureView(view),
+            }
+        }
+        // (The picture at 3 is read by `fs_ssr` alone.)
+        let inputs = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray reflection resolve inputs"),
+            layout: &self.ssr_layout,
+            entries: &[
+                view(0, &targets.prepass_normal.view),
+                view(1, &targets.prepass_depth.view),
+                view(2, &targets.motion.view),
+                view(3, &targets.history[1 - self.current].view),
+                view(4, &self.chain.view),
+                view(5, raw),
+            ],
+        });
+        let mut pass = fullscreen_pass(encoder, "ray reflections resolve", &targets.ssr.view, true);
+        pass.set_pipeline(&self.reflect_resolve);
+        pass.set_bind_group(0, prepass_group, &[]);
+        pass.set_bind_group(1, &inputs, &[]);
         pass.draw(0..3, 0..1);
     }
 

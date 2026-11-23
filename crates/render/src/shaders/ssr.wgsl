@@ -22,7 +22,7 @@
 @group(1) @binding(2) var motion_input: texture_2d<f32>;   // screen motion (uv, current - previous)
 @group(1) @binding(3) var previous_color: texture_2d<f32>; // last frame's image, pre-exposed by frame.reflections.y
 @group(1) @binding(4) var previous_blur: texture_2d<f32>;  // previous_color at half resolution, blurred more per mip
-@group(1) @binding(5) var world_input: texture_2d<f32>;    // world reflections, half resolution: radiance, hit distance (0 = none; negative: traced, nothing within reach)
+@group(1) @binding(5) var world_input: texture_2d<f32>;    // world reflections, half resolution (every pixel's in `fs_reflect_resolve`): radiance, hit distance (0 = none; negative: traced, nothing within reach)
 
 const MAX_STEPS: i32 = 64;
 const REFINE_STEPS: i32 = 6;
@@ -302,4 +302,93 @@ fn fs_ssr(in: FullscreenOut) -> @location(0) vec4<f32> {
     if (total <= 1e-4) { return written(vec4<f32>(0.0), traced); }
     color = (min(color, vec3<f32>(60000.0)) * coverage + world.rgb * world.a * (1.0 - coverage)) / total;
     return written(vec4<f32>(color, total), traced);
+}
+
+// Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`), in place of `fs_ssr`: the trace
+// of ray_reflect.wgsl (`cs_reflect_full`, bound as `world_input` at the view's size: radiance,
+// the distance to what it met, 0 for nothing known, -1 for open sky) marched the screen and took
+// last frame's picture already, so this pass only blurs it over the pixel's reflection lobe.
+// The lobe is about alpha radians wide at the distance of what it met, and on a flat surface
+// the pixels around reflect it that far apart where they are as far from the camera as its
+// mirror image (the surface's depth and the hit's distance). The taps are the pixels on the
+// same surface within that radius (in the surface's plane, facing about as it does): the
+// trace itself where the radius is a few pixels, its chain where it is wider (`previous_blur`
+// here: ssr_chain.wgsl `fs_chain_raw` and `fs_chain_cover`, radiance times the share that met
+// something, and that share), whose level spans about the taps' spacing. The coverage is the
+// share of the taps that met something (the rest is the sky's, `shade_surface`), negative
+// where every tap was traced to an end (`written`).
+const RESOLVE_TAPS: i32 = 12;
+
+@fragment
+fn fs_reflect_resolve(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(floor(in.position.xy));
+    let nr = textureLoad(normal_input, px, 0);
+    let z = textureLoad(depth_input, px, 0);
+    let max_roughness = frame.reflections.z;
+    if (z <= 0.0 || nr.w < 0.5 || nr.z > max_roughness) {
+        return vec4<f32>(0.0);
+    }
+    let roughness = nr.z;
+    let alpha = roughness * roughness;
+    let uv = (vec2<f32>(px) + 0.5) * frame.viewport.zw;
+    let pos = view_position(uv, z);
+    let depth = -pos.z;
+    let world_n = oct_decode(nr.xy);
+    let n = normalize((frame.view * vec4<f32>(world_n, 0.0)).xyz);
+    let rough_fade = saturate(2.0 - 2.0 * roughness / max_roughness);
+    let own = textureLoad(world_input, px, 0);
+    let own_cover = select(0.0, rough_fade, own.w > 0.0);
+    // Meters a pixel spans at the mirror image (a constant width when orthographic).
+    let pixel_angle = 2.0 / max(abs(frame.proj[1][1]) * frame.viewport.y, 1e-6);
+    let hit_dist = select(4.0, own.w, own.w > 0.0);
+    let pixel_size = select((depth + hit_dist) * pixel_angle, pixel_angle, frame.exposure.w > 0.5);
+    let radius = min(hit_dist * alpha / max(pixel_size, 1e-6), frame.viewport.y * 0.25);
+    if (radius < 0.75) {
+        // About a mirror: the pixel's own reflection.
+        return written(vec4<f32>(own.rgb, own_cover), own.w != 0.0);
+    }
+    let size = size_i();
+    let blurred = saturate(radius * 0.5 - 1.0);
+    let lod = clamp(log2(max(radius, 1.0)) - 2.0, 0.0, f32(textureNumLevels(previous_blur) - 1u));
+    let noise = interleaved_gradient_noise(vec2<f32>(px) + frame.time.w * 5.588238);
+    let angle0 = noise * TAU;
+    // How far from the surface's plane a tap may lie (its own bumps, and the depth's steps).
+    let plane = 0.02 * depth + 0.02;
+    var color = vec3<f32>(0.0);
+    var hits = 0.0;
+    var weight = 0.0;
+    var traced = 0.0;
+    for (var i = 0; i < RESOLVE_TAPS; i++) {
+        let t = (f32(i) + 0.5) / f32(RESOLVE_TAPS);
+        let a = angle0 + f32(i) * 2.39996323;
+        let o = vec2<f32>(cos(a), sin(a)) * sqrt(t) * radius;
+        let q = clamp(vec2<i32>(floor(vec2<f32>(px) + 0.5 + o)), vec2<i32>(0), size - 1);
+        let qz = textureLoad(depth_input, q, 0);
+        if (qz <= 0.0) { continue; }
+        let q_uv = (vec2<f32>(q) + 0.5) * frame.viewport.zw;
+        let q_pos = view_position(q_uv, qz);
+        let q_n = oct_decode(textureLoad(normal_input, q, 0).xy);
+        let w = select(0.0, 1.0, abs(dot(q_pos - pos, n)) < plane)
+            * pow(saturate(dot(q_n, world_n)), 16.0);
+        if (w <= 0.0) { continue; }
+        let tap = textureLoad(world_input, q, 0);
+        weight += w;
+        traced += select(0.0, w, tap.w != 0.0);
+        if (tap.w > 0.0) {
+            var c = tap.rgb;
+            if (blurred > 0.0) {
+                let chain = textureSampleLevel(previous_blur, linear_clamp, q_uv, lod);
+                if (chain.a > 1e-3) { c = mix(c, chain.rgb / chain.a, blurred); }
+            }
+            color += c * w;
+            hits += w;
+        }
+    }
+    if (weight <= 1e-4) {
+        // Nothing alike nearby (a thin edge): the pixel's own.
+        return written(vec4<f32>(own.rgb, own_cover), own.w != 0.0);
+    }
+    let cover = hits / weight * rough_fade;
+    let c = min(color / max(hits, 1e-4), vec3<f32>(60000.0));
+    return written(vec4<f32>(c, cover), traced >= weight * 0.999);
 }

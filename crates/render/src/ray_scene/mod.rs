@@ -84,6 +84,9 @@ const VALVE_CLOSE_SHARE: f32 = 0.95;
 /// side they are drawn from, their texture unasked (`shade_skip::RAY_LEAVES_SOLID`, a
 /// measurement).
 const FLAG_LEAVES_SOLID: u32 = 1;
+/// `RayUniform::stand_ins` w: every pixel's reflection is a ray's, without the screen's march
+/// first (`shade_skip::RAY_REFLECT_RAYS_ONLY`, a measurement; ray_reflect.wgsl).
+const FLAG_REFLECT_RAYS_ONLY: u32 = 2;
 /// Frames between two sweeps for geometries nothing uses any more.
 const FORGET_EVERY: u64 = 64;
 
@@ -128,7 +131,7 @@ struct RayUniform {
     /// Instances in the still structure, in the moving one; the frame; the epoch.
     counts: [u32; 4],
     /// Shadow stand-ins in the still structure, in the moving one; w: the scene's flags
-    /// ([`FLAG_LEAVES_SOLID`]).
+    /// ([`FLAG_LEAVES_SOLID`], [`FLAG_REFLECT_RAYS_ONLY`]).
     stand_ins: [u32; 4],
     /// The sun's trace ([`sun`]): the reach of the pixels that get a ray, the rays' length,
     /// the distance from which they meet the swaying plants (meters: the end of the last
@@ -657,8 +660,14 @@ impl RayScene {
         let anchor = (self.instances.anchor() - view.origin).as_vec3();
         let [still, moving] = self.instances.counts();
         let [still_stand_ins, moving_stand_ins] = self.instances.stand_ins();
-        let flags = if settings.debug_skip & crate::settings::shade_skip::RAY_LEAVES_SOLID != 0 {
+        let skip = crate::settings::shade_skip::RAY_LEAVES_SOLID;
+        let rays_only = crate::settings::shade_skip::RAY_REFLECT_RAYS_ONLY;
+        let flags = if settings.debug_skip & skip != 0 {
             FLAG_LEAVES_SOLID
+        } else {
+            0
+        } | if settings.debug_skip & rays_only != 0 {
+            FLAG_REFLECT_RAYS_ONLY
         } else {
             0
         };

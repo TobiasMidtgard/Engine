@@ -2460,7 +2460,15 @@ impl Renderer {
         cpu.step("uniforms and lights");
         let previous =
             self.effects.has_previous() && view.history_valid && self.prev_exposure > 0.0;
-        let ssr = settings.screen_space_reflections && previous;
+        // Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`) needs no picture of last
+        // frame: the first frames' are its rays' alone.
+        let both = crate::settings::trial_cut_more::RAY_WORLD
+            | crate::settings::trial_cut_more::RAY_REFLECTIONS;
+        let full_reflections = !is_extra
+            && settings.trial_cuts_more & both == both
+            && self.ray_scene.is_some()
+            && self.probe_gi.traces_ray_world();
+        let ssr = settings.screen_space_reflections && (previous || full_reflections);
         let gi = uniform.reflections[3] > 0.0 && previous;
         uniform.reflections[0] = if ssr { 1.0 } else { 0.0 };
         uniform.reflections[1] = if previous { self.prev_exposure } else { 0.0 };
@@ -3436,11 +3444,25 @@ impl Renderer {
             self.perf.pass(&mut cpu, &mut encoder, "ray inputs");
             let alternate =
                 settings.trial_cuts & crate::settings::trial_cut::REFLECTIONS_ALTERNATE != 0;
+            let full =
+                settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_REFLECTIONS != 0;
+            let reflections = if !ssr {
+                None
+            } else if full {
+                Some(crate::probe_gi::ReflectionRays::Full {
+                    picture: &self.effects.previous_picture(&self.targets).view,
+                    count: count_sun,
+                })
+            } else {
+                settings
+                    .world_reflections
+                    .then_some(crate::probe_gi::ReflectionRays::Half { alternate })
+            };
             ray_work = self.probe_gi.begin_rays(
                 &self.shared.device,
                 &mut encoder,
                 &self.targets,
-                (ssr && settings.world_reflections).then_some(alternate),
+                reflections,
                 (settings.ray_sun_shadows && !sun_trace).then_some(count_sun),
             );
             let traces_sun = ray.begin_sun(
@@ -3453,7 +3475,14 @@ impl Renderer {
             );
             traced_sun = traces_sun;
             if ray_work.any() || traces_sun {
-                let reflections_last = ray_work.reflections && ray_work.scrolled;
+                let reflections_last = ray_work.any_reflections() && ray_work.scrolled;
+                // (Every pixel's reflection has a mark of its own: they are not the half-size
+                // world reflections.)
+                let reflections_mark = if ray_work.full_reflections {
+                    "ray reflections"
+                } else {
+                    "world reflections"
+                };
                 self.perf.pass(&mut cpu, &mut encoder, "probe gi");
                 {
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -3473,9 +3502,8 @@ impl Renderer {
                         self.perf.pass_inside(&mut cpu, &mut pass, "ray shadows");
                         self.probe_gi.dispatch_sun(&mut pass, &self.targets);
                     }
-                    if ray_work.reflections && !reflections_last {
-                        self.perf
-                            .pass_inside(&mut cpu, &mut pass, "world reflections");
+                    if ray_work.any_reflections() && !reflections_last {
+                        self.perf.pass_inside(&mut cpu, &mut pass, reflections_mark);
                         self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
                     }
                 }
@@ -3485,7 +3513,7 @@ impl Renderer {
                 }
                 ray.end_sun(&mut encoder);
                 if reflections_last {
-                    self.perf.pass(&mut cpu, &mut encoder, "world reflections");
+                    self.perf.pass(&mut cpu, &mut encoder, reflections_mark);
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("rays after the probes"),
                         timestamp_writes: None,
@@ -3493,6 +3521,9 @@ impl Renderer {
                     pass.set_bind_group(0, frame_group, &[]);
                     pass.set_bind_group(1, ray.group(), &[]);
                     self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
+                }
+                if ray_work.full_reflections {
+                    self.probe_gi.end_reflections(&mut encoder);
                 }
             }
         }
@@ -3583,7 +3614,23 @@ impl Renderer {
             self.effects
                 .encode_lamp_tiles(&mut encoder, &self.targets, &self.light_group);
         }
-        if ssr {
+        if ssr
+            && ray_work.full_reflections
+            && let Some(raw) = self.probe_gi.full_reflections()
+        {
+            // Every pixel's reflection, traced in the frame's ray pass above, blurred over each
+            // pixel's reflection lobe into what shading reads (in place of screen-space
+            // reflections, whose march and gather the trace did).
+            self.perf
+                .pass(&mut cpu, &mut encoder, "ray reflections resolve");
+            self.effects.encode_reflect_resolve(
+                &self.shared,
+                &mut encoder,
+                &self.targets,
+                &self.prepass_group,
+                &raw.view,
+            );
+        } else if ssr {
             // What screen-space reflections can't see, traced against probe GI's scene (in
             // the frame's ray pass above while the rays trace the ray scene).
             if !extra {

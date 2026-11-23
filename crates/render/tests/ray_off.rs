@@ -4,14 +4,16 @@
 //! sun's measuring rays are not shot nor its trace (`trial_cut_more::RAY_SUN`; its mark of
 //! what sways is still written, and every other reader takes it as before), so the light pass
 //! joins nothing with the shadow maps (`shade_skip::RAY_SUN_TRACE_ONLY` or not), the probes
-//! are not traced more often nor put to sleep when stuck (`trial_cut_more::RAY_PROBES`), and
-//! the rays walk the probes' own scene in software, so the picture is the one drawn with the
-//! switches off. A test binary of its own: the variable is the whole process's, read when the device is
+//! are not traced more often nor put to sleep when stuck (`trial_cut_more::RAY_PROBES`), no
+//! pixel's reflection is traced (`trial_cut_more::RAY_REFLECTIONS`, with
+//! `shade_skip::RAY_REFLECT_RAYS_ONLY` or not: screen-space reflections over world reflections
+//! draw the mirror as before), and the rays walk the probes' own scene in software, so the
+//! picture is the one drawn with the switches off. A test binary of its own: the variable is the whole process's, read when the device is
 //! made. Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
-use engine_render::settings::trial_cut_more::{RAY_PROBES, RAY_SUN, RAY_WORLD};
+use engine_render::settings::trial_cut_more::{RAY_PROBES, RAY_REFLECTIONS, RAY_SUN, RAY_WORLD};
 use engine_render::{RenderDisabled, capture_now};
 
 const W: u32 = 160;
@@ -45,11 +47,12 @@ fn app(switches: bool) -> App {
         s.gi_probes_per_frame = 16 * 8 * 16 / 4;
         s.gi_hysteresis = 0.5;
         if switches {
-            s.trial_cuts_more |= RAY_WORLD | RAY_PROBES | RAY_SUN;
+            s.trial_cuts_more |= RAY_WORLD | RAY_PROBES | RAY_SUN | RAY_REFLECTIONS;
             s.ray_sun_shadows = true;
             s.debug_skip |= engine_render::settings::shade_skip::RAY_LEAVES_SOLID
                 | engine_render::settings::shade_skip::COUNT_MESH_RUNS
-                | engine_render::settings::shade_skip::RAY_SUN_TRACE_ONLY;
+                | engine_render::settings::shade_skip::RAY_SUN_TRACE_ONLY
+                | engine_render::settings::shade_skip::RAY_REFLECT_RAYS_ONLY;
             s.ray_caster_reach = 40.0;
             s.ray_far_reach = 90.0;
             s.ray_sun_reach = 60.0;
@@ -170,8 +173,8 @@ fn without_ray_queries_the_switches_change_nothing() {
             ("render.gi.probes_raised", 0.0),
             ("render.gi.probes_updated", 512.0),
             ("render.gi.probes_budget_cut", 0.0),
-            // Never published: the meshes prepare nothing for a scene that is not made, and
-            // no ray is shot toward the sun.
+            // Never published: the meshes prepare nothing for a scene that is not made, no
+            // ray is shot toward the sun, and no pixel's reflection is traced.
             ("render.meshes.ray_looked", -1.0),
             ("render.ray.instances", -1.0),
             ("render.ray.sun_rays", -1.0),
@@ -180,6 +183,11 @@ fn without_ray_queries_the_switches_change_nothing() {
             ("render.ray.sun_joined", -1.0),
             ("render.ray.sun_history", -1.0),
             ("render.gi.sun_rays", -1.0),
+            ("render.ray.reflect_full", -1.0),
+            ("render.ray.reflect_pixels", -1.0),
+            ("render.ray.reflect_screen", -1.0),
+            ("render.ray.reflect_rays", -1.0),
+            ("render.ray.reflect_reused", -1.0),
         ] {
             assert_eq!(diag(app, name), expected, "{what}: {name}");
         }

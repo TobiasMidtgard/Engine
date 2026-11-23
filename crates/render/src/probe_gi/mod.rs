@@ -167,10 +167,12 @@ fn shader_source(rays: Rays) -> String {
             "{}\n{own}\n{body}",
             include_str!("../shaders/probe_gi_trace_hw.wgsl")
         ),
+        // (Every pixel's reflection is a dispatch of this program too, after the probes'.)
         Rays::World => format!(
-            "{}\n{}\n{body}",
+            "{}\n{}\n{body}\n{}",
             crate::ray_scene::shader_lib(1),
-            include_str!("../shaders/probe_gi_rays.wgsl")
+            include_str!("../shaders/probe_gi_rays.wgsl"),
+            include_str!("../shaders/ray_reflect.wgsl")
         ),
     }
 }
@@ -610,6 +612,8 @@ struct Active {
     hw: Option<rt::HwScene>,
     /// The sun's rays (`RenderSettings::ray_sun_shadows`), on ray-tracing hardware.
     sun: Option<SunRays>,
+    /// Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`), on the frame's ray scene.
+    full: Option<FullReflections>,
     /// This frame's inputs of the world reflections and of the sun's rays (group 2), made by
     /// [`ProbeGi::begin_rays`] for the dispatches in the frame's ray pass.
     reflect_inputs: Option<wgpu::BindGroup>,
@@ -630,6 +634,8 @@ pub(crate) struct RayWork {
     pub probes: bool,
     /// World reflections into `targets.world_reflection`.
     pub reflections: bool,
+    /// Every pixel's reflection ([`ProbeGi::full_reflections`]), in place of those.
+    pub full_reflections: bool,
     /// The sun's rays.
     pub sun: bool,
     /// The probe grid scrolled this frame: the reflections must not read the atlas before
@@ -641,8 +647,51 @@ pub(crate) struct RayWork {
 impl RayWork {
     /// Whether the pass holds anything.
     pub fn any(&self) -> bool {
-        self.probes || self.reflections || self.sun
+        self.probes || self.reflections || self.full_reflections || self.sun
     }
+
+    /// Whether the pass holds reflections, of either kind.
+    pub fn any_reflections(&self) -> bool {
+        self.reflections || self.full_reflections
+    }
+}
+
+/// The reflections the frame's ray pass traces ([`ProbeGi::begin_rays`]).
+#[derive(Clone, Copy)]
+pub(crate) enum ReflectionRays<'a> {
+    /// World reflections at half size into `targets.world_reflection`, for screen-space
+    /// reflections to blend under theirs; `alternate`: `trial_cut::REFLECTIONS_ALTERNATE`.
+    Half { alternate: bool },
+    /// Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`, ray_reflect.wgsl):
+    /// `picture` is last frame's finished picture (any texture before the view has one:
+    /// `frame.reflections.y` 0 tells the shader), `count` counts them.
+    Full {
+        picture: &'a wgpu::TextureView,
+        count: bool,
+    },
+}
+
+/// Every pixel's reflection (`cs_reflect_full`, ray_reflect.wgsl): its program, its output and
+/// its count.
+struct FullReflections {
+    pipeline: wgpu::ComputePipeline,
+    /// Group 2: the prepass's normals and depth, the motion, last frame's picture, `out`,
+    /// `counts`.
+    layout: wgpu::BindGroupLayout,
+    /// What each pixel's reflection found (radiance, the distance to it), made at first use
+    /// and again when the view's size changes, dropped in a frame without it. 8 bytes a
+    /// pixel, 29.5 MB at 2560x1440.
+    out: Option<crate::targets::Tex>,
+    /// The pixels under the roughness limit, those the screen answered, the rays traced and
+    /// their hits taken from last frame's picture, counted by the pass while
+    /// `shade_skip::COUNT_MESH_RUNS` is set.
+    counts: GpuCounts,
+    /// This frame's inputs ([`ProbeGi::begin_rays`]), until the pass takes them.
+    inputs: Option<wgpu::BindGroup>,
+    /// This frame's reflections are counted, and wait for their counts to be copied out.
+    counting: bool,
+    /// The last frame that asked traced every pixel's reflection.
+    traced: bool,
 }
 
 /// One ray toward the sun from every pixel (`cs_sun`, a measurement for now): its program, its
@@ -1175,6 +1224,60 @@ impl ProbeGi {
                 counts: GpuCounts::new(device, "ray shadow counts"),
             }
         });
+        // Every pixel's reflection: the prepass's normals and depth, the motion, last frame's
+        // picture (sampled between its texels), what the reflections found, and their count.
+        let full = world.then(|| {
+            let texture = |filterable: bool| wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            };
+            let inputs = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ray reflection inputs"),
+                entries: &[
+                    layout_entry(20, S::COMPUTE, texture(false)),
+                    layout_entry(
+                        21,
+                        S::COMPUTE,
+                        wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                    ),
+                    layout_entry(22, S::COMPUTE, texture(false)),
+                    layout_entry(23, S::COMPUTE, texture(true)),
+                    layout_entry(
+                        24,
+                        S::COMPUTE,
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                    ),
+                    layout_entry(25, S::COMPUTE, storage(false)),
+                ],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("ray reflections"),
+                bind_group_layouts: &[
+                    Some(&shared.frame_layout),
+                    Some(scene_layout),
+                    Some(&inputs),
+                ],
+                immediate_size: 0,
+            });
+            FullReflections {
+                pipeline: pipeline("cs_reflect_full", &pipeline_layout),
+                layout: inputs,
+                out: None,
+                counts: GpuCounts::new(device, "ray reflection counts"),
+                inputs: None,
+                counting: false,
+                traced: false,
+            }
+        });
         let usage = wgpu::BufferUsages::STORAGE;
         let grow_usage = usage | wgpu::BufferUsages::COPY_SRC;
         self.active = Some(Active {
@@ -1208,6 +1311,7 @@ impl ProbeGi {
             group: None,
             hw: hardware.then(|| rt::HwScene::new(device)),
             sun,
+            full,
             reflect_inputs: None,
             sun_inputs: None,
             sun_counted: false,
@@ -2674,17 +2778,83 @@ impl ProbeGi {
         Some(inputs)
     }
 
+    /// Every pixel's reflection's inputs and output for this frame (group 2 of
+    /// `cs_reflect_full`), its count cleared when `count` asks for it. `None` without the
+    /// frame's ray scene or before the probes have a scene.
+    fn full_inputs(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &crate::targets::Targets,
+        picture: &wgpu::TextureView,
+        count: bool,
+    ) -> Option<wgpu::BindGroup> {
+        let active = self.active.as_mut()?;
+        active.group.as_ref()?;
+        let full = active.full.as_mut()?;
+        full.counts.take();
+        if !count {
+            full.counts.latest = None;
+        }
+        let size = (targets.width, targets.height);
+        let out = match &mut full.out {
+            Some(t) if (t.width, t.height) == size => t,
+            slot => slot.insert(crate::targets::Tex::new(
+                device,
+                "ray reflections",
+                size.0,
+                size.1,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            )),
+        };
+        fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::TextureView(view),
+            }
+        }
+        let inputs = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray reflection inputs"),
+            layout: &full.layout,
+            entries: &[
+                view(20, &targets.prepass_normal.view),
+                view(21, &targets.prepass_depth.view),
+                view(22, &targets.motion.view),
+                view(23, picture),
+                view(24, &out.view),
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: full.counts.counts.as_entire_binding(),
+                },
+            ],
+        });
+        if count {
+            full.counts.clear(encoder);
+        }
+        full.counting = count;
+        Some(inputs)
+    }
+
+    /// Every pixel's reflection as the last frame that traced it left it (ray_reflect.wgsl
+    /// `full_out`): what ssr.wgsl `fs_reflect_resolve` blurs over each pixel's lobe. `None`
+    /// unless that frame was the last to ask for reflections.
+    pub fn full_reflections(&self) -> Option<&crate::targets::Tex> {
+        let full = self.active.as_ref()?.full.as_ref()?;
+        full.out.as_ref().filter(|_| full.traced)
+    }
+
     /// Before the frame's ray pass, while the rays trace the frame's ray scene: make what
-    /// its dispatches bind. `reflections`: trace world reflections into
-    /// `targets.world_reflection` (its value: `trial_cut::REFLECTIONS_ALTERNATE`); `sun`:
+    /// its dispatches bind. `reflections`: trace world reflections at half size into
+    /// `targets.world_reflection`, or every pixel's reflection ([`ReflectionRays`]); `sun`:
     /// shoot the sun's rays (its value: count them), see [`encode_sun`](Self::encode_sun).
-    /// Says which of the three the pass holds.
+    /// Says which the pass holds.
     pub fn begin_rays(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         targets: &crate::targets::Targets,
-        reflections: Option<bool>,
+        reflections: Option<ReflectionRays<'_>>,
         sun: Option<bool>,
     ) -> RayWork {
         let mut work = RayWork::default();
@@ -2693,12 +2863,31 @@ impl ProbeGi {
         }
         work.probes = self.work.is_some();
         work.scrolled = self.work.as_ref().is_some_and(|w| w.scrolled);
-        let reflect_inputs = reflections
-            .and_then(|alternate| self.reflection_inputs(device, encoder, targets, alternate));
+        let (mut reflect_inputs, mut full_inputs) = (None, None);
+        match reflections {
+            Some(ReflectionRays::Half { alternate }) => {
+                reflect_inputs = self.reflection_inputs(device, encoder, targets, alternate);
+            }
+            Some(ReflectionRays::Full { picture, count }) => {
+                full_inputs = self.full_inputs(device, encoder, targets, picture, count);
+            }
+            None => {}
+        }
         let sun_inputs = sun.and_then(|count| self.sun_inputs(device, encoder, targets, count));
         work.reflections = reflect_inputs.is_some();
+        work.full_reflections = full_inputs.is_some();
         work.sun = sun_inputs.is_some();
         if let Some(active) = self.active.as_mut() {
+            if let Some(full) = active.full.as_mut() {
+                full.traced = work.full_reflections;
+                if !work.full_reflections {
+                    // (A frame without them frees their 29.5 MB at 2560x1440.)
+                    full.out = None;
+                    full.counting = false;
+                    full.counts.latest = None;
+                }
+                full.inputs = full_inputs;
+            }
             active.reflect_inputs = reflect_inputs;
             active.sun_inputs = sun_inputs;
             active.sun_counted = sun == Some(true);
@@ -2757,6 +2946,14 @@ impl ProbeGi {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        if let Some(full) = active.full.as_mut()
+            && let Some(inputs) = full.inputs.take()
+        {
+            pass.set_bind_group(2, &inputs, &[]);
+            pass.set_pipeline(&full.pipeline);
+            pass.dispatch_workgroups(targets.width.div_ceil(8), targets.height.div_ceil(8), 1);
+            return;
+        }
         let Some(inputs) = active.reflect_inputs.take() else {
             return;
         };
@@ -2764,6 +2961,15 @@ impl ProbeGi {
         pass.set_bind_group(2, &inputs, &[]);
         pass.set_pipeline(&active.reflect);
         pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+    }
+
+    /// After the pass that held the reflections ([`dispatch_reflections`](Self::dispatch_reflections)):
+    /// copy every pixel's reflections' counts out, when they were counted.
+    pub fn end_reflections(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(full) = self.active.as_mut().and_then(|a| a.full.as_mut()) {
+            let counted = std::mem::take(&mut full.counting);
+            full.counts.copy(encoder, counted);
+        }
     }
 
     /// After the frame's ray pass: copy the atlas rows the probes' update wrote into the
@@ -2869,6 +3075,19 @@ impl ProbeGi {
                 .map_or([-1.0; 2], |n| [n[0], n[1]].map(f64::from));
             d.set("render.gi.sun_rays", rays);
             d.set("render.gi.sun_hits", hits);
+        }
+        // Every pixel's reflection (while the frame's ray scene is traced): whether the last
+        // frame traced them, and their counts in the latest frame read back (-1: not counted
+        // now): the pixels under the roughness limit, those the screen answered, the rays
+        // traced, and the rays' hits taken from last frame's picture.
+        if let Some(full) = self.active.as_ref().and_then(|a| a.full.as_ref()) {
+            d.set("render.ray.reflect_full", full.traced as u8 as f64);
+            let [pixels, screen, rays, reused] =
+                full.counts.latest.map_or([-1.0; 4], |n| n.map(f64::from));
+            d.set("render.ray.reflect_pixels", pixels);
+            d.set("render.ray.reflect_screen", screen);
+            d.set("render.ray.reflect_rays", rays);
+            d.set("render.ray.reflect_reused", reused);
         }
     }
 }

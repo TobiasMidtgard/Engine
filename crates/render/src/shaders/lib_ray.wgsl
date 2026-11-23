@@ -138,6 +138,9 @@ const RULE_TESTS_SHIFT: u32 = 8u;
 // `RULE_DRAWN_SIDE`), as if its texture covered the card (what the row prices: the texture
 // reads, and the triangles behind the holes).
 const RAY_SCENE_LEAVES_SOLID: u32 = 1u;
+// `RayUniform.stand_ins.w`: the measuring rung `ray_reflect_rays_only` (`shade_skip`): every
+// pixel's reflection is a ray's, without the screen's march first (ray_reflect.wgsl).
+const RAY_SCENE_REFLECT_RAYS_ONLY: u32 = 2u;
 
 // The distance along the ray of the hit `ray_first` or `ray_stopped` last found (the ray's
 // `t_max` where they found none): the sun's trace keeps a blocker's distance for the penumbra
