@@ -435,6 +435,18 @@ fn variants() -> Vec<Variant> {
             "every built step of the ray-traced lighting round at once: ray_world with the probes four times as often, the sun's trace joined with the shadow maps and a reflection for every pixel (what step 10 is to turn on by default; read the whole frame against the baseline)",
         ),
         v(
+            "check_ray_probe",
+            r,
+            json!({"trial_cuts_more": 48, "gi_hardware_rays": true, "ray_probe_check": true}),
+            "a check, not a cut: ray_world_probes with the probe nearest the camera against a brute-force reference of 4,096 rays a direction a frame through the frame's ray scene (`--stats render.gi.check_`: check_probe_*, check_ref_* and check_ratio_* for the six axis directions, means over the same frames; check_worst the farthest ratio from 1 over the directions whose reference holds a tenth of the brightest's; check_spread_* and check_flicker the probe's flicker from frame to frame; pass `probe check` is the check's own cost)",
+        ),
+        v(
+            "check_ray_probe_world",
+            r,
+            json!({"trial_cuts_more": 16, "gi_hardware_rays": true, "ray_probe_check": true}),
+            "check_ray_probe with the probes' own count of rays (ray_world without ray_probes)",
+        ),
+        v(
             "skip_lighting",
             r,
             json!({"debug_skip": 128}),

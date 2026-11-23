@@ -996,7 +996,15 @@ fn cloud_shadow_plane_point(uv: vec2<f32>) -> vec3<f32> {
 // tracing rays into the scene (probe_gi.wgsl). Irradiance is read from the probes around a
 // point, weighted so that probes behind it, or ones that can't see it, don't light it.
 
+// A probe's maps are octahedral, PROBE_GI_TEXELS a side, each in a tile of PROBE_GI_TILE
+// with a border of one texel: copies of the texels across the map's folds (`cs_update`), so
+// that a bilinear read within half a texel of an edge blends the directions on both sides of
+// it, as the sphere has them. Without one the read stopped at the edge's last texels: the four
+// corners are one direction (-z), and a surface facing it read only the corner texel 13
+// degrees off toward +x and +y, 8% darker than a brute-force reference of its light under a
+// canopy (ray_probe_check.rs, 23 Nov).
 const PROBE_GI_TEXELS: u32 = 8u;
+const PROBE_GI_TILE: u32 = 10u;
 const PROBE_GI_TILES_X: u32 = 128u;
 // Stored radiance is scaled into half-float range: sunlit snow to moonlight.
 const PROBE_GI_SCALE: f32 = 0.0625;
@@ -1006,18 +1014,24 @@ fn probe_gi_position(g: vec3<f32>) -> vec3<f32> {
     return frame.gi_volume.xyz + g * frame.gi_volume.w;
 }
 
-// The corner (in atlas texels) of the tile of the probe stored at `c` (the grid scrolls through
+// The corner (in atlas texels) of the map of the probe in storage slot `slot`, inside its
+// tile's border.
+fn probe_gi_slot_map(slot: u32) -> vec2<u32> {
+    return vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TILE + 1u;
+}
+
+// The corner (in atlas texels) of the map of the probe stored at `c` (the grid scrolls through
 // storage: the probe at grid `g` is stored at `(g + frame.gi_grid.xyz) % frame.gi_size.xyz`).
 fn probe_gi_tile(c: vec3<u32>) -> vec2<f32> {
     let size = vec3<u32>(frame.gi_size.xyz);
-    let slot = c.x + size.x * (c.y + size.y * c.z);
-    return vec2<f32>(vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS);
+    return vec2<f32>(probe_gi_slot_map(c.x + size.x * (c.y + size.y * c.z)));
 }
 
-// Texel coordinates of direction `dir` within a probe's tile.
+// Texel coordinates of direction `dir` within a probe's map (0..PROBE_GI_TEXELS: a read within
+// half a texel of an edge takes the border's texels too).
 fn probe_gi_dir_texel(dir: vec3<f32>) -> vec2<f32> {
     let n = f32(PROBE_GI_TEXELS);
-    return clamp((oct_encode(dir) * 0.5 + 0.5) * n, vec2<f32>(0.5), vec2<f32>(n - 0.5));
+    return clamp((oct_encode(dir) * 0.5 + 0.5) * n, vec2<f32>(0.0), vec2<f32>(n));
 }
 
 // Irradiance (rgb, lux-like: diffuse light is albedo / PI times it) at camera-relative `rel`

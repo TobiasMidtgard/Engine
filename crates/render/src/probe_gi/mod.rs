@@ -43,7 +43,7 @@ mod bvh;
 mod rt;
 mod schedule;
 
-use crate::gpu_counts::GpuCounts;
+use crate::gpu_counts::{GpuCounts, GpuReadback};
 use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::change_detection::Tick;
@@ -61,11 +61,12 @@ use crate::settings::RenderSettings;
 use engine_assets::{Assets, Handle};
 use engine_world::WorldShift;
 
-/// Texels along a probe's tile side (`PROBE_GI_TEXELS` in lib_frame.wgsl).
-const TEXELS: u32 = 8;
+/// Texels along a probe's tile side (`PROBE_GI_TILE` in lib_frame.wgsl): its maps, 8 texels a
+/// side, and a border of one texel around them, copies across the octahedron's folds.
+const TILE: u32 = 10;
 /// Tiles per atlas row (`PROBE_GI_TILES_X`).
 const TILES_X: u32 = 128;
-/// Probes the atlas holds: 1024 × 1024 texels, two layers (16 MB).
+/// Probes the atlas holds: 1280 × 1280 texels, two layers (26 MB).
 pub(crate) const MAX_PROBES: u32 = TILES_X * TILES_X;
 /// Rays per probe at most (`MAX_RAYS` in probe_gi.wgsl).
 const MAX_RAYS: u32 = 256;
@@ -167,12 +168,14 @@ fn shader_source(rays: Rays) -> String {
             "{}\n{own}\n{body}",
             include_str!("../shaders/probe_gi_trace_hw.wgsl")
         ),
-        // (Every pixel's reflection is a dispatch of this program too, after the probes'.)
+        // (Every pixel's reflection is a dispatch of this program too, after the probes', and
+        // so is Rendering's check of the probes.)
         Rays::World => format!(
-            "{}\n{}\n{body}\n{}",
+            "{}\n{}\n{body}\n{}\n{}",
             crate::ray_scene::shader_lib(1),
             include_str!("../shaders/probe_gi_rays.wgsl"),
-            include_str!("../shaders/ray_reflect.wgsl")
+            include_str!("../shaders/ray_reflect.wgsl"),
+            include_str!("../shaders/ray_probe_check.wgsl")
         ),
     }
 }
@@ -614,6 +617,9 @@ struct Active {
     sun: Option<SunRays>,
     /// Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`), on the frame's ray scene.
     full: Option<FullReflections>,
+    /// Rendering's check of the probes (`RenderSettings::ray_probe_check`), on the frame's
+    /// ray scene.
+    check: Option<ProbeCheck>,
     /// This frame's inputs of the world reflections and of the sun's rays (group 2), made by
     /// [`ProbeGi::begin_rays`] for the dispatches in the frame's ray pass.
     reflect_inputs: Option<wgpu::BindGroup>,
@@ -638,6 +644,8 @@ pub(crate) struct RayWork {
     pub full_reflections: bool,
     /// The sun's rays.
     pub sun: bool,
+    /// Rendering's check of the probes ([`ProbeGi::dispatch_check`]).
+    pub check: bool,
     /// The probe grid scrolled this frame: the reflections must not read the atlas before
     /// this frame's rows are copied into it ([`ProbeGi::end_rays`]), or a hit at the grid's
     /// leading edge is lit by the probes that left at the far side.
@@ -647,7 +655,7 @@ pub(crate) struct RayWork {
 impl RayWork {
     /// Whether the pass holds anything.
     pub fn any(&self) -> bool {
-        self.probes || self.reflections || self.full_reflections || self.sun
+        self.probes || self.reflections || self.full_reflections || self.sun || self.check
     }
 
     /// Whether the pass holds reflections, of either kind.
@@ -692,6 +700,116 @@ struct FullReflections {
     counting: bool,
     /// The last frame that asked traced every pixel's reflection.
     traced: bool,
+}
+
+/// Rendering's check of the probes (`RenderSettings::ray_probe_check`, ray_probe_check.wgsl
+/// `cs_probe_check`): the irradiance the probe nearest the camera holds facing each of the six
+/// axis directions, against a brute-force reference of 4,096 rays a direction a frame through
+/// the frame's ray scene, each seen as a probe ray sees it, kept as a mean over the frames.
+struct ProbeCheck {
+    pipeline: wgpu::ComputePipeline,
+    /// Group 2: `out`.
+    group: wgpu::BindGroup,
+    /// `check_out` (ray_probe_check.wgsl), read back.
+    out: GpuReadback,
+    /// The frame's ray pass checks: copy `out` out after it.
+    ran: bool,
+    /// What the readbacks told, while they are of one probe.
+    seen: Option<CheckedProbe>,
+}
+
+/// The six axis directions the check reads, in its order, as the diagnostics name them.
+const CHECK_AXES: [&str; 6] = ["px", "nx", "py", "ny", "pz", "nz"];
+/// `check_out`: the probe's six, its position, then the sums, `CHECK_GROUPS` a direction.
+const CHECK_GROUPS: usize = 16;
+const CHECK_BYTES: u64 = ((7 + 6 * CHECK_GROUPS) * 16) as u64;
+/// The means are over the frames read since the probe was last another, up to this many (a
+/// running mean, then a blend that forgets older frames as the light settles): enough of the
+/// probe's updates that its own noise (a fifth from one to the next under a canopy) leaves its
+/// mean a few percent off at most.
+const CHECK_FRAMES: u32 = 128;
+
+/// The probe the check read last, and the means of the frames read since it became that probe:
+/// the probe's own irradiance and the reference's, so that the two differ by what the probes
+/// get wrong on the whole, and the probe's spread from frame to frame, its flicker.
+#[derive(Clone, Copy, Debug, Default)]
+struct CheckedProbe {
+    /// Camera-relative position and grid index, as the latest readback had them.
+    position: [f32; 3],
+    index: f32,
+    /// The probe's own irradiance (lux, rgb) facing each direction, over `frames` frames.
+    own: [[f64; 3]; 6],
+    /// The mean of the square of its luminance over the same frames.
+    own_square: [f64; 6],
+    /// Its state (1: lit in this epoch, + 2: in use), as the latest readback read it.
+    state: f32,
+    /// The reference's irradiance (lux, rgb) facing each direction, over `frames` frames.
+    reference: [[f64; 3]; 6],
+    frames: u32,
+}
+
+impl CheckedProbe {
+    /// Take in one readback of `check_out` (little-endian `vec4<f32>`s).
+    fn read(seen: Option<CheckedProbe>, bytes: &[u8]) -> Option<CheckedProbe> {
+        let f = |i: usize| -> f32 {
+            let at = i * 4;
+            f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        if bytes.len() < CHECK_BYTES as usize {
+            return seen;
+        }
+        let position = [f(24), f(25), f(26)];
+        let index = f(27);
+        // Another probe (the camera moved off this one, or the grid scrolled under it): start
+        // the reference's mean again.
+        let same = seen.is_some_and(|s| {
+            s.index == index && (0..3).all(|i| (s.position[i] - position[i]).abs() < 0.01)
+        });
+        let mut now = if same {
+            seen.unwrap()
+        } else {
+            CheckedProbe::default()
+        };
+        now.position = position;
+        now.index = index;
+        now.state = f(3);
+        now.frames = (now.frames + 1).min(CHECK_FRAMES);
+        let keep = 1.0 - 1.0 / now.frames as f64;
+        for k in 0..6 {
+            let e = [f(k * 4) as f64, f(k * 4 + 1) as f64, f(k * 4 + 2) as f64];
+            if e.iter().any(|v| !v.is_finite()) {
+                continue;
+            }
+            for (value, e) in now.own[k].iter_mut().zip(e) {
+                *value = *value * keep + e * (1.0 - keep);
+            }
+            now.own_square[k] = now.own_square[k] * keep + luma(e).powi(2) * (1.0 - keep);
+        }
+        for (k, reference) in now.reference.iter_mut().enumerate() {
+            let (mut sum, mut rays) = ([0.0f64; 3], 0.0f64);
+            for g in 0..CHECK_GROUPS {
+                let at = (7 + k * CHECK_GROUPS + g) * 4;
+                for (c, sum) in sum.iter_mut().enumerate() {
+                    *sum += f(at + c) as f64;
+                }
+                rays += f(at + 3) as f64;
+            }
+            if rays <= 0.0 || sum.iter().any(|v| !v.is_finite()) {
+                continue;
+            }
+            for (c, value) in reference.iter_mut().enumerate() {
+                // Mean radiance over cosine-spread directions, times pi: irradiance.
+                let e = std::f64::consts::PI * sum[c] / rays;
+                *value = *value * keep + e * (1.0 - keep);
+            }
+        }
+        Some(now)
+    }
+}
+
+/// Luminance of a linear rgb.
+fn luma(c: [f64; 3]) -> f64 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
 /// One ray toward the sun from every pixel (`cs_sun`, a measurement for now): its program, its
@@ -832,11 +950,11 @@ fn copy_atlas_rows(
     atlas: &wgpu::Texture,
     rows: &[(u32, u32)],
 ) {
-    let size = TEXELS * TILES_X;
+    let size = TILE * TILES_X;
     for &(first, n) in rows {
         let origin = wgpu::Origin3d {
             x: 0,
-            y: first * TEXELS,
+            y: first * TILE,
             z: 0,
         };
         encoder.copy_texture_to_texture(
@@ -854,7 +972,7 @@ fn copy_atlas_rows(
             },
             wgpu::Extent3d {
                 width: size,
-                height: n * TEXELS,
+                height: n * TILE,
                 depth_or_array_layers: 2,
             },
         );
@@ -945,7 +1063,7 @@ impl ProbeGi {
         // A one-tile stand-in until probe GI turns on.
         let atlas = atlas_texture(
             device,
-            TEXELS,
+            TILE,
             wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         );
         let atlas_view = array_view(&atlas);
@@ -999,7 +1117,7 @@ impl ProbeGi {
         let hardware = rays == Rays::Hardware;
         let world = rays == Rays::World;
         let device = &shared.device;
-        let size = TEXELS * TILES_X;
+        let size = TILE * TILES_X;
         self.atlas = atlas_texture(
             device,
             size,
@@ -1278,6 +1396,38 @@ impl ProbeGi {
                 traced: false,
             }
         });
+        // Rendering's check of the probes: where its sums go.
+        let check = world.then(|| {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("probe check"),
+                entries: &[layout_entry(30, S::COMPUTE, storage(false))],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("probe check"),
+                bind_group_layouts: &[
+                    Some(&shared.frame_layout),
+                    Some(scene_layout),
+                    Some(&layout),
+                ],
+                immediate_size: 0,
+            });
+            let out = GpuReadback::new(device, "probe check", CHECK_BYTES);
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("probe check"),
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 30,
+                    resource: out.buffer.as_entire_binding(),
+                }],
+            });
+            ProbeCheck {
+                pipeline: pipeline("cs_probe_check", &pipeline_layout),
+                group,
+                out,
+                ran: false,
+                seen: None,
+            }
+        });
         let usage = wgpu::BufferUsages::STORAGE;
         let grow_usage = usage | wgpu::BufferUsages::COPY_SRC;
         self.active = Some(Active {
@@ -1312,6 +1462,7 @@ impl ProbeGi {
             hw: hardware.then(|| rt::HwScene::new(device)),
             sun,
             full,
+            check,
             reflect_inputs: None,
             sun_inputs: None,
             sun_counted: false,
@@ -2847,7 +2998,8 @@ impl ProbeGi {
     /// Before the frame's ray pass, while the rays trace the frame's ray scene: make what
     /// its dispatches bind. `reflections`: trace world reflections at half size into
     /// `targets.world_reflection`, or every pixel's reflection ([`ReflectionRays`]); `sun`:
-    /// shoot the sun's rays (its value: count them), see [`encode_sun`](Self::encode_sun).
+    /// shoot the sun's rays (its value: count them), see [`encode_sun`](Self::encode_sun);
+    /// `check`: Rendering's check of the probes ([`dispatch_check`](Self::dispatch_check)).
     /// Says which the pass holds.
     pub fn begin_rays(
         &mut self,
@@ -2856,6 +3008,7 @@ impl ProbeGi {
         targets: &crate::targets::Targets,
         reflections: Option<ReflectionRays<'_>>,
         sun: Option<bool>,
+        check: bool,
     ) -> RayWork {
         let mut work = RayWork::default();
         if !self.traces_ray_world() || self.active.as_ref().is_none_or(|a| a.group.is_none()) {
@@ -2888,6 +3041,17 @@ impl ProbeGi {
                 }
                 full.inputs = full_inputs;
             }
+            if let Some(probe_check) = active.check.as_mut() {
+                // What arrived of an earlier frame's check (a frame without one forgets it).
+                if let Some(bytes) = probe_check.out.take() {
+                    probe_check.seen = CheckedProbe::read(probe_check.seen, &bytes);
+                }
+                if !check {
+                    probe_check.seen = None;
+                }
+                probe_check.ran = check;
+                work.check = check;
+            }
             active.reflect_inputs = reflect_inputs;
             active.sun_inputs = sun_inputs;
             active.sun_counted = sun == Some(true);
@@ -2915,6 +3079,20 @@ impl ProbeGi {
         pass.dispatch_workgroups((work.probes * work.rays).div_ceil(64), 1, 1);
         pass.set_pipeline(&active.update);
         pass.dispatch_workgroups(work.probes + work.cleared, 1, 1);
+    }
+
+    /// In the frame's ray pass: Rendering's check of the probes ([`begin_rays`](Self::begin_rays)
+    /// said so; `RenderSettings::ray_probe_check`), 6 x 16 workgroups of 64 threads.
+    pub fn dispatch_check(&self, pass: &mut wgpu::ComputePass<'_>) {
+        let Some(probe_check) = self.active.as_ref().and_then(|a| a.check.as_ref()) else {
+            return;
+        };
+        if !probe_check.ran {
+            return;
+        }
+        pass.set_bind_group(2, &probe_check.group, &[]);
+        pass.set_pipeline(&probe_check.pipeline);
+        pass.dispatch_workgroups(6 * CHECK_GROUPS as u32, 1, 1);
     }
 
     /// In the frame's ray pass: the sun's rays ([`begin_rays`](Self::begin_rays) said so).
@@ -2988,6 +3166,11 @@ impl ProbeGi {
         }
         let counted = std::mem::take(&mut active.probes_counting);
         active.probe_counts.copy(encoder, counted);
+        if let Some(probe_check) = active.check.as_mut()
+            && std::mem::take(&mut probe_check.ran)
+        {
+            probe_check.out.copy(encoder);
+        }
         if active.sun_inputs.take().is_some()
             && let Some(sun) = active.sun.as_mut()
         {
@@ -3088,6 +3271,56 @@ impl ProbeGi {
             d.set("render.ray.reflect_screen", screen);
             d.set("render.ray.reflect_rays", rays);
             d.set("render.ray.reflect_reused", reused);
+        }
+        // Rendering's check of the probes, once a readback arrived (none while it is off): the
+        // probe nearest the camera's irradiance (lux, its luminance) facing each axis
+        // direction, the reference's, both means over the same frames, their ratio (-1 where
+        // the reference is dark), the probe's spread from frame to frame (relative to its
+        // mean), the worst ratio's distance from 1 and the worst spread over the directions
+        // whose reference holds at least a tenth of the brightest's, the frames in the means,
+        // the probe's state (1: lit in this epoch, + 2: in use) and where it is from the camera.
+        if let Some(seen) = self
+            .active
+            .as_ref()
+            .and_then(|a| a.check.as_ref())
+            .and_then(|c| c.seen)
+        {
+            let brightest = seen
+                .reference
+                .iter()
+                .map(|c| luma(*c))
+                .fold(0.0f64, f64::max);
+            let (mut worst, mut flicker) = (0.0f64, 0.0f64);
+            for (k, axis) in CHECK_AXES.iter().enumerate() {
+                let (own, reference) = (luma(seen.own[k]), luma(seen.reference[k]));
+                let ratio = if reference > 1e-6 {
+                    own / reference
+                } else {
+                    -1.0
+                };
+                // The probe's spread from frame to frame, relative to its mean.
+                let spread = if own > 1e-6 {
+                    (seen.own_square[k] - own * own).max(0.0).sqrt() / own
+                } else {
+                    0.0
+                };
+                if reference >= 0.1 * brightest && reference > 1e-6 {
+                    worst = worst.max((ratio - 1.0).abs());
+                    flicker = flicker.max(spread);
+                }
+                d.set(&format!("render.gi.check_probe_{axis}"), own);
+                d.set(&format!("render.gi.check_ref_{axis}"), reference);
+                d.set(&format!("render.gi.check_ratio_{axis}"), ratio);
+                d.set(&format!("render.gi.check_spread_{axis}"), spread);
+            }
+            d.set("render.gi.check_worst", worst);
+            d.set("render.gi.check_flicker", flicker);
+            d.set("render.gi.check_frames", seen.frames as f64);
+            d.set("render.gi.check_state", seen.state as f64);
+            // Where the probe is from the camera (meters).
+            for (axis, at) in ["dx", "dy", "dz"].iter().zip(seen.position) {
+                d.set(&format!("render.gi.check_{axis}"), at as f64);
+            }
         }
     }
 }

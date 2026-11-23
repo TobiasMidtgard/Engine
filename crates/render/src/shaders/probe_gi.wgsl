@@ -102,8 +102,8 @@ fn updated_slot(probe: u32) -> u32 {
 fn sleeps_now(slot: u32, world: vec3<i32>) -> bool {
     let state = probe_state[slot];
     if (any(state.xyz != world) || state.w < 2) { return false; }
-    let tile = vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS;
-    if (abs(textureLoad(gi_atlas, vec2<i32>(tile), 1, 0).w - frame.gi_grid.w) > 0.5) { return false; }
+    let map = probe_gi_slot_map(slot);
+    if (abs(textureLoad(gi_atlas, vec2<i32>(map), 1, 0).w - frame.gi_grid.w) > 0.5) { return false; }
     return (state.w - 2) % SLEEP_TURNS != SLEEP_TURNS - 1;
 }
 
@@ -214,6 +214,32 @@ var<workgroup> shared_rays: array<vec4<f32>, MAX_RAYS>;
 var<workgroup> shared_dirs: array<vec3<f32>, MAX_RAYS>;
 
 // One probe per workgroup, one texel of its maps per thread: blend this frame's rays into them.
+// Store texel `t` (0..PROBE_GI_TEXELS) of the probe's maps at `map` (`probe_gi_slot_map`):
+// irradiance in layer 0, moments in layer 1, and the same into its tile's border wherever the
+// border stands for its direction. Across the map's left and right edges the octahedron folds
+// back onto itself mirrored top to bottom, across the top and bottom edges mirrored left to
+// right, and its four corners are one direction: each corner of the border holds the map's
+// corner across from it.
+fn store_probe_texel(map: vec2<u32>, t: vec2<u32>, irradiance: vec4<f32>, moments: vec4<f32>) {
+    let n = i32(PROBE_GI_TEXELS);
+    let p = vec2<i32>(t);
+    let flip = vec2<i32>(n - 1) - p;
+    let at = vec2<i32>(map);
+    store_probe_pair(at + p, irradiance, moments);
+    if (p.x == 0) { store_probe_pair(at + vec2<i32>(-1, flip.y), irradiance, moments); }
+    if (p.x == n - 1) { store_probe_pair(at + vec2<i32>(n, flip.y), irradiance, moments); }
+    if (p.y == 0) { store_probe_pair(at + vec2<i32>(flip.x, -1), irradiance, moments); }
+    if (p.y == n - 1) { store_probe_pair(at + vec2<i32>(flip.x, n), irradiance, moments); }
+    if ((p.x == 0 || p.x == n - 1) && (p.y == 0 || p.y == n - 1)) {
+        store_probe_pair(at + select(vec2<i32>(n), vec2<i32>(-1), flip == vec2<i32>(0)), irradiance, moments);
+    }
+}
+
+fn store_probe_pair(texel: vec2<i32>, irradiance: vec4<f32>, moments: vec4<f32>) {
+    textureStore(atlas_out, texel, 0, irradiance);
+    textureStore(atlas_out, texel, 1, moments);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>, @builtin(local_invocation_index) thread: u32) {
     let probe = group.x;
@@ -223,10 +249,7 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
         // Scrolled in, not traced yet: written empty and in no epoch, so `probe_gi` skips it
         // (fading toward the sky guess by its share) rather than reading the probe that
         // scrolled out of the far side; its first trace starts it fresh.
-        let tile = vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS;
-        let texel = vec2<i32>(tile + local.xy);
-        textureStore(atlas_out, texel, 0, vec4<f32>(0.0, 0.0, 0.0, 1.0));
-        textureStore(atlas_out, texel, 1, vec4<f32>(0.0, 0.0, 0.0, -1.0));
+        store_probe_texel(probe_gi_slot_map(slot), local.xy, vec4<f32>(0.0, 0.0, 0.0, 1.0), vec4<f32>(0.0, 0.0, 0.0, -1.0));
         if (thread == 0u) {
             let g = slot_grid(slot);
             probe_state[slot] = vec4<i32>(pass_.world_origin.xyz + vec3<i32>(g), 0);
@@ -255,8 +278,8 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
         }
         return;
     }
-    let tile = vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS;
-    let texel = vec2<i32>(tile + local.xy);
+    let map = probe_gi_slot_map(slot);
+    let texel = vec2<i32>(map + local.xy);
     let old_irradiance = textureLoad(gi_atlas, texel, 0, 0);
     let old_moments = textureLoad(gi_atlas, texel, 1, 0);
     // A probe new to its slot, or written before every probe started over, has no history.
@@ -296,9 +319,9 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     // keeps as much of its old light as an awake probe does over that many turns.
     if (!fresh && all(state.xyz == world) && state.w >= 2) { keep = pow(keep, f32(SLEEP_TURNS)); }
     if (fresh) { keep = 0.0; }
-    textureStore(atlas_out, texel, 0, vec4<f32>(mix(irradiance, old_irradiance.rgb, keep), 1.0));
-    // w: the epoch it was written in (`probe_gi` ignores probes from another).
-    textureStore(atlas_out, texel, 1, vec4<f32>(mix(moments, old_moments.xy, keep), in_use, frame.gi_grid.w));
+    // Moments' w: the epoch it was written in (`probe_gi` ignores probes from another).
+    store_probe_texel(map, local.xy, vec4<f32>(mix(irradiance, old_irradiance.rgb, keep), 1.0),
+        vec4<f32>(mix(moments, old_moments.xy, keep), in_use, frame.gi_grid.w));
     if (thread == 0u) {
         // Awake while something is near; a fresh probe stays awake for its first turn. With
         // `GI_STUCK_SLEEP` one stuck inside something sleeps too: it lights nothing either

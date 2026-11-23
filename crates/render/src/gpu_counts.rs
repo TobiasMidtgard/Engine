@@ -102,3 +102,88 @@ impl GpuCounts {
         }
     }
 }
+
+/// A buffer a pass writes on the GPU, of any size, and its copy for the CPU to read some
+/// frames later, as [`GpuCounts`] reads its four counters: copied out after the pass, mapped
+/// once the copy was submitted. Rendering's check of the probes reads its sums through one
+/// (probe_gi, `ProbeCheck`).
+pub(crate) struct GpuReadback {
+    /// What the pass binds (`STORAGE`).
+    pub(crate) buffer: wgpu::Buffer,
+    read: wgpu::Buffer,
+    size: u64,
+    /// `COUNTS_*`.
+    state: Arc<AtomicU8>,
+    /// This frame's commands copy the buffer out: map the copy once they are submitted.
+    copied: bool,
+}
+
+impl GpuReadback {
+    pub(crate) fn new(device: &wgpu::Device, label: &str, size: u64) -> Self {
+        let buffer = |label: &str, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            buffer: buffer(
+                label,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            ),
+            read: buffer(
+                &format!("{label} readback"),
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            ),
+            size,
+            state: Default::default(),
+            copied: false,
+        }
+    }
+
+    /// After the pass: copy the buffer out for the CPU, unless an earlier copy is still on its
+    /// way (that frame's result is then not read).
+    pub(crate) fn copy(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.copied && self.state.load(Ordering::Acquire) == COUNTS_FREE {
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &self.read, 0, self.size);
+            self.copied = true;
+        }
+    }
+
+    /// What arrived since the last call, if anything; and ask for what last frame's commands
+    /// copied out (they are submitted by now).
+    pub(crate) fn take(&mut self) -> Option<Vec<u8>> {
+        if std::mem::take(&mut self.copied) {
+            self.state.store(COUNTS_MAPPING, Ordering::Release);
+            let state = self.state.clone();
+            self.read
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    let to = if r.is_ok() {
+                        COUNTS_MAPPED
+                    } else {
+                        COUNTS_FAILED
+                    };
+                    state.store(to, Ordering::Release);
+                });
+        }
+        let mut arrived = None;
+        match self.state.load(Ordering::Acquire) {
+            COUNTS_MAPPED => {
+                if let Ok(view) = self.read.slice(..).get_mapped_range() {
+                    arrived = Some(view.to_vec());
+                }
+                self.read.unmap();
+                self.state.store(COUNTS_FREE, Ordering::Release);
+            }
+            COUNTS_FAILED => {
+                self.read.unmap();
+                self.state.store(COUNTS_FREE, Ordering::Release);
+            }
+            _ => {}
+        }
+        arrived
+    }
+}

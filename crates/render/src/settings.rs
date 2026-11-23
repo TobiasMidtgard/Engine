@@ -708,6 +708,15 @@ pub struct RenderSettings {
     /// Meters from the camera within which a pixel gets a ray toward the sun under
     /// `trial_cut_more::RAY_SUN` (80 by default); farther ones keep the shadow maps.
     pub ray_sun_reach: f32,
+    /// Rendering's check of the probes, a measurement, off by default: each frame, the probe
+    /// nearest the camera's irradiance facing each axis direction against a brute-force
+    /// reference of 4,096 rays a direction through the frame's ray scene, each seen as a probe
+    /// ray sees it, both as means over the frames (ray_probe_check.wgsl, pass "probe check";
+    /// `render.gi.check_probe_*`, `check_ref_*`, `check_ratio_*`, `check_worst`, and the
+    /// probe's flicker `check_spread_*`, `check_flicker`; `gpu_sweep` rows `check_ray_probe`
+    /// and `check_ray_probe_world`). Needs `trial_cut_more::RAY_WORLD` on a GPU with ray
+    /// queries.
+    pub ray_probe_check: bool,
     /// How far light spreads under skin, meters at full strength (screen-space subsurface
     /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
     /// 0 = off.
@@ -1012,6 +1021,7 @@ impl Default for RenderSettings {
             ray_far_reach: 384.0,
             ray_sun_shadows: false,
             ray_sun_reach: 80.0,
+            ray_probe_check: false,
             subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,

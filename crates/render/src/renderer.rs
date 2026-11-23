@@ -3464,6 +3464,7 @@ impl Renderer {
                 &self.targets,
                 reflections,
                 (settings.ray_sun_shadows && !sun_trace).then_some(count_sun),
+                settings.ray_probe_check,
             );
             let traces_sun = ray.begin_sun(
                 &self.shared,
@@ -3493,6 +3494,11 @@ impl Renderer {
                     pass.set_bind_group(1, ray.group(), &[]);
                     if ray_work.probes {
                         self.probe_gi.dispatch_probes(&mut pass);
+                    }
+                    // (Rendering's check of the probes, a measurement: `ray_probe_check`.)
+                    if ray_work.check {
+                        self.perf.pass_inside(&mut cpu, &mut pass, "probe check");
+                        self.probe_gi.dispatch_check(&mut pass);
                     }
                     // (The trace and the measuring rays never run in one frame: one mark.)
                     if traces_sun {
