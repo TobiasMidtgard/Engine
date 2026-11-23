@@ -208,7 +208,14 @@ pub fn tab_kinds(by_type: bool, i: usize, isle: usize) -> Vec<Kind> {
     let Some(tab) = tabs.get(i.min(tabs.len().saturating_sub(1))) else {
         return Vec::new();
     };
-    let mut kinds = tab.kinds.clone();
+    // Farms that grow on no island of this region are left off (manufactories stay
+    // everywhere: home goods can be made abroad and shipped).
+    let mut kinds: Vec<Kind> = tab
+        .kinds
+        .iter()
+        .copied()
+        .filter(|k| grows_in_region(*k, isle))
+        .collect();
     kinds.sort_by_key(|k| !grows(*k, isle));
     kinds
 }
@@ -219,6 +226,18 @@ pub fn grows(k: Kind, isle: usize) -> bool {
         || crate::island::islands()
             .get(isle)
             .is_none_or(|i| i.fertility.allows(k))
+}
+
+/// Whether `k` grows on some island of `isle`'s region (always, for what needs no
+/// fertile ground).
+pub fn grows_in_region(k: Kind, isle: usize) -> bool {
+    let all = crate::island::islands();
+    let r = all.get(isle).map_or(0, |i| i.region());
+    !k.def().needs_fertility
+        || all
+            .iter()
+            .filter(|i| i.region() == r)
+            .any(|i| i.fertility.allows(k))
 }
 
 /// The tab the building is on.
