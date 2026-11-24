@@ -56,7 +56,7 @@ use crate::features::{GpuShared, GrowBuffer};
 use crate::frame::{FrameUniform, ViewData};
 use crate::material::{AlphaMode, StandardMaterial};
 use crate::mesh::Mesh;
-use crate::ray_scene::look::{material_light, texture_mean};
+use crate::ray_scene::look::{PairMeans, material_light, texture_mean, texture_pair_mean};
 use crate::settings::RenderSettings;
 use engine_assets::{Assets, Handle};
 use engine_world::WorldShift;
@@ -860,10 +860,14 @@ pub(crate) struct ProbeGi {
     jobs: HashMap<u32, BuildJob>,
     /// Each mesh's local bounds by version, to leave meshes away from the grid unbuilt.
     bounds: HashMap<u32, (u64, (Vec3, Vec3))>,
-    /// Each base color image's mean color by version (`None`: not RGBA8), read from its pixels
-    /// here: the image cache's copy waits on its lock, which an upload beside the gather holds
-    /// (on a zone's arrival 226 reads waited 1.08 s in one frame on the cloud VM).
-    texture_means: HashMap<u32, (u64, Option<Vec3>)>,
+    /// Each base color image's mean color and each metal-and-roughness image's mean as data
+    /// (`true` in the key), by version (`None`: not RGBA8), read from its pixels here: the
+    /// image cache's copy waits on its lock, which an upload beside the gather holds (on a
+    /// zone's arrival 226 reads waited 1.08 s in one frame on the cloud VM).
+    texture_means: HashMap<(u32, bool), (u64, Option<Vec3>)>,
+    /// A base colour image's and its metal map's means read together, by the two images and
+    /// their versions (`look::texture_pair_mean`).
+    texture_pairs: PairMeans,
     /// Triangles left out for the binding limit (warned once).
     left_out_warned: bool,
     /// What the instances were read for (`None`: read them all next frame).
@@ -1099,6 +1103,7 @@ impl ProbeGi {
             jobs: HashMap::new(),
             bounds: HashMap::new(),
             texture_means: HashMap::new(),
+            texture_pairs: HashMap::new(),
             left_out_warned: false,
             gathered: None,
             entries: EntityHashMap::default(),
@@ -1808,6 +1813,9 @@ impl ProbeGi {
         if self.texture_means.len() > 8192 {
             self.texture_means.clear();
         }
+        if self.texture_pairs.len() > 8192 {
+            self.texture_pairs.clear();
+        }
     }
 
     /// Read `entity` again and update its entry and instance; true when instances came or went
@@ -1938,13 +1946,28 @@ impl ProbeGi {
         // Anchor-relative -> mesh, and back.
         let mut rel = transform.0;
         rel.translation -= look.anchor;
-        let texture_mean = match (&material.base_color_texture, look.images) {
-            (Some(handle), Some(images)) => {
-                texture_mean(&mut self.texture_means, look.shared, images, *handle)
+        // The means of its base colour image and of its metal-and-roughness image, which
+        // makes some of it bare metal (no diffuse colour) as the raster reads it.
+        let mut mean_of =
+            |image: Option<Handle<crate::Image>>, data: bool| match (image, look.images) {
+                (Some(handle), Some(images)) => {
+                    texture_mean(&mut self.texture_means, look.shared, images, handle, data)
+                }
+                _ => None,
+            };
+        let base_mean = mean_of(material.base_color_texture, false);
+        let orm_mean = mean_of(material.metallic_roughness_texture, true);
+        let pair = match (
+            material.base_color_texture,
+            material.metallic_roughness_texture,
+            look.images,
+        ) {
+            (Some(base), Some(orm), Some(images)) => {
+                texture_pair_mean(&mut self.texture_pairs, images, base, orm)
             }
             _ => None,
         };
-        let (albedo, emissive) = material_light(material, texture_mean);
+        let (albedo, emissive) = material_light(material, base_mean, orm_mean, pair);
         entry.record = Some(Record {
             instance: GpuInstance {
                 to_local: affine_rows(&rel.inverse()),

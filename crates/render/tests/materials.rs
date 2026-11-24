@@ -631,30 +631,59 @@ fn preset_mean_albedos_match_their_maps() {
         let n = maps.base_color.width;
         let mut sum = [0.0f64; 3];
         let mut metal = 0.0f64;
+        let mut rough = 0.0f64;
+        // The base colour where it is bare metal, by how much of it is.
+        let mut steel = [0.0f64; 3];
+        // The base colour all over: diffuse (darkened by the occlusion map) and bare.
+        let mut base = [0.0f64; 3];
         for y in 0..n {
             for x in 0..n {
                 let c = maps.base_color.pixel(x, y);
                 let orm = maps.orm.pixel(x, y);
-                let diffuse = (1.0 - orm[2] as f32 / 255.0) * orm[0] as f32 / 255.0;
+                let bare = orm[2] as f32 / 255.0;
+                let diffuse = (1.0 - bare) * orm[0] as f32 / 255.0;
                 for (i, s) in sum.iter_mut().enumerate() {
                     *s += (srgb_to_linear(c[i]) * diffuse) as f64;
+                    steel[i] += (srgb_to_linear(c[i]) * bare) as f64;
+                    base[i] += (srgb_to_linear(c[i]) * (diffuse + bare)) as f64;
                 }
-                metal += orm[2] as f64 / 255.0;
+                metal += bare as f64;
+                rough += orm[1] as f64 / 255.0;
             }
         }
         let mean = sum.map(|s| (s / (n * n) as f64) as f32);
+        let base = base.map(|s| (s / (n * n) as f64) as f32);
+        let steel = (metal > 0.0).then(|| steel.map(|s| (s / metal) as f32));
         let metal = (metal / (n * n) as f64) as f32;
+        let rough = (rough / (n * n) as f64) as f32;
         let table = preset.mean_albedo();
         let table_metal = preset.mean_metalness();
+        let table_rough = preset.mean_roughness();
+        let table_steel = preset.mean_metal_colour();
+        // Made of the tables above: it holds wherever they do, within the same margin.
+        let table_base = preset.mean_base_colour();
         eprintln!(
-            "{}: measured {mean:.3?} metal {metal:.3}, table {table:.3?} metal {table_metal:.3}",
+            "{}: measured {mean:.3?} metal {metal:.3} rough {rough:.3} steel {steel:.3?}, table \
+             {table:.3?} metal {table_metal:.3} rough {table_rough:.3} steel {table_steel:.3?}",
             preset.name()
         );
+        let steel_apart = match (steel, table_steel) {
+            // (A trace of metal, a speck, has no colour worth a table's.)
+            (Some(_), None) => metal > 0.005,
+            (None, Some(_)) => true,
+            (Some(s), Some(t)) => (0..3).any(|i| (s[i] - t[i]).abs() > 0.03 + 0.1 * s[i]),
+            (None, None) => false,
+        };
         if (0..3).any(|i| (mean[i] - table[i]).abs() > 0.03 + 0.1 * mean[i])
+            || (0..3).any(|i| (base[i] - table_base[i]).abs() > 0.03 + 0.1 * base[i])
             || (metal - table_metal).abs() > 0.02 + 0.1 * metal
+            || (rough - table_rough).abs() > 0.03 + 0.1 * rough
+            || steel_apart
         {
             failures.push(format!(
-                "{}: maps {mean:.3?} metal {metal:.3}, table {table:.3?} metal {table_metal:.3}",
+                "{}: maps {mean:.3?} metal {metal:.3} rough {rough:.3} steel {steel:.3?} base \
+                 {base:.3?}, table {table:.3?} metal {table_metal:.3} rough {table_rough:.3} \
+                 steel {table_steel:.3?} base {table_base:.3?}",
                 preset.name()
             ));
         }

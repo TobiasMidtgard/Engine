@@ -40,7 +40,10 @@
 //! keeps, it looks at every slot over a few frames and then drops what it did not find.
 
 use super::*;
-use crate::ray_scene::look::{material_light, texture_mean};
+use crate::ray_scene::look::{
+    PairMeans, material_light, material_metal, material_metallic, material_roughness, texture_mean,
+    texture_pair_mean,
+};
 use crate::ray_scene::{
     RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere, RayTileSource,
     RayView,
@@ -238,8 +241,12 @@ pub(super) struct MeshRays {
     /// The mesh scene's log, as the last fill took it (kept for the allocations).
     touched: Vec<Entity>,
     gone: Vec<Entity>,
-    /// Base color images' mean colors, by image and version.
-    means: HashMap<u32, (u64, Option<Vec3>)>,
+    /// Images' means, by image, the way they are read (`true`: as data, a metal-and-roughness
+    /// map) and version (`look::texture_mean`).
+    means: HashMap<(u32, bool), (u64, Option<Vec3>)>,
+    /// A base colour image's and its metal map's means read together, by the two images and
+    /// their versions (`look::texture_pair_mean`).
+    pairs: PairMeans,
     /// What the scene holds of each `MeshInstances` slot's rows, by entity
     /// (`Entity::to_bits`).
     rows: FastMap<u64, HeldRows>,
@@ -369,26 +376,55 @@ impl MeshRays {
         self.image_allocations = allocations;
     }
 
-    /// What a ray's hit reads of `material`: its mean diffuse colour and its glow. Only
-    /// worked out while the scene is on.
+    /// What a ray's hit reads of `material` ([`RayLight`]), by the means of its base colour
+    /// image and its metal-and-roughness image (`ray_scene::look`). Only worked out while the
+    /// scene is on; its factors alone while it is off.
     pub(super) fn light(
         &mut self,
         gpu: &GpuShared,
         material: &StandardMaterial,
         images: Option<&Assets<Image>>,
-    ) -> ([f32; 3], [f32; 3]) {
+    ) -> RayLight {
         if !self.on {
-            return ([0.5; 3], [0.0; 3]);
+            return RayLight {
+                albedo: [0.5; 3],
+                roughness: material_roughness(material, None),
+                metallic: material_metallic(material, None),
+                ..RayLight::default()
+            };
         }
         if self.means.len() > 8192 {
             self.means.clear();
         }
-        let mean = match (material.base_color_texture, images) {
-            (Some(image), Some(images)) => texture_mean(&mut self.means, gpu, images, image),
+        if self.pairs.len() > 8192 {
+            self.pairs.clear();
+        }
+        let mut mean_of = |image: Option<Handle<Image>>, data: bool| match (image, images) {
+            (Some(image), Some(images)) => texture_mean(&mut self.means, gpu, images, image, data),
             _ => None,
         };
-        let (albedo, emissive) = material_light(material, mean);
-        (albedo.to_array(), emissive.to_array())
+        let mean = mean_of(material.base_color_texture, false);
+        let orm = mean_of(material.metallic_roughness_texture, true);
+        let pair = match (
+            material.base_color_texture,
+            material.metallic_roughness_texture,
+            images,
+        ) {
+            (Some(base), Some(orm), Some(images)) => {
+                texture_pair_mean(&mut self.pairs, images, base, orm)
+            }
+            _ => None,
+        };
+        let (albedo, emissive) = material_light(material, mean, orm, pair);
+        let metal = material_metal(material, mean, orm);
+        RayLight {
+            albedo: albedo.to_array(),
+            emissive: emissive.to_array(),
+            metal: metal.map(|(m, _)| m.to_array()),
+            metal_patterned: metal.is_some_and(|(_, patterned)| patterned),
+            roughness: material_roughness(material, orm),
+            metallic: material_metallic(material, orm),
+        }
     }
 
     /// Which texture a hit of `material` reads as its tile, and the texture's scale (xy) and
@@ -583,7 +619,7 @@ fn plant_sways(mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
 /// 4096 texels spread over it, and taken as 0 until then). A mask over no texture, or over one
 /// that no texel of passes as a hole, is drawn whole.
 fn cut_out(mat: &MaterialFrame) -> bool {
-    mat.masked && mat.alpha_lowest < mat.ray_surface[2]
+    mat.masked && mat.alpha_lowest < mat.ray_cutoff
 }
 
 /// The class a slot (or a row of one) takes by what it is; `None`: no ray sees it.
@@ -627,22 +663,41 @@ fn class_of(
     })
 }
 
+/// What a ray's hit reads of a material (`RayLook`), as `MeshRays::light` works it out: its
+/// mean diffuse colour, its glow (cd/m²), its bare metal's colour where it is kept and whether
+/// that follows the tile's pattern, how rough it is and how much of it is bare metal.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct RayLight {
+    pub albedo: [f32; 3],
+    pub emissive: [f32; 3],
+    pub metal: Option<[f32; 3]>,
+    pub metal_patterned: bool,
+    pub roughness: f32,
+    pub metallic: f32,
+}
+
 /// What a hit of an instance with material `mat` reads: class `class`, a shadow stand-in
-/// (`stand_in`), its tile, its colour times `tint` (a row's).
+/// (`stand_in`), its tile, its colour times `tint` (a row's, its bare metal's too).
 fn look_of(mat: &MaterialFrame, stand_in: bool, tile: Option<u16>, tint: [f32; 3]) -> RayLook {
+    let light = &mat.ray_light;
     // (A tint above 1 brightens the colour no further than a surface may be.)
     let albedo = [0, 1, 2].map(|k| {
-        let a = mat.ray_albedo[k];
+        let a = light.albedo[k];
         (a * tint[k]).min(a.max(0.95))
     });
+    let metal = light
+        .metal
+        .map(|m| [0, 1, 2].map(|k| (m[k] * tint[k]).min(m[k].max(1.0))));
     RayLook {
         albedo,
-        roughness: mat.ray_surface[0],
-        emissive: mat.ray_emissive,
-        metallic: mat.ray_surface[1],
+        roughness: light.roughness,
+        emissive: light.emissive,
+        metallic: light.metallic,
+        metal,
+        metal_patterned: light.metal_patterned,
         tile,
         uv: mat.ray_uv,
-        cutoff: mat.ray_surface[2],
+        cutoff: mat.ray_cutoff,
         coverage: mat.coverage,
         // A crown's stand-in is a one-sided copy of its cards: a ray that meets the back of
         // one has met a leaf, not the inside of something.
@@ -703,7 +758,7 @@ impl Fill<'_> {
             || self.unusable.get(&mesh.index) == Some(&mesh.version)
             || mat.blend
             || mat.unlit
-            || (mat.masked && mat.ray_surface[2] > 1.0)
+            || (mat.masked && mat.ray_cutoff > 1.0)
         {
             return None;
         }
@@ -1530,10 +1585,10 @@ mod tests {
     /// texel of which is below it, it is drawn whole.
     #[test]
     fn a_mask_cuts_holes_only_where_its_texture_is_clear() {
-        let mask = |alpha_lowest, cutoff| MaterialFrame {
+        let mask = |alpha_lowest, ray_cutoff| MaterialFrame {
             masked: true,
             alpha_lowest,
-            ray_surface: [0.5, 0.0, cutoff],
+            ray_cutoff,
             ..MaterialFrame::default()
         };
         assert!(cut_out(&mask(0.0, 0.5)));
@@ -1547,7 +1602,7 @@ mod tests {
         // Not masked: whole.
         assert!(!cut_out(&MaterialFrame {
             alpha_lowest: 0.0,
-            ray_surface: [0.5, 0.0, 0.5],
+            ray_cutoff: 0.5,
             ..MaterialFrame::default()
         }));
     }

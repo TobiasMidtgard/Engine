@@ -297,6 +297,54 @@ impl MaterialPreset {
         }
     }
 
+    /// The mean of the generated roughness map (perceptual): how rough the surface is at
+    /// roughness 1 (a material's roughness scales the map), as a ray's hit sees it
+    /// (`ray_scene::look`). `tests/materials.rs` checks it against the maps.
+    pub fn mean_roughness(self) -> f32 {
+        use MaterialPreset as P;
+        match self {
+            P::Brick => 0.843,
+            P::Cobblestone => 0.755,
+            P::Rock => 0.869,
+            P::Concrete => 0.858,
+            P::Plaster => 0.552,
+            P::WoodPlanks => 0.494,
+            P::Bark => 0.899,
+            P::RustySteel => 0.723,
+            P::PaintedMetal => 0.493,
+            P::Sand => 0.88,
+            P::ForestSoil => 0.878,
+            P::Gravel => 0.782,
+            P::Snow => 0.614,
+            P::Marble => 0.075,
+            P::Grass => 0.706,
+        }
+    }
+
+    /// The mean base color (linear RGB) of the generated maps where the surface is bare metal,
+    /// by how much of it is: the colour its shine takes (its F0) at metallic 1, as the raster
+    /// takes a metal's base colour for it. `None` for a preset without metal.
+    /// `tests/materials.rs` checks it against the maps.
+    pub fn mean_metal_colour(self) -> Option<[f32; 3]> {
+        match self {
+            MaterialPreset::RustySteel => Some([0.442, 0.438, 0.444]),
+            MaterialPreset::PaintedMetal => Some([0.503, 0.501, 0.505]),
+            _ => None,
+        }
+    }
+
+    /// The mean base color (linear RGB) of the generated maps over all of the surface, metal or
+    /// not: [`Self::mean_albedo`] and the bare metal's share of [`Self::mean_metal_colour`]
+    /// (the metal's without the occlusion map's darkening). What a metal map other than the
+    /// preset's own leaves of it: diffuse colour where that map says no metal, the shine's
+    /// colour where it says metal. `tests/materials.rs` checks it against the maps.
+    pub fn mean_base_colour(self) -> [f32; 3] {
+        let diffuse = self.mean_albedo();
+        let steel = self.mean_metal_colour().unwrap_or([0.0; 3]);
+        let metal = self.mean_metalness();
+        [0, 1, 2].map(|i| diffuse[i] + metal * steel[i])
+    }
+
     /// Whether some of the surface is bare metal (metalness 1).
     pub fn has_metal(self) -> bool {
         matches!(

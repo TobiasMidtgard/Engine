@@ -590,11 +590,10 @@ struct MaterialFrame {
     alpha_lowest: f32,
     /// `StandardMaterial::unlit`: the frame's rays pass it.
     unlit: bool,
-    /// What a ray's hit reads of it (`RayLook`), filled while the frame's ray scene is on:
-    /// its mean diffuse colour, its glow (cd/m²), and roughness, metallic, alpha cutoff.
-    ray_albedo: [f32; 3],
-    ray_emissive: [f32; 3],
-    ray_surface: [f32; 3],
+    /// What a ray's hit reads of it (`RayLook`), filled while the frame's ray scene is on
+    /// (`MeshRays::light`), and the alpha cutoff a ray tile's texel is tested against.
+    ray_light: rays::RayLight,
+    ray_cutoff: f32,
     /// The texture a hit's tile of it is filled from, and that texture's scale (xy) and
     /// offset (zw) over the mesh's uv (`RayLook::uv`): `RayTileName::None` while the scene is
     /// off, or when the material has no texture a hit can read.
@@ -4289,7 +4288,7 @@ impl RenderFeature for MeshFeature {
                 if i >= self.material_frames.len() {
                     self.material_frames.resize(i + 1, MaterialFrame::default());
                 }
-                let (ray_albedo, ray_emissive) = self.rays.light(gpu, material, image_assets);
+                let ray_light = self.rays.light(gpu, material, image_assets);
                 let (ray_tile, ray_uv) = self.rays.tile_name(material, image_assets, preset_size);
                 let (coverage, alpha_lowest) = mask_alpha(material, |image| match image_assets {
                     Some(images) => (
@@ -4313,19 +4312,14 @@ impl RenderFeature for MeshFeature {
                     slot: None,
                     impostor_key,
                     unlit: material.unlit,
-                    ray_albedo,
-                    ray_emissive,
-                    ray_surface: [
-                        material.perceptual_roughness,
-                        material.metallic,
-                        // A texel is a hole where its alpha times the colour's is below
-                        // the cutoff, as the raster tests it; a ray tile holds the texel's.
-                        // (Above 1: drawn nowhere, and in no ray.)
-                        match material.alpha_mode {
-                            AlphaMode::Mask(cutoff) => cutoff / material.base_color[3].max(1e-3),
-                            _ => 0.5,
-                        },
-                    ],
+                    ray_light,
+                    // A texel is a hole where its alpha times the colour's is below the
+                    // cutoff, as the raster tests it; a ray tile holds the texel's. (Above 1:
+                    // drawn nowhere, and in no ray.)
+                    ray_cutoff: match material.alpha_mode {
+                        AlphaMode::Mask(cutoff) => cutoff / material.base_color[3].max(1e-3),
+                        _ => 0.5,
+                    },
                     ray_tile,
                     ray_uv,
                 };

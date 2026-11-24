@@ -183,7 +183,15 @@ pub struct RayLook {
     pub roughness: f32,
     /// Its own glow, cd/m².
     pub emissive: [f32; 3],
+    /// How much of it is bare metal, 0 to 1.
     pub metallic: f32,
+    /// The colour of its bare metal (its F0, linear: its base colour), `None` where it isn't
+    /// known: a hit's shine takes grey steel's there (`RAY_METAL_GREY` in lib_ray.wgsl).
+    pub metal: Option<[f32; 3]>,
+    /// Whether that colour follows its tile's pattern as `albedo` does (a metal's own image),
+    /// or holds over the whole surface (a preset's steel, which its rust's pattern doesn't
+    /// touch).
+    pub metal_patterned: bool,
     /// Its layer in the ray tiles, where its colour varies.
     pub tile: Option<u16>,
     /// The texture's scale (xy) and offset (zw) over the mesh's coordinates.
@@ -203,6 +211,8 @@ impl Default for RayLook {
             roughness: 1.0,
             emissive: [0.0; 3],
             metallic: 0.0,
+            metal: None,
+            metal_patterned: false,
             tile: None,
             uv: [1.0, 1.0, 0.0, 0.0],
             cutoff: 0.5,

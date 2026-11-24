@@ -38,9 +38,6 @@ const HIT_SHINE_ROUGH: f32 = 0.75;
 // A hit's highlight is no sharper than this roughness gives: the reflection's pixels average it
 // over their lobe, and the sun's glint on a far pane, a texel wide, would only flicker.
 const HIT_SHINE_LEAST_ROUGH: f32 = 0.08;
-// The ray scene keeps a metal's roughness and how much metal it is, not its colour (its
-// diffuse albedo is what isn't metal): its shine is grey, as bright as polished steel's.
-const HIT_METAL_F0: f32 = 0.6;
 
 // Whether a shadow ray from camera-relative `origin` along `dir` (unit) gets `t_max` far: what
 // casts stops it (`RAY_CASTS`, and the leaves while the canopy map holds none), cut-out cards
@@ -100,7 +97,10 @@ fn reflected_hit_lit(p: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, lights
     let n_dot_v = max(dot(n, v), 1e-4);
     let rough = max(s.roughness, HIT_SHINE_LEAST_ROUGH);
     let alpha = rough * rough;
-    let f0 = mix(vec3<f32>(0.04), vec3<f32>(HIT_METAL_F0), saturate(s.metallic));
+    // A dielectric's 4 percent, and as far as it is metal its bare metal's colour (gold's,
+    // copper's; `RAY_METAL_GREY` where the scene keeps none), as shade_surface takes its base
+    // colour.
+    let f0 = mix(vec3<f32>(0.04), s.metal, saturate(s.metallic));
     let lift = p + n * max(0.002, t * 1e-4);
     // How far shadow rays look: the probes' spacing × 256, as `hit_radiance_with`'s.
     let reach = frame.gi_volume.w * 256.0;

@@ -42,7 +42,11 @@ struct RayRow {
     flags: u32,
     tris: u32,
     tile: u32,
-    tint: u32,
+    // the colour of its bare metal (its F0, linear; `unpack4x8unorm`): its base colour, with
+    // alpha 1 where it follows the tile's pattern as `albedo` does (a metal's own image) and
+    // about 0.5 where it holds over the surface (a preset's steel); alpha 0 where the scene
+    // doesn't keep it (`RAY_METAL_GREY` stands)
+    metal: u32,
     // mean diffuse colour, roughness
     albedo: vec4<f32>,
     // its own glow (cd/m^2), metallic
@@ -110,6 +114,9 @@ const RAY_TILE_BIAS: f32 = 0.0;
 const RAY_ROW_GROUND_MAP: u32 = 2048u;
 // Meters inside the ground colour map's edge over which its colour gives way to the row's.
 const RAY_GROUND_FADE_M: f32 = 32.0;
+// The F0 of a hit's bare metal where its row keeps no colour for it (a texture whose mean
+// isn't known yet, a preset without steel of its own): grey, as bright as polished steel's.
+const RAY_METAL_GREY: f32 = 0.6;
 // The least cosine of a ray to the face that the map's level is picked by (a grazing ray's
 // footprint grows 16 times at most).
 const RAY_GROUND_GRAZE: f32 = 0.0625;
@@ -514,6 +521,11 @@ struct RaySurface {
     // diffuse albedo (linear): the row's mean colour (the ground colour map's where the row
     // reads it), the tile's pattern around that mean and the triangle's vertex colour
     albedo: vec3<f32>,
+    // the colour of its bare metal (its F0, linear): the row's (`RAY_METAL_GREY` where it keeps
+    // none) by the triangle's vertex colour, and by the tile's pattern where the row's colour
+    // follows it, as the raster takes a metal's base colour; what its shine takes as far as it
+    // is metal (`metallic`)
+    metal: vec3<f32>,
     // its own glow (cd/m^2)
     emissive: vec3<f32>,
     roughness: f32,
@@ -565,6 +577,8 @@ fn ray_surface(hit: RayHit, origin: vec3<f32>, dir: vec3<f32>, cone: vec2<f32>) 
         base = min(ray_ground_albedo(base, origin + dir * hit.t, face, dir, hit.t, cone), vec3<f32>(0.95));
     }
     s.albedo = base;
+    let metal = unpack4x8unorm(row.metal);
+    s.metal = select(vec3<f32>(RAY_METAL_GREY), metal.rgb, metal.a > 0.25);
     s.emissive = row.emissive.rgb;
     s.roughness = row.albedo.w;
     s.metallic = row.emissive.w;
@@ -581,18 +595,25 @@ fn ray_surface(hit: RayHit, origin: vec3<f32>, dir: vec3<f32>, cone: vec2<f32>) 
     let into = dot(n, face);
     if (into < 0.0) { n = normalize(n - 2.0 * into * face); }
     s.n = n;
-    var albedo = base * ray_tri_color(at);
+    let vertex = ray_tri_color(at);
+    var albedo = base * vertex;
+    var metal_rgb = s.metal * vertex;
     if ((row.flags & RAY_ROW_HAS_TILE) != 0u) {
         // The tile's pattern around the tile's own mean (its last level): `RayRow.albedo`
         // holds the texture's mean already (look.rs `material_light`), so the texture counts
-        // once and the hit keeps the row's brightness on average.
+        // once and the hit keeps the row's brightness on average; the metal's colour holds it
+        // too (look.rs `material_metal`).
         let uv = ray_tri_uv(row.tris, at, hit.bary) * row.uv.xy + row.uv.zw;
         let level = ray_tile_level(row, at, hit, dir, cone);
         let texel = textureSampleLevel(ray_tiles, linear_repeat, uv, row.tile, level).rgb;
         let mean = textureLoad(ray_tiles, vec2<u32>(0u), row.tile, textureNumLevels(ray_tiles) - 1u).rgb;
-        albedo *= texel / max(mean, vec3<f32>(1.0 / 255.0));
+        let pattern = texel / max(mean, vec3<f32>(1.0 / 255.0));
+        albedo *= pattern;
+        // (A preset's steel holds under its rust's pattern, and grey steel has none of its own.)
+        if (metal.a > 0.75) { metal_rgb *= pattern; }
     }
     s.albedo = min(albedo, vec3<f32>(0.95));
+    s.metal = min(metal_rgb, vec3<f32>(1.0));
     return s;
 }
 

@@ -361,6 +361,9 @@ struct CachedImage {
     keys: [Option<(u64, u64)>; VIEW_SLOTS],
     /// Mean linear color of the pixels as uploaded (RGBA8 images), which outlives a release.
     mean: Option<[f32; 3]>,
+    /// The same read as data, never sRGB decoded (as a metal-and-roughness, normal or
+    /// occlusion slot samples them, whatever the image's flag says).
+    mean_data: Option<[f32; 3]>,
     /// What an alpha test does to its pixels (RGBA8 images), which outlives a release: how
     /// much of a leaf card is leaf, and whether a cutoff cuts holes in it.
     alpha: Option<AlphaStats>,
@@ -523,6 +526,14 @@ impl ImageCache {
     pub fn mean_color(&self, images: &Assets<Image>, handle: Handle<Image>) -> Option<[f32; 3]> {
         let index = images.canonical(handle).index();
         self.lock().images.get(&index).and_then(|c| c.mean)
+    }
+
+    /// The mean of `handle`'s pixels read as data, never sRGB decoded: what a metal-and-roughness
+    /// map holds on average as the raster samples it (linear, whatever the image's flag says).
+    /// Known as [`Self::mean_color`] is.
+    pub fn mean_data(&self, images: &Assets<Image>, handle: Handle<Image>) -> Option<[f32; 3]> {
+        let index = images.canonical(handle).index();
+        self.lock().images.get(&index).and_then(|c| c.mean_data)
     }
 
     /// Share of `handle`'s pixels an alpha test at 0.5 keeps, known once it was
@@ -773,8 +784,8 @@ impl ImageCache {
                 (texture, view, encoding, key, aliasable)
             })
         };
-        // A new image's mean color and alpha are read from its pixels, here too.
-        let looks = (!known).then(|| (mean_color(image), alpha_stats(image)));
+        // A new image's mean colors and alpha are read from its pixels, here too.
+        let looks = (!known).then(|| (mean_colors(image), alpha_stats(image)));
         let mut guard = self.lock();
         let inner = &mut *guard;
         inner.uploading.remove(&(index, slot));
@@ -799,19 +810,23 @@ impl ImageCache {
             texture,
             aliasable,
         });
-        let cached = inner.images.entry(index).or_insert_with(|| CachedImage {
-            version,
-            since: frame,
-            last_used: frame,
-            width: image.width,
-            height: image.height,
-            format: image.format,
-            released: false,
-            views: Default::default(),
-            pending: [None; VIEW_SLOTS],
-            keys: [None; VIEW_SLOTS],
-            mean: looks.map_or_else(|| mean_color(image), |l| l.0),
-            alpha: looks.map_or_else(|| alpha_stats(image), |l| l.1),
+        let cached = inner.images.entry(index).or_insert_with(|| {
+            let means = looks.map_or_else(|| mean_colors(image), |l| l.0);
+            CachedImage {
+                version,
+                since: frame,
+                last_used: frame,
+                width: image.width,
+                height: image.height,
+                format: image.format,
+                released: false,
+                views: Default::default(),
+                pending: [None; VIEW_SLOTS],
+                keys: [None; VIEW_SLOTS],
+                mean: means.map(|m| m.0),
+                mean_data: means.map(|m| m.1),
+                alpha: looks.map_or_else(|| alpha_stats(image), |l| l.1),
+            }
         });
         cached.views[slot] = Some(uploaded.clone());
         cached.pending[slot] = encoding;
@@ -1932,12 +1947,31 @@ fn spread_pixels(image: &Image) -> impl Iterator<Item = [u8; 4]> + '_ {
 /// Mean linear color of an RGBA8 image's pixels (about 4096 of them, spread over it), sRGB
 /// decoded when the image is sRGB.
 fn mean_color(image: &Image) -> Option<[f32; 3]> {
+    spread_mean(image, image.srgb)
+}
+
+/// [`mean_color`], and the mean of the same pixels read as data (never decoded: as a linear
+/// slot samples them), which is the same for an image that isn't sRGB.
+fn mean_colors(image: &Image) -> Option<([f32; 3], [f32; 3])> {
+    let color = mean_color(image)?;
+    let data = if image.srgb {
+        spread_mean(image, false)?
+    } else {
+        color
+    };
+    Some((color, data))
+}
+
+/// The mean of an RGBA8 image's pixels (about 4096 of them, spread over it: [`spread_pixels`]),
+/// linear: sRGB decoded with `srgb`, else the values as they are (a metal-and-roughness map's).
+/// `None` for other formats.
+pub(crate) fn spread_mean(image: &Image, srgb: bool) -> Option<[f32; 3]> {
     if image.format != PixelFormat::Rgba8 || image.data.len() < 4 {
         return None;
     }
     let decode = |c: u8| {
         let c = c as f32 / 255.0;
-        if !image.srgb {
+        if !srgb {
             c
         } else if c <= 0.04045 {
             c / 12.92
@@ -2110,8 +2144,13 @@ mod tests {
         }
         let mean = mean_color(&Image::new(8, 8, data.clone(), true)).expect("RGBA8");
         assert!((mean[0] - 0.25).abs() < 0.01 && mean[2] == 0.0, "{mean:?}");
-        let linear = mean_color(&Image::new(8, 8, data, false)).expect("RGBA8");
+        let linear = mean_color(&Image::new(8, 8, data.clone(), false)).expect("RGBA8");
         assert!((linear[1] - 94.0 / 255.0).abs() < 0.01, "{linear:?}");
+        // Read as data (a metal-and-roughness map loaded from a PNG, flagged sRGB): its values
+        // as they are, as the raster samples that slot.
+        let (color, data) = mean_colors(&Image::new(8, 8, data, true)).expect("RGBA8");
+        assert_eq!(color, mean);
+        assert!((data[1] - 94.0 / 255.0).abs() < 0.01, "{data:?}");
     }
 
     #[test]

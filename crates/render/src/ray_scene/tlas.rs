@@ -69,8 +69,10 @@ pub(super) struct RayRow {
     pub tris: u32,
     /// Its layer in the ray tiles.
     pub tile: u32,
-    /// Reserved (a tint over the tile).
-    pub tint: u32,
+    /// The colour of its bare metal ([`RayLook::metal`]): linear RGB in 8 bits each (lib_ray.wgsl
+    /// `unpack4x8unorm`, red in the low byte), alpha 255 where it follows the tile's pattern and
+    /// 128 where it holds over the surface ([`RayLook::metal_patterned`]); 0 where it isn't kept.
+    pub metal: u32,
     /// Mean diffuse colour, and roughness.
     pub albedo: [f32; 4],
     /// Its own glow (cd/m²), and metallic.
@@ -91,11 +93,15 @@ impl RayRow {
         }
         let [r, g, b] = look.albedo;
         let [er, eg, eb] = look.emissive;
+        let metal = look.metal.map_or(0, |[r, g, b]| {
+            let a: u32 = if look.metal_patterned { 255 } else { 128 };
+            byte(r) | byte(g) << 8 | byte(b) << 16 | a << 24
+        });
         Self {
             flags,
             tris: 0,
             tile: look.tile.map_or(0, u32::from),
-            tint: u32::MAX,
+            metal,
             albedo: [r, g, b, look.roughness],
             emissive: [er, eg, eb, look.metallic],
             uv: look.uv,
@@ -1320,6 +1326,8 @@ mod tests {
             roughness: 0.4,
             emissive: [1.0, 2.0, 3.0],
             metallic: 0.5,
+            metal: Some([1.0, 0.5, 0.0]),
+            metal_patterned: true,
             tile: Some(7),
             uv: [2.0, 2.0, 0.5, 0.5],
             cutoff: 0.5,
@@ -1335,9 +1343,19 @@ mod tests {
         assert_eq!(row.tile, 7);
         assert_eq!(row.albedo, [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(row.emissive, [1.0, 2.0, 3.0, 0.5]);
+        assert_eq!(row.metal, 0xff00_80ff);
+        let plain_metal = RayLook {
+            metal_patterned: false,
+            ..look
+        };
+        assert_eq!(
+            RayRow::new(RayClass::Solid, &plain_metal).metal,
+            0x8000_80ff
+        );
         assert_eq!(std::mem::size_of::<RayRow>(), 64);
         let plain = RayRow::new(RayClass::Solid, &RayLook::default());
         assert_eq!(plain.flags & 0xffff, RayClass::Solid.bit() as u32);
+        assert_eq!(plain.metal, 0);
     }
 
     #[test]

@@ -568,6 +568,105 @@ fn a_glossy_thing_shines_in_a_traced_mirror_as_in_a_drawn_one() {
     }
 }
 
+/// Where the glossy and the matte ball are in [`shine_app`], above the top of the screen: a
+/// gold ball and a chrome one, both bare metal
+/// (`a_metal_shines_in_its_own_colour_in_a_traced_mirror_as_in_a_drawn_one`).
+const GOLD: DVec3 = GLOSSY;
+const CHROME: DVec3 = MATTE;
+
+/// [`ball_app`] with the gold ball and the chrome one.
+fn metal_app(traced: bool) -> App {
+    let mut app = ball_app(traced);
+    for (at, (r, g, b)) in [(GOLD, (1.0, 0.77, 0.34)), (CHROME, (0.9, 0.9, 0.9))] {
+        app.world.spawn((
+            Transform::from_translation(at),
+            MeshRenderer::new(
+                Shape::Sphere {
+                    radius: 0.8,
+                    segments: 48,
+                },
+                StandardMaterial {
+                    perceptual_roughness: 0.25,
+                    ..StandardMaterial::color(r, g, b).with_metallic(1.0)
+                },
+            ),
+        ));
+    }
+    app
+}
+
+/// A reflected metal shines in its own colour (ray_hit_light.wgsl `reflected_hit_lit`: its F0
+/// is its bare metal's, `RaySurface::metal`, the row's colour of it): in the mirror, a gold
+/// ball's reflection is yellower than a chrome one's beside it, traced by the frame's rays as
+/// the drawn mirror shows it. With one grey F0 for every metal the two looked alike.
+#[test]
+fn a_metal_shines_in_its_own_colour_in_a_traced_mirror_as_in_a_drawn_one() {
+    for (traced, what) in [(false, "drawn"), (true, "traced")] {
+        let mut app = metal_app(traced);
+        app.update_n(5);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let d = app.world.resource::<Diagnostics>();
+        if traced {
+            if d.get("render.ray.supported") != Some(1.0) {
+                eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+                return;
+            }
+            assert_eq!(
+                d.get("render.ray.mirror_pictures"),
+                Some(1.0),
+                "a traced picture"
+            );
+        }
+        assert!(
+            pixel(GOLD).y < 0 && pixel(CHROME).y < 0,
+            "the balls are on screen"
+        );
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let name = format!("metal-{what}.png");
+        let path = dir.join(&name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(&name));
+        }
+        let shot = image::open(&path).expect("read the shot").to_rgb8();
+        // How much redder than blue a ball's reflection is round its middle (a mean of 7 x 7
+        // pixels): what gold's own colour adds to the sky and the sun it reflects.
+        let warmth = |p: DVec3| {
+            let c = pixel(mirrored(p));
+            let mut sum = [0.0f64; 3];
+            let mut n = 0.0;
+            for y in c.y - 3..=c.y + 3 {
+                for x in c.x - 3..=c.x + 3 {
+                    let q = shot.get_pixel(x as u32, y as u32).0;
+                    for k in 0..3 {
+                        sum[k] += f64::from(q[k]);
+                    }
+                    n += 1.0;
+                }
+            }
+            (sum[0] - sum[2]) / n
+        };
+        let (gold, chrome) = (warmth(GOLD), warmth(CHROME));
+        eprintln!(
+            "{what}: red over blue in the gold ball's reflection {gold:.1}, in the chrome one's \
+             {chrome:.1}"
+        );
+        assert!(
+            gold > chrome + METAL_WARMER,
+            "{what}: the gold ball's reflection is no yellower than the chrome one's: {gold:.1} \
+             against {chrome:.1}"
+        );
+    }
+}
+
+/// How much redder than blue the gold ball's reflection is than the chrome one's, at least
+/// (levels of 255; measured on lavapipe: 65 drawn and traced, 89 against 24).
+const METAL_WARMER: f64 = 30.0;
+
 /// With temporal anti-aliasing a traced picture holds still under a still camera, as a drawn
 /// one does: each frame's rays go through another point of their texels (the frame's jitter),
 /// and the picture's own history averages them (mirror_resolve.wgsl). Without it the picture
