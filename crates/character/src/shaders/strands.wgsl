@@ -175,7 +175,7 @@ fn fs_strand_fringe(in: StrandOut) -> @location(0) vec4<f32> {
 }
 
 const FRINGE_ALPHA: f32 = 0.7;
-const HUMAN_SHINE: f32 = 2.2;
+const HUMAN_SHINE: f32 = 1.5;
 
 fn strand_shade(in: StrandOut) -> vec3<f32> {
     let kind = strand_params.info.y;
@@ -215,12 +215,12 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     // locks and the roots darker.
     let lit = mix(occ, 1.0, 0.6);
     // Head hair: the sky light reaching into it passes fibres on the way and takes their color,
-    // by how deep the point sits from above and from the side facing the eye, as the strand
+    // by how deep the point sits toward the sky and from the side facing the eye, as the strand
     // renderer shades the near hair (without it the far locks read pale). Its darkening too
     // left the locks a good deal darker than the near hair: their baked occlusion holds it.
     var sky_tint = vec3<f32>(1.0);
     if (kind == 0u) {
-        let tau_sky = 0.5 * (strand_depth_toward(in, vec3<f32>(0.0, 1.0, 0.0)) + strand_depth_toward(in, nc));
+        let tau_sky = 0.5 * (strand_depth_toward(in, normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.99 * nc)) + strand_depth_toward(in, nc));
         sky_tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(min(0.6 * tau_sky, 3.0)));
     }
     var color = vec3<f32>(0.0);

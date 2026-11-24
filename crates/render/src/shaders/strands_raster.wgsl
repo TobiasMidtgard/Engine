@@ -105,7 +105,7 @@ fn strand_depth(inst: StrandInst, m: vec3<f32>, dir: vec3<f32>, steps: u32, jitt
 const HAIR_F0: f32 = 0.04654; // cuticle, index 1.55
 // How much brighter head hair's R highlight is than fur's: the near-white sheen that breaks
 // along the locks of a combed head.
-const HUMAN_SHINE: f32 = 2.2;
+const HUMAN_SHINE: f32 = 1.5;
 
 fn hair_fresnel(cos_theta: f32) -> f32 {
     return HAIR_F0 + (1.0 - HAIR_F0) * pow(1.0 - saturate(cos_theta), 5.0);
@@ -240,9 +240,11 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     // A thin layer (brows, lashes) has next to no hair behind it to scatter light back.
     let scatter = mix(0.8, 1.15, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5))
         * select(1.0, 1.1, fur) * select(1.0, 0.4, inst.more.w == 1u);
-    // How deep in the hair the point sits, from above and from the side facing the eye: its
-    // sky light and the gaps between locks.
-    let up = normalize(strand_to_model_dir(inst, vec3<f32>(0.0, 1.0, 0.0)));
+    // How deep in the hair the point sits, toward the sky above the side facing the eye and
+    // straight out of that side: its sky light and the gaps between locks. (Not straight up:
+    // hanging hair has the whole length of its own sheet above it, and measured that way all of
+    // it below the crown counted as buried: the back of a head in shade was one black mass.)
+    let up = normalize(strand_to_model_dir(inst, normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.99 * nc)));
     let out = normalize(strand_to_model_dir(inst, nc));
     let jitter = vec3<f32>(fract(random * 13.7), fract(random * 29.3), fract(random * 47.9)) - 0.5;
     let tau_sky = 0.5 * (strand_depth(inst, m, up, 16u, jitter) + strand_depth(inst, m, out, 16u, jitter));

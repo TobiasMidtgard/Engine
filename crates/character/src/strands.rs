@@ -49,6 +49,13 @@ const HANGING_PER_GUIDE: f32 = 250.0;
 const CHUNK_CELL: f32 = 0.035;
 /// How far a lock is drawn toward its chunk's mean shape below the crown (0..1).
 const CHUNK_GATHER: f32 = 0.6;
+/// How tightly the hairs of a hanging lock gather into strands a few millimetres wide (0..1).
+/// (At 0.75 every lock split into strings with dark between them, the look of wet hair.)
+const HANGING_STRANDS: f32 = 0.4;
+/// How much shorter than the longest a hanging lock can end (a share of its length).
+const LAYERED: f32 = 0.25;
+/// How far out of step neighboring hanks of wavy hair wave (rad, end to end of the range).
+const HANK_OUT_OF_STEP: f32 = 2.6;
 /// How far each hanging hair waves on its own about its lock (m, a 5.6 mm child wave in
 /// Tobias's gta-hair-sim).
 const CHILD_WAVE: f32 = 0.005;
@@ -740,7 +747,8 @@ fn grow_scalp(
         },
         HairStyle::Medium => Groom {
             length: 0.2 * k,
-            points: 18,
+            // Wavy hair needs the points for its waves.
+            points: 18 + (12.0 * a.hair.curl.clamp(0.0, 1.0)) as u32,
             density: BUNCHED_DENSITY * 170.0,
             gravity: 1.0,
             loft: 0.022,
@@ -750,7 +758,8 @@ fn grow_scalp(
         },
         HairStyle::Long => Groom {
             length: 0.42 * k,
-            points: 32,
+            // Wavy hair needs the points for its waves.
+            points: 32 + (24.0 * a.hair.curl.clamp(0.0, 1.0)) as u32,
             density: BUNCHED_DENSITY * 190.0,
             gravity: 1.0,
             // (Standing off the scalp as much as a real head of long hair does: at 1.2 cm it
@@ -835,25 +844,42 @@ fn grow_scalp(
             if !settle(&mut pts, sp, collider, lm, rest) {
                 continue;
             }
-            // Hanging hair waves as whole locks, shorter and deeper the curlier it is.
-            // Neighboring locks wave nearly in step (as real waves set across the hair), with
-            // enough difference that they catch the light apart; waves of their own would
-            // read as separate ribbons.
+            // Hanging hair waves as whole hanks, shorter and deeper the curlier it is: the
+            // locks of a hank (a chunk, below) wave together, in a plane of their own and out
+            // of step with the hank beside them, so the hair falls in wavy pieces that part
+            // from each other, as wavy hair does. (All in step and all toward and away from the
+            // head, the hair was one corrugated sheet whose waves did not show from behind.)
+            let hank = strand_center(sp.rest, CHUNK_CELL) * 1000.0;
             let around = (sp.rest - rest.head).x.atan2((sp.rest - rest.head).z);
-            let phase = around * 1.5 + (sp.rest.y - rest.head.y) * 20.0 + gr.range(-0.9, 0.9);
-            let wavelength = (0.2 - 0.13 * curl) * gr.range(0.9, 1.1);
+            let phase = around * 1.5
+                + (sp.rest.y - rest.head.y) * 20.0
+                + gr.range(-0.9, 0.9) * 0.4
+                + (hash01(hank) - 0.5) * HANK_OUT_OF_STEP * curl.min(0.5) * 2.0;
+            // (No shorter than eight points to a wave: fewer draws a zigzag.)
+            let last = pts.len() - 1;
+            let segment = g.length / last as f32;
+            let wavelength = (0.2 - 0.36 * curl).max(0.05).max(8.0 * segment) * gr.range(0.9, 1.1);
             let waves = g.length / wavelength;
-            let amp = gr.range(0.005, 0.011) + 0.025 * curl;
-            // Mostly toward and away from the head (which turns the lock's highlight), a
-            // little sideways.
+            // As steep as the curl (a wave's slope: 0.25 nearly straight, 1 a deep S), no
+            // sharper than half a radian from one point to the next. The smoothing every
+            // drawn hair gets flattens short waves, so the lock waves that much deeper.
+            let turn = std::f32::consts::TAU / wavelength;
+            let slope = (0.25 + 1.4 * curl) * gr.range(0.005, 0.011) / 0.008;
+            let flattened = (0.5 + 0.5 * (turn * segment).cos()).powi(SMOOTH_PASSES as i32);
+            let amp = (slope / turn).min(0.5 / (turn * turn * segment)) / flattened.max(0.4);
+            // Toward and away from the head (which turns the lock's highlight) and sideways,
+            // each hank its own mix.
             let out = (sp.p - lm.head).normalize_or(Vec3::Z);
             let side = out.cross(Vec3::Y).normalize_or(Vec3::X);
-            let tilt = gr.range(-0.3, 0.3);
+            let tilt =
+                gr.range(-0.3, 0.3) + (hash01(hank + Vec3::Y) - 0.5) * 2.4 * curl.min(0.5) * 2.0;
             let dir = (out + side * tilt).normalize();
-            let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
-                let wave = (phase + t * waves * std::f32::consts::TAU).sin() - phase.sin();
+                // (About where the lock settled, in and out by turns: with the wave's first
+                // value taken off, a hank lay centimetres farther in or out than its neighbors
+                // all the way down, and the hair shaded in soft blotches a hank wide.)
+                let wave = (phase + t * waves * std::f32::consts::TAU).sin();
                 *p += dir * (amp * t.min(0.5) * 2.0 * wave * hangs_free(*p, lm));
             }
         }
@@ -901,6 +927,28 @@ fn grow_scalp(
         }
     }
     let guide_grid = GuideGrid::new(&guides);
+    // How much of its full length a hanging lock has (see the locks below).
+    // (A lock that would end on top of a shoulder keeps its full length and falls past it:
+    // with every lock layered, three times as many hair ends lay on top of the shoulders,
+    // 5,900 of one long-haired person's against 1,700; this leaves 4,500. Lengthening single
+    // hairs that end there too kinked a thousand of them over the shoulder.)
+    // (Less on shorter hair: a quarter off locks 20 cm long chopped the hem of a bob ragged.)
+    let layered = LAYERED * ((g.length - 0.14) / 0.15).clamp(0.3, 1.0);
+    let on_shoulder = |end: Vec3| {
+        let end = end - lm.head;
+        end.x.abs() > 0.05 && end.z.abs() < 0.07 && (-0.2..-0.09).contains(&end.y)
+    };
+    let layers: Vec<f32> = guides
+        .iter()
+        .map(|(sp, pts)| {
+            let layer = 1.0 - layered * hash01(sp.rest * 1000.0 + Vec3::Y);
+            if on_shoulder(along(pts, layer)) {
+                1.0
+            } else {
+                layer
+            }
+        })
+        .collect();
     // A hair takes its shape (and its motion) only from guides on its own side of the part:
     // a hair following a guide from across it is combed the other way, and the part zigzags
     // along the edges of the guides' patches instead of running straight.
@@ -1021,8 +1069,11 @@ fn grow_scalp(
             if let Some(gi) = guide_grid.nearest(sp.p, &guides, |i| same_side(&guides[i].0)) {
                 let (gsp, gpts) = &guides[gi];
                 let off = sp.p - gsp.p;
+                // (No longer than that lock: alone below its end it trails as a thread.)
+                let reach = scale.min(1.0) * layers[gi];
                 for (k, p) in pts.iter_mut().enumerate() {
-                    *p = along(gpts, k as f32 / last as f32 * scale.min(1.0)) + off;
+                    let center = along(gpts, k as f32 / last as f32 * reach);
+                    *p = center + beside_lock(off, center, 1.0, lm);
                 }
             } else {
                 let jitter = hash01(sp.rest);
@@ -1045,16 +1096,30 @@ fn grow_scalp(
             } else {
                 // (Short hair's strands gather more loosely, 0.3-0.5 at the tip in groomers'
                 // practice: gathered tightly its tips meet in gelled spikes.)
-                (if g.gravity > 0.5 { 0.75 } else { 0.45 }) * (0.7 + 0.6 * hash01(strand * 1000.0))
+                (if g.gravity > 0.5 {
+                    HANGING_STRANDS
+                } else {
+                    0.45
+                }) * (0.7 + 0.6 * hash01(strand * 1000.0))
             };
             // The hairs of a lock share most of its tone, and a strand some of its own.
             lock_tone = Some(0.6 * hash01(gsp.rest) + 0.4 * hash01(strand * 1000.0 + Vec3::X));
             lock_edge = (off.length() / 0.025).min(1.0);
+            // Hanging locks differ: some gather to a point at their end and some stay loose,
+            // and they end at different lengths, as hair cut in layers and worn a while does.
+            // (Every lock alike, half gathered and all one length, the hair was an even sheet
+            // down to one hemline.)
+            let (pointed, layer) = if g.gravity > 0.5 {
+                (hash01(gsp.rest * 1000.0 + Vec3::Z), layers[gi])
+            } else {
+                (0.0, 1.0)
+            };
+            let c = (c * (0.9 + 0.45 * pointed)).min(0.95);
             // A shorter hair follows its lock only as far as it reaches.
-            let reach = scale.min(1.0);
+            let reach = scale.min(1.0) * layer;
             let end = if g.gravity > 0.5 {
                 let e = Vec3::new(r.normal(), r.normal() * 0.3, r.normal()) * 0.02;
-                e - sp.n * e.dot(sp.n) * 0.5
+                (e - sp.n * e.dot(sp.n) * 0.5) * (1.0 - 0.6 * pointed)
             } else {
                 Vec3::ZERO
             };
@@ -1075,13 +1140,16 @@ fn grow_scalp(
                 // where real ends spread and thin out unevenly. Each hair's end strays its
                 // own way a little (`end`).
                 let gather = if g.gravity > 0.5 {
-                    c * t.powf(0.8) * (1.0 - 0.5 * smoothstep(0.6, 1.0, t))
+                    c * t.powf(0.8) * (1.0 - 0.5 * (1.0 - pointed) * smoothstep(0.6, 1.0, t))
                 } else {
                     c * t.powf(0.8)
                 };
-                let follow = along(gpts, t * reach)
-                    + own * (1.0 - gather)
-                    + end * (smoothstep(0.7, 1.0, t) * g.length);
+                let center = along(gpts, t * reach);
+                let mut own = own * (1.0 - gather);
+                if g.gravity > 0.5 {
+                    own = beside_lock(own, center, 0.6, lm);
+                }
+                let follow = center + own + end * (smoothstep(0.7, 1.0, t) * g.length);
                 // Hanging hair takes its lock's shape all along (its own wander would cross
                 // its neighbors' and look like straw); short hair only toward the tip.
                 let w = if g.gravity > 0.5 {
@@ -1130,7 +1198,9 @@ fn grow_scalp(
             // Lifted off the hair and curving away, more toward the tip.
             let out = (sp.p - lm.head).normalize_or(Vec3::Y);
             let aside = Vec3::new(r.normal(), r.normal(), r.normal()) * 0.6;
-            let lift = r.range(0.003, 0.009) + g.length * 0.05;
+            // (At a twentieth of the hair's length one stood two centimetres outside the
+            // head's outline, a wire against the sky.)
+            let lift = r.range(0.003, 0.009) + g.length * 0.025;
             let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
@@ -1242,6 +1312,23 @@ fn grow_scalp(
                 let t = k as f32 / last as f32;
                 *p = collider.push_out(*p, off_skin(t));
             }
+        }
+        // A hair rooted clear of the part and held off the face to the other side of it crosses
+        // the forehead alone, from the hairline to the far temple: leave it out.
+        let crosses = |p: &Vec3| {
+            let q = *p - lm.head;
+            q.z > 0.05
+                && q.y > -0.02
+                && (q.x - PART_X) * (d.x - PART_X) < 0.0
+                && (q.x - PART_X).abs() > 0.02
+        };
+        if parted
+            && g.gravity > 0.5
+            && !flyaway
+            && (d.x - PART_X).abs() > 0.006
+            && pts.iter().skip(3).any(crosses)
+        {
+            continue;
         }
         // Scalp hair is cut, so it keeps its width almost to the end and tapers only over its
         // last fifth (tapered all along, as a hair that grows to its end does, the lower half of
@@ -1583,6 +1670,19 @@ const HAIRLINE_BAND: f32 = 0.02;
 /// crossed the hairs.
 fn hangs_free(p: Vec3, lm: &Landmarks) -> f32 {
     1.0 - smoothstep(-0.08, 0.0, p.y - lm.head.y)
+}
+
+/// A hanging hair's place beside its lock at `center`, from the offset `own` it has there. A
+/// hair rooted beyond its lock the way the lock falls keeps that offset all the way down, where
+/// it points out of the hair: `share` of that part is taken off (a hair in the lock keeps some,
+/// the hair's depth; a loose hair none, it has its own lift). Over the top of the head out is
+/// away from the head's center, below it away from the neck's axis. (Kept, the farthest of them
+/// hung up to two centimetres outside the hair's outline from the crown to the shoulder, a wire
+/// beside the head.)
+fn beside_lock(own: Vec3, center: Vec3, share: f32, lm: &Landmarks) -> Vec3 {
+    let from_head = center - lm.head;
+    let out = from_head.with_y(from_head.y.max(0.0)).normalize_or_zero();
+    own - out * (own.dot(out).max(0.0) * share)
 }
 
 /// The length of a polyline.
