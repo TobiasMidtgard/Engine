@@ -10,7 +10,7 @@ use engine_render::prelude::*;
 use engine_render::settings::shade_skip::COUNT_MESH_RUNS;
 use engine_render::settings::trial_cut_more::{RAY_MIRROR_PICTURES, RAY_WORLD};
 use engine_render::{
-    FrameContext, GpuShared, PlanarReflection, RenderDisabled, ViewData, capture_now,
+    FrameContext, GpuShared, PlanarReflection, RenderDisabled, Screenshots, ViewData, capture_now,
     planar_reflection_picture, rendering_reflection,
 };
 
@@ -402,6 +402,14 @@ fn a_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_it() {
         return;
     };
     assert_eq!(r.get("render.extra_views"), 1.0, "render.extra_views");
+    // The picture's copy into its chain and its levels are the view's own work, timed with it
+    // (where the GPU times its passes).
+    if r.get("render.extra_views_gpu_ms") > 0.0 {
+        assert!(
+            r.get("render.extra_views_gpu.mirror picture levels") >= 0.0,
+            "the picture's copy and levels are not the view's"
+        );
+    }
     assert_reflects_what_is_above(&r.shot, "drawn");
 }
 
@@ -439,6 +447,81 @@ fn a_traced_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_i
         r.get("render.ray.mirror_rays")
     );
     assert_reflects_what_is_above(&r.shot, "traced");
+}
+
+/// With temporal anti-aliasing a traced picture holds still under a still camera, as a drawn
+/// one does: each frame's rays go through another point of their texels (the frame's jitter),
+/// and the picture's own history averages them (mirror_resolve.wgsl). Without it the picture
+/// moved under the main view by a share of a texel each frame, and the reflections' outlines
+/// changed from one frame to the next.
+#[test]
+fn a_traced_mirror_holds_still_under_temporal_anti_aliasing() {
+    let mut app = ball_app(true);
+    app.world.resource_mut::<RenderSettings>().anti_aliasing = AntiAliasing::Taa;
+    app.update_n(40);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let supported = app
+        .world
+        .resource::<Diagnostics>()
+        .get("render.ray.supported");
+    if supported != Some(1.0) {
+        eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+        return;
+    }
+    let dir = std::env::temp_dir().join("engine-planar-reflections");
+    let _ = std::fs::create_dir_all(&dir);
+    // Frames in a row (each `update` places the mirror and traces its picture again).
+    let shots: Vec<image::RgbImage> = (0..3)
+        .map(|i| {
+            let path = dir.join(format!("still-{i}.png"));
+            app.world.resource_mut::<Screenshots>().request(&path);
+            app.update();
+            image::open(&path).expect("read the shot").to_rgb8()
+        })
+        .collect();
+    assert_eq!(
+        app.world
+            .resource::<Diagnostics>()
+            .get("render.ray.mirror_pictures"),
+        Some(1.0),
+        "a traced picture"
+    );
+    // The mirror's part of the screen (under the horizon, the reflections of the red and the
+    // yellow ball in it): how far each pixel moved from one frame to the next. The balls'
+    // outlines in the reflection are what moves. Measured on lavapipe, 400x300, the mirror's
+    // picture at its default half resolution: with the picture's history, 9 and 23 levels at
+    // most and 0 and 3 pixels past 16 (the real ball's outline above, the main view's own
+    // history, 6 and 14 at most); without it, 41 and 76 at most and 10 and 19 pixels past 16.
+    // The water's own shading keeps the average near 0.37 either way.
+    let top = pixel(mirrored(RED)).y.min(pixel(mirrored(YELLOW)).y) as u32 - 20;
+    for pair in shots.windows(2) {
+        let (mut most, mut past, mut sum, mut n) = (0i32, 0u32, 0i64, 0i64);
+        for y in top..WINDOW.y {
+            for x in 0..WINDOW.x {
+                let (a, b) = (pair[0].get_pixel(x, y).0, pair[1].get_pixel(x, y).0);
+                let mut moved = 0;
+                for c in 0..3 {
+                    let d = (i32::from(a[c]) - i32::from(b[c])).abs();
+                    moved = moved.max(d);
+                    sum += i64::from(d);
+                    n += 1;
+                }
+                most = most.max(moved);
+                past += u32::from(moved > 16);
+            }
+        }
+        let mean = sum as f64 / n as f64;
+        eprintln!("a frame later: mean {mean:.3}, most {most}, past 16 {past} (rows {top}..)");
+        assert!(mean < 0.6, "the reflection moved {mean:.3} on average");
+        assert!(
+            past <= 6,
+            "{past} pixels of the reflection moved more than 16"
+        );
+        assert!(most <= 32, "a pixel of the reflection moved {most}");
+    }
 }
 
 /// A white wall behind the mirror with a post's shadow on it, seen in the mirror: rendered with

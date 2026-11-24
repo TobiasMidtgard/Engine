@@ -1108,6 +1108,10 @@ struct FrameWork {
     /// Extra views' pictures to copy into this view's output, over the scene and under the
     /// overlays.
     composites: Vec<Composite>,
+    /// A planar reflection's view: the mip chain its picture is copied into and filtered at the
+    /// end of the view's own commands, so that their GPU time is the view's ("mirror picture
+    /// levels"; `planar_reflection::mirror_chain`).
+    mirror_chain: Option<wgpu::Texture>,
 }
 
 /// What a recorded frame hands back to the world, applied by [`Renderer::apply_return`] on the
@@ -2110,7 +2114,7 @@ impl Renderer {
             shared_lighting += lighting.is_some() as u32;
             self.set_borrowed(lighting, &settings);
             world.insert_resource(crate::frame::RenderingExtraView(camera));
-            let frame = self.extract_frame(
+            let mut frame = self.extract_frame(
                 world,
                 started,
                 Some(ExtraJob {
@@ -2119,6 +2123,14 @@ impl Renderer {
                     mirror: mirror.is_some(),
                 }),
             );
+            if let Some(mirror) = &mirror {
+                frame.mirror_chain = Some(crate::planar_reflection::mirror_chain(
+                    world,
+                    &self.shared,
+                    mirror,
+                    &self.targets.hdr.texture,
+                ));
+            }
             world.remove_resource::<crate::frame::RenderingExtraView>();
             if let Some(quality) = game_quality {
                 swap_quality(world, quality);
@@ -2131,23 +2143,13 @@ impl Renderer {
             );
             self.record_submit(frame);
             if let Some(mirror) = mirror {
-                let mut encoder =
-                    self.shared
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("planar reflection"),
-                        });
                 crate::planar_reflection::keep_picture(
                     world,
-                    &self.shared,
-                    &mut encoder,
                     &mirror,
                     camera,
-                    &self.targets.hdr.texture,
                     &self.targets.depth.view,
                     mirror_view,
                 );
-                self.shared.queue.submit([encoder.finish()]);
             }
             if let Some(portal) = portal {
                 world
@@ -2507,7 +2509,7 @@ impl Renderer {
             let wanted = crate::ray_mirror::RayMirrors::wanted(&settings, &self.shared);
             let can_trace = self.ray_scene.is_some() && self.probe_gi.traces_mirrors();
             self.ray_mirrors
-                .publish(world, &self.shared, &view, placed, (wanted, can_trace));
+                .publish(world, &self.shared, &view, placed, (wanted, can_trace, taa));
         }
         self.prepare_shared.clear();
         self.prepare_shared
@@ -2752,6 +2754,7 @@ impl Renderer {
             extra: is_extra,
             mirror,
             composites: Vec::new(),
+            mirror_chain: None,
             started,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
             cpu: cpu.park(),
@@ -2885,6 +2888,7 @@ impl Renderer {
             extra,
             mirror,
             composites,
+            mirror_chain,
         } = frame;
         let recording = Instant::now();
         // CPU time this thread spends, against the wall time: what is left is waiting
@@ -4090,6 +4094,16 @@ impl Renderer {
             }
         }
 
+        if let Some(chain) = &mirror_chain {
+            self.perf
+                .pass(&mut cpu, &mut encoder, "mirror picture levels");
+            crate::planar_reflection::record_picture_levels(
+                &self.shared,
+                &mut encoder,
+                &self.targets.hdr.texture,
+                chain,
+            );
+        }
         self.perf.end(&mut encoder);
         cpu.step("stats");
         let stats = self.collect_stats(&view, started);

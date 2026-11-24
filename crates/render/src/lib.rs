@@ -655,6 +655,11 @@ mod tests {
                 include_str!("shaders/mirror_depth.wgsl").into(),
                 false,
             ),
+            (
+                "mirror_resolve",
+                include_str!("shaders/mirror_resolve.wgsl").into(),
+                false,
+            ),
         ];
         // Every material preset's generator.
         for preset in MaterialPreset::ALL {

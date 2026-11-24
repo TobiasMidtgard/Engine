@@ -511,26 +511,20 @@ pub(crate) fn picture_mips(size: UVec2) -> u32 {
     (32 - (short / 8).max(1).leading_zeros()).clamp(1, 6)
 }
 
-/// Copy a mirror view's HDR scene color into its mip chain (made or remade at `size`) and
-/// filter the levels, then keep the picture for features to sample: the view's unjittered
-/// view-projection, eye and exposure. `encoder` is submitted right after the view.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn keep_picture(
+/// A mirror view's mip chain for its picture of the view's HDR scene colour `hdr`, made or
+/// remade at its size: the view's own commands copy the colour into it and filter the levels
+/// ([`record_picture_levels`], so that their GPU time is the view's), then [`keep_picture`]
+/// keeps the picture.
+pub(crate) fn mirror_chain(
     world: &mut World,
     gpu: &crate::features::GpuShared,
-    encoder: &mut wgpu::CommandEncoder,
     mirror: &MirrorCamera,
-    camera: Entity,
     hdr: &wgpu::Texture,
-    depth: &wgpu::TextureView,
-    (view_proj, origin, exposure): (Mat4, DVec3, f32),
-) {
+) -> wgpu::Texture {
     let size = UVec2::new(hdr.width(), hdr.height());
     let mips = picture_mips(size);
     let format = hdr.format();
-    let mut pictures = world
-        .remove_resource::<MirrorPictures>()
-        .unwrap_or_default();
+    let mut pictures = world.get_resource_or_init::<MirrorPictures>();
     let chain = pictures
         .chains
         .entry(mirror.mirror)
@@ -538,16 +532,47 @@ pub(crate) fn keep_picture(
     if chain.width() != size.x || chain.height() != size.y || chain.mip_level_count() != mips {
         *chain = make_chain(gpu, size, mips, format);
     }
+    chain.clone()
+}
+
+/// Copy a mirror view's HDR scene colour `hdr` into its chain ([`mirror_chain`]) and filter
+/// the levels, at the end of the view's own commands.
+pub(crate) fn record_picture_levels(
+    gpu: &crate::features::GpuShared,
+    encoder: &mut wgpu::CommandEncoder,
+    hdr: &wgpu::Texture,
+    chain: &wgpu::Texture,
+) {
     encoder.copy_texture_to_texture(
         hdr.as_image_copy(),
         chain.as_image_copy(),
         wgpu::Extent3d {
-            width: size.x,
-            height: size.y,
+            width: hdr.width(),
+            height: hdr.height(),
             depth_or_array_layers: 1,
         },
     );
-    gpu.mips.record(gpu, encoder, chain, format);
+    gpu.mips.record(gpu, encoder, chain, chain.format());
+}
+
+/// Keep a mirror view's picture, its chain filled ([`record_picture_levels`]), for features to
+/// sample: the view's unjittered view-projection, eye and exposure.
+pub(crate) fn keep_picture(
+    world: &mut World,
+    mirror: &MirrorCamera,
+    camera: Entity,
+    depth: &wgpu::TextureView,
+    (view_proj, origin, exposure): (Mat4, DVec3, f32),
+) {
+    let mut pictures = world
+        .remove_resource::<MirrorPictures>()
+        .unwrap_or_default();
+    let Some(chain) = pictures.chains.get(&mirror.mirror) else {
+        world.insert_resource(pictures);
+        return;
+    };
+    let size = UVec2::new(chain.width(), chain.height());
+    let mips = chain.mip_level_count();
     let (plane_point, plane_normal) = world
         .get::<GlobalTransform>(mirror.mirror)
         .map_or((DVec3::ZERO, Vec3::Y), |gt| {

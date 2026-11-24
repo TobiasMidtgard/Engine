@@ -450,7 +450,7 @@ fn variants() -> Vec<Variant> {
             "ray_mirror_pictures",
             r,
             json!({"trial_cuts_more": 1040, "gi_hardware_rays": true}),
-            "ray_world with the lake mirror's picture traced in the frame's ray pass in place of the extra view that draws it: each texel is the reflection, at roughness 0, of where its ray from the mirrored eye meets the plane (passes `ray mirror pictures` and `ray mirror levels`; render.extra_views 0; render.ray.mirror_pictures, mirror_texels, mirror_mb). Its cost is this row against ray_world at the lake; the drawn mirror's is the baseline against water_no_mirror",
+            "ray_world with the lake mirror's picture traced in the frame's ray pass in place of the extra view that draws it: each texel is the reflection, at roughness 0, of where its ray from the mirrored eye meets the plane (passes `ray mirror pictures`, and `ray mirror levels` with the picture's own history; render.extra_views 0; render.ray.mirror_pictures, mirror_texels, mirror_mb). Its saves against ray_world at the lake are what the drawn mirror cost (its view, copy and levels: `render.extra_views_gpu_ms`, which the GPU column counts) less what the traced picture costs",
         ),
         v(
             "count_ray_mirror_pictures",
@@ -462,7 +462,7 @@ fn variants() -> Vec<Variant> {
             "water_no_mirror",
             "WaterSettings",
             json!({"mirror_reflections": false}),
-            "a control, not a cut: no lake mirror, the water's screen-space reflections alone; the baseline against it is what the drawn mirror costs (render.extra_views, extra_views_ms, extra_views_gpu_ms)",
+            "a control, not a cut: no lake mirror, the water's screen-space reflections alone (on every water pixel, so the main view gets dearer); its saves are what the drawn mirror costs, its view, copy and levels (`render.extra_views_gpu_ms`, which the GPU column counts; extra_views_ms its CPU), less the water's own reflections in its place",
         ),
         v(
             "check_ray_probe",
@@ -1149,17 +1149,22 @@ impl Sample {
         self.frame_ms / f64::from(self.frames.max(1))
     }
 
-    /// The frame's GPU time: the profiler's own total where it reports one, else the passes
-    /// summed (a split pass's parts, "scene: meshes", are inside "scene").
+    /// The frame's GPU time: the main view's (the profiler's own total where it reports one,
+    /// else its passes summed; a split pass's parts, "scene: meshes", are inside "scene") and
+    /// the extra views' drawn before it (`render.extra_views_gpu_ms`, 0 without: the lake
+    /// mirror's view, its copy and levels included, which `ray_mirror_pictures` and
+    /// `water_no_mirror` take away).
     fn gpu_ms(&self) -> f64 {
+        let extra = self.mean("render.extra_views_gpu_ms");
         if self.sums.contains_key("render.gpu_ms") {
-            return self.mean("render.gpu_ms");
+            return self.mean("render.gpu_ms") + extra;
         }
         self.sums
             .keys()
             .filter(|k| k.starts_with("render.gpu.") && !k.contains(": "))
             .map(|k| self.mean(k))
-            .sum()
+            .sum::<f64>()
+            + extra
     }
 
     /// The mean of two readings, frame for frame weight.

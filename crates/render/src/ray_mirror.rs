@@ -15,11 +15,19 @@
 //! the mirrored view), so the picture's readers (the water's `mirror_reflection`) find what
 //! lies beyond the plane and what under it as before.
 //!
-//! Per mirror the frame keeps a [`TracedPicture`]: the colour's mip chain (the trace writes
-//! level 0, "ray mirror levels" filters the rest), the depth the trace writes as `R32Float` and
-//! its copy into a depth texture (readers bind a depth texture, and depth formats can't be
-//! written by a compute shader), and the trace's uniform. Their views stay the same from frame
-//! to frame, so readers that cache bind groups by view keep theirs.
+//! With temporal anti-aliasing each frame's ray goes through another point of its texel, and
+//! the picture keeps a history of its own, as a drawn view does (mirror_resolve.wgsl): each
+//! texel blends this frame's ray into what it held where last frame's mirrored view saw its
+//! point, so a still picture holds still and its outlines are smooth. The main view's history
+//! can't do it for the picture, which the water reads through the unjittered view: the picture
+//! would move under it by a share of a texel, a pixel or more across.
+//!
+//! Per mirror the frame keeps a [`TracedPicture`]: the colour's mip chain (the history writes
+//! level 0, "ray mirror levels" filters the rest), this frame's rays and last frame's level 0
+//! for the history, the depth the trace writes as `R32Float` and its copy into a depth texture
+//! (readers bind a depth texture, and depth formats can't be written by a compute shader), and
+//! the trace's and the history's uniforms. Their views stay the same from frame to frame, so
+//! readers that cache bind groups by view keep theirs.
 
 use std::collections::HashMap;
 
@@ -47,16 +55,58 @@ struct GpuMirrorTrace {
     plane: [f32; 4],
 }
 
+/// `MirrorResolve` in mirror_resolve.wgsl: this frame's mirrored view and last frame's, both
+/// relative to this frame's main eye.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuMirrorResolve {
+    /// As the trace's; w: its near plane (m).
+    right: [f32; 4],
+    /// w: 1 where last frame's picture holds this one's history, else 0.
+    up: [f32; 4],
+    /// w: this frame's exposure over last frame's.
+    back: [f32; 4],
+    eye: [f32; 4],
+    tangents: [f32; 4],
+    prev_right: [f32; 4],
+    prev_up: [f32; 4],
+    prev_back: [f32; 4],
+    prev_eye: [f32; 4],
+    prev_tangents: [f32; 4],
+}
+
+/// Where a picture's mirrored view was, for next frame's history.
+#[derive(Clone, Copy)]
+struct MirrorPose {
+    rotation: Quat,
+    eye: DVec3,
+    tangents: Vec4,
+    exposure: f32,
+}
+
 /// A mirror's traced picture: what the trace writes and its readers sample.
 struct TracedPicture {
     size: UVec2,
     mips: u32,
-    /// HDR colour (`Rgba16Float`, pre-exposed by the main view's exposure), `mips` levels.
+    /// HDR colour (`Rgba16Float`, pre-exposed by the main view's exposure), `mips` levels; level
+    /// 0's alpha holds the frames its history holds (readers take rgb).
     chain: wgpu::Texture,
-    /// Level 0, which the trace writes.
-    level0: wgpu::TextureView,
     /// Every level, for readers.
     color: wgpu::TextureView,
+    /// This frame's rays, which the trace writes.
+    raw: crate::targets::Tex,
+    /// Last frame's level 0, copied for the history to read.
+    history: crate::targets::Tex,
+    /// `GpuMirrorResolve`.
+    resolve_uniform: wgpu::Buffer,
+    resolve_group: wgpu::BindGroup,
+    /// Where this picture's view was when its level 0 was last written (none before the first
+    /// time): `RayMirrors::finish`, once the frame traced it.
+    pose: Option<MirrorPose>,
+    /// Where it is this frame, which `finish` makes `pose`.
+    pose_now: Option<MirrorPose>,
+    /// Whether this frame's history reads last frame's level 0.
+    with_history: bool,
     /// Reverse-Z depth as the trace writes it (0 for the sky).
     depth_raw: crate::targets::Tex,
     /// Its copy in the depth format readers bind.
@@ -68,7 +118,12 @@ struct TracedPicture {
 }
 
 impl TracedPicture {
-    fn new(gpu: &GpuShared, copy: &DepthCopy, size: UVec2, mips: u32) -> Self {
+    fn new(
+        gpu: &GpuShared,
+        (copy, resolve): (&DepthCopy, &Resolve),
+        size: UVec2,
+        mips: u32,
+    ) -> Self {
         let device = &gpu.device;
         let chain = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ray mirror picture"),
@@ -83,7 +138,8 @@ impl TracedPicture {
             format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let level0 = chain.create_view(&wgpu::TextureViewDescriptor {
@@ -93,6 +149,22 @@ impl TracedPicture {
             ..Default::default()
         });
         let color = chain.create_view(&Default::default());
+        let raw = crate::targets::Tex::new(
+            device,
+            "ray mirror rays",
+            size.x,
+            size.y,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let history = crate::targets::Tex::new(
+            device,
+            "ray mirror history",
+            size.x,
+            size.y,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
         let depth_raw = crate::targets::Tex::new(
             device,
             "ray mirror depth (traced)",
@@ -123,12 +195,55 @@ impl TracedPicture {
                 resource: wgpu::BindingResource::TextureView(&depth_raw.view),
             }],
         });
+        let resolve_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ray mirror history"),
+            size: std::mem::size_of::<GpuMirrorResolve>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let view = wgpu::BindingResource::TextureView;
+        let resolve_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray mirror history"),
+            layout: &resolve.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: resolve_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: view(&raw.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: view(&depth_raw.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: view(&history.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&gpu.linear_clamp),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: view(&level0),
+                },
+            ],
+        });
         Self {
             size,
             mips,
             chain,
-            level0,
             color,
+            raw,
+            history,
+            resolve_uniform,
+            resolve_group,
+            pose: None,
+            pose_now: None,
+            with_history: false,
             depth_raw,
             depth,
             uniform,
@@ -136,10 +251,86 @@ impl TracedPicture {
         }
     }
 
-    /// Bytes on the GPU: the chain (a third over its level 0), the two depths.
+    /// Bytes on the GPU: the chain (a third over its level 0), this frame's rays and last
+    /// frame's level 0, the two depths.
     fn bytes(&self) -> u64 {
         let texels = self.size.x as u64 * self.size.y as u64;
-        texels * 8 * 4 / 3 + texels * 4 * 2
+        texels * 8 * 4 / 3 + texels * 8 * 2 + texels * 4 * 2
+    }
+}
+
+/// The history: each texel's ray blended into what the texel held (mirror_resolve.wgsl).
+struct Resolve {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl Resolve {
+    fn new(gpu: &GpuShared) -> Self {
+        let device = &gpu.device;
+        let module = gpu.shader(
+            "ray mirror history",
+            include_str!("shaders/mirror_resolve.wgsl"),
+            false,
+        );
+        let texture = |binding: u32, filterable: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ray mirror history"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                texture(1, false),
+                texture(2, false),
+                texture(3, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ray mirror history"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ray mirror history"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("cs_mirror_resolve"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        Self { pipeline, layout }
     }
 }
 
@@ -221,7 +412,7 @@ pub(crate) struct RayMirrors {
     pictures: HashMap<Entity, TracedPicture>,
     /// The mirrors traced this frame, in the order they dispatch.
     due: Vec<Entity>,
-    copy: Option<DepthCopy>,
+    copy: Option<(DepthCopy, Resolve)>,
 }
 
 impl RayMirrors {
@@ -236,14 +427,15 @@ impl RayMirrors {
     /// features prepare: each mirror placed to be traced (`placed`) gets this frame's picture,
     /// which the frame's ray pass then traces, while `can_trace` (the scene is there and the
     /// rays trace it); without, it has none this frame. `wanted`: [`Self::wanted`] (the
-    /// pictures are freed when not). Also every frame without mirrors.
+    /// pictures are freed when not); `taa`: whether the main view has temporal anti-aliasing,
+    /// and with it the pictures their history. Also every frame without mirrors.
     pub fn publish(
         &mut self,
         world: &mut World,
         gpu: &GpuShared,
         view: &ViewData,
         placed: Vec<TracedPlacement>,
-        (wanted, can_trace): (bool, bool),
+        (wanted, can_trace, taa): (bool, bool, bool),
     ) {
         self.due.clear();
         if !wanted {
@@ -258,17 +450,19 @@ impl RayMirrors {
             }
             let size = p.view.size.max(UVec2::ONE);
             let mips = crate::planar_reflection::picture_mips(size);
-            let copy = self.copy.get_or_insert_with(|| DepthCopy::new(gpu));
+            let (copy, resolve) = &*self
+                .copy
+                .get_or_insert_with(|| (DepthCopy::new(gpu), Resolve::new(gpu)));
             let picture = match self.pictures.entry(p.mirror) {
                 std::collections::hash_map::Entry::Occupied(e) => {
                     let picture = e.into_mut();
                     if picture.size != size || picture.mips != mips {
-                        *picture = TracedPicture::new(gpu, copy, size, mips);
+                        *picture = TracedPicture::new(gpu, (copy, resolve), size, mips);
                     }
                     picture
                 }
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(TracedPicture::new(gpu, copy, size, mips))
+                    e.insert(TracedPicture::new(gpu, (copy, resolve), size, mips))
                 }
             };
             let rot = p.at.rotation();
@@ -287,6 +481,44 @@ impl RayMirrors {
             };
             gpu.queue
                 .write_buffer(&picture.uniform, 0, bytemuck::bytes_of(&trace));
+            // The history, from where the view was when level 0 was last written: none after a
+            // camera cut, or without temporal anti-aliasing (the picture is then this frame's
+            // rays, as a drawn view's is its frame).
+            let pose = MirrorPose {
+                rotation: rot,
+                eye: p.at.translation(),
+                tangents: t,
+                exposure: view.exposure,
+            };
+            let last = picture
+                .pose
+                .filter(|_| taa && view.history_valid)
+                .unwrap_or(pose);
+            picture.with_history = taa && view.history_valid && picture.pose.is_some();
+            let (last_right, last_up, last_back) = (
+                last.rotation * Vec3::X,
+                last.rotation * Vec3::Y,
+                last.rotation * Vec3::Z,
+            );
+            let resolve = GpuMirrorResolve {
+                right: trace.right,
+                up: up
+                    .extend(if picture.with_history { 1.0 } else { 0.0 })
+                    .to_array(),
+                back: back
+                    .extend(view.exposure / last.exposure.max(f32::MIN_POSITIVE))
+                    .to_array(),
+                eye: trace.eye,
+                tangents: trace.tangents,
+                prev_right: last_right.extend(0.0).to_array(),
+                prev_up: last_up.extend(0.0).to_array(),
+                prev_back: last_back.extend(0.0).to_array(),
+                prev_eye: view.relative(last.eye).extend(0.0).to_array(),
+                prev_tangents: last.tangents.to_array(),
+            };
+            gpu.queue
+                .write_buffer(&picture.resolve_uniform, 0, bytemuck::bytes_of(&resolve));
+            picture.pose_now = Some(pose);
             crate::planar_reflection::keep_traced(
                 world,
                 p.mirror,
@@ -315,20 +547,46 @@ impl RayMirrors {
             let p = self.pictures.get(mirror)?;
             Some(MirrorTarget {
                 uniform: &p.uniform,
-                color: &p.level0,
+                color: &p.raw.view,
                 depth: &p.depth_raw.view,
                 size: p.size,
             })
         })
     }
 
-    /// After the pass that traced them: each picture's levels, and its depth copied into the
-    /// depth texture readers bind.
-    pub fn finish(&self, gpu: &GpuShared, encoder: &mut wgpu::CommandEncoder) {
-        let Some(copy) = &self.copy else {
+    /// After the pass that traced them: each picture's history (its level 0), its levels, and
+    /// its depth copied into the depth texture readers bind.
+    pub fn finish(&mut self, gpu: &GpuShared, encoder: &mut wgpu::CommandEncoder) {
+        let Some((copy, resolve)) = &self.copy else {
             return;
         };
-        for p in self.due.iter().filter_map(|m| self.pictures.get(m)) {
+        for mirror in &self.due {
+            let Some(p) = self.pictures.get_mut(mirror) else {
+                continue;
+            };
+            // (A frame that published the picture but didn't trace it leaves its level 0, and so
+            // where it was seen from, as it was.)
+            p.pose = p.pose_now.take();
+            if p.with_history {
+                encoder.copy_texture_to_texture(
+                    p.chain.as_image_copy(),
+                    p.history.texture.as_image_copy(),
+                    wgpu::Extent3d {
+                        width: p.size.x,
+                        height: p.size.y,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("ray mirror history"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&resolve.pipeline);
+                pass.set_bind_group(0, &p.resolve_group, &[]);
+                pass.dispatch_workgroups(p.size.x.div_ceil(8), p.size.y.div_ceil(8), 1);
+            }
             gpu.mips
                 .record(gpu, encoder, &p.chain, wgpu::TextureFormat::Rgba16Float);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

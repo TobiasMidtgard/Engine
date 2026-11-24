@@ -27,7 +27,8 @@ struct MirrorTrace {
     plane: vec4<f32>,    // the plane's unit normal (its reflecting side); w: dot(n, point on it), camera-relative
 };
 @group(2) @binding(26) var<uniform> mirror_trace: MirrorTrace;
-// Level 0 of the picture's chain: rgb pre-exposed by the frame's exposure, a 1.
+// This frame's rays (the picture's history blends them into level 0 of its chain): rgb
+// pre-exposed by the frame's exposure, a 1.
 @group(2) @binding(27) var mirror_color: texture_storage_2d<rgba16float, write>;
 // Reverse-Z depth: the near plane over the depth along the mirrored view, 0 the sky.
 @group(2) @binding(28) var mirror_depth_raw: texture_storage_2d<r32float, write>;
@@ -90,9 +91,9 @@ fn mirror_texel(id: vec2<u32>, size: vec2<u32>) -> vec4<u32> {
     let m = mirror_trace;
     // With temporal anti-aliasing each frame's ray goes through another point of the texel:
     // the frame's jitter, its axes swapped so that it doesn't move with the pixels' own. The
-    // main view's history then gathers the texel's whole area, as a drawn view's own history
-    // does (one ray at the texel's centre left the outlines of what it reflects ragged). Without
-    // it, the centre (`frame.jitter` is 0).
+    // picture's own history (mirror_resolve.wgsl) then gathers the texel's whole area, as a
+    // drawn view's own history does (one ray at the texel's centre left the outlines of what it
+    // reflects ragged). Without it, the centre (`frame.jitter` is 0).
     let uv = (vec2<f32>(id) + 0.5 + frame.jitter.wz) / vec2<f32>(size);
     // The texel's ray from the mirrored eye, 1 along the mirrored view's axis: `u` along it is
     // a point's depth in that view.
