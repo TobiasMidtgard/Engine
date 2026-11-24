@@ -192,7 +192,8 @@ pub struct ChunkMesh {
     /// Terrain-local origin the vertices are relative to.
     pub origin: DVec3,
     pub vertices: Vec<TerrainVertex>,
-    /// Lowest and highest terrain height in the patch, meters.
+    /// Lowest and highest height drawn in the patch, meters, geomorph included (over the sea,
+    /// the surface where the terrain draws it).
     pub min_height: f64,
     pub max_height: f64,
     /// Bounding sphere (terrain-local center, radius).
@@ -592,8 +593,12 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
             }
             let s = samples[idx];
             let m = morph[(j - 1) * GRID + i - 1];
-            min_h = min_h.min(s.height).min(s.height + m);
-            max_h = max_h.max(s.height).max(s.height + m);
+            // The heights drawn, from this patch's to its parent's: over the sea, the surface
+            // the terrain draws in place of the floor. The LOD's horizon test and its estimates
+            // of the children go by them.
+            let h = shown(src, s.height);
+            min_h = min_h.min(h).min(h + m);
+            max_h = max_h.max(h).max(h + m);
             center_sum += p;
             let ocean = src.ocean_surface && src.shape.ocean && s.height < -0.25;
             if ocean {
@@ -801,6 +806,52 @@ mod tests {
             shape: Arc::new(shape),
             edits: Arc::new(EditLayer::default()),
             ocean_surface: true,
+        }
+    }
+
+    /// Out at sea the terrain draws the sea's surface (0.25 m down) in place of the floor, and
+    /// a patch's heights say so: the LOD's horizon test takes its top from them, and the floor
+    /// kilometres down hid open sea that stands in view. Without that surface they are the
+    /// floor's.
+    #[test]
+    fn a_patch_out_at_sea_spans_the_surface_it_draws() {
+        let shape = PlanetShape {
+            rivers: false,
+            ..PlanetShape::earthlike(7)
+        };
+        let mut src = ChunkSource {
+            map: SurfaceMap::new(TerrainDomain::Sphere, shape.radius_m),
+            shape: Arc::new(shape),
+            edits: Arc::new(EditLayer::default()),
+            ocean_surface: false,
+        };
+        // A level-8 patch (about 40 km across) in the middle of a face (|a|, |b| < 0.5, where
+        // its grid is nearly square), its floor deeper than 100 m everywhere.
+        let key = (0..6u8)
+            .flat_map(|face| (0..64u32).map(move |i| (face, 4 + i % 8, 4 + i / 8)))
+            .map(|(face, x, y)| NodeKey {
+                face,
+                level: 8,
+                x: x * 16 + 8,
+                y: y * 16 + 8,
+            })
+            .find(|&k| build_chunk(&src, k).max_height < -100.0)
+            .expect("open sea on an earthlike planet");
+        src.ocean_surface = true;
+        let c = build_chunk(&src, key);
+        assert_eq!(c.max_height, -0.25);
+        // Geomorphing to the middle of the parent's diagonals (2.8 spacings), a chord's depth
+        // inside the sphere: spacing² / radius where the grid is square (up to 4/3 of it toward
+        // a face's corners, where its cells shear).
+        let sag = c.spacing * c.spacing / src.map.radius;
+        assert!(
+            (-0.25 - 1.1 * sag..=-0.25).contains(&c.min_height),
+            "{} {sag}",
+            c.min_height
+        );
+        for v in &c.vertices[..GRID * GRID] {
+            let p = DVec3::from(v.position.map(f64::from)) + c.origin;
+            assert!((p.length() - (src.map.radius - 0.25)).abs() < 0.01);
         }
     }
 

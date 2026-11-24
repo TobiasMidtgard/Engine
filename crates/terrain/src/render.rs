@@ -4947,19 +4947,19 @@ mod tests {
     }
 
     /// The ground colour map's walk on a planet the size of the Earth, its lowest point 5 km
-    /// down (as the home planet's), the ground 0 to 10 m high, the eye 2 m up on a level-3 patch
-    /// (1,250 km across), 0.2 of the way in from one edge and halfway along it. The patch's
-    /// three siblings lie behind the horizon, so the view's walk never builds them, and the one
-    /// across that edge holds the eye in its bounding sphere. The map's walk passes over them as
-    /// the view's does and reaches the patch under the eye, about a texel between vertices (it
-    /// used to stop at their parent, 2,500 km across), and covers the square once, holding back
-    /// where only coarser patches are resident.
+    /// down (as the home planet's), the ground 0 to 10 m high, the eye 2 m up at the middle of a
+    /// level-3 patch (1,250 km across). The patch's three siblings lie behind the horizon, so the
+    /// view's walk never builds them. The map's walk reaches the patch under the eye, about a
+    /// texel between vertices, and covers the square once, holding back where only coarser
+    /// patches are resident. Patches behind the horizon never hold it back, even where the
+    /// square would take them in (it used to stop at their parent, 2,500 km across, when the
+    /// LOD culled patches in view, the eye's own among them).
     #[test]
     fn the_ground_maps_walk_reaches_the_eyes_patch_on_a_planet() {
         use crate::cube::{SurfaceMap, TerrainDomain};
         let map = SurfaceMap::new(TerrainDomain::Sphere, 6.371e6);
         let mut lod = Lod::new(map, (-5075.0, 3000.0), 0.5);
-        let eye = map.position(2, 0.3, 0.375, 2.0);
+        let eye = map.position(2, 0.375, 0.375, 2.0);
         // The view's walks until they want nothing more, each patch built at 0 to 10 m.
         let all = |_: DVec3, _: f64| true;
         let mut chunks = HashMap::new();
@@ -5008,8 +5008,11 @@ mod tests {
         assert!(
             missing
                 .iter()
-                .any(|k| inside(lod.nodes[k].center, lod.nodes[k].radius))
+                .all(|k| lod.behind_horizon_from(*k, &lod.nodes[k], eye))
         );
+        // Even a square that takes in every patch reaches the eye's.
+        let everything = |_: DVec3, _: f64| true;
+        assert!(ground_map_walk(&lod, &chunks, eye, &everything).contains(&under(18)));
         let walked = ground_map_walk(&lod, &chunks, eye, &inside);
         let coarsest = walked.iter().map(|k| k.level).min().expect("patches");
         assert!(coarsest >= 15, "a patch of level {coarsest}");
