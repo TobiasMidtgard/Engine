@@ -1276,8 +1276,16 @@ fn place_vertex(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
     let planet = planets[in.planet];
-    let rot = planet_rot(planet);
     let rel = place_vertex(in, planet);
+    var out = vertex_out(in, planet, rel);
+    out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
+    return out;
+}
+
+// What a vertex at camera-relative `rel` (`place_vertex`) carries to the pixels but its clip
+// position: the scene's (`vs_main`) or the ground colour map's (`vs_ground_map`).
+fn vertex_out(in: VertexIn, planet: PlanetGpu, rel: vec3<f32>) -> VertexOut {
+    let rot = planet_rot(planet);
     let up = planet_up(planet, rel);
     let flags = u32(round(in.climate.w * 255.0));
     let ocean = select(0.0, 1.0, (flags & 2u) != 0u);
@@ -1301,8 +1309,35 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.water = in.river.xyz;
     out.night = in.night;
     out.tint = vec4<f32>(in.tint.rgb * in.tint.rgb, in.tint.a);
-    out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
+}
+
+// ---------------------------------------------------------------- ground colour map
+// The ground's albedo seen from straight above, for the rays (`trial_cut_more::RAY_GROUND_MAP`,
+// render.rs `GroundMapDraw`): the patches over the map's square through its own view, with
+// `OFF_GROUND_MAP` (`ground_color` returns the albedo, linear: the map's sRGB target encodes
+// it). The map's pixels are its own: 0.75 m on level ground, which `ground_color`'s fades go by.
+
+// Must match `GroundMapGpu` in render.rs.
+struct GroundMapView {
+    view_proj: mat4x4<f32>,  // camera-relative position -> the map's clip space
+    center: vec4<f32>,       // its centre relative to the camera (x, z), the trees' reach in the rays (m)
+};
+@group(2) @binding(8) var<uniform> ground_map: GroundMapView;
+
+@vertex
+fn vs_ground_map(in: VertexIn) -> VertexOut {
+    let planet = planets[in.planet];
+    let rel = place_vertex(in, planet);
+    var out = vertex_out(in, planet, rel);
+    out.clip = ground_map.view_proj * vec4<f32>(rel, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_ground_map(in: VertexOut) -> @location(0) vec4<f32> {
+    ground_map_at = ground_map.center;
+    return ground_color(in, GroundSteps(dpdx(in.rel), dpdy(in.rel), fwidth(in.climate.w)));
 }
 
 
@@ -1525,7 +1560,19 @@ struct MatSample {
 // 1 material textures (their means instead), 2 rock's larger scales, 4 parallax relief,
 // 16 lighting (albedo only); 128 everything (a flat color: the floor), 256 everything after
 // the materials are blended; 512 draws what the materials cost instead of the ground (`cost`).
+// 1024 is the ground colour map's (`fs_ground_map`): the albedo alone, seen from straight
+// above, with nothing that depends on the eye, the sun or the time.
 override TERRAIN_OFF: u32 = 0u;
+const OFF_GROUND_MAP: u32 = 1024u;
+
+// The ground colour map's centre relative to the camera (x, z) and the trees' reach in the
+// rays (z, m), as `fs_ground_map` sets them from its view before `ground_color` (a private
+// copy, so the entry points that never draw the map need no binding of it).
+var<private> ground_map_at: vec4<f32>;
+
+fn ground_map_on() -> bool {
+    return (TERRAIN_OFF & OFF_GROUND_MAP) != 0u;
+}
 
 // The cost view (`TERRAIN_SHADER_OFF=512`): what a pixel did up to the blended materials,
 // counted as it ran. x: texture probes (one trilinear lookup each: an anisotropic sample is as
@@ -1976,8 +2023,16 @@ fn wave_height(tp: vec3<f32>) -> f32 {
 // The ground's color at a pixel (pre-exposed HDR), from what its vertices carry there and
 // `st`: once a pixel in `fs_once` (the main view), or in `fs_main` for every triangle that
 // touches the pixel's 2x2 block (extra views, and the patches the night's lamps glow on).
+//
+// In the ground colour map (`ground_map_on`, `fs_ground_map`) it returns the albedo (linear,
+// alpha 1) as soon as it has it, and holds nothing that depends on the eye, the sun or the
+// time: the woods' canopy and the farmland go by the distance from the map's centre (which
+// stands for the eye) and the canopy starts where the rays' trees end; no crowns, no
+// regolith's view and sun, the surf still at time 0 in a steady wind; no footprints; no
+// debug view. (The prints' and the small craters' sun shading fade out at its 0.75 m pixels.)
 fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
-    if ((TERRAIN_OFF & 128u) != 0u || shade_skip(SKIP_TERRAIN)) {
+    let map = ground_map_on();
+    if ((TERRAIN_OFF & 128u) != 0u || (!map && shade_skip(SKIP_TERRAIN))) {
         return vec4<f32>(0.1, 0.2, 0.05, 1.0);
     }
     let planet = planets[in.planet];
@@ -2015,6 +2070,8 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     }
     let tp = tiling_pos(in.rel);
     let dist = length(in.rel);
+    // (What stands for the eye's distance in the map: along the ground from its centre.)
+    let eye_dist = select(dist, length(in.rel.xz - ground_map_at.xy), map);
     // Ridge outlines: where a crest hides the slope behind it, a sliver of that back slope
     // thinner than a pixel still fills whole pixels (there is no anti-aliasing). Its normal,
     // turned from the eye and often from the sun, drew a dark line along every ridge. Such
@@ -2087,7 +2144,9 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
 
     // Ground maps around the focus.
     let duv = deform_uv(in.rel);
-    let in_deform = inside01(duv) * maps.flags.x * (1.0 - ocean);
+    // (Never in the ground colour map: a print is a share of its 0.75 m texel, and every
+    // step would have it drawn again.)
+    let in_deform = inside01(duv) * maps.flags.x * (1.0 - ocean) * select(1.0, 0.0, map);
     let texel = 1.0 / maps.deform.w;
     // (Read inside the window only: everything they feed is scaled by `in_deform`.)
     var d0 = vec4<f32>(0.0);
@@ -2192,14 +2251,21 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     // From a couple of hundred meters the canopy (the foliage module draws trees near the camera,
     // and bare leaf litter there read as a brown hole in the land). Up close: ferns and grass
     // with patches of litter between them.
-    let canopy = smoothstep(15.0, 90.0, dist);
+    // (In the map: where the rays have no trees, whose ground they would see from above.)
+    let canopy = select(
+        smoothstep(15.0, 90.0, dist),
+        smoothstep(ground_map_at.z, ground_map_at.z + 40.0, eye_dist),
+        map,
+    );
     // Until a pixel spans a few meters, the canopy shows its trees: crowns with shade between
     // them inside the woods, and meadow between the last trees at their edges.
     // Crowns painted on the ground only pass for trees seen from well above them and from
     // high enough an angle (from lower down they read as flat discs: the canopy stays plain).
     let eye_height = dot(-in.rel, up);
+    // (Never in the map: the rays' own leaves stop them, and the crowns' shade is the sun's.)
     let crown_k = canopy * (1.0 - smoothstep(1.5, 6.0, pixel)) * step(0.003, forest)
-        * smoothstep(30.0, 80.0, eye_height) * smoothstep(0.15, 0.3, dot(to_eye, up));
+        * smoothstep(30.0, 80.0, eye_height) * smoothstep(0.15, 0.3, dot(to_eye, up))
+        * select(1.0, 0.0, map);
     var crown = Crowns(1.0, vec2<f32>(0.0), 0.5, 0.0, 0.0);
     var woods = forest;
     if (crown_k > 0.0) {
@@ -2414,7 +2480,7 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     // the eye the ground stays as it was (the foliage module's grass grows there). From high
     // up, once fields are only a few pixels across, they settle to their mean color, and from
     // orbit to the land's own (the far look's).
-    let field_k = planet.far_mean.w * (1.0 - smoothstep(250.0, 900.0, pixel)) * smoothstep(250.0, 700.0, dist)
+    let field_k = planet.far_mean.w * (1.0 - smoothstep(250.0, 900.0, pixel)) * smoothstep(250.0, 700.0, eye_dist)
         * vegetation * (1.0 - paint_w) * (1.0 - tint.a);
     var farm = field_k * (1.0 - smoothstep(0.012, 0.035, slope))
         * smoothstep(3.0, 9.0, temp_c) * (1.0 - smoothstep(24.0, 30.0, temp_c))
@@ -2558,6 +2624,14 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
         if (wt[i] > 0.003) {
             if ((TERRAIN_OFF & 1u) != 0u || shade_skip(SKIP_TERRAIN_TEXTURES)) {
                 ms[i] = mat_mean(i, n_geo);
+                // The ground colour map keeps a scan variant's own colour (wet sand, moss,
+                // needles, cobbles, scree, rock bands), blended as `sample_ground` blends it:
+                // with the means both heights are the same.
+                let vl = variant_layer(i);
+                if (map && vl != NO_LAYER) {
+                    let t = smoothstep(0.35, 0.65, mat_variant[i]);
+                    ms[i].detail *= mix(vec3<f32>(1.0), variant_tint(i, vl), t);
+                }
             } else {
                 ms[i] = sample_ground(i, tp_m, n_geo, dp1, dp2, tex_pixel);
             }
@@ -2703,8 +2777,10 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     if (planet.params2.y > 0.0 && planet.params2.z > 0.0) {
         let crater = crater_detail(planet, in.rel, altitude, pixel, pixel_across, in.lod.x);
         // Past the terminator the walls of real craters sit in the shadow of the land around
-        // them (which these slopes cannot cast), so they only shade where the sun is up.
-        let sun_up = smoothstep(-0.02, 0.2, dot(up, frame.sun_dir.xyz));
+        // them (which these slopes cannot cast), so they only shade where the sun is up. (The
+        // ground colour map keeps them as by day: they tilt the snow's slope, and the map does
+        // not follow the sun.)
+        let sun_up = select(smoothstep(-0.02, 0.2, dot(up, frame.sun_dir.xyz)), 1.0, map);
         n = normalize(n - crater.slope * sun_up);
         albedo *= 1.0 + crater.bright;
         crater_shade = max(crater_shade, crater.shadow);
@@ -2989,7 +3065,8 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     let sea_depth = max(-coast_alt, 0.0);
     // The wind roughens the sea: the mean square slope of its waves (Cox and Munk 1954) sets
     // how wide the sun's glitter spreads, and the waves it raises break higher on the shore.
-    let wind = min(length(frame.wind.xz), 20.0);
+    // (The map holds a steady 5 m/s: the wind is the one at the eye, gusts and all.)
+    let wind = select(min(length(frame.wind.xz), 20.0), 5.0, map);
     let slope_var = 0.003 + 0.00512 * wind;
     let breaker = clamp(0.3 + 0.012 * wind * wind, 0.3, 2.5);
     let wave_period = 6.0 + 0.3 * wind;
@@ -3027,7 +3104,9 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     // depth), each with a sharp front and a fading trail, broken into patches. Froth lines the
     // water's edge. Where the lines get finer than a pixel they blend into their average.
     let surf_depth = breaker * 1.3;
-    let line_phase = sea_depth / max(breaker * 0.45, 0.12) + frame.time.x / wave_period + (meadow_v - 0.5) * 3.0;
+    // (The map holds the surf still, at time 0.)
+    let sea_t = select(frame.time.x, 0.0, map);
+    let line_phase = sea_depth / max(breaker * 0.45, 0.12) + sea_t / wave_period + (meadow_v - 0.5) * 3.0;
     let line_f = fract(line_phase);
     let surf_front = smoothstep(0.0, 0.05, line_f) * (1.0 - smoothstep(0.05, 0.6, line_f));
     let broken = smoothstep(0.25, 0.65, detail_n + (mid_v - 0.5) * 0.5 * clump_fade);
@@ -3052,7 +3131,7 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     let runup = 0.2 + breaker * 0.6;
     let shore_h = coast_alt + (detail_n - 0.5) * 0.06 * fine_fade;
     let washed = (1.0 - smoothstep(runup * 0.8, runup * 1.2, shore_h)) * step(0.0, coast_alt) * coast_near * (1.0 - ocean);
-    let surge = runup * (0.45 + 0.4 * sin(6.2832 * (frame.time.x / wave_period + (meadow_v - 0.5) * 0.7)));
+    let surge = runup * (0.45 + 0.4 * sin(6.2832 * (sea_t / wave_period + (meadow_v - 0.5) * 0.7)));
     let swash = (1.0 - smoothstep(surge - 0.02, surge, shore_h)) * washed;
     let swash_edge = smoothstep(surge - 0.06, surge - 0.015, shore_h) * swash * broken;
     albedo = mix(albedo, albedo * 0.6, washed);
@@ -3079,14 +3158,15 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     // Sliver pixels show the level crest.
     n = normalize(mix(n, up, sliver));
 
-    // Debug views (RenderSettings.debug_view).
-    if (frame.counts.z == 1u) {
+    // Debug views (RenderSettings.debug_view; never in the map).
+    let debug_view = select(frame.counts.z, 0u, map);
+    if (debug_view == 1u) {
         return vec4<f32>(n * 0.5 + 0.5, 1.0);
     }
-    if (frame.counts.z == 3u) {
+    if (debug_view == 3u) {
         return vec4<f32>(vec3(sky_visibility(in.rel, n)), 1.0);
     }
-    if (frame.counts.z == 4u) {
+    if (debug_view == 4u) {
         return vec4<f32>(vec3(screen_ao(in.rel)), 1.0);
     }
 
@@ -3095,7 +3175,8 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     // its limb as in its middle and its relief fades under a high sun, and dust lit from
     // straight behind the viewer brightens (the opposition surge). The surface is lit as
     // Lambertian, so the difference goes into the albedo where the sun is up.
-    let regolith = planet.params3.x * (1.0 - ocean);
+    // (The map's albedo is the Lambertian one: this goes by the eye and the sun.)
+    let regolith = select(planet.params3.x, 0.0, map) * (1.0 - ocean);
     if (regolith > 0.0) {
         let v = normalize(-in.rel);
         let l = frame.sun_dir.xyz;
@@ -3136,6 +3217,9 @@ fn ground_color(in: VertexOut, st: GroundSteps) -> vec4<f32> {
     }
     var s = default_surface();
     s.albedo = saturate3(albedo);
+    if (map) {
+        return vec4<f32>(s.albedo, 1.0);
+    }
     s.roughness = clamp(roughness, 0.03, 1.0);
     s.reflectance = reflectance;
     s.normal = n;

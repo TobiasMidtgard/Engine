@@ -209,6 +209,18 @@ impl Lod {
         true
     }
 
+    /// Whether a walk from `cam` (terrain-local) passes over patch `key`, bounded by `b`, as
+    /// behind the planet's horizon: no walk from there builds it. Never on flat terrain, nor
+    /// for levels 0 to 2.
+    pub fn behind_horizon_from(&self, key: NodeKey, b: &NodeBounds, cam: DVec3) -> bool {
+        self.horizon_culled(key, b, cam, self.occluder())
+    }
+
+    /// Radius of the sphere the horizon is reckoned against: the planet's lowest point.
+    fn occluder(&self) -> f64 {
+        self.map.radius + self.height_range.0.min(0.0)
+    }
+
     /// Walk the quadtree for a new frame.
     pub fn select(&mut self, input: &SelectInput) -> Selection {
         self.frame += 1;
@@ -219,7 +231,7 @@ impl Lod {
     /// Patches it visits count as seen this frame.
     pub fn walk(&mut self, input: &SelectInput) -> Selection {
         let mut out = Selection::default();
-        let occluder = self.map.radius + self.height_range.0.min(0.0);
+        let occluder = self.occluder();
         let mut stack: Vec<NodeKey> = (0..self.map.roots()).map(NodeKey::root).collect();
         while let Some(key) = stack.pop() {
             out.visited += 1;

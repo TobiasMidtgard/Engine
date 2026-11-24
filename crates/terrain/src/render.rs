@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::math::{DAffine3, DQuat, DVec3, IVec2, Mat3, UVec2, Vec3};
+use engine_core::math::{DAffine3, DQuat, DVec2, DVec3, IVec2, Mat3, UVec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
@@ -16,7 +16,8 @@ use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
 use engine_render::shadows::{FAR_SHADOW_MAP, ShadowTiles};
 use engine_render::{
-    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere, RayView,
+    GroundAlbedoView, RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource,
+    RaySphere, RayView,
 };
 use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 
@@ -865,6 +866,8 @@ pub struct TerrainFeature {
     serial: Option<(MapsGpu, bool, Steps)>,
     /// The ground in the frame's ray scene ([`RenderFeature::ray_scene`]).
     rays: GroundRays,
+    /// The ground's albedo for the rays' ground colour map.
+    ground_map: GroundMapDraw,
 }
 
 /// The ground in the frame's ray scene (`engine_render::ray_scene`, while it is on): each patch
@@ -944,9 +947,162 @@ fn ray_still_from(moved: u64, shifted: u64, placed: bool) -> u64 {
     }
 }
 
-/// How wet and snowy the ground is beyond the weather's grid around the player: like the open
-/// ground along the grid's rim. The upper quartile of its last few cells, so shelters, fires
-/// and the strip a move has just uncovered (empty until the weather fills it) don't count.
+/// `TERRAIN_OFF` for the ground colour map: the material means, no rock's larger scales, no
+/// parallax ([`EXTRA_VIEW_OFF`]), and `OFF_GROUND_MAP` (terrain.wgsl: the albedo alone, with
+/// nothing that depends on the eye, the sun or the time).
+const GROUND_MAP_OFF: u32 = EXTRA_VIEW_OFF | 1024;
+
+/// The ground's albedo seen from straight above, which the frame's rays read where they hit
+/// the ground (`trial_cut_more::RAY_GROUND_MAP`, step 11 of the ray-traced lighting round; the
+/// renderer owns the map, [`GroundAlbedoView`]), in place of the air's one ground colour
+/// (`GroundRays::albedo`). The patches over the map's square are drawn through its view with
+/// `fs_ground_map` (terrain.wgsl), morph off, when the renderer asks
+/// ([`RenderFeature::draw_ground_albedo`]). Which patches: from each casting terrain's roots
+/// down, the children of a patch while those the square needs are resident and their
+/// vertices still at least a texel apart (so 0.75 to 1.5 m, a quad to a texel or two), within
+/// [`GroundAlbedoView::REACH_FROM_EYE_M`] of the camera along x and z and the map's depth
+/// ([`GroundAlbedoView::HALF_DEPTH_M`]) along y (the map's square wherever its centre stands).
+/// A child outside the square never holds the descent back: on a round planet the LOD leaves
+/// the children behind the horizon unbuilt. It draws what the other walks keep resident: it
+/// asks for nothing and marks nothing seen, so where only coarser patches are there it draws
+/// those (the paint map goes per pixel on them, as in the view). The version
+/// ([`RenderFeature::ground_albedo_version`]) goes over what reaches the GPU in world space,
+/// for the terrains with a patch in the square only (the other planets move every frame): the
+/// patches and their uploads, each such terrain's data but its camera-relative place and its
+/// own moves (a world shift moves them all, and the map follows it itself); the weather's
+/// layers, the worn paths as the main view's window holds them, the paint map once all of it
+/// is up, the materials; the trees' reach in the rays and the switches the shader reads. Not
+/// the footprints, the wind or the time, which the map leaves out (terrain.wgsl,
+/// `ground_map_on`).
+#[derive(Default)]
+struct GroundMapDraw {
+    /// What the map may draw this frame (the main view's walk).
+    patches: Vec<MapPatch>,
+    /// The version over it (`None`: nothing to draw, or nothing to draw with yet).
+    version: Option<u64>,
+    /// `RenderSettings::ray_caster_reach` this frame: the canopy starts past it in the map.
+    reach: f32,
+    /// Each terrain's place when last seen and how often it moved by itself while the map was
+    /// wanted, and the world shifts read so far.
+    poses: HashMap<Entity, (DVec3, DQuat, u64)>,
+    shifts: bevy_ecs::message::MessageCursor<engine_world::WorldShift>,
+    gpu: Option<GroundMapPass>,
+}
+
+/// A patch the ground colour map may draw, world space (the map's camera is the main view's,
+/// known when it draws).
+struct MapPatch {
+    origin: DVec3,
+    center: DVec3,
+    radius: f32,
+    planet: u32,
+    slot: u32,
+    spacing: f32,
+    level: u8,
+}
+
+/// The ground colour map's view (uniform). Matches `GroundMapView` in terrain.wgsl.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GroundMapGpu {
+    view_proj: [[f32; 4]; 4],
+    /// Its centre relative to the camera (x, z), the trees' reach in the rays (m), unused.
+    center: [f32; 4],
+}
+
+/// The map's pipeline (made once the map is first wanted), its view as group 2, and its own
+/// instances: buffers that only the map's pass reads (the call writes them, and the frame is
+/// one submit).
+struct GroundMapPass {
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+    group: wgpu::BindGroup,
+    instances: GrowBuffer,
+}
+
+impl GroundMapDraw {
+    /// A new frame of the main view: count, for each terrain, whether it moved by itself since
+    /// the last one (a world shift in between moves them all).
+    fn begin(&mut self, world: &World, terrains: &Terrains, on: bool) {
+        use bevy_ecs::message::Messages;
+        let shift = world
+            .get_resource::<Messages<engine_world::WorldShift>>()
+            .and_then(|m| self.shifts.read(m).copied().reduce(|a, b| a.then(&b)));
+        self.patches.clear();
+        self.version = None;
+        if !on {
+            self.poses.clear();
+            return;
+        }
+        self.poses.retain(|e, _| terrains.entries.contains_key(e));
+        for (e, t) in &terrains.entries {
+            let moves = self.poses.get(e).map_or(0, |&(p, q, moves)| {
+                let (p, q) = shift.map_or((p, q), |s| (s.point(p), (s.rotation * q).normalize()));
+                let moved = (t.position - p).length() > 1e-3 || t.rotation.angle_between(q) > 1e-6;
+                moves + u64::from(moved)
+            });
+            self.poses.insert(*e, (t.position, t.rotation, moves));
+        }
+    }
+
+    /// How often terrain `e` moved by itself while the map was wanted.
+    fn moves(&self, e: Entity) -> u64 {
+        self.poses.get(&e).map_or(0, |p| p.2)
+    }
+}
+
+/// The patches of `chunks` (a terrain's resident ones, `lod` its tree) the ground colour map
+/// draws ([`GroundMapDraw`]) within `inside` (a terrain-local bounding sphere): a texel or two
+/// between vertices at most. A patch's children are taken while every child the map needs is
+/// resident. One outside the square (as the LOD bounds it, or would) does not count, nor one
+/// behind the horizon from `eye` (terrain-local), which the view's walk never builds: on a
+/// planet the patch beside the eye's is hundreds of km across from level 3 on, its bounding
+/// sphere holds the eye, and it would keep a patch thousands of km across in the map.
+fn ground_map_walk(
+    lod: &Lod,
+    chunks: &HashMap<NodeKey, ChunkGpu>,
+    eye: DVec3,
+    inside: &dyn Fn(DVec3, f64) -> bool,
+) -> Vec<NodeKey> {
+    let texel = GroundAlbedoView::TEXEL_M as f64;
+    let mut out = Vec::new();
+    let mut stack: Vec<NodeKey> = (0..lod.map.roots()).map(NodeKey::root).collect();
+    while let Some(key) = stack.pop() {
+        let Some(c) = chunks.get(&key) else {
+            continue;
+        };
+        if !inside(c.center, c.radius) {
+            continue;
+        }
+        // (A child's bounds as the LOD's walk takes them: its own, or estimated from its
+        // parent's heights.)
+        let heights = lod
+            .nodes
+            .get(&key)
+            .map_or(lod.height_range, |b| (b.min_height, b.max_height));
+        let needed = |k: &NodeKey| {
+            let b = lod
+                .nodes
+                .get(k)
+                .copied()
+                .unwrap_or_else(|| lod.estimate(*k, heights.0, heights.1));
+            inside(b.center, b.radius) && !lod.behind_horizon_from(*k, &b, eye)
+        };
+        let children = key.children();
+        if c.spacing * 0.5 >= texel
+            && children
+                .iter()
+                .all(|k| chunks.contains_key(k) || !needed(k))
+        {
+            // (Those not resident are passed over when popped.)
+            stack.extend(children);
+        } else {
+            out.push(key);
+        }
+    }
+    out
+}
+
 /// The weather's surface layers on the GPU (wetness, puddles, snow, scorch: a grid that
 /// follows the focus, `engine_world::SurfaceLayers`). The texture wraps around, as a clipmap's
 /// does (Asirvatham and Hoppe, "Terrain Rendering Using GPU-Based Geometry Clipmaps", GPU Gems
@@ -965,9 +1121,24 @@ struct SurfaceUpload {
     row: u32,
     /// Wetness and snow depth beyond the grid (see [`beyond_grid`]).
     far: [f32; 2],
+    /// Texel rectangles sent so far (the ground colour map's version counts them).
+    writes: u64,
+    /// The world shifts read so far: one that only moves carries `origin` with the grid's.
+    shifts: bevy_ecs::message::MessageCursor<engine_world::WorldShift>,
 }
 
 impl SurfaceUpload {
+    /// A world shift that only moves carries the weather's grid with its cells as they are
+    /// (engine_world's shift.rs), so it carries what was sent too, and nothing is sent again;
+    /// a shift that turns has the grid sampled again, which [`Self::refresh`] follows.
+    fn follow(&mut self, s: &engine_world::WorldShift) {
+        if s.is_translation_only()
+            && let Some(o) = &mut self.origin
+        {
+            *o += DVec2::new(s.translation.x, s.translation.z);
+        }
+    }
+
     fn update(
         &mut self,
         g: &Grid2<SurfaceCell>,
@@ -977,6 +1148,7 @@ impl SurfaceUpload {
     ) {
         let w = g.width;
         for [x, y, cw, ch] in self.refresh(g, fresh) {
+            self.writes += 1;
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: tex,
@@ -1103,6 +1275,9 @@ fn split_wrap(start: u32, len: u32, size: u32, mut f: impl FnMut(u32, u32)) {
     }
 }
 
+/// How wet and snowy the ground is beyond the weather's grid around the player: like the open
+/// ground along the grid's rim. The upper quartile of its last few cells, so shelters, fires
+/// and the strip a move has just uncovered (empty until the weather fills it) don't count.
 fn beyond_grid(g: &Grid2<SurfaceCell>) -> [f32; 2] {
     let ring = 4.min(g.width / 2).min(g.height / 2);
     let (mut wet, mut snow) = (Vec::new(), Vec::new());
@@ -1746,6 +1921,15 @@ impl TerrainFeature {
         mut recreate: bool,
     ) -> MapsGpu {
         let gpu = self.gpu.as_mut().expect("gpu");
+        if let Some(m) =
+            world.get_resource::<bevy_ecs::message::Messages<engine_world::WorldShift>>()
+        {
+            let shifts: Vec<engine_world::WorldShift> =
+                self.surface.shifts.read(m).copied().collect();
+            for s in &shifts {
+                self.surface.follow(s);
+            }
+        }
         // Wetness, puddles, snow and scorch from the weather (every few frames).
         if let Some(layers) = world.get_resource::<SurfaceLayers>() {
             let g = &layers.grid;
@@ -2560,6 +2744,14 @@ impl RenderFeature for TerrainFeature {
                 |a| a.ground_color,
             );
         }
+        // The ground colour map's patches and the version over them (`GroundMapDraw`).
+        let map_wanted =
+            !mirror && engine_render::ray_scene::ground_map_wanted(render_settings, gpu_shared);
+        if !mirror {
+            self.ground_map.begin(world, terrains, map_wanted);
+            self.ground_map.reach = render_settings.ray_caster_reach;
+        }
+        let mut map_hash = map_wanted.then(std::collections::hash_map::DefaultHasher::new);
         let city = world.get_resource::<CityLights>();
 
         // Looks from afar, uploaded to a layer of the map array as their planets are drawn.
@@ -2971,6 +3163,39 @@ impl RenderFeature for TerrainFeature {
                 }
             }
             steps.mark("patches: rays");
+            // The ground colour map's: what is resident over the square it may cover, and the
+            // version over it for a terrain with a patch there (`GroundMapDraw`).
+            let mut in_map = false;
+            if let Some(h) = map_hash.as_mut()
+                && t.config.cast_shadows
+            {
+                use std::hash::Hash;
+                let reach = GroundAlbedoView::REACH_FROM_EYE_M as f64;
+                let depth = GroundAlbedoView::HALF_DEPTH_M as f64;
+                let inside = |c: DVec3, r: f64| {
+                    let rel = pos + rot * c - origin;
+                    rel.x.abs() <= reach + r && rel.z.abs() <= reach + r && rel.y.abs() <= depth + r
+                };
+                let walked = ground_map_walk(&state.lod, &state.chunks, cam_local, &inside);
+                in_map = !walked.is_empty();
+                if in_map {
+                    (e, state.version, self.ground_map.moves(*e)).hash(h);
+                }
+                for k in walked {
+                    let c = &state.chunks[&k];
+                    (k, c.stamp).hash(h);
+                    self.ground_map.patches.push(MapPatch {
+                        origin: pos + rot * c.origin,
+                        center: pos + rot * c.center,
+                        radius: c.radius as f32,
+                        planet: pi as u32,
+                        slot: c.slot,
+                        spacing: c.spacing as f32,
+                        level: k.level,
+                    });
+                }
+            }
+            steps.mark("patches: ground map");
             if !mirror {
                 // Each patch once, at its most urgent; at most a few hundred (after a jump the
                 // nearest go first and the rest are asked for again as those land).
@@ -3254,8 +3479,28 @@ impl RenderFeature for TerrainFeature {
                 far,
                 far_mean,
             });
+            // (The map's version: the terrain's data but its place relative to the camera, its
+            // motion and the camera's distance at which the lamps hand over.)
+            if let Some(h) = map_hash.as_mut()
+                && in_map
+                && let Some(p) = planet_gpu.last()
+            {
+                use std::hash::Hasher;
+                let mut p = *p;
+                p.center = [0.0, 0.0, 0.0, p.center[3]];
+                p.motion = [0.0; 4];
+                p.params4[1] = 0.0;
+                h.write(bytemuck::bytes_of(&p));
+            }
         }
         self.built_last_frame = built_total;
+        if let Some(h) = map_hash {
+            self.ground_map_version(gpu_shared, render_settings, &maps, h);
+            out.set(
+                "terrain.ground_map_patches",
+                self.ground_map.patches.len() as f64,
+            );
+        }
         steps.mark("patches: planet data");
 
         // Group draws by vertex page (one multi-draw a page), the scene's and the water's
@@ -3643,6 +3888,77 @@ impl RenderFeature for TerrainFeature {
         self.rays.placed = placed;
     }
 
+    fn ground_albedo_version(&self) -> Option<u64> {
+        self.ground_map.version
+    }
+
+    /// The patches over the map's square ([`GroundMapDraw`]), relative to the map's camera with
+    /// the morph off, each with its grid alone (from straight above a skirt has no area): the
+    /// map's own instances and view, written here.
+    fn draw_ground_albedo(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        view: &GroundAlbedoView,
+        ctx: &FrameContext,
+    ) {
+        let (Some(gpu), Some(map)) = (&self.gpu, &mut self.ground_map.gpu) else {
+            return;
+        };
+        let Some(group) = &gpu.group else {
+            return;
+        };
+        let mut draws = Vec::new();
+        let mut instances = Vec::new();
+        for p in &self.ground_map.patches {
+            if !view.contains_sphere((p.center - view.origin).as_vec3(), p.radius) {
+                continue;
+            }
+            draws.push(Draw {
+                slot: p.slot,
+                instance: instances.len() as u32,
+                list: 0,
+            });
+            instances.push(ChunkInstance {
+                origin: (p.origin - view.origin).as_vec3().to_array(),
+                planet: p.planet,
+                lod: [p.spacing, p.level as f32, 0.0, 0.0],
+                night: NO_PAGE,
+            });
+        }
+        if draws.is_empty() {
+            return;
+        }
+        draws.sort_by_key(|d| d.slot / SLOTS_PER_PAGE);
+        let queue = &ctx.gpu.queue;
+        map.instances
+            .write(&ctx.gpu.device, queue, bytemuck::cast_slice(&instances));
+        let center = view.center - DVec2::new(view.origin.x, view.origin.z);
+        let uniform = GroundMapGpu {
+            view_proj: view.view_proj.to_cols_array_2d(),
+            center: [center.x as f32, center.y as f32, self.ground_map.reach, 0.0],
+        };
+        queue.write_buffer(&map.uniform, 0, bytemuck::bytes_of(&uniform));
+        pass.set_pipeline(&map.pipeline);
+        pass.set_bind_group(1, group, &[]);
+        pass.set_bind_group(2, &map.group, &[]);
+        pass.set_index_buffer(gpu.index.slice(..), wgpu::IndexFormat::Uint16);
+        pass.set_vertex_buffer(1, map.instances.buffer.slice(..));
+        let grid = (QUADS * QUADS * 6) as u32;
+        let mut page = None;
+        for d in &draws {
+            let p = d.slot / SLOTS_PER_PAGE;
+            if page != Some(p) {
+                let Some(buffer) = self.pool.pages.get(p as usize) else {
+                    continue;
+                };
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                page = Some(p);
+            }
+            let base = ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32;
+            pass.draw_indexed(0..grid, base, d.instance..d.instance + 1);
+        }
+    }
+
     fn stats(&self) -> FeatureStats {
         self.stats
     }
@@ -3680,6 +3996,61 @@ impl RenderFeature for TerrainFeature {
 }
 
 impl TerrainFeature {
+    /// The ground colour map's version this frame ([`GroundMapDraw`]): `h` holds the patches
+    /// walked and the terrains' data, and to it go everything else its picture takes. `None`
+    /// until the map's pass and the ground's bind group are there and a patch is to be drawn.
+    /// Makes the pass the first time.
+    fn ground_map_version(
+        &mut self,
+        gpu_shared: &GpuShared,
+        settings: &RenderSettings,
+        maps: &MapsGpu,
+        mut h: std::collections::hash_map::DefaultHasher,
+    ) {
+        use std::hash::{Hash, Hasher};
+        if self.ground_map.gpu.is_none() {
+            self.ground_map.gpu = self
+                .gpu
+                .as_ref()
+                .map(|g| ground_map_pass(gpu_shared, &g.layout));
+        }
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        if gpu.group.is_none()
+            || self.ground_map.gpu.is_none()
+            || self.ground_map.patches.is_empty()
+        {
+            return;
+        }
+        // The ground maps' uploads: the weather's layers; the worn paths' window (its place
+        // and its regions coming or going: the main view's, which every frame it sends last),
+        // but not each send of their tiles, as the paths heal every 2 s and grow a little
+        // with every step, which the map takes with its next draw; the paint map (the shader
+        // takes it once all of it is up); the materials. Not the footprints, which the map
+        // leaves out.
+        (self.surface.writes, self.surface.far.map(f32::to_bits)).hash(&mut h);
+        // (And whether the shader draws the paths this frame: they go with their switch, or
+        // when no region is near, under the same window.)
+        (self.wear_window, maps.wear_v[3].to_bits()).hash(&mut h);
+        let paint = gpu
+            .paint_map
+            .map(|(min, texel, size)| (min.map(f64::to_bits), texel.to_bits(), size));
+        (gpu.paint_key, paint).hash(&mut h);
+        (&gpu.mat_key, gpu.mat_size, gpu.mat_scanned).hash(&mut h);
+        h.write(bytemuck::cast_slice(&[maps.flags, maps.far]));
+        // The switches `ground_color` reads, and where the map's canopy starts.
+        let reach = settings.ray_caster_reach.to_bits();
+        (
+            settings.trial_cuts,
+            settings.trial_cuts_more,
+            settings.debug_skip,
+            reach,
+        )
+            .hash(&mut h);
+        self.ground_map.version = Some(h.finish());
+    }
+
     /// A shadow map's patches (`still`: a cascade, or [`FAR_STILL`]), into the map or its
     /// still image.
     fn draw_shadow_ground(&self, pass: &mut wgpu::RenderPass<'_>, still: usize) {
@@ -3814,6 +4185,90 @@ impl TerrainFeature {
                 &gpu_shared.queue,
                 bytemuck::cast_slice(&self.args),
             );
+    }
+}
+
+/// The ground colour map's pass ([`GroundMapPass`]): `vs_ground_map` puts the patches in the
+/// map's view, `fs_ground_map` writes their albedo; the back culled, depth tested and written
+/// as in the scene pass (`ground_layout`: the ground's own group, 1).
+fn ground_map_pass(gpu: &GpuShared, ground_layout: &wgpu::BindGroupLayout) -> GroundMapPass {
+    let device = &gpu.device;
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("terrain ground map"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 8,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("terrain ground map"),
+        size: std::mem::size_of::<GroundMapGpu>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("terrain ground map"),
+        layout: &layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 8,
+            resource: uniform.as_entire_binding(),
+        }],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("terrain ground map"),
+        bind_group_layouts: &[Some(&gpu.frame_layout), Some(ground_layout), Some(&layout)],
+        immediate_size: 0,
+    });
+    let shader = gpu.shader("terrain", SHADER, true);
+    let buffers = [Some(TerrainVertex::layout()), Some(ChunkInstance::layout())];
+    let constants = [("TERRAIN_OFF", GROUND_MAP_OFF as f64)];
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("terrain ground map"),
+        layout: Some(&pl),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_ground_map"),
+            compilation_options: Default::default(),
+            buffers: &buffers,
+        },
+        primitive: wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(gpu.depth_state(true)),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_ground_map"),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+            targets: &[Some(wgpu::ColorTargetState {
+                format: GroundAlbedoView::FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    GroundMapPass {
+        pipeline,
+        uniform,
+        group,
+        instances: GrowBuffer::new(
+            device,
+            "terrain ground map instances",
+            wgpu::BufferUsages::VERTEX,
+            1024 * std::mem::size_of::<ChunkInstance>() as u64,
+        ),
     }
 }
 
@@ -4427,6 +4882,28 @@ mod tests {
         fill(&mut g);
         let sent: u32 = up.refresh(&g, false).iter().map(|r| r[2] * r[3]).sum();
         assert!(sent <= 2 * 12 + 16 * 2, "{sent}");
+        // A world shift that only moves carries the grid with its cells as they are (not a
+        // whole number of cells): nothing is sent again, for a round of bands, and the ground
+        // colour map, whose version counts the sends, stays as drawn. One that turns has the
+        // grid sampled again, sent as it comes.
+        tex.copy_from_slice(&up.sent);
+        for _ in 0..SURFACE_UPLOAD_FRAMES {
+            step(&mut up, &g, &mut tex);
+        }
+        check(&up, &g, &tex);
+        let shift = engine_world::WorldShift::translate(DVec3::new(-1234.3, 5.0, 877.9));
+        up.follow(&shift);
+        g.origin += DVec2::new(shift.translation.x, shift.translation.z);
+        for _ in 0..SURFACE_UPLOAD_FRAMES {
+            assert!(up.refresh(&g, false).is_empty());
+        }
+        check(&up, &g, &tex);
+        let origin = up.origin;
+        up.follow(&engine_world::WorldShift {
+            rotation: DQuat::from_rotation_y(0.3),
+            ..shift
+        });
+        assert_eq!(up.origin, origin);
     }
 
     #[test]
@@ -4467,6 +4944,93 @@ mod tests {
             h.transmittance(2.0, 0.0, 1e5),
         );
         assert!(deep >= air_only * 0.2 * (1.0 - 1e-6), "{deep} {air_only}");
+    }
+
+    /// The ground colour map's walk on a planet the size of the Earth, its lowest point 5 km
+    /// down (as the home planet's), the ground 0 to 10 m high, the eye 2 m up on a level-3 patch
+    /// (1,250 km across), 0.2 of the way in from one edge and halfway along it. The patch's
+    /// three siblings lie behind the horizon, so the view's walk never builds them, and the one
+    /// across that edge holds the eye in its bounding sphere. The map's walk passes over them as
+    /// the view's does and reaches the patch under the eye, about a texel between vertices (it
+    /// used to stop at their parent, 2,500 km across), and covers the square once, holding back
+    /// where only coarser patches are resident.
+    #[test]
+    fn the_ground_maps_walk_reaches_the_eyes_patch_on_a_planet() {
+        use crate::cube::{SurfaceMap, TerrainDomain};
+        let map = SurfaceMap::new(TerrainDomain::Sphere, 6.371e6);
+        let mut lod = Lod::new(map, (-5075.0, 3000.0), 0.5);
+        let eye = map.position(2, 0.3, 0.375, 2.0);
+        // The view's walks until they want nothing more, each patch built at 0 to 10 m.
+        let all = |_: DVec3, _: f64| true;
+        let mut chunks = HashMap::new();
+        for _ in 0..64 {
+            let sel = lod.select(&SelectInput {
+                camera: eye,
+                split_factor: 3.0,
+                merge_factor: Some(3.0),
+                visible: &all,
+                min_size: 0.0,
+                detail: None,
+            });
+            if sel.missing.is_empty() {
+                break;
+            }
+            for (_, k) in sel.missing {
+                let b = lod.estimate(k, 0.0, 10.0);
+                lod.set_built(k, 0.0, 10.0, b.center, b.radius);
+                let c = ChunkGpu {
+                    slot: 0,
+                    stamp: 1,
+                    origin: b.center,
+                    center: b.center,
+                    radius: b.radius,
+                    spacing: map.node_size(k.level) / QUADS as f64,
+                    water: false,
+                    skip: SkipCost::default(),
+                };
+                chunks.insert(k, c);
+            }
+        }
+        // The square around the eye, in the eye's frame (up along +y), as the map takes it.
+        let frame = DQuat::from_rotation_arc(eye.normalize(), DVec3::Y);
+        let reach = GroundAlbedoView::REACH_FROM_EYE_M as f64;
+        let depth = GroundAlbedoView::HALF_DEPTH_M as f64;
+        let inside = |c: DVec3, r: f64| {
+            let rel = frame * (c - eye);
+            rel.x.abs() <= reach + r && rel.z.abs() <= reach + r && rel.y.abs() <= depth + r
+        };
+        let under = |level| map.node_at(eye, level).expect("on the planet");
+        // What the walk has to pass over.
+        let missing: Vec<NodeKey> = (under(2).children().into_iter())
+            .filter(|k| !chunks.contains_key(k))
+            .collect();
+        assert_eq!(missing.len(), 3);
+        assert!(
+            missing
+                .iter()
+                .any(|k| inside(lod.nodes[k].center, lod.nodes[k].radius))
+        );
+        let walked = ground_map_walk(&lod, &chunks, eye, &inside);
+        let coarsest = walked.iter().map(|k| k.level).min().expect("patches");
+        assert!(coarsest >= 15, "a patch of level {coarsest}");
+        assert!(walked.contains(&under(18)));
+        assert!(chunks[&under(18)].spacing < 2.0 * GroundAlbedoView::TEXEL_M as f64);
+        // Every point of the square in exactly one patch walked.
+        let n = 33;
+        for i in 0..n {
+            for j in 0..n {
+                let s = |k: usize| (k as f64 / (n - 1) as f64 * 2.0 - 1.0) * reach;
+                let p = eye + frame.inverse() * DVec3::new(s(i), 0.0, s(j));
+                let (face, a, b) = map.face_coords(p).expect("on the planet");
+                let holding = walked.iter().filter(|k| {
+                    let (lo, size) = k.face_rect();
+                    k.face == face
+                        && (lo.x..lo.x + size).contains(&a)
+                        && (lo.y..lo.y + size).contains(&b)
+                });
+                assert_eq!(holding.count(), 1, "the point {i}, {j} of the square");
+            }
+        }
     }
 
     #[test]
@@ -4539,6 +5103,11 @@ mod tests {
                 assert_eq!(
                     size("Print"),
                     Some(std::mem::size_of::<PrintGpu>()),
+                    "{label}"
+                );
+                assert_eq!(
+                    size("GroundMapView"),
+                    Some(std::mem::size_of::<GroundMapGpu>()),
                     "{label}"
                 );
             }
