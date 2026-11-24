@@ -6,7 +6,7 @@
 use engine_core::prelude::*;
 use engine_render::RenderDisabled;
 use engine_render::prelude::*;
-use engine_render::settings::trial_cut_more::RAY_WORLD;
+use engine_render::settings::trial_cut_more::{RAY_WORLD, RAYS};
 use engine_water::{WaterBody, WaterPlugin};
 use engine_world::WorldPlugin;
 
@@ -38,7 +38,8 @@ fn each_body_in_reach_is_one_water_instance() {
         s.probe_gi = true;
         s.gi_hardware_rays = true;
         s.gi_probes_per_frame = 16;
-        s.trial_cuts_more |= RAY_WORLD;
+        // The scene alone, whatever part of the ray-traced lighting is on by default.
+        s.trial_cuts_more = (s.trial_cuts_more & !RAYS) | RAY_WORLD;
     }
     let w = &mut app.world;
     w.spawn((
