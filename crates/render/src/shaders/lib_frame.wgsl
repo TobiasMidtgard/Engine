@@ -1562,6 +1562,8 @@ fn specular_sky_visibility(rel: vec3<f32>, dir: vec3<f32>, n: vec3<f32>, roughne
     let params = frame.sky_occlusion_params;
     let flat_len = length(dir.xz);
     if (params.x < 0.5 || flat_len < 1e-3 || shade_skip(SKIP_SPECULAR_SKY)) { return 1.0; }
+    // Heading down past the lobe's width: no cover counts (see the end).
+    if (dir.y <= -(0.04 + roughness)) { return 1.0; }
     let p = rel + n * 0.2;
     let c = frame.sky_occlusion * vec4<f32>(p, 1.0);
     let edge = max(abs(c.x), abs(c.y));
@@ -1600,7 +1602,13 @@ fn specular_sky_visibility(rel: vec3<f32>, dir: vec3<f32>, n: vec3<f32>, roughne
     }
     // Half the lobe is hidden when the cover is level with the reflection.
     let width = 0.04 + roughness;
-    let vis = 1.0 - smoothstep(-width, width, steepest - dir.y);
+    var vis = 1.0 - smoothstep(-width, width, steepest - dir.y);
+    // A reflection heading down meets the ground, and the map can't tell cover that reaches it
+    // (a wall across the square) from cover over the surface (the top of a ball over its own
+    // underside, which a lake's mirror shows): the march took the ball's top for a wall in the
+    // way of every reflection under it, black patches on bare metal. Cover counts for the part
+    // of the lobe above the horizon only; `sky_visibility` still darkens what is under a roof.
+    vis = mix(1.0, vis, saturate(1.0 + dir.y / width));
     return mix(vis, 1.0, saturate((edge - 0.875) * 8.0));
 }
 
