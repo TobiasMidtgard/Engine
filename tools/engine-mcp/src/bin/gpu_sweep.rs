@@ -455,6 +455,12 @@ fn variants() -> Vec<Variant> {
             "every built step of the ray-traced lighting round at once: ray_world with the probes four times as often, the sun's trace joined with the shadow maps and a reflection for every pixel (what step 10 is to turn on by default; read the whole frame against the baseline)",
         ),
         v(
+            "ray_all",
+            r,
+            json!({"trial_cuts_more": 2032, "gi_hardware_rays": true}),
+            "every bit of the ray-traced lighting round at once (`trial_cut_more::RAYS`): ray_round with the ground colour map, the water's own reflection ray and the lake mirror's picture traced in place of its extra view. What step 10 turns on by default if all seven join; read the whole frame against the baseline",
+        ),
+        v(
             "ray_ground_map",
             r,
             json!({"trial_cuts_more": 528, "gi_hardware_rays": true}),
