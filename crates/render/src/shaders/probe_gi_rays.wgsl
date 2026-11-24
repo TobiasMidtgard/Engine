@@ -18,21 +18,9 @@
 // `cs_reflect` trace nothing in between); shadow rays leave it as it is.
 var<private> ray_last: RayHit;
 
-// The leaves for the probes' rays and their hits' shadow rays while the canopy map holds no
-// crown (`frame.canopy.w` 0: the setting is off, or no crown is near): the crowns as their
-// stand-ins' cards and the swaying cards that cast, taken whole by the probes' rays and
-// through the holes of their texture by the shadow rays (`SHADOW_RULES`). While the map holds
-// crowns, the leaves reach the probes through it (`canopy_ray_transmittance`), never as
-// cards.
-fn leaves_unless_canopy() -> u32 {
-    return select(RAY_LEAF, 0u, frame.canopy.w > 0.0);
-}
-
-// What a hit's shadow rays ask of a cut-out card's triangles (a fence, and the leaves while the
-// canopy map holds none): their texture, for the first 4 a ray meets, then their coverage, at
-// either face, as the shadow maps draw them. The ground stops them from either side, as in the
-// probes' own scene.
-const SHADOW_RULES: u32 = RULE_LEAF_TEXTURE | (4u << RULE_TESTS_SHIFT);
+// (The leaves the rays take while the canopy map holds no crown, `leaves_unless_canopy`, and
+// what the hits' shadow rays and world reflections ask of a cut-out card, `SHADOW_RULES` and
+// `REFLECT_RULES`, are ray_hit_light.wgsl's, which the water's reflection ray shares.)
 
 // The nearest hit along a camera-relative ray within `t_max` (`instance` all ones: none)
 // among what holds its shape and is 0.3 m or more (`RAY_SEES_SHAPES`, and the leaves while the
@@ -66,12 +54,6 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
 // the map without a place in the rays yet, such as cloth, characters and rocks under 0.3 m,
 // then no longer dims that sky.)
 const REFLECT_MISS_SEES_SKY: bool = true;
-
-// What world reflections ask of a cut-out card's triangles: their texture, for the first 4 a
-// ray meets, then their coverage, a card drawn from one side only at that side, as the view
-// draws it; and the ground only at its front.
-const REFLECT_RULES: u32 = RULE_GROUND_FRONT | RULE_LEAF_TEXTURE | RULE_DRAWN_SIDE
-    | (4u << RULE_TESTS_SHIFT);
 
 // The nearest hit along a camera-relative ray within `t_max` that a world reflection sees
 // (`instance` all ones: none), as `trace_scene` gives a probe's: every class a view draws, of

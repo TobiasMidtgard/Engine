@@ -180,7 +180,8 @@ fn hit_radiance(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>, t: f32, spacing: f32
 }
 
 // `hit_radiance` with the light bounced onto the point given: `bounced` (irradiance, lux-like:
-// diffuse light is albedo / PI times it).
+// diffuse light is albedo / PI times it). A reflection's hit is lit as this lights a probe's,
+// and with its own shine, by ray_hit_light.wgsl `reflected_hit_lit`: change them together.
 fn hit_radiance_with(p: vec3<f32>, n: vec3<f32>, t: f32, spacing: f32, albedo: vec3<f32>, emissive: vec3<f32>, lights_most: u32, bounced: vec3<f32>) -> vec3<f32> {
     let lift = p + n * max(0.002, t * 1e-4);
     var light = vec3<f32>(0.0);

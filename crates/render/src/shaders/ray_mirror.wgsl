@@ -55,12 +55,27 @@ fn mirror_sky(dir: vec3<f32>) -> vec3<f32> {
             let uv = vec2<f32>(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
             let prev_uv = vec2<f32>(p.x / p.w * 0.5 + 0.5, 0.5 - p.y / p.w * 0.5);
             if (all(uv > vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0)) && all(prev_uv > vec2<f32>(0.0))
-                && all(prev_uv < vec2<f32>(1.0)) && full_scene_depth(uv) <= 0.0) {
+                && all(prev_uv < vec2<f32>(1.0)) && mirror_sky_around(uv)) {
                 return full_seen_at(prev_uv);
             }
         }
     }
     return sample_env(dir);
+}
+
+// Whether the screen shows the sky at the pixel `uv` lies in and the 8 around it: every pixel
+// the picture's filtered read there blends, and a pixel more for the edges temporal
+// anti-aliasing blends. Where a direction's vanishing point lay just off a thing's outline, the
+// read blended the thing in: a lake's far edge under a ball peeking in at the top of the
+// screen came out dimmed in dashes.
+fn mirror_sky_around(uv: vec2<f32>) -> bool {
+    let last = vec2<i32>(textureDimensions(full_depth)) - 1;
+    let px = vec2<i32>(floor(uv * frame.viewport.xy));
+    for (var i = 0; i < 9; i++) {
+        let at = clamp(px + vec2<i32>(i % 3 - 1, i / 3 - 1), vec2<i32>(0), last);
+        if (textureLoad(full_depth, at, 0) > 0.0) { return false; }
+    }
+    return true;
 }
 
 // What lies along unit `dir` from camera-relative `origin` past the ray's reach that the

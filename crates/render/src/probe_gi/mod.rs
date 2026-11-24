@@ -169,10 +169,12 @@ fn shader_source(rays: Rays) -> String {
             include_str!("../shaders/probe_gi_trace_hw.wgsl")
         ),
         // (Every pixel's reflection is a dispatch of this program too, after the probes', and
-        // so are the mirrors' pictures and Rendering's check of the probes.)
+        // so are the mirrors' pictures and Rendering's check of the probes; their hits are lit
+        // by ray_hit_light.wgsl, which the water's reflection ray composes too.)
         Rays::World => format!(
-            "{}\n{}\n{body}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{body}\n{}\n{}\n{}",
             crate::ray_scene::shader_lib(1),
+            include_str!("../shaders/ray_hit_light.wgsl"),
             include_str!("../shaders/probe_gi_rays.wgsl"),
             include_str!("../shaders/ray_reflect.wgsl"),
             include_str!("../shaders/ray_mirror.wgsl"),

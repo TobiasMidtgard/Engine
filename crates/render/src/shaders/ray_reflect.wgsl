@@ -44,10 +44,6 @@ const FULL_MARCH_STEPS: i32 = 64;
 const FULL_REFINE_STEPS: i32 = 6;
 // `shade_skip::COUNT_MESH_RUNS`: the counts of the frame's work are asked for.
 const COUNT_REFLECTIONS: u32 = 262144u;
-// The lamps a ray's hit asks for their shadow, at most, and the roughest pixel whose hits ask
-// at all (a rougher reflection blurs a lamp's light away; the probes carry it).
-const FULL_LAMPS_MOST: u32 = 2u;
-const FULL_LAMPS_ROUGHNESS: f32 = 0.3;
 // The screen's outer share over which a hit the camera sees mixes into its own light.
 const FULL_SCREEN_EDGE: f32 = 0.08;
 // How far above the face the prepass drew a reflection is kept (the cosine to the face).
@@ -152,15 +148,25 @@ fn full_march(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> F
                 if (m_scene > 0.0 && m_ray > m_scene) { hi = mid; } else { lo = mid; }
             }
             // The ray crossed what the screen shows there, rather than passed behind its
-            // outline: where it went behind, it lies behind the surface by no more than a
-            // surface's thickness or than it moves in depth across a pixel (a step can span
-            // several). Else, under a ball, the march met the ball's outline and its near side's
-            // light speckled the reflection of the underside the ray goes on to meet.
+            // outline: it lies behind the surface by no more than a surface's thickness, or a
+            // pixel before the crossing it lay in front of the surface as the screen shows it
+            // there or at the crossing (a step can span several pixels), so it reached the
+            // surface's depth within that pixel. Else, under a ball, the march met the ball's
+            // outline and its near side's light speckled the reflection of the underside the ray
+            // goes on to meet; and toward the ray's vanishing point, where a pixel spans
+            // hundreds of metres of the ray, a ray from a lake's far side that had gone far
+            // behind a ball peeking in at the top of the screen took the ball's pixels (dark
+            // specks), as the mirror's march past the ray's reach did (`mirror_far`). (Allowed
+            // as far behind as the ray moves in depth across a pixel, the rule before let both
+            // through.)
             let cross_uv = mix(a.xy, b.xy, hi);
             let cross_ray = 1.0 / mix(inv_a, inv_b, hi);
             let cross_scene = full_scene_depth(cross_uv);
-            let pixel_span = step_span * f32(steps) / max(pixels, f32(steps));
-            if (cross_ray - cross_scene < max(0.1 + 0.02 * cross_scene, pixel_span * 1.5)) {
+            let thick = 0.1 + 0.02 * cross_scene;
+            let back_k = max(hi - 1.0 / max(pixels, 1.0), 0.0);
+            let back_ray = 1.0 / mix(inv_a, inv_b, back_k);
+            let back_scene = full_scene_depth(mix(a.xy, b.xy, back_k));
+            if (cross_ray - cross_scene < thick || back_ray < max(back_scene, cross_scene) + thick) {
                 hit.uv = cross_uv;
                 hit.found = true;
                 return hit;
@@ -267,35 +273,8 @@ fn full_seen(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(full_seen_at(prev_uv), full_edge(uv) * full_edge(prev_uv));
 }
 
-// The light a ray's hit `s` at distance `t` along `dir` from `origin` sends back along it, as
-// `shade_hit` lights a world reflection's hit, with the lamps of a pixel of `roughness`. Where
-// last frame's probes don't cover the hit (past their grid: a far shore, a hill, a ball above
-// a lake), the light bounced onto it is the sky's that `shade_surface` guesses there rather
-// than none, which left a reflected thing's shaded side black.
-fn full_hit_light(origin: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, roughness: f32) -> vec3<f32> {
-    var p = origin + dir * t;
-    if (any(s.n != s.face)) {
-        // `hit_radiance` lifts its shadow rays along `n`: off the face by as much as along a
-        // flat face's normal, however far `n` leans.
-        p += s.face * (max(0.002, t * 1e-4) * (1.0 - dot(s.n, s.face)));
-    }
-    let lamps = select(0u, min(FULL_LAMPS_MOST, u32(ray_scene.lights.x)), roughness <= FULL_LAMPS_ROUGHNESS);
-    let indirect = probe_gi(p, s.n, -dir);
-    var bounced = indirect.rgb * indirect.a;
-    if (indirect.a < 1.0) {
-        bounced += full_sky_guess(p, s.n) * (1.0 - indirect.a);
-    }
-    return hit_radiance_with(p, s.n, t, frame.gi_volume.w, s.albedo, s.emissive, lamps, bounced);
-}
-
-// The light `shade_surface` guesses bounced onto camera-relative `p` with normal `n` where the
-// probes don't cover it (irradiance, lux-like): the sky's around `n`, less what the cover over
-// `p` hides (the top-down maps and the indoor volumes), and the ambient fill.
-fn full_sky_guess(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
-    let sky_vis = sky_visibility(p, n);
-    let fill = frame.ambient.rgb;
-    return ((sky_ambient_covered(n, sky_vis) - fill) * sky_vis + fill) * PI;
-}
+// (A ray's hit is lit by ray_hit_light.wgsl `reflected_hit_light`, which the water's reflection
+// ray shares: its light, its lamps and its own shine.)
 
 // The reflection at pixel `pixel`, written to `full_out`, and what it adds to the counts
 // (pixels under the limit, answered by the screen, rays, rays' hits taken from the picture).
@@ -430,7 +409,7 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
             }
             var lit = vec3<f32>(0.0);
             if (seen.a < 1.0) {
-                lit = full_hit_light(origin, dir, hit.t, s, roughness);
+                lit = reflected_hit_light(origin, dir, hit.t, s, roughness);
             }
             if (seen.a > 0.0 || screen.a > 0.0) { found.counts.w = 1u; }
             out = vec4<f32>(min(mix(lit, seen.rgb, seen.a), vec3<f32>(60000.0)), max(hit.t, 1e-3));

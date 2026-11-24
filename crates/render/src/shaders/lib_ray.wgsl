@@ -87,7 +87,7 @@ const RAY_SEES_SHAPES: u32 = 55u; // SOLID | GROUND | SWAY | WATER | NOCAST
 // What casts a shadow of those: every face of it stops light on its way from the sun or a
 // lamp to a hit, a cut-out's only where its texture is opaque (`ray_stopped`, which also asks
 // the stand-ins that cast for things that cast none; the rules are `SHADOW_RULES` in
-// probe_gi_rays.wgsl).
+// ray_hit_light.wgsl).
 const RAY_CASTS: u32 = 7u; // SOLID | GROUND | SWAY
 // What the sun's measuring rays see (`trace_sun` in probe_gi_rays.wgsl): what casts at any
 // size, and the leaves (a crown's stand-in, swaying cards that cast) through the holes of

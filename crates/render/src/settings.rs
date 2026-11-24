@@ -516,9 +516,11 @@ pub mod trial_cut_more {
     /// `min(384, 400 exp(-5 roughness))` m long, whose hit is taken from last frame's picture
     /// too where the camera sees it, and is lit as a world reflection's elsewhere (the sun
     /// through a shadow ray, the two nearest lamps through shadow rays up to roughness 0.3,
-    /// the probes). A pass "ray reflections resolve" blurs them over each pixel's reflection
-    /// lobe into what shading reads (ssr.wgsl `fs_reflect_resolve`), from the first frame
-    /// on: a frame without last frame's picture has the rays alone. With
+    /// the probes), with its own shine where it is glossy or metal (the sun's and the lamps'
+    /// highlights and its sky, ray_hit_light.wgsl). A pass "ray reflections resolve" blurs
+    /// them over each pixel's reflection lobe into what shading reads (ssr.wgsl
+    /// `fs_reflect_resolve`), from the first frame on: a frame without last frame's picture
+    /// has the rays alone. With
     /// `shade_skip::COUNT_MESH_RUNS` they are counted (`render.ray.reflect_pixels`,
     /// `reflect_screen`, `reflect_rays`, `reflect_reused`); `shade_skip::RAY_REFLECT_RAYS_ONLY`
     /// traces every one as a ray. 29.5 MB at 2560x1440 while on. Off by default.
@@ -547,8 +549,11 @@ pub mod trial_cut_more {
     /// the screen first, then a ray 384 m long through the frame's ray scene, lit as a world
     /// reflection's hit, the sky beyond, then what the screen shows farther out). The picture
     /// keeps its mip chain, depth, projection and exposure, so its readers (the water's
-    /// `mirror_reflection`) sample it as before. Main view only. `render.ray.mirror_pictures`,
-    /// `mirror_texels`, `mirror_mb` (about 18 bytes a texel while on: 13.5 MB at the lake);
+    /// `mirror_reflection`) sample it as before. With temporal anti-aliasing each frame's rays
+    /// go through another point of their texels and the picture keeps a history of its own
+    /// that averages them (mirror_resolve.wgsl), as a drawn view's does. Main view only.
+    /// `render.ray.mirror_pictures`, `mirror_texels`, `mirror_mb` (about 35 bytes a texel
+    /// while on: about 26 MB at the lake);
     /// with `shade_skip::COUNT_MESH_RUNS` they are counted (`render.ray.mirror_screen`,
     /// `mirror_rays`, `mirror_reused`). A mirror drawn again after its traced pictures keeps
     /// no picture for a frame, so its readers start over (the water's settling frames). Off by

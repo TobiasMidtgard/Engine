@@ -449,6 +449,120 @@ fn a_traced_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_i
     assert_reflects_what_is_above(&r.shot, "traced");
 }
 
+/// Above the top of the screen beside the yellow ball, so that only their reflections show: a
+/// glossy ball and a matte one of one dark blue (`a_glossy_thing_shines_in_a_traced_mirror_as_in_a_drawn_one`).
+const GLOSSY: DVec3 = DVec3::new(-2.6, 6.0, -10.0);
+const MATTE: DVec3 = DVec3::new(2.6, 6.0, -10.0);
+
+/// [`ball_app`] with the glossy ball and the matte one.
+fn shine_app(traced: bool) -> App {
+    let mut app = ball_app(traced);
+    for (at, roughness) in [(GLOSSY, 0.15), (MATTE, 0.95)] {
+        app.world.spawn((
+            Transform::from_translation(at),
+            MeshRenderer::new(
+                Shape::Sphere {
+                    radius: 0.8,
+                    segments: 48,
+                },
+                StandardMaterial {
+                    perceptual_roughness: roughness,
+                    ..StandardMaterial::color(0.05, 0.08, 0.35)
+                },
+            ),
+        ));
+    }
+    app
+}
+
+/// A reflected thing's own shine (ray_hit_light.wgsl `reflected_hit_lit`): in the mirror, the
+/// sun's highlight on a glossy ball that only the reflection shows, where a matte ball of the
+/// same colour beside it has none, traced by the frame's rays as the drawn mirror shows it. Lit
+/// without its shine, a hit of the rays looked matte, and the two balls alike. And the lake's
+/// far side shows nothing of the balls peeking in at the top of the screen (ray_reflect.wgsl
+/// `full_march`'s crossing rule, ray_mirror.wgsl `mirror_sky_around`).
+#[test]
+fn a_glossy_thing_shines_in_a_traced_mirror_as_in_a_drawn_one() {
+    for (traced, what) in [(false, "drawn"), (true, "traced")] {
+        let mut app = shine_app(traced);
+        app.update_n(5);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let d = app.world.resource::<Diagnostics>();
+        if traced {
+            if d.get("render.ray.supported") != Some(1.0) {
+                eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+                return;
+            }
+            assert_eq!(
+                d.get("render.ray.mirror_pictures"),
+                Some(1.0),
+                "a traced picture"
+            );
+        }
+        assert!(
+            pixel(GLOSSY).y < 0 && pixel(MATTE).y < 0,
+            "the balls are on screen"
+        );
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let name = format!("shine-{what}.png");
+        let path = dir.join(&name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(&name));
+        }
+        let shot = image::open(&path).expect("read the shot").to_rgb8();
+        // The whitest pixel of a ball's reflection (its least channel: the ball's own colour
+        // has next to no red, a highlight and the sky it reflects have).
+        let whitest = |p: DVec3| {
+            let c = pixel(mirrored(p));
+            let mut most = 0;
+            for y in c.y - 10..=c.y + 10 {
+                for x in c.x - 10..=c.x + 10 {
+                    let q = shot.get_pixel(x as u32, y as u32).0;
+                    most = most.max(q.iter().copied().min().unwrap_or(0));
+                }
+            }
+            i32::from(most)
+        };
+        let (glossy, matte) = (whitest(GLOSSY), whitest(MATTE));
+        // The lake's far side below where the balls peek in at the top of the screen: a ray
+        // reflected there rises toward them on screen but passes far behind them, so nothing
+        // of theirs shows (pixels darker than the stretch's median by more than 10 levels:
+        // 9 and 14 before, under the march's old crossing rule and a filtered read of the
+        // sky beside the balls' outlines, `mirror_sky`; 5 and 6 with the march's rule alone;
+        // 0 in the drawn mirror).
+        let specks: usize = [(140u32, 172u32), (228, 260)]
+            .iter()
+            .map(|&(x0, x1)| {
+                let lum: Vec<f32> = (102..114)
+                    .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                    .map(|(x, y)| {
+                        let q = shot.get_pixel(x, y).0;
+                        q.iter().map(|&c| f32::from(c)).sum::<f32>() / 3.0
+                    })
+                    .collect();
+                let mut sorted = lum.clone();
+                sorted.sort_by(f32::total_cmp);
+                let median = sorted[sorted.len() / 2];
+                lum.iter().filter(|&&l| l < median - 10.0).count()
+            })
+            .sum();
+        eprintln!(
+            "{what}: the glossy ball's reflection at its whitest {glossy}, the matte one's \
+             {matte}; specks on the lake's far side {specks}"
+        );
+        assert!(
+            glossy > matte + 60,
+            "{what}: the glossy ball's reflection shines no more than the matte one's: {glossy} against {matte}"
+        );
+        assert_eq!(specks, 0, "{what}: specks on the lake's far side");
+    }
+}
+
 /// With temporal anti-aliasing a traced picture holds still under a still camera, as a drawn
 /// one does: each frame's rays go through another point of their texels (the frame's jitter),
 /// and the picture's own history averages them (mirror_resolve.wgsl). Without it the picture
