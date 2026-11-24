@@ -53,15 +53,27 @@ const FULL_SCREEN_EDGE: f32 = 0.08;
 // How far above the face the prepass drew a reflection is kept (the cosine to the face).
 const FULL_ABOVE_FACE: f32 = 0.05;
 // When last frame's picture stands for a surface the screen's march or a ray met
-// (`full_picture_stands`): unless the camera sees it more edge on than the reflection does, by
-// more than this in its own Fresnel reflection's share of its light (Schlick's (1 - cos)^5).
-// Seen so, what the camera saw there is mostly the surface's reflection of what lies beside
-// it, which the reflection doesn't see: seen from just above, the underside of a ball over a
-// mirror came out darker than the ball's own light in the mirror, in specks. Seen less edge on
-// by the camera than by the reflection (the ground in a wall mirror), the picture still stands:
-// the ray's own light, which leaves out the surface's reflection altogether, is farther off.
-// A wall seen in the floor in front of it is seen at the same angle both ways.
+// (`full_picture_stands`). What the camera saw there is the surface's own light and its
+// reflection of what lies the other way from the camera, a share of its light that rises as it
+// is seen more edge on (Schlick's (1 - cos)^5). Where the camera sees a rough surface face on
+// (this share at most FULL_SEEN_OWN_MAX, a cosine of 0.5; its roughness FULL_FACE_ON_ROUGH at
+// least, so a light's highlight on it is wide and dim), it looks about the same from every
+// side and the picture stands. Elsewhere the picture stands only where the surface reflects
+// about the same toward the camera as toward the reflection: its two mirror directions within
+// its lobe (`FULL_LOBE_MIN` at the least), so the sun's glare on a glossy floor, or a lamp's
+// streak on a wet one, isn't copied into a wall mirror that sees that floor from the other
+// side; and the camera's share no more than FULL_FRESNEL_GAP above the reflection's, so the
+// underside of a ball seen from just above isn't copied into the mirror under it (dark specks).
+// A rough wall seen in the floor in front of it keeps the picture however edge on, and the
+// ray's own light, which leaves the surface's reflection out, stands in elsewhere.
 const FULL_FRESNEL_GAP: f32 = 0.05;
+const FULL_SEEN_OWN_MAX: f32 = 0.032;
+// (A dielectric's highlight from a light at this roughness peaks at about 40% of its own light
+// where its albedo is 0.3; at 0.15, about a hundred times.)
+const FULL_FACE_ON_ROUGH: f32 = 0.6;
+// The least half width of a surface's lobe for `full_picture_stands`, radians (6 degrees): a
+// nearly smooth surface reflects about the same over that.
+const FULL_LOBE_MIN: f32 = 0.1;
 // Never more edge on to the camera than this cosine: the pixels there are outlines, which hold
 // the background beside them.
 const FULL_OUTLINE_MIN: f32 = 0.1;
@@ -211,14 +223,20 @@ fn full_seen_at(uv: vec2<f32>) -> vec3<f32> {
     return min(c / frame.reflections.y, vec3<f32>(60000.0));
 }
 
-// Whether last frame's picture of a surface facing `n`, seen along unit `v` (toward the
-// camera), stands for the light it sends back along unit `back` (toward where a reflection's
-// ray comes from): `FULL_FRESNEL_GAP`, `FULL_OUTLINE_MIN`.
-fn full_picture_stands(n: vec3<f32>, v: vec3<f32>, back: vec3<f32>) -> bool {
+// Whether last frame's picture of a surface facing `n` of perceptual `roughness`, seen along
+// unit `v` (toward the camera), stands for the light it sends back along unit `back` (toward
+// where a reflection's ray comes from): `FULL_FRESNEL_GAP`, `FULL_FACE_ON_ROUGH`,
+// `FULL_OUTLINE_MIN`.
+fn full_picture_stands(n: vec3<f32>, v: vec3<f32>, back: vec3<f32>, roughness: f32) -> bool {
     let nv = dot(n, v);
     let seen = pow(1.0 - saturate(nv), 5.0);
+    if (nv <= FULL_OUTLINE_MIN) { return false; }
+    if (seen <= FULL_SEEN_OWN_MAX && roughness >= FULL_FACE_ON_ROUGH) { return true; }
     let reflected = pow(1.0 - saturate(dot(n, back)), 5.0);
-    return nv > FULL_OUTLINE_MIN && seen - reflected < FULL_FRESNEL_GAP;
+    // GGX's lobe: about 1.3 alpha wide each side of its mirror direction (half its peak).
+    let lobe = max(FULL_LOBE_MIN, 1.3 * roughness * roughness);
+    return seen - reflected < FULL_FRESNEL_GAP
+        && dot(reflect(-v, n), reflect(-back, n)) > cos(min(lobe, 1.5));
 }
 
 // What last frame's picture shows of camera-relative point `p` on a surface facing `n`, for a
@@ -227,8 +245,6 @@ fn full_picture_stands(n: vec3<f32>, v: vec3<f32>, back: vec3<f32>) -> bool {
 // picture stands for the ray's (`full_picture_stands`): rgb, and its share (0: the camera
 // doesn't see it; under 1 within the screen's outer 8%, where the hit's own light takes over).
 fn full_seen(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
-    let v = select(normalize(-p), frame.inv_view[2].xyz, frame.exposure.w > 0.5);
-    if (!full_picture_stands(n, v, -dir)) { return vec4<f32>(0.0); }
     let c = frame.view_proj * vec4<f32>(p, 1.0);
     if (c.w <= 0.0) { return vec4<f32>(0.0); }
     let ndc = c.xy / c.w;
@@ -244,6 +260,8 @@ fn full_seen(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     if (abs(scene - depth) > 0.02 * depth + 0.05 || dot(oct_decode(nr.xy), n) < 0.3) {
         return vec4<f32>(0.0);
     }
+    let v = select(normalize(-p), frame.inv_view[2].xyz, frame.exposure.w > 0.5);
+    if (!full_picture_stands(n, v, -dir, nr.z)) { return vec4<f32>(0.0); }
     let prev_uv = uv - textureLoad(full_motion, px, 0).xy;
     if (any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0))) { return vec4<f32>(0.0); }
     return vec4<f32>(full_seen_at(prev_uv), full_edge(uv) * full_edge(prev_uv));
@@ -363,14 +381,15 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
         let m = full_march(origin_view, dir_view, min(depth * 3.0 + 30.0, 1000.0), noise);
         if (m.found) {
             let hit_px = clamp(vec2<i32>(floor(m.uv * frame.viewport.xy)), vec2<i32>(0), size - 1);
-            let hit_n = oct_decode(textureLoad(full_normal, hit_px, 0).xy);
+            let hit_nr = textureLoad(full_normal, hit_px, 0);
+            let hit_n = oct_decode(hit_nr.xy);
             let prev_uv = m.uv - textureLoad(full_motion, hit_px, 0).xy;
             let hit_rel = (frame.inv_view * vec4<f32>(view_position(m.uv, textureLoad(full_depth, hit_px, 0)), 0.0)).xyz;
             let hit_v = select(normalize(-hit_rel), frame.inv_view[2].xyz, frame.exposure.w > 0.5);
             // The surface met faces the reflection (its back is not what the camera saw), the
             // camera's picture of it stands for the reflection's (`full_picture_stands`), and
             // last frame's picture holds it.
-            if (dot(hit_n, dir) < -0.1 && full_picture_stands(hit_n, hit_v, -dir)
+            if (dot(hit_n, dir) < -0.1 && full_picture_stands(hit_n, hit_v, -dir, hit_nr.z)
                 && all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0))) {
                 screen = vec4<f32>(full_seen_at(prev_uv), full_edge(m.uv) * full_edge(prev_uv));
                 screen_t = max(distance(hit_rel, origin), 1e-3);
