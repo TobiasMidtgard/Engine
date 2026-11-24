@@ -16,9 +16,11 @@
 //! game runs; a mirror shows the wall behind a cut-out card through the card's holes; each
 //! kind of thing is in the rays as its class; the reaches are settings; each row of a
 //! `MeshInstances` slot is an instance of its own; the measuring fill fills both
-//! structures to their caps; and a ground another feature brings through the hook stops the
+//! structures to their caps; a ground another feature brings through the hook stops the
 //! probes' rays at its front, is lit from above, hides the sky where it rises, and lets the
-//! sun's rays out through its back. Needs a GPU with ray queries (lavapipe has them); passes
+//! sun's rays out through its back; and a ground that draws the ground colour map lights with
+//! the map's colour where it painted it, also on rows placed before it drew, and the map is
+//! drawn again only when it changes. Needs a GPU with ray queries (lavapipe has them); passes
 //! with a note without.
 
 use engine_assets::{Assets, Handle};
@@ -26,11 +28,13 @@ use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::rock::rock;
 use engine_render::settings::shade_skip;
-use engine_render::settings::trial_cut_more::RAY_WORLD;
+use engine_render::settings::trial_cut_more::{RAY_GROUND_MAP, RAY_WORLD};
 use engine_render::{
-    GpuShared, RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere,
-    RayView, RenderDisabled, capture_now,
+    FrameContext, GpuShared, GroundAlbedoView, RayClass, RayGeometryState, RayKey, RayLook,
+    RaySceneOut, RaySource, RaySphere, RayView, RenderDisabled, capture_now, wgpu,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const W: u32 = 160;
 const H: u32 = 120;
@@ -2860,4 +2864,430 @@ fn a_hooked_ground_blocks_the_sky_and_is_lit_from_above() {
         "a hooked ground's front stops the sun's rays: {:.4} stopped under the roof",
         stopped[1]
     );
+}
+
+/// A painted ground: [`HookedGround`]'s squares, placed once an epoch (as a feature that keeps
+/// what it placed), that draws one colour over a world rectangle into the ground colour map
+/// (`trial_cut_more::RAY_GROUND_MAP`), as the terrain draws its albedo there. Its version is
+/// the test's to set: 0 draws nothing.
+struct PaintedGround {
+    squares: Vec<(DAffine3, [f32; 3])>,
+    /// The painted rectangle at y = 0: world x0, z0, x1, z1.
+    area: [f64; 4],
+    paint: [f32; 3],
+    version: Arc<AtomicU64>,
+    /// The epoch its squares were placed in.
+    placed: Option<u32>,
+    gpu: Option<(wgpu::RenderPipeline, wgpu::Buffer, wgpu::BindGroup)>,
+}
+
+/// The paint: the rectangle's four corners (camera-relative) through the map's matrix, in one
+/// colour.
+const PAINT_SHADER: &str = r#"
+struct Paint { view_proj: mat4x4<f32>, corners: array<vec4<f32>, 4>, color: vec4<f32> };
+@group(1) @binding(0) var<uniform> paint: Paint;
+@vertex fn vs_paint(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    var order = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+    return paint.view_proj * vec4<f32>(paint.corners[order[i]].xyz, 1.0);
+}
+@fragment fn fs_paint() -> @location(0) vec4<f32> { return vec4<f32>(paint.color.rgb, 1.0); }
+"#;
+
+/// `Paint`'s size: the matrix, four corners and the colour.
+const PAINT_BYTES: u64 = 144;
+
+impl RenderFeature for PaintedGround {
+    fn name(&self) -> &str {
+        "painted ground"
+    }
+
+    fn init(&mut self, gpu: &GpuShared) {
+        let module = gpu.shader("painted ground", PAINT_SHADER, false);
+        let own = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("painted ground"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("painted ground"),
+                bind_group_layouts: &[Some(&gpu.frame_layout), Some(&own)],
+                immediate_size: 0,
+            });
+        let pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("painted ground"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_paint"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(gpu.depth_state(true)),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_paint"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: GroundAlbedoView::FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("painted ground"),
+            size: PAINT_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("painted ground"),
+            layout: &own,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        self.gpu = Some((pipeline, buffer, group));
+    }
+
+    fn ray_scene(&mut self, _gpu: &GpuShared, view: &RayView, out: &mut RaySceneOut<'_>) {
+        if self.placed == Some(view.epoch) {
+            return;
+        }
+        let square = RayKey(0, 0);
+        let state = out.geometry(square, 1, RayClass::Ground.opaque(), RaySource::UnitSquare);
+        if !matches!(state, RayGeometryState::Ready | RayGeometryState::Older) {
+            return;
+        }
+        for (i, (to_world, albedo)) in self.squares.iter().enumerate() {
+            let m = to_world.matrix3;
+            let sphere = RaySphere {
+                center: to_world.translation,
+                radius: (m.x_axis.length() + m.z_axis.length()) as f32,
+            };
+            let look = RayLook {
+                albedo: *albedo,
+                ..Default::default()
+            };
+            out.place(
+                RayKey(1, i as u64),
+                square,
+                to_world,
+                sphere,
+                RayClass::Ground,
+                0,
+                &look,
+            );
+        }
+        self.placed = Some(view.epoch);
+    }
+
+    fn ground_albedo_version(&self) -> Option<u64> {
+        let version = self.version.load(Ordering::Relaxed);
+        (self.gpu.is_some() && version != 0).then_some(version)
+    }
+
+    fn draw_ground_albedo(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        view: &GroundAlbedoView,
+        ctx: &FrameContext,
+    ) {
+        let Some((pipeline, buffer, group)) = &self.gpu else {
+            return;
+        };
+        let o = view.origin;
+        let [x0, z0, x1, z1] = self.area;
+        let corner = |x: f64, z: f64| [(x - o.x) as f32, -o.y as f32, (z - o.z) as f32, 1.0];
+        let mut data = view.view_proj.to_cols_array().to_vec();
+        // Counter-clockwise seen from above: the map draws faces that face up.
+        for c in [
+            corner(x0, z1),
+            corner(x1, z1),
+            corner(x1, z0),
+            corner(x0, z0),
+        ] {
+            data.extend(c);
+        }
+        data.extend([self.paint[0], self.paint[1], self.paint[2], 1.0]);
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(bytes.len() as u64, PAINT_BYTES);
+        // (A buffer of its own, read by this pass alone.)
+        ctx.gpu.queue.write_buffer(buffer, 0, &bytes);
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(1, group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
+/// The paint: green, against the squares' gray 0.3.
+const PAINT: [f32; 3] = [0.05, 0.6, 0.05];
+/// The painted half of the ground: x0, z0, x1, z1. The half the wall's front faces (z < 0), so
+/// that a flip of the map's z puts the paint behind the wall.
+const PAINTED: [f64; 4] = [-100.0, -100.0, 100.0, 0.0];
+
+/// [`hooked_ground_app`]'s scene on one gray square of [`PaintedGround`] 200 m across, its
+/// version `version` (0: it draws nothing), the ground colour map on (`map`) or off; and the
+/// camera.
+fn painted_ground_app(version: u64, map: bool) -> (App, Arc<AtomicU64>, Entity) {
+    let mut app = app(true);
+    let shared = Arc::new(AtomicU64::new(version));
+    app.add_render_feature(PaintedGround {
+        squares: vec![hooked_square(
+            [200.0, 200.0],
+            DQuat::IDENTITY,
+            DVec3::ZERO,
+            [0.3; 3],
+        )],
+        area: PAINTED,
+        paint: PAINT,
+        version: shared.clone(),
+        placed: None,
+        gpu: None,
+    });
+    app.add_message::<engine_world::WorldShift>();
+    let w = &mut app.world;
+    slab(w, DVec3::new(0.0, 1.0, 0.0), DVec3::new(3.0, 2.0, 0.2), 0.8);
+    sun(w, 110_000.0, DVec3::new(0.1, -1.0, 0.0));
+    let eye = camera(
+        w,
+        DVec3::new(0.0, 1.0, -4.0),
+        DVec3::new(0.0, 1.0, 0.0),
+        12.0,
+    );
+    set_ground_map(&mut app, map);
+    (app, shared, eye)
+}
+
+fn set_ground_map(app: &mut App, on: bool) {
+    let mut s = app.world.resource_mut::<RenderSettings>();
+    if on {
+        s.trial_cuts_more |= RAY_GROUND_MAP;
+    } else {
+        s.trial_cuts_more &= !RAY_GROUND_MAP;
+    }
+}
+
+/// `render.ray.ground_map`, `ground_draws`, `ground_drawers`, `ground_mb`.
+fn ground_rows(app: &App) -> [f64; 4] {
+    ["map", "draws", "drawers", "mb"].map(|row| diag(app, &format!("render.ray.ground_{row}")))
+}
+
+/// The ground colour map (step 11 of the ray-traced lighting round): a ground whose feature
+/// draws the map takes the map's colour where a ray hits it, in place of its row's one colour.
+/// The painted ground's green, on the half of it the wall faces, lights the white wall green
+/// where its gray did not, also when the ground's rows were placed before its feature drew
+/// (rows kept from before take the map once it does); with the map off, or nothing drawing it,
+/// the picture is the one without it.
+#[test]
+fn a_ground_hit_takes_the_ground_maps_colour() {
+    let runs = [
+        ("off", 1, false, 0),
+        ("on", 1, true, 0),
+        ("drawn_by_none", 0, true, 0),
+        ("drawn_later", 0, true, 1),
+    ];
+    let mut shots = Vec::new();
+    for (name, version, map, later) in runs {
+        let (mut app, shared, _) = painted_ground_app(version, map);
+        app.update_n(3);
+        if !can_run(&app) {
+            return;
+        }
+        app.update_n(7);
+        if later != 0 {
+            // (The rows are placed and kept by now; the feature draws from here.)
+            shared.store(later, Ordering::Relaxed);
+        }
+        app.update_n(30);
+        assert_in_ray_scene(&app, name);
+        assert_eq!(diag(&app, "render.ray.class_ground"), 1.0, "{name}");
+        let [read, draws, drawers, mb] = ground_rows(&app);
+        if name == "on" || name == "drawn_later" {
+            assert_eq!(read, 1.0, "{name}: the rays read the map");
+            assert_eq!(drawers, 1.0, "{name}: the painted ground draws it");
+            assert_eq!(draws, 1.0, "{name}: drawn once, nothing changed after");
+            assert!((mb - 9.333).abs() < 0.01, "{name}: {mb} MiB");
+        } else {
+            assert_eq!([read, draws, drawers, mb], [0.0; 4], "{name}: no map");
+        }
+        shots.push(picture(&mut app, &format!("ground_map_{name}.png")));
+    }
+    let green: Vec<f32> = shots.iter().map(|s| share(s, HOOKED_WALL, 1)).collect();
+    eprintln!("the wall's green share {green:?} (off, on, drawn by none, drawn later)");
+    for (i, name) in [(1, "on"), (3, "drawn later")] {
+        assert!(
+            green[i] > green[0] + 0.05,
+            "{name}: the painted ground lights the wall green: green share {:.3} against {:.3} \
+             with the map off",
+            green[i],
+            green[0]
+        );
+    }
+    let (share_apart, most, mean) = apart(&shots[0], &shots[2]);
+    assert!(
+        share_apart <= APART_SHARE && most <= APART_MOST && mean <= APART_MEAN,
+        "nothing drawing the map is the frame without it: {share_apart:.4} of the pixels apart, \
+         at most {most}, mean {mean:.3}"
+    );
+}
+
+/// The ground colour map is drawn again only when it changes, at most every 8th frame: when
+/// its drawer's version changes, when the camera leaves its centre by more than 40 m, after a
+/// world shift that turns (one that only moves carries it), when it is made again (its switch,
+/// or the ray scene, turned off and on, or its drawer drawing nothing for a frame); not while
+/// nothing changes, nor for an extra view.
+#[test]
+fn the_ground_map_is_drawn_again_only_when_it_changes() {
+    let (mut app, version, eye) = painted_ground_app(1, true);
+    set_probes(&mut app, FEW_PROBES);
+    app.update_n(3);
+    if !can_run(&app) {
+        return;
+    }
+    app.update_n(4);
+    assert_in_ray_scene(&app, "start");
+    let draws = |app: &App| diag(app, "render.ray.ground_draws");
+    let expect = |app: &mut App, frames: usize, drawn: f64, what: &str| {
+        app.update_n(frames);
+        assert_eq!(draws(app), drawn, "{what}: the map's draws");
+    };
+    expect(&mut app, 0, 1.0, "drawn at the start");
+    let [read, _, drawers, mb] = ground_rows(&app);
+    assert_eq!(
+        [read, drawers],
+        [1.0, 1.0],
+        "read and drawn by the painted ground"
+    );
+    assert!((mb - 9.333).abs() < 0.01, "{mb} MiB");
+    expect(&mut app, 16, 1.0, "nothing changed");
+    // A new version every frame: drawn at once, then every 8th frame.
+    for _ in 0..16 {
+        version.fetch_add(1, Ordering::Relaxed);
+        app.update();
+    }
+    assert_eq!(draws(&app), 3.0, "a new version every frame for 16 frames");
+    expect(
+        &mut app,
+        16,
+        4.0,
+        "the last version, once the throttle allowed",
+    );
+    expect(&mut app, 16, 4.0, "nothing changed since");
+    let place = |app: &mut App, x: f64| {
+        app.world
+            .get_mut::<Transform>(eye)
+            .expect("camera")
+            .translation = DVec3::new(x, 1.0, -4.0);
+    };
+    place(&mut app, 30.0);
+    expect(
+        &mut app,
+        16,
+        4.0,
+        "the camera 30 m from the centre keeps it",
+    );
+    place(&mut app, 50.0);
+    expect(&mut app, 16, 5.0, "50 m: the centre moves to (64, 0)");
+    place(&mut app, 30.0);
+    expect(&mut app, 16, 5.0, "back at 30 m, 34 m from the new centre");
+
+    // World shifts, as `engine_world` applies them: every root transform moves. (The painted
+    // ground's squares and rectangle are its own, in world positions it does not shift: the
+    // scene carries its rows, and only the draws are counted from here.) The turn is so slight
+    // that the map carried as a plain move would still hold the eye, 37 m and 10 m from its
+    // centre: only the rule for turns draws it again.
+    let turn = DQuat::from_rotation_y(0.002);
+    for (shift, drawn, what) in [
+        (
+            engine_world::WorldShift::translate(DVec3::new(3000.0, 0.0, -1700.0)),
+            5.0,
+            "a shift that only moves carries the map",
+        ),
+        (
+            engine_world::WorldShift {
+                rotation: turn,
+                ..engine_world::WorldShift::translate(DVec3::new(-850.0, 0.0, 420.0))
+            },
+            6.0,
+            "a shift that turns has it drawn again",
+        ),
+    ] {
+        let mut roots = app
+            .world
+            .query_filtered::<&mut Transform, Without<ChildOf>>();
+        for mut t in roots.iter_mut(&mut app.world) {
+            *t = shift.transform(&t);
+        }
+        app.world.write_message(shift);
+        expect(&mut app, 16, drawn, what);
+        assert_eq!(diag(&app, "render.ray.ground_map"), 1.0, "{what}");
+    }
+
+    // An extra view far off draws no map and leaves the main view's alone.
+    app.world.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 12.0 },
+            ..Camera::perspective(70.0)
+        },
+        Transform::from_translation(DVec3::new(300.0, 2.0, 300.0))
+            .looking_at(DVec3::new(300.0, 0.0, 0.0), Vec3::Y),
+        ExtraView::window(),
+        Viewport {
+            position: UVec2::new(100, 10),
+            size: UVec2::new(50, 40),
+        },
+    ));
+    expect(&mut app, 16, 6.0, "an extra view");
+
+    // Its drawer draws nothing for a frame: the map goes, and comes back drawn at once.
+    version.store(0, Ordering::Relaxed);
+    expect(&mut app, 1, 6.0, "nothing to draw");
+    assert_eq!(ground_rows(&app), [0.0, 6.0, 0.0, 0.0], "nothing to draw");
+    version.store(99, Ordering::Relaxed);
+    expect(&mut app, 1, 7.0, "something to draw again");
+    expect(&mut app, 16, 7.0, "nothing changed since");
+    // Its switch off for a frame, then on: dropped, made again and drawn at once.
+    set_ground_map(&mut app, false);
+    expect(&mut app, 1, 7.0, "the switch off");
+    assert_eq!(ground_rows(&app), [0.0, 7.0, 0.0, 0.0], "the switch off");
+    set_ground_map(&mut app, true);
+    expect(&mut app, 1, 8.0, "the switch on again");
+    let [read, _, drawers, mb] = ground_rows(&app);
+    assert_eq!([read, drawers], [1.0, 1.0], "the switch on again");
+    assert!((mb - 9.333).abs() < 0.01, "the switch on again: {mb} MiB");
+    // The ray scene off for a frame, then on: a new scene draws its own at once.
+    expect(&mut app, 16, 8.0, "nothing changed since");
+    set_ray_world(&mut app, false);
+    app.update();
+    assert_eq!(diag(&app, "render.ray.on"), 0.0, "the ray scene off");
+    assert_eq!(ground_rows(&app), [0.0; 4], "the ray scene off");
+    set_ray_world(&mut app, true);
+    expect(&mut app, 1, 1.0, "a new ray scene");
+    let [read, _, drawers, mb] = ground_rows(&app);
+    assert_eq!([read, drawers], [1.0, 1.0], "a new ray scene");
+    assert!((mb - 9.333).abs() < 0.01, "a new ray scene: {mb} MiB");
+    assert_in_ray_scene(&app, "a new ray scene");
 }

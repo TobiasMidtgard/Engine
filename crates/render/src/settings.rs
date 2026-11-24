@@ -520,6 +520,19 @@ pub mod trial_cut_more {
     /// `reflect_screen`, `reflect_rays`, `reflect_reused`); `shade_skip::RAY_REFLECT_RAYS_ONLY`
     /// traces every one as a ray. 29.5 MB at 2560x1440 while on. Off by default.
     pub const RAY_REFLECTIONS: u32 = 64;
+    /// The ground colour map, with [`RAY_WORLD`] (ray_scene/ground.rs; pass "ray ground map",
+    /// before "ray inputs"; `gpu_sweep` rows `ray_ground_map`, `ray_ground_map_every_frame`):
+    /// the features that draw it (`RenderFeature::ground_albedo_version`,
+    /// `draw_ground_albedo`: the terrain) draw their albedo seen from straight above into a
+    /// 1024 x 1024 `Rgba8UnormSrgb` map 768 m across around the camera (0.75 m a texel,
+    /// centred on a 64 m grid, kept while the eye is within 40 m of its centre), again when a
+    /// version or the centre changes, at most every 8th frame, with its levels; a `Ground` hit
+    /// of theirs takes the map's colour there (`ray_surface` in lib_ray.wgsl) in place of its
+    /// row's one colour, which it keeps outside the map and gives way to over the outer 32 m.
+    /// Main view only. `render.ray.ground_map`, `ground_draws`, `ground_drawers`, `ground_mb`
+    /// (9.3 MiB while on, with its depth); `RenderSettings::ray_ground_every_frame` draws it
+    /// every frame for a measurement. Off by default.
+    pub const RAY_GROUND_MAP: u32 = 512;
 }
 
 /// What the screen shows.
@@ -717,6 +730,11 @@ pub struct RenderSettings {
     /// and `check_ray_probe_world`). Needs `trial_cut_more::RAY_WORLD` on a GPU with ray
     /// queries.
     pub ray_probe_check: bool,
+    /// With `trial_cut_more::RAY_GROUND_MAP`, a measurement, off by default: the ground colour
+    /// map is drawn every frame, whatever changed, so that `render.gpu.ray ground map` is one
+    /// draw's cost at a still stop (`gpu_sweep` row `ray_ground_map_every_frame`). The picture
+    /// is the same.
+    pub ray_ground_every_frame: bool,
     /// How far light spreads under skin, meters at full strength (screen-space subsurface
     /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
     /// 0 = off.
@@ -1022,6 +1040,7 @@ impl Default for RenderSettings {
             ray_sun_shadows: false,
             ray_sun_reach: 80.0,
             ray_probe_check: false,
+            ray_ground_every_frame: false,
             subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,

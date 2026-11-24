@@ -311,7 +311,7 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
         // tile.
         let pixel_m = 2.0 / (abs(frame.proj[1][1]) * frame.viewport.y);
         let cone = select(vec2<f32>(pixel_m * depth, pixel_m + alpha), vec2<f32>(pixel_m, alpha), frame.exposure.w > 0.5);
-        let s = ray_surface(ray_last, dir, cone);
+        let s = ray_surface(ray_last, origin, dir, cone);
         // The back of a single-sided surface: the ray started inside something, so it
         // reflects nothing of its own.
         if (!s.inside) {

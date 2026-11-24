@@ -52,14 +52,18 @@ const ROW_DOUBLE_SIDED: u32 = 1 << 8;
 const ROW_HAS_TRIS: u32 = 1 << 9;
 /// [`RayRow::flags`]: `tile` names a layer of the ray tiles.
 const ROW_HAS_TILE: u32 = 1 << 10;
+/// [`RayRow::flags`]: a `Ground` row of a feature that draws the ground colour map
+/// (`ground.rs`): its hits take the map's colour.
+pub(super) const ROW_GROUND_MAP: u32 = 1 << 11;
 
 /// What a hit reads of its instance (`RayRow` in lib_ray.wgsl).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct RayRow {
     /// Bits 0-7: the class ([`RayClass::bit`]); 8: lit from both sides; 9: `tris` names its
-    /// triangle records; 10: `tile` names its layer; 16-23: the alpha cutoff, 24-31: the
-    /// texture's coverage (both in 255ths).
+    /// triangle records; 10: `tile` names its layer; 11: its ground takes the ground colour
+    /// map ([`ROW_GROUND_MAP`]); 16-23: the alpha cutoff, 24-31: the texture's coverage (both
+    /// in 255ths).
     pub flags: u32,
     /// Its first triangle record.
     pub tris: u32,
@@ -847,6 +851,33 @@ impl Instances {
             self.remove(store, name, frame);
         }
         gone.len() as u32
+    }
+
+    /// The `Ground` instances of feature `feature` take the ground colour map's colour (`on`)
+    /// or their own from now: their rows' [`ROW_GROUND_MAP`], written where it changes. (A
+    /// feature places what changed and keeps the rest, so the rows it keeps take the bit here,
+    /// once, when it begins or stops drawing the map.)
+    pub(super) fn mark_ground(&mut self, feature: u16, on: bool) {
+        for i in 0..self.list.len() {
+            let (at, row) = match self.list[i].as_mut() {
+                Some(inst) if inst.name.0 == feature && inst.class == RayClass::Ground => {
+                    let was = inst.row;
+                    if on {
+                        inst.row.flags |= ROW_GROUND_MAP;
+                    } else {
+                        inst.row.flags &= !ROW_GROUND_MAP;
+                    }
+                    if inst.row == was {
+                        continue;
+                    }
+                    (inst.at, inst.row)
+                }
+                _ => continue,
+            };
+            if let At::In(level, slot) = at {
+                self.write_row(level, slot, row);
+            }
+        }
     }
 
     /// Whether instance `name` is in a structure as last built, in the slot it has now (see

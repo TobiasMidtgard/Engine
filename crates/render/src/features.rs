@@ -44,7 +44,7 @@ use crate::cloud_shadows::{CloudShadowRequest, CloudShadowTarget};
 use crate::frame::ViewData;
 use crate::image_cache::{ImageCache, ImageTexture};
 use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
-use crate::ray_scene::{RaySceneOut, RayView};
+use crate::ray_scene::{GroundAlbedoView, RaySceneOut, RayView};
 use crate::settings::RenderSettings;
 use crate::shadows::ShadowTiles;
 use crate::texture::Image;
@@ -816,6 +816,42 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// while the ray scene is on. The scene keeps what it was told: a feature says what
     /// changed, and looks at everything again when `view.epoch` changes.
     fn ray_scene(&mut self, _gpu: &GpuShared, _view: &RayView, _out: &mut RaySceneOut<'_>) {}
+
+    /// The version of what this feature draws into the ground colour map, or `None` when it
+    /// draws nothing there (`trial_cut_more::RAY_GROUND_MAP`, `ray_scene/ground.rs`): the
+    /// frame's rays read the map for the `Ground` instances of the features that answer
+    /// `Some`, placed or kept, in place of their rows' one colour. Asked once a frame on the
+    /// render thread, main view only, just before [`ray_scene`](Self::ray_scene), while the
+    /// map is on ([`crate::ray_scene::ground_map_wanted`]). Answer `Some` only once you can
+    /// draw (your pipeline and groups made): an empty picture is kept until the version
+    /// changes. Change the version whenever your picture would, by what reached the GPU in
+    /// world space (an upload or a bake that landed, a patch built again), never for a
+    /// camera-relative value nor for a world shift that only moves (the map moves with it). A
+    /// change has the map drawn again, at most every 8th frame.
+    fn ground_albedo_version(&self) -> Option<u64> {
+        None
+    }
+
+    /// Draw this feature's albedo, seen from straight above, into the ground colour map: the
+    /// base colour only (linear, alpha 1 where drawn), nothing that depends on the eye, the sun
+    /// or the time. Called only in a frame whose
+    /// [`ground_albedo_version`](Self::ground_albedo_version) was `Some` and that draws the map
+    /// again: the main view's, after the ray scene's builds and before its rays. The pass is
+    /// the renderer's: group 0 is set to `ctx.frame_group`; the colour target is
+    /// [`GroundAlbedoView::FORMAT`], `view.size` texels square, cleared to transparent black;
+    /// the depth is `gpu.formats.depth`, cleared to 0 (use `gpu.depth_state(true)`); single
+    /// sampled. `view.view_proj` takes camera-relative positions to clip space (reverse-Z,
+    /// straight down, row 0 at the least z, column 0 at the least x); cull with
+    /// `view.contains_sphere`. Every buffer the call writes (its matrix, its list of what it
+    /// draws) must be one no other pass of the frame reads: the frame is one submit, so a
+    /// write here lands before every pass of it.
+    fn draw_ground_albedo(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        view: &GroundAlbedoView,
+        ctx: &FrameContext,
+    ) {
+    }
 
     /// Record compute or offscreen work before the scene is drawn.
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}

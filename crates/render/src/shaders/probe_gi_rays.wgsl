@@ -113,7 +113,7 @@ fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32, cone: ve
         found.n = hit.local_n;
         found.primitive = RAY_NONE;
     }
-    let s = ray_surface(found, dir, cone);
+    let s = ray_surface(found, origin, dir, cone);
     if (s.inside) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
     var p = origin + dir * hit.t;
     if (any(s.n != s.face)) {

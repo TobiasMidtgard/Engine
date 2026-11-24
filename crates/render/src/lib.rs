@@ -166,7 +166,8 @@ pub use plant_wind::{
 };
 pub use portal::Portal;
 pub use ray_scene::{
-    RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere, RayView,
+    GroundAlbedoView, RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource,
+    RaySphere, RayView,
 };
 pub use renderer::{
     RenderDisabled, RenderPaused, RenderStats, RenderThread, Renderer, ScreenshotInfo, Screenshots,

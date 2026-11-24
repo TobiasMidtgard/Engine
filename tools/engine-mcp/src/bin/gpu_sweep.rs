@@ -435,6 +435,18 @@ fn variants() -> Vec<Variant> {
             "every built step of the ray-traced lighting round at once: ray_world with the probes four times as often, the sun's trace joined with the shadow maps and a reflection for every pixel (what step 10 is to turn on by default; read the whole frame against the baseline)",
         ),
         v(
+            "ray_ground_map",
+            r,
+            json!({"trial_cuts_more": 528, "gi_hardware_rays": true}),
+            "ray_world with the ground colour map: the features that draw it (the terrain) draw their albedo seen from straight above into a 1024 x 1024 map 768 m across around the camera (0.75 m a texel) when a version or the map's centre changes, at most every 8th frame, and their ground hits take the map's colour in place of the air's one ground colour (pass `ray ground map`, 0 in the frames that do not draw it; `--stats render.ray.ground_` keeps ground_map, ground_draws, ground_drawers, ground_mb; without a feature that draws it the row is ray_world)",
+        ),
+        v(
+            "ray_ground_map_every_frame",
+            r,
+            json!({"trial_cuts_more": 528, "gi_hardware_rays": true, "ray_ground_every_frame": true}),
+            "ray_ground_map drawn every frame (`ray_ground_every_frame`, a measurement): pass `ray ground map` is one draw's cost, the features' part and the map's levels; the picture is ray_ground_map's",
+        ),
+        v(
             "check_ray_probe",
             r,
             json!({"trial_cuts_more": 48, "gi_hardware_rays": true, "ray_probe_check": true}),

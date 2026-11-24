@@ -2881,7 +2881,14 @@ impl Renderer {
         if !extra && let Some(ray) = &mut self.ray_scene {
             cpu.step("ray scene");
             let ray_view = ray.begin(&view, &settings);
+            // (Who draws the ground colour map, asked before each hook: the `Ground` rows of
+            // one that does read the map.)
+            let ground =
+                settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_GROUND_MAP != 0;
             for (f, number) in self.features.iter_mut().zip(&self.feature_numbers) {
+                if ground {
+                    ray.ground_drawer(*number, f.ground_albedo_version());
+                }
                 f.ray_scene(&self.shared, &ray_view, &mut ray.out(*number));
             }
             ray.finish(&view, &settings);
@@ -3439,6 +3446,21 @@ impl Renderer {
         if !extra && let Some(ray) = &mut self.ray_scene {
             self.perf.pass(&mut cpu, &mut encoder, "ray scene build");
             ray.encode_builds(&mut encoder);
+            // The ground colour map when it is drawn again (`trial_cut_more::RAY_GROUND_MAP`):
+            // the features that draw it, in a pass of its own, each finding the frame's group
+            // at 0, then its levels; before the rays that read it.
+            if ray.ground_due() {
+                self.perf.pass(&mut cpu, &mut encoder, "ray ground map");
+                let (features, numbers) = (&mut self.features, &self.feature_numbers);
+                ray.encode_ground(&self.shared, &mut encoder, |pass, ground, drawers| {
+                    for (f, number) in features.iter_mut().zip(numbers) {
+                        if drawers.iter().any(|&(n, _)| n == *number) {
+                            pass.set_bind_group(0, frame_group, &[]);
+                            f.draw_ground_albedo(pass, ground, &ctx);
+                        }
+                    }
+                });
+            }
             // (What the rays' dispatches bind: the reflections' copy of last frame's and the
             // clearing of the sun's count are timed apart from the builds.)
             self.perf.pass(&mut cpu, &mut encoder, "ray inputs");

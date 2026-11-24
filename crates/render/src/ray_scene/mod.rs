@@ -15,6 +15,9 @@
 //!   128 texels down to its mean, filled on the GPU from what the raster draws with.
 //! * [`sun`]: the sun's trace (`trial_cut_more::RAY_SUN`), a ray toward the sun's disc from
 //!   the prepass's pixels against the still structure, a dispatch of the frame's ray pass.
+//! * [`ground`]: the ground colour map (`trial_cut_more::RAY_GROUND_MAP`), the albedo of the
+//!   features that draw it seen from straight above around the camera, which their `Ground`
+//!   hits read.
 //!
 //! The scene exists only on devices with ray queries that take two structures in a stage,
 //! and only while [`crate::settings::trial_cut_more::RAY_WORLD`] is on: off, nothing here is
@@ -22,13 +25,14 @@
 //!
 //! Its bind group (group 1 of every ray pipeline, lib_ray.wgsl): 0 [`RayUniform`], 1 the
 //! still structure, 2 the moving one, 3 the rows, 4 triangle records, 5 the ray tiles, 6 the
-//! ground map (a stand-in until its step lands; so are the tiles until a first fill makes
-//! them). Binding a structure
-//! costs the render thread a walk of its instances at submit (0.02 ms a thousand on the
-//! RTX 5080), and again whenever a group before it is set, so a frame's ray dispatches run in
-//! one compute pass with groups 0 and 1 set once.
+//! ground colour map (a stand-in while it is off or nothing draws it; so are the tiles until a
+//! first fill makes them). Binding a structure costs the render thread a walk of its
+//! instances at submit (0.02 ms a thousand on the RTX 5080), and again whenever a group before
+//! it is set, so a frame's ray dispatches run in one compute pass with groups 0 and 1 set
+//! once.
 
 mod blas;
+mod ground;
 mod hook;
 pub(crate) mod look;
 mod sun;
@@ -41,6 +45,7 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
+pub use ground::GroundAlbedoView;
 pub(crate) use hook::RayTileSource;
 pub use hook::{
     RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere, RayView,
@@ -143,9 +148,14 @@ struct RayUniform {
     reach: [f32; 4],
     /// x: point lights a hit asks for their shadow, at most.
     lights: [f32; 4],
-    /// The ground map: its center (camera-relative x, z), half width; w: whether it is drawn.
+    /// The ground colour map ([`ground`], `ray_ground`): its centre (camera-relative x, z), its
+    /// half width (m); w: 1 while the rays read it. All four 0 otherwise.
     ground: [f32; 4],
 }
+
+const _: () = assert!(
+    std::mem::size_of::<RayUniform>() == 112 && std::mem::offset_of!(RayUniform, ground) == 96
+);
 
 /// `render.ray.*`: what the scene holds and what the frame did to it.
 #[derive(Default, Clone, Copy, Debug)]
@@ -216,6 +226,12 @@ pub(crate) struct RayStats {
     /// Whether the last frame joined the trace with the shadow maps, and whether its filter
     /// read the frame before's history (`None`: no trace).
     pub sun_joined: Option<(bool, bool)>,
+    /// The ground colour map: read this frame, its draws since the scene was made, the
+    /// features that draw it this frame, its textures (MiB; 0 while off).
+    pub ground_map: bool,
+    pub ground_draws: u32,
+    pub ground_drawers: u32,
+    pub ground_mb: f32,
 }
 
 /// The frame's ray scene.
@@ -231,7 +247,10 @@ pub(crate) struct RayScene {
     /// larger buffer, and when the tiles are made).
     device: wgpu::Device,
     layout: wgpu::BindGroupLayout,
-    ground: wgpu::TextureView,
+    ground: ground::GroundMap,
+    /// The ground colour map was made or dropped: the group binds another view at the next
+    /// [`encode_builds`](Self::encode_builds).
+    ground_regroup: bool,
     group: wgpu::BindGroup,
     /// This frame (`ViewData::frame_index + 1`, as the mesh scene counts: 0 is never).
     frame: u64,
@@ -331,8 +350,8 @@ impl Valve {
 }
 
 /// lib_ray.wgsl with its bindings in group `group` (`RAY_GROUP` in the shader): 1 in the
-/// frame's ray pass (`probe_gi::shader_source`). lib_ray reads the frame's `linear_repeat`, so
-/// it is composed with lib_frame.
+/// frame's ray pass (`probe_gi::shader_source`). lib_ray reads the frame's `linear_repeat` and
+/// `linear_clamp`, so it is composed with lib_frame.
 pub(crate) fn shader_lib(group: u32) -> String {
     format!(
         "const RAY_GROUP: u32 = {group}u;\n{}",
@@ -351,6 +370,14 @@ pub fn wanted(settings: &crate::RenderSettings, shared: &GpuShared) -> bool {
         && settings.gi_hardware_rays
         && RayScene::supported(shared)
         && !shared.ray_scene_given_up()
+}
+
+/// Whether the ray scene will ask for the ground colour map: [`wanted`] with
+/// `trial_cut_more::RAY_GROUND_MAP`. A feature that draws the map prepares for it by this (its
+/// pipeline) in its main view's prepare.
+pub fn ground_map_wanted(settings: &crate::RenderSettings, shared: &GpuShared) -> bool {
+    settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_GROUND_MAP != 0
+        && wanted(settings, shared)
 }
 
 impl RayScene {
@@ -414,8 +441,8 @@ impl RayScene {
             mapped_at_creation: false,
         });
         let tris = tris::Records::new(device);
-        // Stand-ins for the tiles until a first fill makes them, and for the ground map until
-        // its step lands.
+        // Stand-ins for the tiles until a first fill makes them, and for the ground colour map
+        // while it is off.
         let stand_in = |label, dimension| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -441,9 +468,12 @@ impl RayScene {
             "ray scene tiles (none yet)",
             wgpu::TextureViewDimension::D2Array,
         ));
-        let ground = stand_in(
-            "ray scene ground map (none yet)",
-            wgpu::TextureViewDimension::D2,
+        let ground = ground::GroundMap::new(
+            stand_in(
+                "ray scene ground map (none yet)",
+                wgpu::TextureViewDimension::D2,
+            ),
+            shared.formats.depth,
         );
         let layout = Self::layout(shared);
         let group = Self::make_group(
@@ -451,7 +481,7 @@ impl RayScene {
             &layout,
             [&uniform, &rows, tris.buffer()],
             &instances,
-            [tiles.view(), &ground],
+            [tiles.view(), ground.view()],
         );
         Self {
             queue: shared.queue.clone(),
@@ -464,6 +494,7 @@ impl RayScene {
             device: device.clone(),
             layout,
             ground,
+            ground_regroup: false,
             group,
             frame: 0,
             epoch,
@@ -572,6 +603,7 @@ impl RayScene {
         self.frame = view.frame_index + 1;
         self.store.begin_frame(&mut self.tris);
         self.instances.begin_frame();
+        self.ground.begin_frame();
         if let Some(shift) = self.shift.take() {
             // The world moved to a new frame (a floating-origin move, a jump that re-anchors
             // it): every placement moves with it, so that what the features place next is
@@ -579,6 +611,8 @@ impl RayScene {
             let affine = DAffine3::from_rotation_translation(shift.rotation, shift.translation);
             self.instances
                 .shift(&affine, shift.is_translation_only(), self.frame);
+            self.ground
+                .shift(shift.translation, shift.is_translation_only());
             self.eye = self.eye.map(|eye| affine.transform_point3(eye));
             self.shifted = self.frame;
         }
@@ -641,6 +675,11 @@ impl RayScene {
         for geometry in self.store.take_changed() {
             self.instances.geometry_changed(geometry);
         }
+        // The `Ground` rows of a feature that began or stopped drawing the ground colour map,
+        // placed this frame or kept from before, read the map or stop.
+        for (feature, on) in self.ground.take_marks() {
+            self.instances.mark_ground(feature, on);
+        }
         self.instances.stress(
             &mut self.store,
             settings.ray_scene_stress,
@@ -696,6 +735,15 @@ impl RayScene {
             plants_from,
             view.sun_angular_radius.tan() * settings.sun_penumbra_scale.max(0.0),
         ];
+        let ground_on =
+            settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_GROUND_MAP != 0;
+        self.ground_regroup |= self.ground.settle(
+            &self.device,
+            view.origin,
+            self.frame,
+            ground_on,
+            settings.ray_ground_every_frame,
+        );
         let uniform = RayUniform {
             anchor: [anchor.x, anchor.y, anchor.z, 0.0],
             counts: [still, moving, self.frame as u32, self.epoch],
@@ -703,7 +751,7 @@ impl RayScene {
             sun: self.sun_values,
             reach: [caster_reach, far_reach, self.cut(), 0.0],
             lights: [settings.gi_shadowed_lights as f32, 0.0, 0.0, 0.0],
-            ground: [0.0; 4],
+            ground: self.ground.uniform(view.origin),
         };
         self.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
@@ -739,15 +787,41 @@ impl RayScene {
             |layer| instances.tile_users(layer),
             self.frame,
         );
-        if regroup || made {
+        let ground = std::mem::take(&mut self.ground_regroup);
+        if regroup || made || ground {
             self.group = Self::make_group(
                 &self.device,
                 &self.layout,
                 [&self.uniform, &self.rows, self.tris.buffer()],
                 &self.instances,
-                [self.tiles.view(), &self.ground],
+                [self.tiles.view(), self.ground.view()],
             );
         }
+    }
+
+    /// Feature `feature` draws `version` of its part of the ground colour map this frame
+    /// (`None`: nothing). Asked before its hook while `trial_cut_more::RAY_GROUND_MAP` is on: the
+    /// `Ground` rows it places read the map.
+    pub(crate) fn ground_drawer(&mut self, feature: u16, version: Option<u64>) {
+        self.ground.drawer(feature, version);
+    }
+
+    /// Whether the ground colour map is drawn this frame ([`encode_ground`](Self::encode_ground)).
+    pub(crate) fn ground_due(&self) -> bool {
+        self.ground.due()
+    }
+
+    /// Draw the ground colour map, after [`encode_builds`](Self::encode_builds) and before the
+    /// frame's ray pass: one render pass (colour cleared to transparent black, depth to 0) in
+    /// which `draw` has this frame's drawers draw (the view, who draws which version), then its
+    /// levels. Nothing when it is not due.
+    pub(crate) fn encode_ground(
+        &mut self,
+        shared: &GpuShared,
+        encoder: &mut wgpu::CommandEncoder,
+        draw: impl FnOnce(&mut wgpu::RenderPass<'_>, &GroundAlbedoView, &[(u16, u64)]),
+    ) {
+        self.ground.encode(shared, encoder, self.frame, draw);
     }
 
     /// Before the frame's ray pass, after [`encode_builds`](Self::encode_builds): what the
@@ -846,6 +920,7 @@ impl RayScene {
     /// After the frame's submit (`failed`: wgpu rejected it).
     pub(crate) fn after_submit(&mut self, failed: bool) {
         self.store.after_submit(&self.queue, failed, self.frame);
+        self.ground.after_submit(failed, self.frame);
     }
 
     pub(crate) fn stats(&self) -> RayStats {
@@ -854,6 +929,7 @@ impl RayScene {
         let (tris, tris_mb, tris_refused, tris_wanted_mb) =
             self.tris.stats(self.store.missing_records());
         let tiles = self.tiles.stats();
+        let ground = self.ground.stats();
         RayStats {
             geometries: s.geometries,
             triangles: s.held.triangles,
@@ -896,6 +972,10 @@ impl RayScene {
             epoch: self.epoch,
             sun: self.sun.as_ref().and_then(|s| s.counts()),
             sun_joined: self.sun.as_ref().map(|s| s.joined()),
+            ground_map: ground.on,
+            ground_draws: ground.draws,
+            ground_drawers: ground.drawers,
+            ground_mb: ground.mb,
         }
     }
 
@@ -978,6 +1058,12 @@ impl RayScene {
         });
         d.set("render.ray.sun_joined", joined);
         d.set("render.ray.sun_history", carried);
+        // The ground colour map: read this frame, drawn how often since the scene was made, by
+        // how many features this frame, its textures (MiB).
+        d.set("render.ray.ground_map", s.ground_map as u8 as f64);
+        d.set("render.ray.ground_draws", s.ground_draws as f64);
+        d.set("render.ray.ground_drawers", s.ground_drawers as f64);
+        d.set("render.ray.ground_mb", s.ground_mb as f64);
     }
 
     // What the hook calls (`RaySceneOut`), each with the feature's number first.
@@ -1017,6 +1103,11 @@ impl RayScene {
         let Some(geometry) = self.store.index_of((feature, geometry)) else {
             return false;
         };
+        let mut row = RayRow::new(class, look);
+        // (A ground whose feature draws the ground colour map takes the map's colour.)
+        if class == RayClass::Ground && self.ground.draws(feature) {
+            row.flags |= tlas::ROW_GROUND_MAP;
+        }
         self.instances.place(
             &mut self.store,
             (feature, id),
@@ -1025,7 +1116,7 @@ impl RayScene {
             sphere,
             class,
             still_from,
-            RayRow::new(class, look),
+            row,
             self.frame,
         )
     }

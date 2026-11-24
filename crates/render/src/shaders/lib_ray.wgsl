@@ -3,8 +3,8 @@
 // a row for each instance that a hit reads, and a record for each triangle built from the mesh
 // pool (its uv, its corners' normals, its vertex colour). Composed before the shader that
 // traces, after `const RAY_GROUP` (`ray_scene::shader_lib`) and with lib_frame (a hit's tile is
-// read through the frame's `linear_repeat`); the scene is group `RAY_GROUP` of its pipeline,
-// 1 in the frame's one ray pass.
+// read through the frame's `linear_repeat`, the ground colour map through its `linear_clamp`);
+// the scene is group `RAY_GROUP` of its pipeline, 1 in the frame's one ray pass.
 //
 // Positions are camera-relative, as everywhere; the structures' instances stand around an
 // anchor (`ray_scene.anchor`, camera-relative) that moves only when the camera is far from it,
@@ -29,14 +29,16 @@ struct RayUniform {
     reach: vec4<f32>,
     // x: point lights a hit asks for their shadow, at most
     lights: vec4<f32>,
-    // the ground map: its center (camera-relative x, z), half width; w: whether it is drawn
+    // the ground colour map (`ray_ground`, ray_scene/ground.rs): its centre (camera-relative x,
+    // z), its half width (meters); w: 1 while the rays read it (all four 0 otherwise)
     ground: vec4<f32>,
 };
 
 // What a hit reads of its instance (`RayRow` in ray_scene/tlas.rs).
 struct RayRow {
     // bits 0-7: the class; 8: lit from both sides; 9: `tris` names its triangle records;
-    // 10: `tile` names its layer; 16-23: the alpha cutoff, 24-31: the texture's coverage
+    // 10: `tile` names its layer; 11: its ground takes the ground colour map; 16-23: the alpha
+    // cutoff, 24-31: the texture's coverage
     flags: u32,
     tris: u32,
     tile: u32,
@@ -58,8 +60,12 @@ struct RayRow {
 @group(RAY_GROUP) @binding(4) var<storage, read> ray_tris: array<u32>;
 // The tiles (ray_scene/tiles.rs, filled by ray_tiles.wgsl): a material's base colour in layer
 // `RayRow.tile` at 128 texels, every level down to one texel, its mean; a 1x1 stand-in until
-// the scene's first fill. (The ground map is a stand-in until step 11 draws it.)
+// the scene's first fill.
 @group(RAY_GROUP) @binding(5) var ray_tiles: texture_2d_array<f32>;
+// The ground colour map (ray_scene/ground.rs): the albedo of the features that draw it, seen
+// from straight above, 1024 texels across `2 * ray_scene.ground.z` m around
+// `ray_scene.ground.xy`, row 0 at the least z, column 0 at the least x, every level down to one
+// texel, its alpha the share drawn (premultiplied); a 1x1 stand-in while it is off.
 @group(RAY_GROUP) @binding(6) var ray_ground: texture_2d<f32>;
 
 // An instance's class (`RayClass`): a ray names the classes it sees in its mask.
@@ -99,6 +105,14 @@ const RAY_ROW_HAS_TILE: u32 = 1024u;
 // Levels added to the level a ray's cone picks in a tile (`ray_tile_level`): 0 reads the cone
 // as it is.
 const RAY_TILE_BIAS: f32 = 0.0;
+// `RayRow.flags`: a `Ground` row of a feature that draws the ground colour map
+// (`ROW_GROUND_MAP`, ray_scene/tlas.rs).
+const RAY_ROW_GROUND_MAP: u32 = 2048u;
+// Meters inside the ground colour map's edge over which its colour gives way to the row's.
+const RAY_GROUND_FADE_M: f32 = 32.0;
+// The least cosine of a ray to the face that the map's level is picked by (a grazing ray's
+// footprint grows 16 times at most).
+const RAY_GROUND_GRAZE: f32 = 0.0625;
 
 // No row: the ray hit nothing.
 const RAY_NONE: u32 = 0xffffffffu;
@@ -497,8 +511,8 @@ struct RaySurface {
     // the normal it is shaded with (unit), on the ray's side of the face: its corners' normals
     // where the row has triangle records, else exactly `face`
     n: vec3<f32>,
-    // diffuse albedo (linear): the row's mean colour, the tile's pattern around that mean and
-    // the triangle's vertex colour
+    // diffuse albedo (linear): the row's mean colour (the ground colour map's where the row
+    // reads it), the tile's pattern around that mean and the triangle's vertex colour
     albedo: vec3<f32>,
     // its own glow (cd/m^2)
     emissive: vec3<f32>,
@@ -510,13 +524,35 @@ struct RaySurface {
     inside: bool,
 };
 
-// Hit `hit` of a ray along `dir` (unit) as a surface. `cone`: the ray's width where it started
-// (meters) and how fast it widens (meters per meter), which pick the tile's level
-// (`ray_tile_level`). The side the ray met is told by the face's normal, as every scene of the
-// probes tells it; the back of a single-sided face is `inside`. A row without records is its
-// face and its row exactly as before the records. The ground keeps its row's colour until
-// step 11 reads `ray_ground` here.
-fn ray_surface(hit: RayHit, dir: vec3<f32>, cone: vec2<f32>) -> RaySurface {
+// The ground colour map's albedo at `p` (camera-relative) for a hit of a row of colour
+// `row_albedo` (linear) on face `face` by a ray along `dir` at distance `t`: the map's colour
+// over the row's by the share the map holds there, at the level the ray's cone picks (its width
+// at the hit, `cone.x + cone.y * t`, over the cosine of the face to the ray, in the map's
+// texels); the row's colour alone outside the map, the map's giving way to it over the outer
+// `RAY_GROUND_FADE_M`.
+fn ray_ground_albedo(row_albedo: vec3<f32>, p: vec3<f32>, face: vec3<f32>, dir: vec3<f32>, t: f32, cone: vec2<f32>) -> vec3<f32> {
+    let across = 2.0 * ray_scene.ground.z;
+    let uv = (p.xz - ray_scene.ground.xy) / across + 0.5;
+    // Meters to the nearest edge (negative outside).
+    let inside = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)) * across;
+    let keep = saturate(inside / RAY_GROUND_FADE_M);
+    if (keep <= 0.0) { return row_albedo; }
+    let texel = across / f32(textureDimensions(ray_ground).x);
+    let footprint = (cone.x + cone.y * t) / max(abs(dot(face, dir)), RAY_GROUND_GRAZE);
+    let last = f32(textureNumLevels(ray_ground) - 1u);
+    let level = clamp(log2(max(footprint / texel, 1e-6)), 0.0, last);
+    let c = textureSampleLevel(ray_ground, linear_clamp, uv, level);
+    return mix(row_albedo, c.rgb + row_albedo * (1.0 - c.a), keep);
+}
+
+// Hit `hit` of a ray from `origin` (camera-relative) along `dir` (unit) as a surface. `cone`:
+// the ray's width where it started (meters) and how fast it widens (meters per meter), which
+// pick the tile's level (`ray_tile_level`). The side the ray met is told by the face's normal,
+// as every scene of the probes tells it; the back of a single-sided face is `inside`. A row
+// without records is its face and its row exactly as before the records. A row with
+// `RAY_ROW_GROUND_MAP` takes the ground colour map's colour where the hit falls on it, while
+// the rays read it (`ray_ground_albedo`).
+fn ray_surface(hit: RayHit, origin: vec3<f32>, dir: vec3<f32>, cone: vec2<f32>) -> RaySurface {
     let row = ray_rows[hit.row];
     var s: RaySurface;
     var face = normalize(hit.n);
@@ -524,7 +560,11 @@ fn ray_surface(hit: RayHit, dir: vec3<f32>, cone: vec2<f32>) -> RaySurface {
     if (back) { face = -face; }
     s.face = face;
     s.n = face;
-    s.albedo = row.albedo.rgb;
+    var base = row.albedo.rgb;
+    if ((row.flags & RAY_ROW_GROUND_MAP) != 0u && ray_scene.ground.w > 0.5) {
+        base = min(ray_ground_albedo(base, origin + dir * hit.t, face, dir, hit.t, cone), vec3<f32>(0.95));
+    }
+    s.albedo = base;
     s.emissive = row.emissive.rgb;
     s.roughness = row.albedo.w;
     s.metallic = row.emissive.w;
@@ -541,7 +581,7 @@ fn ray_surface(hit: RayHit, dir: vec3<f32>, cone: vec2<f32>) -> RaySurface {
     let into = dot(n, face);
     if (into < 0.0) { n = normalize(n - 2.0 * into * face); }
     s.n = n;
-    var albedo = row.albedo.rgb * ray_tri_color(at);
+    var albedo = base * ray_tri_color(at);
     if ((row.flags & RAY_ROW_HAS_TILE) != 0u) {
         // The tile's pattern around the tile's own mean (its last level): `RayRow.albedo`
         // holds the texture's mean already (look.rs `material_light`), so the texture counts
