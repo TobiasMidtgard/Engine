@@ -976,6 +976,23 @@ fn grow_scalp(
         if !flyaway && lock.is_none() && g.gravity > 0.5 && d.z > 0.03 {
             continue;
         }
+        // A hanging hair with no lock of its own (a flyaway, or one far from any guide) still
+        // hangs as the settled hair around it does. (In its own grown shape it stood
+        // centimetres off the hair and ran out along the shoulder.)
+        if g.gravity > 0.5 && (flyaway || lock.is_none()) {
+            let last = pts.len() - 1;
+            if let Some(gi) = guide_grid.nearest(sp.p, &guides, |i| same_side(&guides[i].0)) {
+                let (gsp, gpts) = &guides[gi];
+                let off = sp.p - gsp.p;
+                for (k, p) in pts.iter_mut().enumerate() {
+                    *p = along(gpts, k as f32 / last as f32 * scale.min(1.0)) + off;
+                }
+            } else {
+                let jitter = hash01(sp.rest);
+                let front = falls_front(d, jitter);
+                lay_off_shoulder(&mut pts, front, jitter, |_| 0.003, collider, lm);
+            }
+        }
         if !flyaway && let Some(gi) = lock {
             let (gsp, gpts) = &guides[gi];
             let off = sp.p - gsp.p;
@@ -1224,6 +1241,14 @@ fn grow_scalp(
 const STIFF_ROOT: f32 = 0.06;
 /// Hair lies held on the head down to this far under the head's center (about the jaw), m.
 const ON_HEAD_ABOVE: f32 = -0.11;
+/// Hair growing this far ahead of the head's center (about the ear) falls in front of the
+/// shoulder, the rest behind it, m.
+const FALLS_FRONT_Z: f32 = 0.005;
+/// How far the locks in front of a shoulder spread across the chest, m.
+const FRONT_SPREAD: f32 = 0.04;
+/// A hanging guide is laid down its side of the shoulder from this far under the head's
+/// center (under the ear), m.
+const DRAPES_BELOW: f32 = -0.06;
 /// How far hair on top of a shoulder slips toward its front or back each settling step, m.
 const OFF_SHOULDER: f32 = 0.0015;
 
@@ -1264,6 +1289,9 @@ fn settle(
     };
     let jitter = hash01(sp.rest);
     let mut face_side = Some(if d.x > PART_X { 1.0 } else { -1.0 });
+    let front = falls_front(d, jitter);
+    let spread = hash01(sp.rest + Vec3::X);
+    lay_off_shoulder(pts, front, spread, lie, collider, lm);
     let mut prev = pts.to_vec();
     // Points resting on the skin hold there by friction, so combed hair stays combed where it
     // lies on the head and only what hangs free falls.
@@ -1301,10 +1329,32 @@ fn settle(
                 continue;
             }
             for k in 2..n {
+                // Under the jaw hair falls and swings in toward the body, never out from it:
+                // the ends of locks lying on the chest swung out around it toward the arms,
+                // and stopped there, turned out sideways.
+                if pts[k].y < lm.head.y + ON_HEAD_ABOVE {
+                    let (now, was) = (pts[k].x - lm.head.x, prev[k].x - lm.head.x);
+                    if now * was > 0.0 && now.abs() > was.abs() {
+                        pts[k].x = prev[k].x;
+                    }
+                }
                 let aside = keep_off_face(pts[k], &mut face_side, jitter, pts[0], lm);
                 let p = pts[k] + (aside - pts[k]) * 0.35;
                 let mut out = collider.push_out(p, lie(k));
                 touching[k] = (out - p).length_squared() > 0.0;
+                // Under the jaw the body pushes hair up, forward or back, not outward: the
+                // chest and the shoulder face a little outward all over, and pushed the way
+                // they face, the ends of the locks lying on them crept out toward the arm
+                // and curled up.
+                let push = out - p;
+                let up_or_along = Vec3::new(0.0, push.y, push.z);
+                if touching[k]
+                    && p.y < lm.head.y + ON_HEAD_ABOVE
+                    && push.x * (p.x - lm.head.x) > 0.0
+                    && up_or_along.length_squared() > 0.25 * push.length_squared()
+                {
+                    out = p + up_or_along * (push.length_squared() / up_or_along.length_squared());
+                }
                 // Hair that lands on top of a shoulder slips off it to the front or the back,
                 // whichever it is nearer, and never along it: the shoulder slopes away to the
                 // arm, so pushed out of it the way it faces, hair was laid along it toward
@@ -1314,7 +1364,6 @@ fn settle(
                     && let Some((i, _)) = collider.nearest(out)
                     && collider.skin.normals[i].y > 0.3
                 {
-                    let front = if out.z > lm.head.z - 0.02 { 1.0 } else { -1.0 };
                     out.x = p.x;
                     out.z += front * OFF_SHOULDER;
                 }
@@ -1326,7 +1375,74 @@ fn settle(
     // its hair goes with the guides around it. (Left in its grown shape, which only starts
     // the settling, one from the front hairline hung 6 cm clear of the temple with its 150
     // hairs, like a jug's handle.)
-    !pts.windows(3).any(|w| (w[1] - w[0]).dot(w[2] - w[1]) < 0.0)
+    // (Nor is one whose end turns upward: hair settled under gravity has none.)
+    let folds = pts.windows(3).any(|w| (w[1] - w[0]).dot(w[2] - w[1]) < 0.0);
+    let rises = pts[n / 3..]
+        .windows(2)
+        .any(|w| w[1].y - w[0].y > 0.5 * w[1].distance(w[0]));
+    !folds && !rises
+}
+
+/// Which side of the shoulder hair rooted `d` from the head's center (rest space) falls on:
+/// 1 in front of it, -1 behind. Hair growing ahead of the ear falls forward.
+fn falls_front(d: Vec3, jitter: f32) -> f32 {
+    if d.z > FALLS_FRONT_Z + (jitter - 0.5) * 0.024 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+/// Lays the part of a hanging hair under the ears down its side of the shoulder (`front` 1 or
+/// -1), `clear(k)` off the skin at its point `k`.
+///
+/// The grown guess follows the skin outward along the shoulder and down the raised arm of the
+/// pose people are built in, and settling it left it there: with the arms down, a lock lying
+/// out sideways on the shoulder. So under the ears it is laid again, straight down from where
+/// it hangs, turning to its side of the shoulder only as far as the body is in the way (as
+/// water would run), never outward along it. In front, where the locks are seen side by side
+/// on the chest, each also drifts a little toward its middle (`random` 0..1 says how far):
+/// all hanging from the same few centimetres beside the head, they lay on top of each other
+/// in a rope.
+fn lay_off_shoulder(
+    pts: &mut [Vec3],
+    front: f32,
+    random: f32,
+    clear: impl Fn(usize) -> f32,
+    collider: &SkinCollider,
+    lm: &Landmarks,
+) {
+    let Some(start) = pts.iter().position(|p| p.y < lm.head.y + DRAPES_BELOW) else {
+        return;
+    };
+    // (Toward the chest only: a lock that drifted outward lay down on top of the shoulder.)
+    let drift = if front > 0.0 {
+        -(pts[start].x - lm.head.x).signum() * random * FRONT_SPREAD
+    } else {
+        0.0
+    };
+    let lengths: Vec<f32> = pts.windows(2).map(|w| (w[1] - w[0]).length()).collect();
+    let mut laid = 0.0;
+    for k in start.max(2)..pts.len() {
+        let from = pts[k - 1];
+        let seg = lengths[k - 1];
+        // (From under the jaw: drifting from the ears, it crossed the cheek, was held back off
+        // the face, and folded up beside it.)
+        let mut aside = 0.0;
+        if from.y < lm.head.y + ON_HEAD_ABOVE {
+            aside = drift * (smoothstep(0.0, 0.15, laid + seg) - smoothstep(0.0, 0.15, laid));
+            laid += seg;
+        }
+        for turn in 0..=6 {
+            let a = turn as f32 * (std::f32::consts::FRAC_PI_2 / 6.0);
+            let dir = Vec3::new(aside / seg.max(1e-6), -a.cos(), front * a.sin());
+            let to = from + dir.normalize() * seg;
+            pts[k] = collider.push_out(to, clear(k));
+            if pts[k] == to {
+                break;
+            }
+        }
+    }
 }
 
 /// The guide whose root is nearest `p`, searching all of them.
