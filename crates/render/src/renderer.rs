@@ -2960,6 +2960,7 @@ impl Renderer {
             scene_depth_copy: &self.targets.depth_copy.view,
             ldr: &self.targets.ldr.view,
             cloud_shadows: None,
+            ray_group: None,
         };
 
         self.atmosphere.encode(&mut encoder, &uniform);
@@ -3669,6 +3670,18 @@ impl Renderer {
                 _ => ray.skip_sun_filter(),
             }
         }
+        // The frame's ray scene's group for the features' own draws from here on, the main
+        // view's only: its builds are recorded above, in this frame's commands
+        // (`FrameContext::ray_group`). (A clone, so that `ctx` holds no borrow of the scene.)
+        let ray_group = self
+            .ray_scene
+            .as_ref()
+            .filter(|_| !extra)
+            .map(|ray| ray.group().clone());
+        let ctx = FrameContext {
+            ray_group: ray_group.as_ref(),
+            ..ctx
+        };
         // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
         // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass
         // group).

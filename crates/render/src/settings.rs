@@ -538,6 +538,18 @@ pub mod trial_cut_more {
     /// (9.3 MiB while on, with its depth); `RenderSettings::ray_ground_every_frame` draws it
     /// every frame for a measurement. Off by default.
     pub const RAY_GROUND_MAP: u32 = 512;
+    /// The water's own reflection ray, with [`RAY_WORLD`] (ray_water.wgsl,
+    /// [`crate::ray_scene::water_reflection_lib`]; `gpu_sweep` row `ray_water`, read against
+    /// `ray_world`): a calm water body's pixel (waves of 0.25 m or less) no rougher than
+    /// `RenderSettings::ssr_max_roughness`, where the lake mirror's picture doesn't answer, asks
+    /// the frame's ray scene along its reflection, up to `min(384, 400 exp(-5 roughness))` m,
+    /// and the hit is lit as every pixel's reflection lights its hits; faded by roughness as the
+    /// screen's march is (`1 - 2 roughness`), under the march and over the sky: what the march
+    /// would show if the screen went on. Through [`crate::FrameContext::ray_group`], bound at
+    /// group 3 of the water bodies' own pipeline: main view only, and nothing while the scene
+    /// doesn't exist. The water asks [`crate::ray_scene::water_wanted`] (its `water.ray`,
+    /// `water.ray_bodies`). Off by default.
+    pub const RAY_WATER: u32 = 256;
     /// Every [`crate::PlanarReflection`]'s picture (a lake mirror's) traced in the frame's ray
     /// pass in place of the extra view that draws it, with [`RAY_WORLD`] (ray_mirror.rs,
     /// ray_mirror.wgsl; passes "ray mirror pictures", in the ray pass after the reflections,

@@ -18,8 +18,9 @@ use crate::body::{WaterExtent, WaterSettings};
 use crate::state::{BodyState, SharedWater};
 
 /// Waves taller than this (meters, the sum of the body's wave amplitudes) are too much for one
-/// plane: the body keeps screen-space reflections.
-const MAX_WAVES_M: f32 = 0.25;
+/// plane: the body keeps screen-space reflections. Calmer bodies may also reflect through the
+/// frame's rays (`engine_render::settings::trial_cut_more::RAY_WATER`, render/mod.rs).
+pub(crate) const MAX_WAVES_M: f32 = 0.25;
 /// Bodies farther than this (meters from their edge) get no mirror.
 const REACH_M: f64 = 400.0;
 

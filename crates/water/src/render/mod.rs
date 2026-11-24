@@ -31,7 +31,11 @@ mod surface;
 mod swash;
 mod waterline;
 
-/// The water shader (composed after the renderer's `lib_types` and `lib_frame`).
+/// The water shader, composed after the renderer's `lib_types` and `lib_frame` with a
+/// `ray_reflection` in front of it (`with_reflection_ray`):
+/// `engine_render::ray_scene::WATER_REFLECTION_STUB` (finds nothing, no binding), or
+/// `engine_render::ray_scene::water_reflection_lib(device_type)` for the bodies' traced pipeline,
+/// with the ray scene's group at 3.
 pub const SHADER: &str = include_str!("water.wgsl");
 
 /// Bodies drawn at once (the nearest ones).
@@ -621,8 +625,10 @@ struct Globals {
     /// the plume's radius. `plume[2]` counts them.
     mouths: [[f32; 4]; MAX_MOUTHS],
     plunge_dirs: [[f32; 4]; MAX_PLUNGES],
-    /// Lakes take the open sky's share and the fog from their vertices
-    /// (`WaterSettings::vertex_sky_and_fog`: 1/0), unused x3.
+    /// x: lakes take the open sky's share and the fog from their vertices
+    /// (`WaterSettings::vertex_sky_and_fog`: 1/0); y: the tallest waves (m, summed) of a body
+    /// that may reflect through the frame's rays (fs_body's `use_rays`,
+    /// `crate::mirror::MAX_WAVES_M`); z, w unused.
     cheaper: [f32; 4],
 }
 
@@ -712,6 +718,9 @@ fn body_detail(b: &BodyState, tiles: Option<&detail::DetailState>) -> [f32; 4] {
 struct BodyDraw {
     first_band: u32,
     last_band: u32,
+    /// Its waves are as low as the lake mirror takes ([`crate::mirror::MAX_WAVES_M`]): it may
+    /// reflect through the frame's rays (`trial_cut_more::RAY_WATER`, fs_body's `use_rays`).
+    calm: bool,
 }
 
 /// GPU resources of one flowing region.
@@ -766,6 +775,11 @@ struct CreeksGpu {
 
 struct Gpu {
     body: wgpu::RenderPipeline,
+    /// The bodies' pipeline that traces the frame's ray scene ([`WaterFeature::body_rays`]),
+    /// once the water has asked for it.
+    body_rays: Option<wgpu::RenderPipeline>,
+    /// The water shader every pipeline is made from (water.wgsl, or `ENGINE_WATER_SHADER`'s).
+    source: String,
     flow: wgpu::RenderPipeline,
     puddle: wgpu::RenderPipeline,
     sand: wgpu::RenderPipeline,
@@ -891,6 +905,9 @@ pub struct WaterFeature {
     mirror_age: (Option<Entity>, u32, DVec3),
     /// The bodies' stand-ins in the ray scene.
     rays: ray::WaterRays,
+    /// This view's calm bodies reflect through the frame's rays (`trial_cut_more::RAY_WATER`,
+    /// [`engine_render::ray_scene::water_wanted`]): the main view only, while one is drawn.
+    ray_water: bool,
 }
 
 /// Frames a lake mirror's picture is left to settle before the water shows it, after the
@@ -1075,8 +1092,8 @@ fn plain_waterline() -> bool {
 }
 
 /// `ENGINE_WATER_REFLECT_DEBUG` set: the water shows where its reflection comes from (the lake
-/// mirror's picture red, screen-space reflections green, the sky blue; darker in the sun's
-/// shadow).
+/// mirror's picture red, screen-space reflections green, the sky blue, the frame's rays magenta
+/// in diagonal stripes; darker in the sun's shadow).
 fn reflect_debug() -> bool {
     static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DEBUG.get_or_init(|| std::env::var_os("ENGINE_WATER_REFLECT_DEBUG").is_some())
@@ -1108,14 +1125,109 @@ fn extent_range(b: &BodyState, p: DVec2) -> (f64, f64) {
     }
 }
 
+/// The water shader `source` with its reflection ray (`ray_reflection` in water.wgsl's
+/// `shade_water`): with `traced`, the type of the device it is for, the one that asks the frame's
+/// ray scene (`engine_render::ray_scene::water_reflection_lib`, `trial_cut_more::RAY_WATER`: the
+/// bodies' `Gpu::body_rays`, its group at 3), or else the stub that finds nothing, with no
+/// binding (every other pipeline, and the bodies' own without the bit).
+fn with_reflection_ray(traced: Option<wgpu::DeviceType>, source: &str) -> String {
+    match traced {
+        Some(device) => format!(
+            "{}\n{source}",
+            engine_render::ray_scene::water_reflection_lib(device)
+        ),
+        None => format!(
+            "{}\n{source}",
+            engine_render::ray_scene::WATER_REFLECTION_STUB
+        ),
+    }
+}
+
+/// One of the water's pipelines with no vertex buffers, drawing into the HDR target.
+fn water_pipeline(
+    gpu: &GpuShared,
+    module: &wgpu::ShaderModule,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    (vs, fs): (&str, &str),
+    depth: wgpu::DepthStencilState,
+) -> wgpu::RenderPipeline {
+    gpu.device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some(vs),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(depth),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some(fs),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.formats.hdr,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
 impl WaterFeature {
+    /// The bodies' pipeline that traces the frame's ray scene (`trial_cut_more::RAY_WATER`):
+    /// `Gpu::body`'s, from the shader with the traced reflection ray, the scene's group at 3
+    /// (and none at 2). `None` where the device can't hold the scene. Made the first frame the
+    /// water asks for it: the water shader's second compile.
+    fn body_rays(shared: &GpuShared, gpu: &Gpu) -> Option<wgpu::RenderPipeline> {
+        let ray = shared.ray_group_layout()?;
+        let module = shared.shader(
+            "water rays",
+            &with_reflection_ray(Some(shared.adapter_info.device_type), &gpu.source),
+            true,
+        );
+        let layout = shared
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("water body rays"),
+                bind_group_layouts: &[
+                    Some(&shared.frame_layout),
+                    Some(&gpu.group1_layout),
+                    None,
+                    Some(&ray),
+                ],
+                immediate_size: 0,
+            });
+        Some(water_pipeline(
+            shared,
+            &module,
+            "water body rays",
+            &layout,
+            ("vs_body", "fs_body"),
+            shared.depth_state(true),
+        ))
+    }
+
     fn build(gpu: &GpuShared) -> Gpu {
         let device = &gpu.device;
         // Shader work without a rebuild: `ENGINE_WATER_SHADER=<path to water.wgsl>` loads the
-        // shader from that file instead of the copy built in.
-        let source =
-            std::env::var_os("ENGINE_WATER_SHADER").and_then(|p| std::fs::read_to_string(p).ok());
-        let shader = gpu.shader("water", source.as_deref().unwrap_or(SHADER), true);
+        // shader from that file instead of the copy built in (for both modules: `Gpu::source`).
+        let source = std::env::var_os("ENGINE_WATER_SHADER")
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_else(|| SHADER.to_owned());
+        // Every pipeline but the bodies' traced one (`body_rays`): its reflection ray finds
+        // nothing.
+        let shader = gpu.shader("water", &with_reflection_ray(None, &source), true);
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let tex = |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1192,35 +1304,7 @@ impl WaterFeature {
                         vs: &str,
                         fs: &str,
                         depth: wgpu::DepthStencilState| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some(vs),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(depth),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: gpu.formats.hdr,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
+            water_pipeline(gpu, &shader, label, layout, (vs, fs), depth)
         };
         let always = wgpu::DepthStencilState {
             depth_compare: Some(wgpu::CompareFunction::Always),
@@ -1518,6 +1602,8 @@ impl WaterFeature {
         );
         Gpu {
             body,
+            body_rays: None,
+            source,
             flow,
             puddle,
             sand,
@@ -1818,6 +1904,7 @@ impl WaterFeature {
             BodyDraw {
                 first_band: first,
                 last_band: last,
+                calm: b.waves.max_height() <= crate::mirror::MAX_WAVES_M,
             },
         ))
     }
@@ -2348,13 +2435,14 @@ impl RenderFeature for WaterFeature {
         world: &World,
         shared: &GpuShared,
         view: &ViewData,
-        _settings: &RenderSettings,
-        _out: &mut PrepareOut,
+        settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
         self.bodies.clear();
         self.underwater = false;
         self.split = false;
         self.lens_on = false;
+        self.ray_water = false;
         self.stats = FeatureStats::default();
         self.extra_view = view.extra_view;
         self.mirror = None;
@@ -2723,7 +2811,28 @@ impl RenderFeature for WaterFeature {
         let per_vertex = world
             .get_resource::<crate::body::WaterSettings>()
             .is_some_and(|s| s.vertex_sky_and_fog);
-        g.cheaper = [if per_vertex { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+        // The calm bodies' reflections through the frame's rays (`trial_cut_more::RAY_WATER`):
+        // the waves a body may have for them, as for the lake mirror (fs_body's `use_rays`).
+        g.cheaper = [
+            if per_vertex { 1.0 } else { 0.0 },
+            crate::mirror::MAX_WAVES_M,
+            0.0,
+            0.0,
+        ];
+        if !view.extra_view {
+            let calm = self.bodies.iter().filter(|d| d.calm).count();
+            self.ray_water = calm > 0 && engine_render::ray_scene::water_wanted(settings, shared);
+            if self.ray_water && gpu.body_rays.is_none() {
+                let rays = Self::body_rays(shared, gpu);
+                gpu.body_rays = rays;
+            }
+            self.ray_water &= gpu.body_rays.is_some();
+            out.set("water.ray", if self.ray_water { 1.0 } else { 0.0 });
+            out.set(
+                "water.ray_bodies",
+                if self.ray_water { calm as f64 } else { 0.0 },
+            );
+        }
         if let (Some((corner, cell)), Some(slot)) = (shelter_place, shelter_slot) {
             let rel = view.relative(DVec3::new(corner.x, 0.0, corner.y));
             g.shelter = [
@@ -2967,7 +3076,7 @@ impl RenderFeature for WaterFeature {
         gpu.group1_now = gpu.group1.len() - 1;
     }
 
-    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {
         if phase != RenderPhase::Transparent {
             return;
         }
@@ -3011,7 +3120,21 @@ impl RenderFeature for WaterFeature {
             pass.draw_indexed(0..gpu.creeks.index_count, 0, 0..1);
         }
         if !self.bodies.is_empty() {
-            pass.set_pipeline(&gpu.body);
+            // The calm bodies' reflections through the frame's rays (`trial_cut_more::RAY_WATER`,
+            // main view only): the scene's group at 3, set once and after every group 1 and 2 of
+            // this draw. A lower group set after it, or a switch between the two pipelines,
+            // binds it again: one more walk of the scene's instances at submit.
+            match ctx
+                .ray_group
+                .filter(|_| self.ray_water)
+                .zip(gpu.body_rays.as_ref())
+            {
+                Some((group, rays)) => {
+                    pass.set_pipeline(rays);
+                    pass.set_bind_group(3, group, &[]);
+                }
+                None => pass.set_pipeline(&gpu.body),
+            }
             pass.set_index_buffer(gpu.grid_index.slice(..), wgpu::IndexFormat::Uint32);
             for (i, d) in self.bodies.iter().enumerate() {
                 let per_band = SEGMENTS * 6;
@@ -3081,8 +3204,18 @@ mod tests {
 
     #[test]
     fn shader_validates() {
-        let code = engine_render::features::compose_shader(SHADER, true);
-        engine_render::features::validate_wgsl("water", &code).unwrap_or_else(|e| panic!("{e}"));
+        // With the reflection ray's stub (every pipeline) and with the traced ray (the bodies'
+        // `body_rays`).
+        for traced in [
+            None,
+            Some(wgpu::DeviceType::DiscreteGpu),
+            Some(wgpu::DeviceType::Cpu),
+        ] {
+            let code =
+                engine_render::features::compose_shader(&with_reflection_ray(traced, SHADER), true);
+            engine_render::features::validate_wgsl("water", &code)
+                .unwrap_or_else(|e| panic!("traced {traced:?}: {e}"));
+        }
     }
 
     #[test]

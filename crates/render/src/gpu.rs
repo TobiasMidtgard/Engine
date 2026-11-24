@@ -263,23 +263,27 @@ fn try_create(
     let experimental_features = if ray_queries {
         // SAFETY: wgpu marks its ray queries experimental: a misuse may be undefined behavior
         // rather than a validation error. Two places use them: probe GI's hardware path
-        // (probe_gi/rt.rs) and the frame's ray scene (ray_scene/blas.rs and tlas.rs, traced
-        // by lib_ray.wgsl). In both every structure is built before any query reads it (a
-        // top-level one in the frame's commands before the pass that binds it, the
-        // bottom-level ones it points at in the same call or an earlier submission) and
-        // kept until the GPU has finished every frame that may trace it (wgpu frees a
-        // structure with its last handle, though a top-level structure the GPU is still
-        // tracing points at it: `Retired` and `Drop for Store` there); a geometry is built
-        // only from ranges whose indices were checked against its vertices; the scene
-        // starts over when a submission holding its builds fails. Probe GI's own queries
-        // and the probes' rays of the ray scene force their triangles opaque; the queries
-        // that ask the triangles built to be asked (a cut-out card's, lib_ray.wgsl's
-        // `ray_first` and `ray_nearest`) read a candidate's row, triangle record and tile
-        // only for a row the scene wrote, a record its geometry has and a layer a fill
-        // filled, inside the query's loop and nowhere else. Their tests hold the pictures
-        // to the software path's, and the ray scene's to the probes' own, on lavapipe's ray
-        // queries (tests/probe_gi.rs, ray_queries.rs, ray_scene.rs), and read a texture in
-        // a candidate's loop there (ray_queries.rs).
+        // (probe_gi/rt.rs) and the frame's ray scene (ray_scene/blas.rs and tlas.rs, traced by
+        // lib_ray.wgsl in the frame's ray pass and, through `FrameContext::ray_group`, in a
+        // feature's own draw: the water bodies' fragment shader, in the main view only, after the
+        // same frame's commands recorded the builds). In both every structure is built before any
+        // query reads it (a top-level one in the frame's commands before the pass that binds it,
+        // the bottom-level ones it points at in the same call or an earlier submission) and kept
+        // until the GPU has finished every frame that may trace it (wgpu frees a structure with its
+        // last handle, though a top-level structure the GPU is still tracing points at it:
+        // `Retired` and `Drop for Store` there); a geometry is built only from ranges whose indices
+        // were checked against its vertices; the scene starts over when a submission holding its
+        // builds fails. Probe GI's own queries and the probes' rays of the ray scene force their
+        // triangles opaque; the queries that ask the triangles built to be asked (a cut-out card's,
+        // lib_ray.wgsl's `ray_first` and `ray_nearest`) read a candidate's row, triangle record and
+        // tile only for a row the scene wrote, a record its geometry has and a layer a fill filled,
+        // inside the query's loop and nowhere else (on a software device the water's reflection ray
+        // asks none, as lavapipe's fragment shader crashed in `ray_nearest`'s loop there; its hit's
+        // shadow rays ask by `ray_first`'s, which runs there with a ground's candidates and a
+        // cut-out card's: `water_reflection_lib` in ray_scene/mod.rs). Their tests hold the
+        // pictures to the software path's, and the ray scene's to the probes' own, on lavapipe's
+        // ray queries (tests/probe_gi.rs, ray_queries.rs, ray_scene.rs), and read a texture in a
+        // candidate's loop there (ray_queries.rs, and the water's tests/ray_water.rs).
         unsafe { wgpu::ExperimentalFeatures::enabled() }
     } else {
         wgpu::ExperimentalFeatures::disabled()

@@ -298,6 +298,10 @@ distance beyond, out to `ray_far_reach` (the nearest 512, `RayView::ground_patch
 its terrains that cast), each built from its slot of the vertex pages with its skirts and
 placed as `Ground` in the `Atmosphere`'s ground colour;
 `ray_scene::wanted` tells a feature in its main view's prepare whether the scene will ask.
+A feature's own draw may trace the scene too: `GpuShared::ray_group_layout` for its pipeline,
+`FrameContext::ray_group` to bind (main view only, from `before_scene` on), and
+`ray_scene::water_reflection_lib` with its stub `WATER_REFLECTION_STUB` for the water's
+reflection ray (`trial_cut_more::RAY_WATER`, group 3 of the water bodies' pipeline).
 Without ray queries, or with the switch off, nothing of it is made and the probes gather their own scene as before. `render.ray.*` and
 `render.meshes.ray_*` count it. With `trial_cut_more::RAY_SUN` as well (off by default;
 `ray_scene/sun.rs`, `ray_sun.wgsl`), the sun's trace takes the measuring rays' place in that

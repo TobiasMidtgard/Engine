@@ -61,7 +61,7 @@ struct Globals {
     flood_scatter: vec4<f32>, // its scatter color rgb, roughness
     mouths: array<vec4<f32>, 4>, // where streams run into lakes: plume middle rel camera xyz, share of the radius
     plunge_dirs: array<vec4<f32>, 16>, // each plunge's way on (world xz, unit), landing speed (m/s)
-    cheaper: vec4<f32>,  // lakes' sky share and fog from their vertices (1/0, `WaterSettings::vertex_sky_and_fog`), unused x3
+    cheaper: vec4<f32>,  // lakes' sky share and fog from their vertices (1/0, `WaterSettings::vertex_sky_and_fog`); the tallest waves (m, summed) of a body that may reflect through the frame's rays (`use_rays`); unused x2
 };
 
 struct WaterUniform {
@@ -87,6 +87,10 @@ struct WaterUniform {
 
 // The body being shaded reflects through the lake mirror (set by fs_body).
 var<private> use_mirror: bool = false;
+// The body being shaded is calm enough to reflect through the frame's rays where the screen's
+// march finds nothing (set by fs_body; `ray_reflection` asks them only in the bodies' traced
+// pipeline, trial_cut_more::RAY_WATER, and finds nothing in every other: flows, creeks, puddles).
+var<private> use_rays: bool = false;
 // How much the bed seen through the water darkens: the swash's sand is soaked, though the scene
 // colour the water refracts was drawn dry (the sand decal goes on after it is copied).
 var<private> wet_bed: f32 = 1.0;
@@ -1136,25 +1140,40 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     let env = (mix(sample_env(r), sky_ambient(r), saturate(rough * 1.5)) - fill) * sky_vis + fill;
     var refl = pre_expose(env);
     // The lake mirror where it has the answer; screen-space reflections, then the sky, where
-    // it doesn't.
+    // it doesn't. Where the screen's march finds nothing (off the screen, behind something) or
+    // fades at the screen's edge, a calm body asks the frame's rays (`use_rays`) for what it
+    // would have found there, faded by roughness as the march is: the sky keeps what neither
+    // answers. Without the rays, or where they meet nothing, today's mix exactly.
     var mirrored = vec4<f32>(0.0);
     if (use_mirror) { mirrored = mirror_reflection(rel, r, rough); }
     var ssr_a = 0.0;
+    var ray_w = 0.0;
     if (mirrored.a < 0.999) {
         let ssr = trace_reflection(rel, r, size, rough);
+        // The march's weight: its confidence times this (trace_reflection).
+        let fade = saturate(1.0 - rough * 2.0);
+        if (use_rays && ssr.a < fade - 1e-3) {
+            let rayed = ray_reflection(rel, r, rough);
+            ray_w = (fade - ssr.a) * rayed.a;
+            // (Under the march, which takes `ssr.a` of what this leaves.)
+            if (ray_w > 0.0) { refl = mix(refl, rayed.rgb, ray_w / (1.0 - ssr.a)); }
+        }
         refl = mix(refl, ssr.rgb, ssr.a);
         ssr_a = ssr.a;
     }
     refl = mix(refl, mirrored.rgb, mirrored.a);
     if (water.g.swash2.w > 0.5) {
         // Debug (ENGINE_WATER_REFLECT_DEBUG): where each reflection comes from. Red: the lake
-        // mirror's picture; green: screen-space reflections; blue: the sky. Darker where the
-        // sun's shadow lies.
+        // mirror's picture; green: screen-space reflections; blue: the sky; magenta in diagonal
+        // stripes, black between them: the frame's rays (so that no blend of the other three
+        // reads as them). Darker where the sun's shadow lies.
         let from_ssr = (1.0 - mirrored.a) * ssr_a;
-        let from_sky = (1.0 - mirrored.a) * (1.0 - ssr_a);
+        let stripe = select(0.0, 1.0, fract((frag.x + frag.y) * 0.125) < 0.5);
+        let from_ray = (1.0 - mirrored.a) * ray_w * stripe;
+        let from_sky = (1.0 - mirrored.a) * (1.0 - ssr_a - ray_w);
         let lit = shadow_factor(rel, n);
         // (Pre-exposed output: these land mid-bright on screen.)
-        return vec3<f32>(mirrored.a, from_ssr, from_sky) * (0.3 + 0.5 * lit);
+        return vec3<f32>(mirrored.a + from_ray, from_ssr, from_sky + from_ray) * (0.3 + 0.5 * lit);
     }
 
     // ---- sun glitter
@@ -1623,6 +1642,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     let dome = water.g.waterline.y;
     if (water.g.waterline.x > 0.5 && dot(in.rel, in.rel) < dome * dome) { discard; }
     use_mirror = i32(bi) == i32(water.g.mirror.w);
+    use_rays = water.bodies[bi].grid2.w <= water.g.cheaper.y;
     wet_bed = mix(1.0, WET_SAND, sw.w);
     if (in.sky >= 0.0) {
         given_sky = in.sky;

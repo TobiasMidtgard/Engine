@@ -10,16 +10,19 @@
 //! draw the mirror as before), no ground colour map is made or drawn
 //! (`trial_cut_more::RAY_GROUND_MAP`, with `RenderSettings::ray_ground_every_frame` or not),
 //! no mirror's picture is traced (`trial_cut_more::RAY_MIRROR_PICTURES`: its view is drawn as
-//! before), and the rays walk the probes' own scene in software, so the picture is the one
-//! drawn with the switches off. A test binary of its own: the variable is the whole process's, read when the device is
-//! made. Needs a GPU or lavapipe; passes with a note when neither is available.
+//! before), no feature's own draw is handed the scene's group (`trial_cut_more::RAY_WATER`:
+//! `FrameContext::ray_group` is `None` in every view and phase, so the water draws as before,
+//! which crates/water/tests/ray_water_off.rs shows of the water itself), and the rays walk the
+//! probes' own scene in software, so the picture is the one drawn with the switches off. A test
+//! binary of its own: the variable is the whole process's, read when the device is made. Needs
+//! a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::settings::trial_cut_more::{
-    RAY_GROUND_MAP, RAY_MIRROR_PICTURES, RAY_PROBES, RAY_REFLECTIONS, RAY_SUN, RAY_WORLD,
+    RAY_GROUND_MAP, RAY_MIRROR_PICTURES, RAY_PROBES, RAY_REFLECTIONS, RAY_SUN, RAY_WATER, RAY_WORLD,
 };
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{FrameContext, RenderDisabled, capture_now};
 
 const W: u32 = 160;
 const H: u32 = 120;
@@ -57,7 +60,8 @@ fn app(switches: bool) -> App {
                 | RAY_SUN
                 | RAY_REFLECTIONS
                 | RAY_GROUND_MAP
-                | RAY_MIRROR_PICTURES;
+                | RAY_MIRROR_PICTURES
+                | RAY_WATER;
             s.ray_sun_shadows = true;
             s.ray_ground_every_frame = true;
             s.debug_skip |= engine_render::settings::shade_skip::RAY_LEAVES_SOLID
@@ -70,6 +74,24 @@ fn app(switches: bool) -> App {
         }
     }
     app
+}
+
+/// Every draw a feature is handed, in every view and phase: how many, and how many of them came
+/// with the frame's ray scene's group (`FrameContext::ray_group`, what the water's bodies trace
+/// through with `trial_cut_more::RAY_WATER`).
+#[derive(Default, Clone)]
+struct GroupWatch(std::sync::Arc<std::sync::Mutex<(u32, u32)>>);
+
+impl RenderFeature for GroupWatch {
+    fn name(&self) -> &str {
+        "ray group watch"
+    }
+
+    fn draw(&self, _phase: RenderPhase, _pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {
+        let mut seen = self.0.lock().unwrap();
+        seen.0 += 1;
+        seen.1 += u32::from(ctx.ray_group.is_some());
+    }
 }
 
 fn slab(w: &mut World, center: DVec3, size: DVec3, material: StandardMaterial) {
@@ -169,14 +191,29 @@ fn picture(app: &mut App, name: &str) -> Option<image::RgbImage> {
 fn without_ray_queries_the_switches_change_nothing() {
     // SAFETY: the only test of this binary, before any other thread exists.
     unsafe { std::env::set_var("ENGINE_RAY_QUERIES", "off") };
+    let (plain_watch, switched_watch) = (GroupWatch::default(), GroupWatch::default());
     let mut plain = app(false);
+    plain.add_render_feature(plain_watch.clone());
     yard(&mut plain.world);
     let Some(before) = picture(&mut plain, "plain.png") else {
         return;
     };
     let mut switched = app(true);
+    switched.add_render_feature(switched_watch.clone());
     yard(&mut switched.world);
     let after = picture(&mut switched, "switched.png").expect("GPU");
+    // No feature's own draw is handed the scene's group, in the main view or the mirror's.
+    for (watch, what) in [
+        (&plain_watch, "switches off"),
+        (&switched_watch, "switches on"),
+    ] {
+        let (draws, with_group) = *watch.0.lock().unwrap();
+        assert!(draws > 0, "{what}: the watch was never drawn");
+        assert_eq!(
+            with_group, 0,
+            "{what}: {with_group} of {draws} draws had the ray scene's group"
+        );
+    }
     for (app, what) in [(&plain, "switches off"), (&switched, "switches on")] {
         for (name, expected) in [
             ("render.ray_queries", 0.0),

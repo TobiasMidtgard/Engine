@@ -29,7 +29,9 @@
 //! first fill makes them). Binding a structure costs the render thread a walk of its
 //! instances at submit (0.02 ms a thousand on the RTX 5080), and again whenever a group before
 //! it is set, so a frame's ray dispatches run in one compute pass with groups 0 and 1 set
-//! once.
+//! once. A feature's own draw may trace the scene too, as group 3 of its pipeline (the water's
+//! bodies, `trial_cut_more::RAY_WATER`): [`water_reflection_lib`],
+//! [`crate::GpuShared::ray_group_layout`] and [`crate::FrameContext::ray_group`].
 
 mod blas;
 mod ground;
@@ -350,14 +352,50 @@ impl Valve {
 }
 
 /// lib_ray.wgsl with its bindings in group `group` (`RAY_GROUP` in the shader): 1 in the
-/// frame's ray pass (`probe_gi::shader_source`). lib_ray reads the frame's `linear_repeat` and
-/// `linear_clamp`, so it is composed with lib_frame.
+/// frame's ray pass (`probe_gi::shader_source`), 3 in the water bodies' ray pipeline
+/// ([`water_reflection_lib`]). lib_ray reads the frame's `linear_repeat` and `linear_clamp`,
+/// so it is composed with lib_frame.
 pub(crate) fn shader_lib(group: u32) -> String {
     format!(
         "const RAY_GROUP: u32 = {group}u;\n{}",
         include_str!("../shaders/lib_ray.wgsl")
     )
 }
+
+/// The water's own reflection ray (`trial_cut_more::RAY_WATER`), for a fragment shader composed
+/// with lib_frame (`GpuShared::shader(.., true)`): lib_ray with its bindings in group 3 and
+/// ray_water.wgsl's `fn ray_reflection(rel, r, rough) -> vec4<f32>` (pre-exposed rgb, and in a
+/// 1 where it met something), its hits lit as every pixel's reflection lights its own
+/// (ray_hit_light.wgsl). Its pipeline has [`GpuShared::ray_group_layout`] at 3 and binds
+/// [`crate::FrameContext::ray_group`] there; where that is `None`, the same shader is built
+/// with [`WATER_REFLECTION_STUB`] instead.
+///
+/// `device` is the type of the device it is for (`GpuShared::adapter_info`). On a software one
+/// the ray takes every triangle whole, as a probe's does (`WATER_RAY_RULES`), so there a
+/// ground's back and a card's cut-out stop it as their faces do: in the water's body shader,
+/// lavapipe (Mesa 25.2.8) crashes in `ray_nearest`'s loop where it reads the row a candidate
+/// names, even where no candidate comes, unless the ray takes every triangle whole. The hit's
+/// shadow rays ask by `ray_first`'s loop (`SHADOW_RULES`, on every device), which runs there
+/// with a ground's candidates and a cut-out card's, its texel read (the roof and the card of
+/// the water's tests/ray_water.rs), as `ray_nearest`'s does in the frame's compute passes and in
+/// a smaller fragment shader.
+pub fn water_reflection_lib(device: wgpu::DeviceType) -> String {
+    let rules = if device == wgpu::DeviceType::Cpu {
+        "0u"
+    } else {
+        "REFLECT_RULES"
+    };
+    format!(
+        "{}\n{}\nconst WATER_RAY_RULES: u32 = {rules};\n{}",
+        shader_lib(3),
+        include_str!("../shaders/ray_hit_light.wgsl"),
+        include_str!("../shaders/ray_water.wgsl")
+    )
+}
+
+/// [`water_reflection_lib`]'s `ray_reflection` finding nothing, with no binding and no
+/// `enable`: for the pipelines that don't bind the frame's ray scene.
+pub const WATER_REFLECTION_STUB: &str = include_str!("../shaders/ray_water_stub.wgsl");
 
 /// Whether `settings` ask for the ray scene on this device: its switch, with probe GI on
 /// ray-tracing hardware, where the device can hold it, unless the renderer gave it up for
@@ -377,6 +415,15 @@ pub fn wanted(settings: &crate::RenderSettings, shared: &GpuShared) -> bool {
 /// pipeline) in its main view's prepare.
 pub fn ground_map_wanted(settings: &crate::RenderSettings, shared: &GpuShared) -> bool {
     settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_GROUND_MAP != 0
+        && wanted(settings, shared)
+}
+
+/// Whether the water traces reflection rays of its own: [`wanted`] with
+/// `trial_cut_more::RAY_WATER`. The water prepares for it by this (its ray pipeline, made from
+/// [`water_reflection_lib`], the first time) in its main view's prepare, and draws with the
+/// rays only where [`crate::FrameContext::ray_group`] holds them.
+pub fn water_wanted(settings: &crate::RenderSettings, shared: &GpuShared) -> bool {
+    settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_WATER != 0
         && wanted(settings, shared)
 }
 
@@ -1247,5 +1294,39 @@ mod tests {
                 .and_then(|(_, v)| v.binding.as_ref().map(|b| b.group));
             assert_eq!(at, Some(group));
         }
+    }
+
+    #[test]
+    fn the_waters_ray_and_its_stub_compose_into_a_fragment_shader() {
+        let entry = "\n@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> \
+                     { return ray_reflection(p.xyz, vec3<f32>(0.0, 1.0, 0.0), 0.1); }\n";
+        for (lib, traces) in [
+            (water_reflection_lib(wgpu::DeviceType::DiscreteGpu), true),
+            (water_reflection_lib(wgpu::DeviceType::Cpu), true),
+            (WATER_REFLECTION_STUB.to_owned(), false),
+        ] {
+            let code = crate::features::compose_shader(&format!("{lib}{entry}"), true);
+            crate::features::validate_wgsl("ray_water", &code).unwrap();
+            let module = wgpu::naga::front::wgsl::parse_str(&code).unwrap();
+            let groups: Vec<u32> = module
+                .global_variables
+                .iter()
+                .filter(|(_, v)| v.name.as_deref().is_some_and(|n| n.starts_with("ray_")))
+                .filter_map(|(_, v)| v.binding.as_ref().map(|b| b.group))
+                .collect();
+            assert_eq!(groups, if traces { vec![3; 7] } else { vec![] });
+        }
+        // (`validate_wgsl` takes every capability, so it can't tell that the stub needs none.)
+        assert!(!WATER_REFLECTION_STUB.contains("enable "));
+        assert!(!WATER_REFLECTION_STUB.contains("@group"));
+        let head = |s: &str| {
+            s.lines()
+                .find(|l| l.starts_with("fn ray_reflection("))
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            head(include_str!("../shaders/ray_water.wgsl")),
+            head(WATER_REFLECTION_STUB)
+        );
     }
 }

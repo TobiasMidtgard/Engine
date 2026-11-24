@@ -264,6 +264,11 @@ fn mirrored(p: DVec3) -> DVec3 {
 /// through the frame's ray scene (a few probes a frame: their rays are most of a frame's time
 /// on a software GPU), the trace counted.
 fn ball_app(traced: bool) -> App {
+    ball_app_with(traced, MirrorFeature::default())
+}
+
+/// [`ball_app`] with `feature` drawing the mirror's square in place of [`MirrorFeature`].
+fn ball_app_with(traced: bool, feature: impl RenderFeature) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -273,7 +278,7 @@ fn ball_app(traced: bool) -> App {
         w.height = WINDOW.y;
     }
     app.add_plugins(RenderPlugin);
-    app.add_render_feature(MirrorFeature::default());
+    app.add_render_feature(feature);
     {
         let mut s = app.world.resource_mut::<RenderSettings>();
         s.anti_aliasing = AntiAliasing::None;
@@ -907,5 +912,248 @@ fn a_mirror_lit_by_the_main_views_shadow_maps_shows_the_same_shadows() {
             (a - b).abs() < 12.0,
             "the reflection at {p} differs: own maps {a_rgb:?}, borrowed {b_rgb:?}"
         );
+    }
+}
+
+/// A feature's own fragment shader that traces the frame's ray scene, as the water's bodies do
+/// (`trial_cut_more::RAY_WATER`): the mirror's square, reflecting along its normal with
+/// `ray_reflection` (`ray_scene::water_reflection_lib`, the scene's group at 3) where the frame
+/// hands it the group, else with the stub, which finds nothing (black).
+const FLOOR_SHADER: &str = r#"
+@group(1) @binding(0) var<uniform> floor_half: vec4<f32>; // half the square's side (m)
+
+struct FloorOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) rel: vec3<f32>,
+};
+
+@vertex
+fn vs_floor(@builtin(vertex_index) index: u32) -> FloorOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+    );
+    let c = corners[index] * floor_half.x;
+    let p = vec3<f32>(c.x, 0.0, c.y) - frame.camera_world.xyz;
+    var out: FloorOut;
+    out.clip = frame.view_proj * vec4<f32>(p, 1.0);
+    out.rel = p;
+    return out;
+}
+
+@fragment
+fn fs_floor(in: FloorOut) -> @location(0) vec4<f32> {
+    let f = ray_reflection(in.rel, reflect(normalize(in.rel), vec3<f32>(0.0, 1.0, 0.0)), 0.02);
+    return vec4<f32>(f.rgb * f.a, 1.0);
+}
+"#;
+
+/// Whether each draw of [`RayFloor`] was in an extra view, and whether it had the frame's ray
+/// scene's group.
+type FloorDraws = std::sync::Arc<std::sync::Mutex<Vec<(bool, bool)>>>;
+
+/// Draws [`FLOOR_SHADER`] in the transparent phase, as the water draws its bodies: with the
+/// tracing pipeline (`[frame, own, none, the ray scene's]`) where `FrameContext::ray_group` is
+/// given, else with the stub's (`[frame, own]`).
+struct RayFloor {
+    pipelines: Option<(
+        Option<wgpu::RenderPipeline>,
+        wgpu::RenderPipeline,
+        wgpu::BindGroup,
+    )>,
+    draws: FloorDraws,
+}
+
+impl RenderFeature for RayFloor {
+    fn name(&self) -> &str {
+        "test ray floor"
+    }
+
+    fn init(&mut self, gpu: &GpuShared) {
+        let device = &gpu.device;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("test ray floor"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test ray floor"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(
+            &buffer,
+            0,
+            bytemuck::cast_slice(&[SIZE * 0.5, 0.0, 0.0, 0.0]),
+        );
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("test ray floor"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        let pipeline = |label: &str, lib: &str, layouts: &[Option<&wgpu::BindGroupLayout>]| {
+            let shader = gpu.shader(label, &format!("{lib}\n{FLOOR_SHADER}"), true);
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: layouts,
+                immediate_size: 0,
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_floor"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: Some(gpu.depth_state(true)),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_floor"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.formats.hdr,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let plain = pipeline(
+            "test ray floor (stub)",
+            engine_render::ray_scene::WATER_REFLECTION_STUB,
+            &[Some(&gpu.frame_layout), Some(&layout)],
+        );
+        let rays = gpu.ray_group_layout().map(|ray| {
+            pipeline(
+                "test ray floor (rays)",
+                &engine_render::ray_scene::water_reflection_lib(gpu.adapter_info.device_type),
+                &[Some(&gpu.frame_layout), Some(&layout), None, Some(&ray)],
+            )
+        });
+        self.pipelines = Some((rays, plain, group));
+    }
+
+    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {
+        if phase != RenderPhase::Transparent {
+            return;
+        }
+        let Some((rays, plain, group)) = &self.pipelines else {
+            return;
+        };
+        self.draws
+            .lock()
+            .unwrap()
+            .push((ctx.view.extra_view, ctx.ray_group.is_some()));
+        // The scene's group last, after every group below it (each bind of it costs the submit
+        // a walk of its instances).
+        match ctx.ray_group.zip(rays.as_ref()) {
+            Some((ray, rays)) => {
+                pass.set_pipeline(rays);
+                pass.set_bind_group(1, group, &[]);
+                pass.set_bind_group(3, ray, &[]);
+            }
+            None => {
+                pass.set_pipeline(plain);
+                pass.set_bind_group(1, group, &[]);
+            }
+        }
+        pass.draw(0..6, 0..1);
+    }
+}
+
+/// A feature's own shader traces the frame's ray scene as the water's bodies will
+/// (`trial_cut_more::RAY_WATER`, step 12 part two): with the scene's group from
+/// `FrameContext::ray_group` at 3, the mirror's square shows the red ball and the yellow one
+/// above the top of the screen, lit as every pixel's reflection lights its hits, and nothing
+/// under it. The group is handed over only in the main view: the mirror's own view, drawn as an
+/// extra view here (`RAY_MIRROR_PICTURES` off), has none. Without the scene (its switch off) the
+/// same square draws with the stub, which finds nothing.
+#[test]
+fn a_features_own_shader_reflects_through_the_frames_rays_what_is_above_it() {
+    for rays in [true, false] {
+        let draws = FloorDraws::default();
+        let mut app = ball_app_with(
+            false,
+            RayFloor {
+                pipelines: None,
+                draws: draws.clone(),
+            },
+        );
+        {
+            let mut s = app.world.resource_mut::<RenderSettings>();
+            s.probe_gi = true;
+            s.gi_hardware_rays = true;
+            s.gi_probe_spacing = 1.0;
+            s.gi_probe_grid = [16, 8, 16];
+            s.gi_probes_per_frame = 16;
+            if rays {
+                s.trial_cuts_more |= RAY_WORLD;
+            }
+        }
+        app.update_n(5);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let d = app.world.resource::<Diagnostics>();
+        if d.get("render.ray.supported") != Some(1.0) {
+            eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+            return;
+        }
+        assert_eq!(d.get("render.ray.on"), Some(if rays { 1.0 } else { 0.0 }));
+        assert_eq!(d.get("render.extra_views"), Some(1.0), "the mirror's view");
+        let name = format!("floor-{}.png", if rays { "rays" } else { "stub" });
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(&name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(&name));
+        }
+        let shot = image::open(&path).expect("read the shot").to_rgb8();
+        let draws = draws.lock().unwrap().clone();
+        let main: Vec<bool> = draws.iter().filter(|d| !d.0).map(|d| d.1).collect();
+        let extra: Vec<bool> = draws.iter().filter(|d| d.0).map(|d| d.1).collect();
+        eprintln!("rays {rays}: main view's draws {main:?}, the mirror view's {extra:?}");
+        assert!(!extra.is_empty(), "the floor drew in the mirror's view");
+        assert!(
+            extra.iter().all(|&had| !had),
+            "an extra view had the ray group"
+        );
+        assert!(main.len() >= 5, "the floor drew in every frame: {main:?}");
+        if rays {
+            // (From the frame the scene is made in, which may follow the first.)
+            assert!(
+                main[main.len() - 3..].iter().all(|&had| had),
+                "a main view without the ray group: {main:?}"
+            );
+            assert_reflects_what_is_above(&shot, "the floor's own rays");
+        } else {
+            assert!(
+                main.iter().all(|&had| !had),
+                "a ray group without the scene"
+            );
+            let q = pixel(mirrored(YELLOW));
+            let c = shot.get_pixel(q.x as u32, q.y as u32).0;
+            assert!(c.iter().all(|&v| v < 24), "the stub found something: {c:?}");
+        }
     }
 }

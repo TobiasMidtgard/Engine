@@ -10,16 +10,16 @@
 //!
 //! At each stop it waits for the view to settle, reads every `render.gpu.<pass>` row for a few
 //! seconds (the baseline), then switches one thing at a time (a `RenderSettings` field, a weather
-//! or terrain setting), reads the rows again and switches it back. The difference between a
-//! variant's total and the baseline's is what that thing costs at that stop, in milliseconds of
-//! GPU time, with every other pass in the same state. The baseline is read again after every
-//! variant, and a variant is compared with the two readings around it, so drift over the minutes
-//! a sweep takes doesn't count. `--out NAME` writes `NAME.md` (tables to read) and `NAME.json`
-//! (every number). `--shots` saves a picture of each stop, `--variant-shots a,b` (or `all`) one
-//! under each of those variants too, as `NAME-<stop>[-<variant>].png`: those are taken after the
-//! readings with the simulation paused, next to `NAME-<stop>-paused.png`, so two of them differ
-//! only by what the switch does. `--shots-only` takes the pictures without the readings (a
-//! software GPU's times say nothing).
+//! or terrain setting, or settings of two modules together), reads the rows again and switches it
+//! back. The difference between a variant's total and the baseline's is what that thing costs at
+//! that stop, in milliseconds of GPU time, with every other pass in the same state. The baseline is
+//! read again after every variant, and a variant is compared with the two readings around it, so
+//! drift over the minutes a sweep takes doesn't count. `--out NAME` writes `NAME.md` (tables to
+//! read) and `NAME.json` (every number). `--shots` saves a picture of each stop,
+//! `--variant-shots a,b` (or `all`) one under each of those variants too, as
+//! `NAME-<stop>[-<variant>].png`: those are taken after the readings with the simulation paused,
+//! next to `NAME-<stop>-paused.png`, so two of them differ only by what the switch does.
+//! `--shots-only` takes the pictures without the readings (a software GPU's times say nothing).
 //!
 //! The cuts of `RenderSettings::trial_cuts` are on by default. `--old-way` takes them all off
 //! for the sweep (and puts probe GI's rays back in software), so the baseline is the frame as it
@@ -51,7 +51,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-/// One thing to switch: a JSON merge patch for a registered resource.
+/// One thing to switch: a JSON merge patch for a registered resource, and for more resources
+/// where the thing is a setting of two modules together (`also`).
 struct Variant {
     name: &'static str,
     resource: &'static str,
@@ -59,39 +60,56 @@ struct Variant {
     patch: Value,
     /// Numbers to multiply instead: (key, factor) of the resource's value at the time.
     times: &'static [(&'static str, f64)],
+    /// More resources it patches, each with its values to set: set after `resource`, in this
+    /// order, and put back before it, in the reverse one (`switch_on`, `switch_back`).
+    also: Vec<(&'static str, Value)>,
     /// What it shows.
     note: &'static str,
 }
 
 impl Variant {
-    /// The patch to send, given the resource as it stands: `patch` plus the `times` keys.
-    /// The cuts' bits (`trial_cuts`, `trial_cuts_more`) are added to those already on, so a
-    /// row means the same against the default frame and against the old way (`--old-way`).
-    fn patch_for(&self, current: &Value) -> Value {
-        let mut out = self.patch.as_object().cloned().unwrap_or_default();
-        for key in ["trial_cuts", "trial_cuts_more"] {
-            let on = current.get(key).and_then(Value::as_u64).unwrap_or(0);
-            if let Some(bits) = out.get(key).and_then(Value::as_u64) {
-                out.insert(key.to_string(), json!(on | bits));
-            }
-        }
-        for (key, factor) in self.times {
-            let Some(now) = current.get(*key).and_then(Value::as_f64) else {
-                continue;
-            };
-            let whole = current.get(*key).is_some_and(|v| v.is_u64() || v.is_i64());
-            let scaled = now * factor;
-            out.insert(
-                (*key).to_string(),
-                if whole {
-                    json!(scaled.round().max(0.0) as u64)
-                } else {
-                    json!(scaled)
-                },
-            );
-        }
-        Value::Object(out)
+    /// Each resource it patches, with its values and the numbers it multiplies, in the order
+    /// they are set: its own, then `also`'s (which multiply none).
+    fn parts(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &Value, &'static [(&'static str, f64)])> {
+        const NONE: &[(&str, f64)] = &[];
+        std::iter::once((self.resource, &self.patch, self.times)).chain(
+            self.also
+                .iter()
+                .map(|(resource, patch)| (*resource, patch, NONE)),
+        )
     }
+}
+
+/// The patch to send to a resource as it stands, `current`: `patch` plus the `times` keys (their
+/// values in `current` multiplied). The cuts' bits (`trial_cuts`, `trial_cuts_more`) are added
+/// to those already on, so a row means the same against the default frame and against the old
+/// way (`--old-way`).
+fn patch_against(patch: &Value, times: &[(&str, f64)], current: &Value) -> Value {
+    let mut out = patch.as_object().cloned().unwrap_or_default();
+    for key in ["trial_cuts", "trial_cuts_more"] {
+        let on = current.get(key).and_then(Value::as_u64).unwrap_or(0);
+        if let Some(bits) = out.get(key).and_then(Value::as_u64) {
+            out.insert(key.to_string(), json!(on | bits));
+        }
+    }
+    for (key, factor) in times {
+        let Some(now) = current.get(*key).and_then(Value::as_f64) else {
+            continue;
+        };
+        let whole = current.get(*key).is_some_and(|v| v.is_u64() || v.is_i64());
+        let scaled = now * factor;
+        out.insert(
+            (*key).to_string(),
+            if whole {
+                json!(scaled.round().max(0.0) as u64)
+            } else {
+                json!(scaled)
+            },
+        );
+    }
+    Value::Object(out)
 }
 
 fn variants() -> Vec<Variant> {
@@ -101,6 +119,7 @@ fn variants() -> Vec<Variant> {
         resource,
         patch,
         times: &[],
+        also: Vec::new(),
         note,
     };
     // Multiplies numbers of the resource as it stands (thresholds a game or a preset set).
@@ -109,6 +128,7 @@ fn variants() -> Vec<Variant> {
         resource,
         patch: json!({}),
         times,
+        also: Vec::new(),
         note,
     };
     vec![
@@ -464,6 +484,20 @@ fn variants() -> Vec<Variant> {
             json!({"mirror_reflections": false}),
             "a control, not a cut: no lake mirror, the water's screen-space reflections alone (on every water pixel, so the main view gets dearer); its saves are what the drawn mirror costs, its view, copy and levels (`render.extra_views_gpu_ms`, which the GPU column counts; extra_views_ms its CPU), less the water's own reflections in its place",
         ),
+        v(
+            "ray_water",
+            r,
+            json!({"trial_cuts_more": 272, "gi_hardware_rays": true}),
+            "ray_world with the water's own reflection ray: a calm body's pixel (waves of 0.25 m or less, the lake mirror's test) that the mirror doesn't fully answer traces the frame's ray scene along its reflection where the screen's march finds nothing or fades at the screen's edge, and lights its hit as every reflection's hits are lit (two queries and the hit's light a traced pixel; water.ray 1 while the bodies draw with it, water.ray_bodies the calm bodies). Its cost is in the water's draw (pass `transparent`, read against ray_world's) and in render.cpu.submit (one more walk of the scene's instances where the bodies bind it); where every water pixel is the mirror's (a still lake in full view), little traces",
+        ),
+        Variant {
+            name: "ray_water_no_mirror",
+            resource: r,
+            patch: json!({"trial_cuts_more": 272, "gi_hardware_rays": true}),
+            times: &[],
+            also: vec![("WaterSettings", json!({"mirror_reflections": false}))],
+            note: "ray_water without the lake mirror (with water_no_mirror's WaterSettings): the lake's reflections from the screen's march and the frame's rays alone, render.extra_views 0. Against water_no_mirror: what the rays add where the march alone stood; against ray_water: what the drawn mirror costs (`render.extra_views_gpu_ms`, which the GPU column counts) and what it shows that the rays don't (its picture is blurred by roughness, a single ray isn't)",
+        },
         v(
             "check_ray_probe",
             r,
@@ -908,6 +942,7 @@ fn variants() -> Vec<Variant> {
                 ("shadow_refresh_secs", 0.0),
                 ("pacing_fps", 0.0),
             ],
+            also: Vec::new(),
             note: "the frame as it was drawn before 11 Nov 2026 (no cut on, no pacing, the rays in software): against the default frame, the whole before and after",
         },
         v(
@@ -1130,6 +1165,78 @@ fn restore_of(current: &Value, patch: &Value) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// What a row switches: the game's registered resources, read whole and set by a JSON merge
+/// patch (the bridge's `resource.get` and `resource.set`; a test's stand-in).
+trait Resources {
+    fn get(&mut self, name: &str) -> Result<Value, String>;
+    fn set(&mut self, name: &str, value: &Value) -> Result<(), String>;
+}
+
+impl Resources for Bridge {
+    fn get(&mut self, name: &str) -> Result<Value, String> {
+        self.call("resource.get", json!({"name": name}))
+    }
+
+    fn set(&mut self, name: &str, value: &Value) -> Result<(), String> {
+        self.call("resource.set", json!({"name": name, "value": value}))
+            .map(|_| ())
+    }
+}
+
+/// A row switched on: what each of its resources was sent, and what puts it back.
+struct SwitchedOn {
+    /// The patch its own resource was sent ([`patch_against`]).
+    patch: Value,
+    /// The patches its other resources were sent, by name (`Variant::also`; empty without).
+    also: Map<String, Value>,
+    /// Each resource with what puts it back, in the order they were set.
+    back: Vec<(&'static str, Value)>,
+}
+
+/// Switches row `v` on: each of its resources ([`Variant::parts`]) read and patched in turn, as
+/// it stands then. A resource that can't be read or set skips the row: those set before it are
+/// put back first, and the error names it.
+fn switch_on(res: &mut impl Resources, v: &Variant) -> Result<SwitchedOn, String> {
+    let mut on = SwitchedOn {
+        patch: Value::Null,
+        also: Map::new(),
+        back: Vec::new(),
+    };
+    for (i, (resource, patch, times)) in v.parts().enumerate() {
+        let set = match res.get(resource) {
+            Ok(current) => {
+                let patch = patch_against(patch, times, &current);
+                let back = restore_of(&current, &patch);
+                res.set(resource, &patch).map(|()| (patch, back))
+            }
+            Err(_) => Err(format!("no {resource}")),
+        };
+        match set {
+            Ok((patch, back)) => {
+                if i == 0 {
+                    on.patch = patch;
+                } else {
+                    on.also.insert(resource.to_string(), patch);
+                }
+                on.back.push((resource, back));
+            }
+            Err(e) => {
+                switch_back(res, &on)?;
+                return Err(e);
+            }
+        }
+    }
+    Ok(on)
+}
+
+/// Puts back what [`switch_on`] set, the last resource set first.
+fn switch_back(res: &mut impl Resources, on: &SwitchedOn) -> Result<(), String> {
+    for (resource, back) in on.back.iter().rev() {
+        res.set(resource, back)?;
+    }
+    Ok(())
 }
 
 #[derive(Default, Clone)]
@@ -1513,12 +1620,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                 for v in variants() {
                     let times: Vec<String> =
                         v.times.iter().map(|(k, f)| format!("{k} x{f}")).collect();
+                    let also: Vec<String> =
+                        v.also.iter().map(|(r, p)| format!(" + {r} {p}")).collect();
                     println!(
-                        "{:22} {} {} {}  ({})",
+                        "{:22} {} {} {}{}  ({})",
                         v.name,
                         v.resource,
                         v.patch,
                         times.join(" "),
+                        also.concat(),
                         v.note
                     );
                 }
@@ -1667,18 +1777,13 @@ fn run(args: &Args) -> Result<(), String> {
         let mut rows: Vec<Row> = Vec::new();
         let timed: &[&Variant] = if args.shots_only { &[] } else { &chosen };
         for v in timed {
-            let current = bridge.call("resource.get", json!({"name": v.resource}));
-            let Ok(current) = current else {
-                eprintln!("{stop}: {} skipped (no {})", v.name, v.resource);
-                continue;
+            let on = match switch_on(&mut bridge, v) {
+                Ok(on) => on,
+                Err(e) => {
+                    eprintln!("{stop}: {} skipped ({e})", v.name);
+                    continue;
+                }
             };
-            let patch = v.patch_for(&current);
-            let back = restore_of(&current, &patch);
-            if let Err(e) = bridge.call("resource.set", json!({"name": v.resource, "value": patch}))
-            {
-                eprintln!("{stop}: {} skipped ({e})", v.name);
-                continue;
-            }
             wait(&mut bridge, args.settle)?;
             let s = sample(&mut bridge, args.secs)?;
             let tris = triangles(&mut bridge);
@@ -1690,7 +1795,7 @@ fn run(args: &Args) -> Result<(), String> {
                 .into_iter()
                 .find(|key| v.name.starts_with(&format!("count_{key}")))
                 .and_then(|key| Some((key, runs_of(&mut bridge, key)?)));
-            bridge.call("resource.set", json!({"name": v.resource, "value": back}))?;
+            switch_back(&mut bridge, &on)?;
             wait(&mut bridge, args.settle)?;
             let after = sample(&mut bridge, args.secs)?;
             let around = Sample::mean_of(&before, &after);
@@ -1714,7 +1819,10 @@ fn run(args: &Args) -> Result<(), String> {
                 eprintln!("{stop}: {} {runs}", v.name);
                 entry[key] = runs;
             }
-            entry["patch"] = patch;
+            entry["patch"] = on.patch;
+            if !on.also.is_empty() {
+                entry["also"] = Value::Object(on.also);
+            }
             stop_json.insert(v.name.into(), entry);
             baselines.push(after.gpu_ms());
             rows.push(Row {
@@ -1741,21 +1849,13 @@ fn run(args: &Args) -> Result<(), String> {
             let still = triangles(&mut bridge);
             pictures.push(("paused".to_string(), still));
             for v in pictured {
-                let Ok(current) = bridge.call("resource.get", json!({"name": v.resource})) else {
+                let Ok(on) = switch_on(&mut bridge, v) else {
                     continue;
                 };
-                let patch = v.patch_for(&current);
-                let back = restore_of(&current, &patch);
-                if bridge
-                    .call("resource.set", json!({"name": v.resource, "value": patch}))
-                    .is_err()
-                {
-                    continue;
-                }
                 wait(&mut bridge, args.settle)?;
                 shot(&mut bridge, &format!("{}-{stop}-{}.png", args.out, v.name))?;
                 pictures.push((v.name.to_string(), triangles(&mut bridge)));
-                bridge.call("resource.set", json!({"name": v.resource, "value": back}))?;
+                switch_back(&mut bridge, &on)?;
             }
             if paused {
                 bridge.call("engine.resume", json!({}))?;
@@ -2038,11 +2138,12 @@ mod tests {
             resource: "R",
             patch: json!({"flag": false}),
             times: &[("size", 0.5), ("error", 2.0), ("missing", 2.0)],
+            also: Vec::new(),
             note: "",
         };
         let current = json!({"size": 4096, "error": 0.75, "flag": true});
         assert_eq!(
-            v.patch_for(&current),
+            patch_against(&v.patch, v.times, &current),
             json!({"flag": false, "size": 2048, "error": 1.5})
         );
     }
@@ -2060,6 +2161,97 @@ mod tests {
         };
         b.sums.insert("render.gpu_ms".into(), 18.0);
         assert!((Sample::mean_of(&a, &b).gpu_ms() - 7.0).abs() < 1e-9);
+    }
+
+    /// Resources as the game keeps them, for `switch_on`: a merge patch sets the keys it names;
+    /// every `set` is logged, and `refuse` names one that can't be set.
+    #[derive(Default)]
+    struct Game {
+        resources: BTreeMap<String, Value>,
+        sets: Vec<String>,
+        refuse: Option<&'static str>,
+    }
+
+    impl Resources for Game {
+        fn get(&mut self, name: &str) -> Result<Value, String> {
+            self.resources
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("no resource {name}"))
+        }
+
+        fn set(&mut self, name: &str, value: &Value) -> Result<(), String> {
+            if self.refuse == Some(name) {
+                return Err(format!("{name} refused"));
+            }
+            let r = self.resources.get_mut(name).ok_or("no resource")?;
+            for (key, v) in value.as_object().into_iter().flatten() {
+                r[key] = v.clone();
+            }
+            self.sets.push(name.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_row_of_two_resources_sets_both_and_puts_both_back_in_turn() {
+        let v = Variant {
+            name: "two",
+            resource: "R",
+            patch: json!({"trial_cuts_more": 272, "rays": true}),
+            times: &[],
+            also: vec![("W", json!({"mirror": false}))],
+            note: "",
+        };
+        let before = [
+            (
+                "R",
+                json!({"trial_cuts_more": 1, "rays": false, "other": 3}),
+            ),
+            ("W", json!({"mirror": true, "waves": 0.5})),
+        ];
+        let mut game = Game {
+            resources: before
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.clone()))
+                .collect(),
+            ..Default::default()
+        };
+        let on = switch_on(&mut game, &v).unwrap();
+        // The cuts' bits join those already on; the second resource's patch is its own.
+        assert_eq!(on.patch, json!({"trial_cuts_more": 273, "rays": true}));
+        assert_eq!(
+            on.also,
+            json!({"W": {"mirror": false}})
+                .as_object()
+                .cloned()
+                .unwrap()
+        );
+        assert_eq!(
+            game.resources["R"],
+            json!({"trial_cuts_more": 273, "rays": true, "other": 3})
+        );
+        assert_eq!(game.resources["W"], json!({"mirror": false, "waves": 0.5}));
+        switch_back(&mut game, &on).unwrap();
+        assert_eq!(game.sets, ["R", "W", "W", "R"]);
+        for (name, value) in &before {
+            assert_eq!(&game.resources[*name], value, "{name} put back");
+        }
+
+        // A second resource that can't be set skips the row, with the first put back.
+        game.sets.clear();
+        game.refuse = Some("W");
+        let skipped = switch_on(&mut game, &v).err().unwrap();
+        assert!(skipped.contains("W"), "{skipped}");
+        assert_eq!(game.sets, ["R", "R"]);
+        assert_eq!(game.resources["R"], before[0].1);
+        // And one the game doesn't have.
+        game.sets.clear();
+        game.refuse = None;
+        game.resources.remove("W");
+        assert_eq!(switch_on(&mut game, &v).err().unwrap(), "no W");
+        assert_eq!(game.sets, ["R", "R"]);
+        assert_eq!(game.resources["R"], before[0].1);
     }
 
     #[test]

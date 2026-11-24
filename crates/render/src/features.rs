@@ -149,6 +149,16 @@ impl GpuShared {
         self.ray_scene_off
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// The layout of the frame's ray scene's group ([`FrameContext::ray_group`]), for a
+    /// feature's own pipeline that traces the scene (compute and fragment stages;
+    /// [`crate::ray_scene::water_reflection_lib`] binds it at 3); `None` where the device can't
+    /// hold the scene (no ray queries that take two structures in a stage). The same object at
+    /// every call, the one the scene's group is made with.
+    pub fn ray_group_layout(&self) -> Option<wgpu::BindGroupLayout> {
+        crate::ray_scene::RayScene::supported(self)
+            .then(|| crate::ray_scene::RayScene::layout(self))
+    }
 }
 
 /// See [`GpuShared::side_commands`].
@@ -651,6 +661,18 @@ pub struct FrameContext<'a> {
     /// `frame_group` binds a white stand-in in its place (frame binding 22), so the pass that
     /// draws the map can bind `frame_group` too.
     pub cloud_shadows: Option<CloudShadowTarget<'a>>,
+    /// The frame's ray scene's group, for a pipeline with [`GpuShared::ray_group_layout`] where
+    /// it binds it (the water's bodies: group 3, [`crate::ray_scene::water_reflection_lib`]).
+    /// `Some` only in the main view, from [`RenderFeature::before_scene`] on, in a frame with the
+    /// scene, whose builds this frame's commands recorded before; `None` in extra views, in
+    /// `compute`, and without the scene (its switch off, no device support, given up), where a
+    /// feature draws with a pipeline that doesn't trace
+    /// ([`crate::ray_scene::WATER_REFLECTION_STUB`]). A new object whenever the scene's buffers
+    /// grow or the scene is made again: take it here each frame. Bind it once a pass, after every
+    /// group below it: each bind that reaches a draw costs the render thread a walk of the
+    /// scene's instances at submit (at most about 0.37 ms on the RTX 5080's PC at the scene's
+    /// caps), and setting a lower group afterwards binds it again.
+    pub ray_group: Option<&'a wgpu::BindGroup>,
 }
 
 /// The shared depth prepass's targets, for [`RenderFeature::prepass_own`].
