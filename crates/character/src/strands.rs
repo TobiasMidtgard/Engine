@@ -420,7 +420,13 @@ pub fn grow_all(
     }
     out.retain(|s| !s.points.is_empty());
     for s in &mut out {
-        occlude(s, lm.head);
+        let points = s.points_per.max(2) as f32 - 1.0;
+        let weight = match (s.kind, a.hair_style()) {
+            (StrandKind::Scalp, HairStyle::Long) => 31.0 / points,
+            (StrandKind::Scalp, HairStyle::Medium) => 17.0 / points,
+            _ => 1.0,
+        };
+        occlude(s, lm.head, weight);
     }
     out
 }
@@ -1114,7 +1120,6 @@ fn grow_scalp(
             } else {
                 (0.0, 1.0)
             };
-            let c = (c * (0.9 + 0.45 * pointed)).min(0.95);
             // A shorter hair follows its lock only as far as it reaches.
             let reach = scale.min(1.0) * layer;
             let end = if g.gravity > 0.5 {
@@ -1139,8 +1144,15 @@ fn grow_scalp(
                 // third: gathered all the way, every lock ended in one point, a paintbrush,
                 // where real ends spread and thin out unevenly. Each hair's end strays its
                 // own way a little (`end`).
+                // (Gathered over the first half of the length and then held: locks a
+                // centimetre or two wide down the hair, as wide as the gaps between them are
+                // dark. Gathering all the way down, the upper half was one even sheet. Only a
+                // pointed lock's end draws tighter.)
                 let gather = if g.gravity > 0.5 {
-                    c * t.powf(0.8) * (1.0 - 0.5 * (1.0 - pointed) * smoothstep(0.6, 1.0, t))
+                    (c * smoothstep(0.05, 0.5, t)
+                        * (1.0 + 0.3 * pointed * smoothstep(0.5, 1.0, t))
+                        * (1.0 - 0.5 * (1.0 - pointed) * smoothstep(0.6, 1.0, t)))
+                    .min(0.95)
                 } else {
                     c * t.powf(0.8)
                 };
@@ -1322,12 +1334,26 @@ fn grow_scalp(
                 && (q.x - PART_X) * (d.x - PART_X) < 0.0
                 && (q.x - PART_X).abs() > 0.02
         };
+        // (Nor one rooted on the part that swings to one side and back across to the other.)
+        let beside = |side: f32| {
+            pts.iter().skip(3).any(|p| {
+                let q = *p - lm.head;
+                q.z > 0.05 && q.y > -0.02 && (q.x - PART_X) * side > 0.015
+            })
+        };
         if parted
             && g.gravity > 0.5
             && !flyaway
-            && (d.x - PART_X).abs() > 0.006
-            && pts.iter().skip(3).any(crosses)
+            && (((d.x - PART_X).abs() > 0.006 && pts.iter().skip(3).any(crosses))
+                || (beside(1.0) && beside(-1.0)))
         {
+            continue;
+        }
+        // (Nor one that still hangs down the forehead after all of the above, clear below
+        // where swept hair lies: smoothing can pull a hair lifted to the hairline back down
+        // between its root and an end by the brow.)
+        let hangs_low = |p: &Vec3| over_forehead(*p, lm) && (*p - lm.head).y < 0.042;
+        if g.gravity > 0.5 && !flyaway && !lies && pts.iter().skip(3).any(hangs_low) {
             continue;
         }
         // Scalp hair is cut, so it keeps its width almost to the end and tapers only over its
@@ -2045,13 +2071,14 @@ impl GuideGrid {
 
 /// Occlusion of every point from the hair around it: a density grid (3 mm cells) of all
 /// points, summed along the way out from the head center (light into a hairdo comes mostly
-/// from outside it).
-fn occlude(set: &mut StrandSet, head: Vec3) {
+/// from outside it). `weight`: how much hair a point stands for, against the point counts the
+/// densities below were set with (wavy hair has more points along the same hair).
+fn occlude(set: &mut StrandSet, head: Vec3, weight: f32) {
     const CELL: f32 = 0.0025;
     let mut density: HashMap<[i32; 3], f32> = HashMap::new();
     let key = |p: Vec3| (p / CELL).floor().as_ivec3().to_array();
     for p in &set.points {
-        let w = p[3] / 0.00005;
+        let w = p[3] / 0.00005 * weight;
         *density.entry(key(Vec3::new(p[0], p[1], p[2]))).or_default() += w;
     }
     let per_cell = match set.kind {

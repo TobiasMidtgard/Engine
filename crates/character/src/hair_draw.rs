@@ -97,7 +97,7 @@ pub struct FaceFollow {
 const SCALP_WIDTH: f32 = 1.2;
 
 /// How dark the most buried hair is drawn, against hair in the open (its color's share).
-const BURIED_DARK: f32 = 0.8;
+const BURIED_DARK: f32 = 0.55;
 
 /// How rough the cuticle of scalp hair is, and of brows and beard.
 const SCALP_ROUGHNESS: f32 = 0.33;
@@ -176,12 +176,18 @@ pub fn groom(set: &StrandSet, packed: &PackedStrands, pigment: [f32; 3]) -> Opti
         // long hair), which shades the layers but can't part one lock from the next: without
         // this the hair read as one smooth even sheet, thin beside the deep gaps between
         // clumps real hair shows.
+        // (Over a stretch of the hair, each point counted by how open it is: a hair shows where
+        // it comes to the surface, and there it is in the light. By the plain mean a hair that
+        // ran mostly under its lock was dark all along, and wherever it surfaced it drew a dark
+        // dash across the lit hair: sunlit fair hair looked hatched.)
         let occ = |from: usize, to: usize| {
-            let n = (to - from).max(1) as f32;
-            (from..to)
-                .map(|k| packed.attrs.get(s * per + k).map_or(1.0, |a| unorm(*a)))
-                .sum::<f32>()
-                / n
+            let (mut sum, mut seen) = (0.0, 0.0);
+            for k in from..to {
+                let o = packed.attrs.get(s * per + k).map_or(1.0, |a| unorm(*a));
+                sum += o;
+                seen += o * o;
+            }
+            if sum > 0.0 { seen / sum } else { 0.0 }
         };
         let buried = |o: f32| BURIED_DARK + (1.0 - BURIED_DARK) * o.clamp(0.0, 1.0);
         let root = hair_color(eu, red, grey, random) * shade * buried(occ(0, per.div_ceil(3)));

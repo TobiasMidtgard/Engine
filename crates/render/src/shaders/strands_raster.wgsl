@@ -88,14 +88,26 @@ fn cs_tile_depth(@builtin(global_invocation_id) id: vec3<u32>) {
 // the grid's cells don't show as square patches of shade across a lock.
 fn strand_depth(inst: StrandInst, m: vec3<f32>, dir: vec3<f32>, steps: u32, jitter: vec3<f32>) -> f32 {
     let d = i32(params.misc.w);
-    var q = (m - inst.grid.xyz) / inst.grid.w + jitter + dir;
+    let at = (m - inst.grid.xyz) / inst.grid.w;
+    let own = vec3<i32>(floor(at));
+    // (Along the way the shift only ever starts the march further on, and the point's own cell
+    // never counts: a cell is a centimetre across on long hair and holds the hair under the
+    // point as well as over it. Shifted back into it, half the hairs lying on top of a lock
+    // took the lock under them for hair in their light, and sunlit hair was hatched with dark
+    // dashes wherever its surface sat low in a cell. A coat of fur is thinner than its cells
+    // are wide, and its own cell is most of the hair there is in its light: fur keeps it.)
+    let fur = inst.more.y == 1u;
+    let back = select(dot(jitter, dir), 0.0, fur);
+    var q = at + jitter + dir * (1.0 + abs(back) - back);
     var sum = 0u;
     for (var k = 0u; k < steps; k++) {
         let c = vec3<i32>(floor(q));
         if (any(c < vec3<i32>(0)) || any(c >= vec3<i32>(d))) {
             break;
         }
-        sum += voxels[inst.out.w + u32(c.x + d * (c.y + d * c.z))];
+        if (fur || any(c != own)) {
+            sum += voxels[inst.out.w + u32(c.x + d * (c.y + d * c.z))];
+        }
         q += dir;
     }
     // Projected fibre area per cell face: the share of light the fibres in a cell stop.
