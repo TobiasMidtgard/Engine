@@ -1892,15 +1892,17 @@ fn rests(
     let hysteresis = if b.frozen { 0.9 } else { 1.0 };
     let far = 2.0 * config.lod_distance * hysteresis;
     let far_strands = config.lod_distance * hysteresis;
-    let resting = resting
-        || (b.sim.params.self_collide > 0.0 && dist > far)
-        || (b.strands.is_some() && dist > far_strands);
+    let strands_far = b.strands.is_some() && dist > far_strands;
+    let resting = resting || (b.sim.params.self_collide > 0.0 && dist > far) || strands_far;
     // One still settling keeps going, a budget a frame, so it is ready when it is first seen
     // up close; past the freeze distance it waits until the focus comes nearer. The lake's
     // dinghy sail (re)built with its zone settled 610 m from the fortress for 11-15 ms a frame
     // (VM), and the yard's unveiling sheet 550 m off the same way.
+    // Hair and fur past the LOD distance rest even while settling: riding their bones they
+    // show nothing of it, and they settle when they come near (a rest shape solved on a worker
+    // put a far head's hair back to settling and woke it, guides.rs `rests_at`).
     (resting || dist > config.freeze_distance)
-        && (b.pending_prewarm == 0 || dist > config.freeze_distance)
+        && (b.pending_prewarm == 0 || dist > config.freeze_distance || strands_far)
 }
 
 fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {

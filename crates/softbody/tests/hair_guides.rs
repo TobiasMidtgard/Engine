@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use engine_core::prelude::*;
 use engine_core::time::{FixedTime, TimeSource};
-use engine_softbody::guides::GuideHair;
+use engine_softbody::guides::{GroomedRest, GuideHair};
 use engine_softbody::{BoneCapsule, BoneColliders, SoftBodyPlugin, SoftBodySim};
 use engine_world::animation::{BonePose, SkeletonPose};
 use engine_world::{HairGuide, HairGuides, HairGuidesPosed, WeatherState};
@@ -83,6 +83,23 @@ fn steps(app: &mut App, n: usize) {
     }
 }
 
+/// Steps until every hair body's rest shape, solved on a worker, is in and its motion shown
+/// (at most 60 s of wall time: how many frames that takes depends on the machine's cores).
+fn until_rested(app: &mut App) {
+    let started = std::time::Instant::now();
+    loop {
+        let mut q = app.world.query::<&GroomedRest>();
+        if q.iter(&app.world).all(GroomedRest::shown) {
+            return;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the hair's rest shape never came in"
+        );
+        app.update();
+    }
+}
+
 #[test]
 fn guides_from_another_module_are_simulated_and_handed_back_in_model_space() {
     let mut app = app();
@@ -101,6 +118,7 @@ fn guides_from_another_module_are_simulated_and_handed_back_in_model_space() {
         ))
         .id();
     steps(&mut app, 60);
+    until_rested(&mut app);
 
     // Simulated on a child, and not drawn here (the module that grew it draws it).
     let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
@@ -497,6 +515,7 @@ fn a_long_groom_built_near_too_big_to_settle_ahead_sags_into_place_without_flail
         assert!(fastest < 2.0, "step {step}: hair swung at {fastest:.1} m/s");
     }
     assert!(stepped, "never simulated");
+    until_rested(&mut app);
     // It did fall (it is not just frozen in the grown shape), and it is settled by now.
     let (_, b) = q.single(&app.world).unwrap();
     let tip = b.world_position(19);
