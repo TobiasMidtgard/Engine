@@ -639,6 +639,19 @@ impl HairGuides {
 pub struct HairGuidesPosed {
     pub version: u32,
     pub points: Vec<Vec3>,
+    /// The shapes the simulation held the hair out of at this step (same space as `points`);
+    /// the drawing side keeps the hairs between guides out of them too. Empty: none.
+    pub capsules: Vec<HairCapsule>,
+}
+
+/// A tapered capsule the hair simulation keeps hair out of: a sphere of radius `ra` at `a`
+/// swept to one of radius `rb` at `b`, in the person's model space.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct HairCapsule {
+    pub a: Vec3,
+    pub ra: f32,
+    pub b: Vec3,
+    pub rb: f32,
 }
 
 impl HairGuidesPosed {
@@ -915,6 +928,7 @@ mod tests {
                 .iter()
                 .flat_map(|g| g.points.clone())
                 .collect(),
+            capsules: Vec::new(),
         };
         assert_eq!(posed.guide(&guides, 1), Some(&guides.guides[1].points[..]));
         assert_eq!(posed.guide(&guides, 2), None);

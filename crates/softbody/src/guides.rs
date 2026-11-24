@@ -625,6 +625,7 @@ pub fn write_posed_guides(
                 commands.entity(hair.person).insert(HairGuidesPosed {
                     version: hair.version,
                     points: points.collect(),
+                    capsules: Vec::new(),
                 });
             }
         }

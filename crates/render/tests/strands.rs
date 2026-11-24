@@ -425,6 +425,7 @@ fn render_guided(guides: Guides, shot: &str) -> Option<RgbImage> {
             w.entity_mut(hair).insert(HairGuidesPosed {
                 version: 0,
                 points: posed,
+                capsules: Vec::new(),
             });
         }
         Guides::WhenDrawn => {
