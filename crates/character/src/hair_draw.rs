@@ -21,7 +21,10 @@ use std::sync::{Arc, Mutex};
 use engine_assets::{Assets, Handle};
 use engine_core::math::{Mat4, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{Camera, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance};
+use engine_render::{
+    Camera, StrandCapsule, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance,
+    StrandKeptOutWhenDrawn,
+};
 use engine_world::animation::SkeletonPose;
 use engine_world::character::{Appearance, FaceControls};
 use engine_world::{HairGuides, HairGuidesPosed};
@@ -620,7 +623,10 @@ pub(crate) fn draw_hair(
                 ChildOf(person),
             ));
             if moves {
-                child.insert(StrandGuidesWhenDrawn(guides_now));
+                child.insert((
+                    StrandGuidesWhenDrawn(guides_now),
+                    StrandKeptOutWhenDrawn(kept_out_now),
+                ));
             }
         }
     }
@@ -717,18 +723,56 @@ fn guides_now(world: &World, entity: Entity, out: &mut Vec<Vec3>) -> bool {
         out.extend_from_slice(&face.now);
         return true;
     }
+    let Some((posed, to_head)) = simulated(world, hair, entity) else {
+        return false;
+    };
+    out.clear();
+    out.extend(posed.points.iter().map(|p| to_head.transform_point3(*p)));
+    true
+}
+
+/// The shapes the hair simulation held a person's hair out of (head, neck, shoulders), in the
+/// head's frame as [`guides_now`] gives the guides: the hairs drawn between the guides are
+/// kept out of them too.
+fn kept_out_now(world: &World, entity: Entity, out: &mut Vec<StrandCapsule>) {
+    out.clear();
+    let Some(hair) = world.get::<DrawnHair>(entity) else {
+        return;
+    };
+    if hair.face.is_some() {
+        return;
+    }
+    let Some((posed, to_head)) = simulated(world, hair, entity) else {
+        return;
+    };
+    let size = to_head.x_axis.truncate().length();
+    out.extend(posed.capsules.iter().map(|c| StrandCapsule {
+        a: to_head.transform_point3(c.a),
+        ra: c.ra * size,
+        b: to_head.transform_point3(c.b),
+        rb: c.rb * size,
+    }));
+}
+
+/// What the hair simulation left for a person's drawn hair, when it is of this build, and the
+/// way from the person's model space to the head's frame (the instance's model space).
+fn simulated<'w>(
+    world: &'w World,
+    hair: &DrawnHair,
+    entity: Entity,
+) -> Option<(&'w HairGuidesPosed, Mat4)> {
     let (Some(guides), Some(posed), Some(t)) = (
         world.get::<HairGuides>(hair.person),
         world.get::<HairGuidesPosed>(hair.person),
         world.get::<Transform>(entity),
     ) else {
-        return false;
+        return None;
     };
     if posed.version != guides.version
         || posed.version != hair.version as u32
         || posed.points.len() != hair.rest_guides.len()
     {
-        return false;
+        return None;
     }
     // The person's model space to the head's frame (the skin's rest space riding the head), as
     // the simulation saw the head: fitted to where it left the guides' roots, which ride the
@@ -749,9 +793,7 @@ fn guides_now(world: &World, entity: Entity, out: &mut Vec<Vec3>) -> bool {
         now
     }
     .inverse();
-    out.clear();
-    out.extend(posed.points.iter().map(|p| to_head.transform_point3(*p)));
-    true
+    Some((posed, to_head))
 }
 
 /// The similarity transform (rotation, uniform scale, translation) carrying the `from` points

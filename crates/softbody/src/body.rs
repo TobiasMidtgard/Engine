@@ -125,6 +125,8 @@ pub struct SoftBodySim {
     pub out: StepOutput,
     /// Simulated time owed by skipped level-of-detail steps, seconds.
     pub lod_debt: f32,
+    /// How often the frames this body follows are posed anew (scalp hair only).
+    pub(crate) cadence: PoseCadence,
     /// Steps once every this many fixed steps (level of detail); drawing spreads each step
     /// over them.
     pub lod_every: u32,
@@ -258,6 +260,7 @@ impl SoftBodySim {
             step_ms: 0.0,
             out: StepOutput::default(),
             lod_debt: 0.0,
+            cadence: PoseCadence::default(),
             lod_every: 1,
             lod_wait: 0,
             carried: false,
@@ -349,5 +352,128 @@ impl SoftBodySim {
             "triangles": self.surface.as_ref().map(|s| s.triangles.len()).unwrap_or(0),
             "guides": self.strands.as_ref().map(|s| s.guides.len()).unwrap_or(0),
         })
+    }
+}
+
+/// How often the bones a body follows are posed anew, in the body's own steps, and the newest
+/// pose spread over that many steps.
+///
+/// Bones are posed once a drawn frame and bodies step at the fixed rate: at 30 frames a
+/// second and 60 steps, a turning head stands still one step and turns twice as fast the
+/// next. Stepped like that, the hair on a shaking head was thrown about twice as hard as on
+/// one that turns evenly: every other step the head's shapes swept through it at double
+/// speed. Spread, the frames move evenly, a step or so behind the pose.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PoseCadence {
+    /// The pose last sampled, per frame.
+    last: Vec<Option<(Vec3, Quat)>>,
+    /// Steps since it changed.
+    still: u32,
+    /// Steps between its changes while it moves (1: every step).
+    every: u32,
+    /// Steps left to reach it.
+    left: u32,
+}
+
+impl PoseCadence {
+    /// Most steps a pose is spread over (a body stepping 60 times a second in a picture
+    /// drawn 15 times).
+    const MOST: u32 = 4;
+
+    /// Forget the rhythm: the next pose is taken whole.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Takes this step's sampled `poses` and leaves in them where the frames (now at `at`)
+    /// should be by the end of the step.
+    pub(crate) fn spread(
+        &mut self,
+        poses: &mut [Option<(Vec3, Quat)>],
+        at: &[crate::solver::Frame],
+    ) {
+        // (A pose not made anew is the same to the bit.)
+        let same = self.last.as_slice() == &*poses;
+        if same {
+            self.still += 1;
+        } else {
+            // A pose after a long stillness says nothing of the rhythm: it starts moving at
+            // the rhythm it last moved at.
+            if self.still < Self::MOST {
+                self.every = self.still + 1;
+            }
+            self.every = self.every.clamp(1, Self::MOST);
+            self.left = self.every;
+            self.still = 0;
+            self.last.clear();
+            self.last.extend_from_slice(poses);
+        }
+        let left = self.left.max(1);
+        self.left = left - 1;
+        if left <= 1 {
+            return;
+        }
+        let t = 1.0 / left as f32;
+        for (pose, f) in poses.iter_mut().zip(at) {
+            if let Some((p, r)) = pose {
+                *p = f.to_pos.lerp(*p, t);
+                *r = f.to_rot.slerp(*r, t).normalize();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+    use crate::solver::Frame;
+
+    /// How far a frame moves each step when its pose moves 2 cm on every `every`-th step.
+    fn steps(every: u32) -> Vec<f32> {
+        let mut cadence = PoseCadence::default();
+        let mut frame = [Frame::at(Vec3::ZERO, Quat::IDENTITY)];
+        (0..48)
+            .map(|step| {
+                let x = (step / every) as f32 * 0.02;
+                let mut poses = [Some((Vec3::new(x, 0.0, 0.0), Quat::from_rotation_y(x)))];
+                cadence.spread(&mut poses, &frame);
+                let (p, r) = poses[0].expect("posed");
+                let moved = p.x - frame[0].to_pos.x;
+                assert!(
+                    x - p.x < 0.02 + 1e-6,
+                    "step {step}: more than a pose behind"
+                );
+                frame[0] = Frame::at(p, r);
+                moved
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pose_made_every_other_step_moves_its_frame_every_step() {
+        // A head posed 30 times a second under hair stepped 60 times stood still one step
+        // and moved double the next.
+        for (step, moved) in steps(2).iter().enumerate().skip(4) {
+            assert!(
+                (moved - 0.01).abs() < 1e-5,
+                "step {step}: the frame moved {moved} m, not the even 1 cm"
+            );
+        }
+        for (step, moved) in steps(3).iter().enumerate().skip(6) {
+            assert!(
+                (moved - 0.02 / 3.0).abs() < 1e-5,
+                "step {step}: the frame moved {moved} m, not a third of 2 cm"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pose_made_every_step_is_taken_as_it_is() {
+        for (step, moved) in steps(1).iter().enumerate().skip(1) {
+            assert!(
+                (moved - 0.02).abs() < 1e-6,
+                "step {step}: the frame moved {moved} m behind its pose"
+            );
+        }
     }
 }

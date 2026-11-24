@@ -122,7 +122,7 @@ pub enum StrandLod {
 
 /// A groom worn by this entity: drawn at the entity's `Transform`, its guides posed by the
 /// entity's `engine_world::HairGuidesPosed` when that matches the groom (skinned with the body
-/// otherwise).
+/// otherwise) and its strands kept out of the capsules those bring.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrandInstance {
     pub groom: Handle<StrandGroom>,
@@ -167,6 +167,34 @@ pub struct StrandGuidesWhenDrawn(pub fn(&World, Entity, &mut Vec<Vec3>) -> bool)
 impl std::fmt::Debug for StrandGuidesWhenDrawn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("StrandGuidesWhenDrawn")
+    }
+}
+
+/// A shape drawn hair is kept out of: a sphere of radius `ra` at `a` swept to one of radius
+/// `rb` at `b` (a tapered capsule), in the instance's model space, meters.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StrandCapsule {
+    pub a: Vec3,
+    pub ra: f32,
+    pub b: Vec3,
+    pub rb: f32,
+}
+
+/// The shapes an instance's strands are kept out of when the renderer draws it (a head, a
+/// neck, shoulders): a simulation keeps its guides out of them, and the strands drawn between
+/// the guides, moved by blending those, would cut through where the guides part around one.
+/// Every drawn point but a strand's root that lies deeper in a shape than it does at rest is
+/// moved out to its surface.
+///
+/// Asked like [`StrandGuidesWhenDrawn`] and right after it, for an instance whose guides are
+/// posed this frame and for no other; the function fills `out` (the renderer takes the first
+/// 32).
+#[derive(Component, Clone, Copy)]
+pub struct StrandKeptOutWhenDrawn(pub fn(&World, Entity, &mut Vec<StrandCapsule>));
+
+impl std::fmt::Debug for StrandKeptOutWhenDrawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StrandKeptOutWhenDrawn")
     }
 }
 

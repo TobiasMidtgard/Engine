@@ -15,7 +15,7 @@ use engine_render::{
     AmbientLight, RenderDisabled, Renderer, StrandFiber, StrandFollow, StrandGroom,
     StrandGuidesWhenDrawn, StrandInstance, capture_now,
 };
-use engine_world::HairGuidesPosed;
+use engine_world::{HairCapsule, HairGuidesPosed};
 use image::RgbImage;
 
 const W: u32 = 320;
@@ -327,6 +327,10 @@ fn guided_curtain() -> StrandGroom {
 /// Where the guide is posed: the whole curtain 4 cm to the side.
 const SWUNG: Vec3 = Vec3::new(0.04, 0.0, 0.0);
 
+/// A ball the swung curtain hangs through (center, radius): of the strands it reaches, none
+/// reached it as groomed.
+const BALL: (Vec3, f32) = (Vec3::new(0.02, -0.03, 0.0), 0.02);
+
 /// Times the renderer asked for the guides of the curtain in view and of the one behind the
 /// camera.
 static ASKED_IN_VIEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -361,6 +365,9 @@ enum Guides {
     AtRest,
     /// Posed points on the instance, as a simulation writes them every frame.
     Written,
+    /// Written as groomed or swung, with the ball the simulation held the hair out of.
+    RestKeptOut,
+    WrittenKeptOut,
     /// A function the renderer asks when it draws the instance; and a second curtain behind
     /// the camera with one of its own.
     WhenDrawn,
@@ -421,11 +428,26 @@ fn render_guided(guides: Guides, shot: &str) -> Option<RgbImage> {
         .id();
     match guides {
         Guides::AtRest => {}
-        Guides::Written => {
+        Guides::Written | Guides::RestKeptOut | Guides::WrittenKeptOut => {
+            let points = if guides == Guides::RestKeptOut {
+                posed.iter().map(|p| *p - SWUNG).collect()
+            } else {
+                posed
+            };
+            let capsules = if guides == Guides::Written {
+                Vec::new()
+            } else {
+                vec![HairCapsule {
+                    a: BALL.0,
+                    ra: BALL.1,
+                    b: BALL.0,
+                    rb: BALL.1,
+                }]
+            };
             w.entity_mut(hair).insert(HairGuidesPosed {
                 version: 0,
-                points: posed,
-                capsules: Vec::new(),
+                points,
+                capsules,
             });
         }
         Guides::WhenDrawn => {
@@ -502,6 +524,65 @@ fn guides_are_posed_for_the_hair_that_is_drawn_and_no_other() {
         "the curtain in view is posed every frame it is drawn: {in_view} times in 6 frames"
     );
     assert_eq!(behind, 0, "the curtain behind the camera is never posed");
+}
+
+#[test]
+fn strands_between_guides_are_kept_out_of_the_shapes_the_guides_bring() {
+    // A simulation keeps its guides out of the head; the strands drawn between them cut
+    // through it where the guides part around it. The posed guides bring the shapes, and
+    // every drawn point is moved out of them: but no deeper-lying point of the groom itself,
+    // so hair at rest stays as groomed.
+    let Some(rest) = render_guided(Guides::AtRest, "strands_kept_out_groomed.png") else {
+        return;
+    };
+    let Some(rest_ball) = render_guided(Guides::RestKeptOut, "strands_kept_out_rest.png") else {
+        return;
+    };
+    let Some(swung) = render_guided(Guides::Written, "strands_kept_out_swung.png") else {
+        return;
+    };
+    let Some(swung_ball) = render_guided(Guides::WrittenKeptOut, "strands_kept_out.png") else {
+        return;
+    };
+    let (at_rest, worst) = differing(&rest, &rest_ball);
+    let (moved, _) = differing(&swung, &swung_ball);
+    // The ball's middle on the picture: the wall shows where the curtain hung through it.
+    let px = H as f32 * 0.5 / (20f32.to_radians().tan() * 0.5);
+    let (cx, cy) = (
+        W as f32 * 0.5 + BALL.0.x * px,
+        H as f32 * 0.5 - BALL.0.y * px,
+    );
+    let luma = |im: &RgbImage| {
+        let mut sum = 0.0;
+        for y in -4i32..=4 {
+            for x in -4i32..=4 {
+                let p = im.get_pixel((cx as i32 + x) as u32, (cy as i32 + y) as u32);
+                sum += p.0[0] as f32 + p.0[1] as f32 + p.0[2] as f32;
+            }
+        }
+        sum / (81.0 * 3.0)
+    };
+    eprintln!(
+        "kept out of a ball: {at_rest} pixels differ at rest (worst {worst}), {moved} swung; the ball's middle is {:.1} with hair through it, {:.1} kept out",
+        luma(&swung),
+        luma(&swung_ball)
+    );
+    assert_eq!(
+        at_rest, 0,
+        "a shape moved hair that lies as groomed (worst {worst}/255)"
+    );
+    assert!(
+        moved > 150,
+        "the curtain swung into the ball should be parted by it: {moved} pixels differ"
+    );
+    assert!(
+        // (Not bare: the curtain's points lie 2 cm apart, and a hair between two points
+        // moved out of the ball still crosses its edge.)
+        luma(&swung_ball) < luma(&swung) * 0.92,
+        "hair covers the ball's middle as before: {:.1}, {:.1} without the ball",
+        luma(&swung_ball),
+        luma(&swung)
+    );
 }
 
 /// A patch of short fine fur, 20 cm square in the plane z = 0 and facing the camera: `strands`

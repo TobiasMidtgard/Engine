@@ -47,7 +47,10 @@ use engine_world::HairGuidesPosed;
 use crate::features::{FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase};
 use crate::frame::ViewData;
 use crate::settings::{RenderSettings, shade_skip};
-use crate::strands::{StrandFiber, StrandGroom, StrandGuidesWhenDrawn, StrandInstance, StrandLod};
+use crate::strands::{
+    StrandCapsule, StrandFiber, StrandGroom, StrandGuidesWhenDrawn, StrandInstance,
+    StrandKeptOutWhenDrawn, StrandLod,
+};
 
 const COMMON: &str = include_str!("shaders/strands_common.wgsl");
 const POSE: &str = include_str!("shaders/strands_pose.wgsl");
@@ -57,6 +60,8 @@ const SHADOW: &str = include_str!("shaders/strands_shadow.wgsl");
 
 /// Instances drawn at once, nearest first.
 pub(crate) const MAX_INSTANCES: usize = 32;
+/// Shapes one instance's strands are kept out of ([`StrandKeptOutWhenDrawn`]).
+const MAX_CAPSULES: usize = 32;
 /// Cells along each side of an instance's density volume.
 pub(crate) const VOXELS: u32 = 64;
 /// Points drawn in a frame; past it every instance draws a smaller share.
@@ -416,6 +421,10 @@ struct Draw {
     /// Who poses them now that it is drawn ([`StrandGuidesWhenDrawn`]), and how many points
     /// the groom's guides have.
     pose: Option<(StrandGuidesWhenDrawn, usize)>,
+    /// The shapes its strands are kept out of ([`StrandKeptOutWhenDrawn`]), asked with the
+    /// guides.
+    kept_out: Option<StrandKeptOutWhenDrawn>,
+    capsules: Vec<StrandCapsule>,
 }
 
 /// What the frame draws, as `prepare_frame` laid it out.
@@ -604,6 +613,41 @@ pub(crate) struct StrandFeature {
     warned_no_room: bool,
 }
 
+/// The length of the line through `points` (their first three numbers).
+fn polyline_length<'a, const N: usize>(points: impl Iterator<Item = &'a [f32; N]>) -> f32 {
+    let mut last: Option<Vec3> = None;
+    let mut length = 0.0;
+    for p in points {
+        let p = Vec3::new(p[0], p[1], p[2]);
+        length += last.map_or(0.0, |l| l.distance(p));
+        last = Some(p);
+    }
+    length
+}
+
+/// A guide a strand follows, as the pose pass reads it: the guide's number in the low
+/// [`FOLLOW_GUIDE_BITS`] bits, and above them how far along the guide the strand reaches, 0..1
+/// in 12 bits (its own length over the guide's). A strand moves with its guide length for
+/// length: a hair 3 cm long beside a lock of 35 cm takes the motion of the lock's first 3 cm,
+/// not of its tip (point for point, the short hairs of a head were drawn out sideways into a
+/// comb whenever the long locks swung). `u32::MAX` stays no guide.
+fn follow_bits(guide: u32, length: f32, guide_length: Option<f32>) -> u32 {
+    let Some(guide_length) = guide_length.filter(|_| guide < (1 << FOLLOW_GUIDE_BITS)) else {
+        return u32::MAX;
+    };
+    let reach = if guide_length > 1e-9 {
+        (length / guide_length).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    // (4095 in the reach with every guide bit set would read as no guide: one less.)
+    guide | (((reach * 4094.0).round() as u32) << FOLLOW_GUIDE_BITS)
+}
+
+/// Bits of a guide's number in a packed strand's `follow` (a groom has up to a million
+/// guides).
+const FOLLOW_GUIDE_BITS: u32 = 20;
+
 /// `groom` as the GPU holds it: its strands in [`spread_order`], their colours and guides
 /// packed. `lo` and `hi` are its bounds ([`GroomFacts`]). The loops run on the frame's leaf
 /// threads, a few thousand strands to each.
@@ -622,6 +666,11 @@ fn pack_groom(groom: &StrandGroom, lo: Vec3, hi: Vec3) -> PackedGroom {
             points.copy_from_slice(&groom.points[s * per..(s + 1) * per]);
         }
     });
+    let guide_lengths: Vec<f32> = groom
+        .guides
+        .chunks_exact(per)
+        .map(|g| polyline_length(g.iter()))
+        .collect();
     let mut info = vec![GpuInfo::default(); order.len()];
     engine_core::tasks::par_chunks_mut(&mut info, PACK_CHUNK, |chunk, out| {
         let order = &order[chunk * PACK_CHUNK..];
@@ -637,6 +686,8 @@ fn pack_groom(groom: &StrandGroom, lo: Vec3, hi: Vec3) -> PackedGroom {
             let pack = |a: f32, b: f32| f16_bits(a) | (f16_bits(b) << 16);
             let follow = groom.follow.get(s).copied().unwrap_or_default();
             let unorm = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u32;
+            let length = polyline_length(groom.points[s * per..(s + 1) * per].iter());
+            let guide = |g: u32| follow_bits(g, length, guide_lengths.get(g as usize).copied());
             *info = GpuInfo {
                 color: [
                     pack(root[0], root[1]),
@@ -645,9 +696,9 @@ fn pack_groom(groom: &StrandGroom, lo: Vec3, hi: Vec3) -> PackedGroom {
                     pack(tip[2], tip[3]),
                 ],
                 follow: [
-                    follow.guides[0],
-                    follow.guides[1],
-                    follow.guides[2],
+                    guide(follow.guides[0]),
+                    guide(follow.guides[1]),
+                    guide(follow.guides[2]),
                     unorm(follow.weights[0]) | (unorm(follow.weights[1]) << 16),
                 ],
             };
@@ -1527,6 +1578,7 @@ impl RenderFeature for StrandFeature {
             &GlobalTransform,
             Option<&HairGuidesPosed>,
             Option<&StrandGuidesWhenDrawn>,
+            Option<&StrandKeptOutWhenDrawn>,
         )>();
         let Some(assets) = world.get_resource::<Assets<StrandGroom>>() else {
             return;
@@ -1536,7 +1588,7 @@ impl RenderFeature for StrandFeature {
         let mut worn: HashMap<u32, &StrandGroom> = HashMap::new();
         let origin = view.origin;
         let px_per_m = view.proj.y_axis.y * view.height as f32 * 0.5;
-        for (entity, inst, gt, posed, when_drawn) in q.iter(world) {
+        for (entity, inst, gt, posed, when_drawn, kept_out) in q.iter(world) {
             if !inst.visible || inst.lod == Some(StrandLod::Hidden) {
                 continue;
             }
@@ -1601,6 +1653,7 @@ impl RenderFeature for StrandFeature {
                 .filter(|_| guides.is_none() && !groom.guides.is_empty())
                 .map(|w| (*w, groom.guides.len()));
             worn.insert(index, groom);
+            let guides_from_entity = guides.is_some();
             draws.push(Draw {
                 entity,
                 groom: index,
@@ -1614,6 +1667,23 @@ impl RenderFeature for StrandFeature {
                 distance,
                 guides,
                 pose,
+                kept_out: kept_out.copied(),
+                // (Its own posed guides bring the shapes they were held out of.)
+                capsules: posed
+                    .filter(|_| guides_from_entity)
+                    .map(|p| {
+                        p.capsules
+                            .iter()
+                            .take(MAX_CAPSULES)
+                            .map(|c| StrandCapsule {
+                                a: c.a,
+                                ra: c.ra,
+                                b: c.b,
+                                rb: c.rb,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
         }
         draws.sort_by(|a, b| a.distance.total_cmp(&b.distance));
@@ -1770,6 +1840,10 @@ impl RenderFeature for StrandFeature {
                 let mut out = Vec::with_capacity(points);
                 if (pose.0)(world, d.entity, &mut out) && out.len() == points {
                     d.guides = Some(out);
+                    if let Some(kept_out) = d.kept_out {
+                        (kept_out.0)(world, d.entity, &mut d.capsules);
+                        d.capsules.truncate(MAX_CAPSULES);
+                    }
                 }
             }
         }));
@@ -1922,6 +1996,13 @@ impl RenderFeature for StrandFeature {
             slots_now.insert(d.entity, slots);
             let guide_base = match &d.guides {
                 Some(posed) if posed.len() == g.guides.len() => {
+                    // Ahead of its offsets, the shapes its strands are kept out of (two
+                    // entries each) and how many there are (`strands_pose.wgsl`).
+                    for c in &d.capsules {
+                        offsets.push([c.a.x, c.a.y, c.a.z, c.ra]);
+                        offsets.push([c.b.x, c.b.y, c.b.z, c.rb]);
+                    }
+                    offsets.push([d.capsules.len() as f32, 0.0, 0.0, 0.0]);
                     let base = offsets.len() as u32;
                     offsets.extend(
                         posed
@@ -2727,7 +2808,11 @@ mod tests {
                     f16_bits(0.25) | (f16_bits(0.4) << 16),
                 ]
             );
-            assert_eq!(packed.info[k].follow, [0, u32::MAX, u32::MAX, 65535]);
+            // The guide's number, and how far along it the strand reaches (2 of its 20 cm).
+            let reach = packed.info[k].follow[0] >> FOLLOW_GUIDE_BITS;
+            assert_eq!(packed.info[k].follow[0] & ((1 << FOLLOW_GUIDE_BITS) - 1), 0);
+            assert!((408..=411).contains(&reach), "reach {reach}");
+            assert_eq!(packed.info[k].follow[1..], [u32::MAX, u32::MAX, 65535]);
         }
         // A groom whose arrays don't agree is known as such, and has no bounds.
         groom.roots.pop();

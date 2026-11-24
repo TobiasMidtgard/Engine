@@ -77,7 +77,8 @@ clone_by_field!(Sim {
     self_contacts,
     self_ref,
     self_fresh,
-    tangled
+    tangled,
+    tress,
 });
 clone_by_field!(Split { key, starts, lists });
 clone_by_field!(RunLists {
@@ -433,6 +434,9 @@ pub struct Sim {
     self_fresh: bool,
     /// Steps left without self-collision for a cloth found bunched into a ball.
     tangled: u32,
+    /// A person's scalp hair: these particles are stepped by the strand solver of
+    /// [`crate::tress`] in place of the constraints above.
+    pub tress: Option<Box<crate::tress::Tress>>,
 }
 
 /// Self-collision candidate pairs per particle past which a cloth counts as bunched into a
@@ -647,6 +651,9 @@ impl Sim {
         for v in &mut self.vel {
             *v = turn * *v;
         }
+        if let Some(tress) = &mut self.tress {
+            tress.calm();
+        }
         self.snap_frame(frame, pos, rot);
     }
 
@@ -697,6 +704,9 @@ impl Sim {
         self.prev.clone_from(&self.pos);
         self.step_start.clone_from(&self.pos);
         self.vel.fill(Vec3::ZERO);
+        if let Some(tress) = &mut self.tress {
+            tress.calm();
+        }
     }
 
     /// Translate every particle (and its history) by `delta`, keeping velocities.
@@ -794,6 +804,13 @@ impl Sim {
             .resize(colliders.len(), ColliderImpulse::default());
         self.ground_impact = (0.0, Vec3::ZERO);
         if dt <= 0.0 || self.pos.is_empty() {
+            self.finish_step();
+            return;
+        }
+        if let Some(mut tress) = self.tress.take() {
+            tress.step(self, dt);
+            self.tress = Some(tress);
+            self.params.time += dt;
             self.finish_step();
             return;
         }

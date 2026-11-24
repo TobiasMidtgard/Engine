@@ -1,0 +1,1748 @@
+//! Scalp hair in motion: the guide-strand solver of the owner's `gta-hair-sim` project (its
+//! `shaders/hair_sim.wgsl`, pass `sim_strands`), ported to the CPU and to people with whole
+//! skeletons.
+//!
+//! Every guide is a chain of up to [`MAX_VERTS`] points about two centimeters apart, rooted on
+//! the bone frame it rides. Each substep a strand
+//!
+//! 1. pins its root to the frame, and spreads its points' velocities along itself from there
+//!    (friction inside the lock, [`TressConfig::inner_friction`]: not in that project),
+//! 2. predicts its points (Verlet) under gravity, the air (wind with gusts and curl-noise
+//!    turbulence, drag that is weaker along the strand than across it), a cushion of pressure
+//!    where hair is dense and a pull toward the hair's mean velocity there (a voxel grid),
+//! 3. pulls its first points softly back to where the head carries them,
+//! 4. turns every segment toward its grown direction relative to the segment before it (local
+//!    shape matching: waves and the comb's direction survive, and swing),
+//! 5. keeps its bends and its length (symmetric distance constraints, then follow-the-leader)
+//!    and slides off the head, ears, neck, shoulders and torso ([`TressCapsule`]: tapered
+//!    capsules on the bones, the creases between the body's blended smooth),
+//! 6. ends on a projection that leaves every segment its exact length outside every capsule,
+//! 7. and takes its velocities from where the points ended up.
+//!
+//! The constants are that project's. What a person in a world adds: the capsules ride bones
+//! instead of one head; the hair's speed limit, damping and drag are measured against the head
+//! it rides, so a run or a ride leaves the hair streaming, not torn; a dash's jolt is partly
+//! followed; the wind is the weather's, in m/s; a strand that lies still sleeps; and a lock
+//! has friction inside it, where that project's swings like a bare chain.
+
+use engine_core::prelude::*;
+
+use crate::solver::{Sim, leaf_pool};
+
+/// Most points a strand is simulated with.
+pub const MAX_VERTS: usize = 32;
+/// Most capsules hair slides off (the first that many of [`Tress::capsules`]).
+pub const MAX_CAPSULES: usize = 32;
+/// Fastest a point moves against the head it rides, m/s.
+const MAX_SPEED: f32 = 7.5;
+/// The voxel grid's cell, m, and its most cells along an axis.
+const CELL: f32 = 0.015;
+const GRID_MAX: usize = 64;
+/// Guide points the source project simulates (1792 guides of 20): its pressure and cohesion
+/// constants are for that many in a head of hair, so fewer points each weigh more.
+const SOURCE_POINTS: f32 = 35_840.0;
+const SOURCE_STRANDS: f32 = 1792.0;
+/// How much of a jolt of the head (a dash, a teleport-like jerk: hundreds of m/s²) the hair
+/// follows rigidly. Less, and the head sweeps through the hair on its leading side within a
+/// step, which comes out of the capsules wherever it is nearest: folded up beside the ear
+/// after a 30 cm jerk at 0.6.
+const FOLLOWED: f32 = 0.85;
+/// Seconds over which the head's velocity is taken.
+const CARRIED_OVER: f32 = 0.1;
+/// Width of the fillet in the creases between the body's capsules, m.
+const FILLET: f32 = 0.005;
+/// Furthest the constraint passes of one substep move a point, m: capsules further off than
+/// this when they begin aren't looked at again in them.
+const REACHED: f32 = 0.03;
+/// A strand none of whose points moves faster than [`RESTFUL`] (m/s, against the head) for
+/// this long, s, sleeps: it rides its bone until the body or the air moves. The pull to the
+/// grown shape acts on positions and holds no energy, so a lock lying on a shoulder creeps
+/// up it for good at under a centimeter a second, falls and starts again; asleep it lies.
+const SLEEPS_AFTER: f32 = 0.5;
+const RESTFUL: f32 = 0.03;
+/// What wakes the hair: air past the head faster than this, m/s, a bone further from where
+/// it was against the head than this, m, or turned further (the cosine of half the angle,
+/// 0.6 degrees), the head's own turn included.
+const STILL_AIR: f32 = 0.02;
+const STILL_BONE: f32 = 0.002;
+const STILL_TURN: f32 = 0.999_986;
+
+/// Tuning (the source project's `SimConfig` defaults).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TressConfig {
+    /// Substeps per 1/60 s.
+    pub substeps: u32,
+    /// Constraint iterations per substep; the last is follow-the-leader.
+    pub iterations: u32,
+    pub air_drag: f32,
+    /// How much weaker the air drags along a strand than across it.
+    pub aniso: f32,
+    /// Depth of the gusts' swell, 0..1.
+    pub gust: f32,
+    pub turbulence: f32,
+    pub turbulence_freq: f32,
+    /// Scales every point's shape and bend stiffness.
+    pub stiffness: f32,
+    pub damping: f32,
+    pub friction: f32,
+    /// Strength of the hair's pressure against itself.
+    pub self_collision: f32,
+    /// How much a point takes on the mean velocity of the hair around it.
+    pub cohesion: f32,
+    /// Friction inside a lock, m^2/s: how fast a difference in velocity spreads along a
+    /// strand. The source has none, and its hair swings like a chain: a head shaking at the
+    /// rhythm a 30 cm lock swings at by itself (about 1.1 Hz) threw the hair out level with
+    /// the ears and across the throat. With it the hair below takes up what the hair above
+    /// does, a real lock's hairs rubbing on each other, and a shake swings it half as far.
+    pub inner_friction: f32,
+    /// Wind strength (the source project's unit, 0..6) per m/s of wind at the head: hair
+    /// against a head feels less than the open air.
+    pub wind_feel: f32,
+}
+
+impl Default for TressConfig {
+    fn default() -> Self {
+        Self {
+            substeps: 6,
+            iterations: 3,
+            air_drag: 1.4,
+            aniso: 3.0,
+            gust: 0.35,
+            turbulence: 0.65,
+            turbulence_freq: 1.8,
+            stiffness: 1.0,
+            damping: 0.035,
+            friction: 0.32,
+            self_collision: 0.75,
+            cohesion: 0.35,
+            inner_friction: 0.1,
+            wind_feel: 0.5,
+        }
+    }
+}
+
+/// One simulated point of a strand (particle `i` of the [`Sim`] is `verts[i]`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TressVertex {
+    /// As grown, in the strand's frame.
+    pub rest: Vec3,
+    /// Length of the segment to the point before, m.
+    pub rest_len: f32,
+    /// 0 at the root .. 1 at the tip.
+    pub t: f32,
+    pub stiffness: f32,
+    pub bend: f32,
+    /// How firmly the head carries the point, 0..1.
+    pub pin: f32,
+    pub damping: f32,
+    /// How deep inside the head's and the body's capsules the point was grown, m: it may sit
+    /// that deep again (the capsules stand in for a body they are a little fatter than in
+    /// places; hair grown lying on that body isn't pushed off it).
+    pub sunk: [f32; 2],
+}
+
+/// One strand: particles `first..first + count`, root first, riding solver frame `frame`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TressStrand {
+    pub first: u32,
+    pub count: u32,
+    pub frame: u16,
+    /// 0..1, the strand's own phase in the gusts.
+    pub seed: f32,
+}
+
+/// A tapered capsule on a bone that hair slides off: ends and radii in solver frame `frame`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TressCapsule {
+    pub frame: u16,
+    pub a: Vec3,
+    pub ra: f32,
+    pub b: Vec3,
+    pub rb: f32,
+    pub friction: f32,
+    /// Neck, shoulders and torso (their creases are blended smooth); not the head and ears.
+    pub body: bool,
+}
+
+/// A capsule where it is in one substep.
+#[derive(Debug, Clone, Copy)]
+struct Posed {
+    cone: Cone,
+    friction: f32,
+    body: bool,
+    center: Vec3A,
+    reach: f32,
+}
+
+/// The hair of one person for the solver: on [`Sim::tress`].
+#[derive(Debug, Clone, Default)]
+pub struct Tress {
+    pub config: TressConfig,
+    pub verts: Vec<TressVertex>,
+    pub strands: Vec<TressStrand>,
+    /// The first [`MAX_CAPSULES`] count.
+    pub capsules: Vec<TressCapsule>,
+    /// The frame most of the hair rides (the head).
+    pub carrier: u16,
+    carrier_vel: Vec3,
+    carrier_moved: Vec3,
+    grid: Grid,
+    posed: Vec<Posed>,
+    /// How far from each capsule a point may start a step and still reach it within it, m.
+    pads: Vec<f32>,
+    /// How long each strand has lain still, s: from [`SLEEPS_AFTER`] on it sleeps.
+    still: Vec<f32>,
+    /// Every frame against the head, and the head's turn, when the body last moved.
+    held_at: Vec<(Vec3, Quat)>,
+}
+
+impl Default for TressStrand {
+    fn default() -> Self {
+        Self {
+            first: 0,
+            count: 0,
+            frame: 0,
+            seed: 0.0,
+        }
+    }
+}
+
+#[inline]
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// `x.floor()` for |x| < 2³¹ without the call the baseline x86-64 target makes of it.
+#[inline]
+fn floor(x: f32) -> f32 {
+    let t = x as i32 as f32;
+    if t > x { t - 1.0 } else { t }
+}
+
+#[inline]
+fn floor3(v: Vec3) -> Vec3 {
+    Vec3::new(floor(v.x), floor(v.y), floor(v.z))
+}
+
+#[inline]
+fn fract(v: Vec3) -> Vec3 {
+    v - floor3(v)
+}
+
+fn hash31(p: Vec3) -> f32 {
+    let mut q = fract(p * Vec3::new(0.1031, 0.1030, 0.0973));
+    q += Vec3::splat(q.dot(Vec3::new(q.y, q.x, q.z) + 33.33));
+    let v = (q.x + q.y) * q.z;
+    (v - floor(v)) * 2.0 - 1.0
+}
+
+/// Value noise with its gradient (quintic, C2).
+fn noise_grad(x: Vec3) -> (f32, Vec3) {
+    let i = floor3(x);
+    let f = x - i;
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+    let at = |x: f32, y: f32, z: f32| hash31(i + Vec3::new(x, y, z));
+    let (a, b, c, d) = (
+        at(0.0, 0.0, 0.0),
+        at(1.0, 0.0, 0.0),
+        at(0.0, 1.0, 0.0),
+        at(1.0, 1.0, 0.0),
+    );
+    let (e, f1, g, h) = (
+        at(0.0, 0.0, 1.0),
+        at(1.0, 0.0, 1.0),
+        at(0.0, 1.0, 1.0),
+        at(1.0, 1.0, 1.0),
+    );
+    let (k0, k1, k2, k3) = (a, b - a, c - a, e - a);
+    let (k4, k5, k6) = (a - b - c + d, a - c - e + g, a - b - e + f1);
+    let k7 = -a + b + c - d + e - f1 - g + h;
+    let val = k0
+        + k1 * u.x
+        + k2 * u.y
+        + k3 * u.z
+        + k4 * u.x * u.y
+        + k5 * u.y * u.z
+        + k6 * u.z * u.x
+        + k7 * u.x * u.y * u.z;
+    let grad = Vec3::new(
+        du.x * (k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z),
+        du.y * (k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x),
+        du.z * (k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y),
+    );
+    (val, grad)
+}
+
+/// Divergence-free turbulence: the curl of three noise potentials, two octaves.
+fn curl_noise(p: Vec3) -> Vec3 {
+    let curl = |p: Vec3, o2: Vec3, o3: Vec3| {
+        let (_, g1) = noise_grad(p);
+        let (_, g2) = noise_grad(p + o2);
+        let (_, g3) = noise_grad(p + o3);
+        Vec3::new(g3.y - g2.z, g1.z - g3.x, g2.x - g1.y)
+    };
+    let c1 = curl(
+        p,
+        Vec3::new(31.416, 17.321, 59.265),
+        Vec3::new(73.112, 41.778, 19.634),
+    );
+    let c2 = curl(
+        p * 2.13 + Vec3::new(11.7, -5.3, 23.1),
+        Vec3::new(27.1, 43.9, 13.7),
+        Vec3::new(53.3, 7.1, 61.9),
+    );
+    (c1 * 0.72 + c2 * 0.28) * 0.32
+}
+
+/// A round cone (a capsule with radius `r1` at `a` and `r2` at `b`) readied for many
+/// distance queries.
+#[derive(Debug, Clone, Copy)]
+struct Cone {
+    a: Vec3A,
+    b: Vec3A,
+    r1: f32,
+    r2: f32,
+    ba: Vec3A,
+    axis: Vec3A,
+    l2: f32,
+    il2: f32,
+    rr: f32,
+    a2: f32,
+    /// `sign(rr) rr²`.
+    krr: f32,
+    /// `sqrt(a2 / l2)` and `rr / l`: the side's normal is that much across and along.
+    across: f32,
+    along: f32,
+    /// One sphere stands for it: no length, or one end's sphere holds the other.
+    ball: Option<(Vec3A, f32)>,
+}
+
+impl Cone {
+    fn new(a: Vec3A, b: Vec3A, r1: f32, r2: f32) -> Self {
+        let ba = b - a;
+        let l2 = ba.length_squared();
+        let rr = r1 - r2;
+        let a2 = l2 - rr * rr;
+        let mut cone = Self {
+            a,
+            b,
+            r1,
+            r2,
+            ba,
+            axis: Vec3A::Y,
+            l2,
+            il2: 0.0,
+            rr,
+            a2,
+            krr: rr * rr.abs(),
+            across: 1.0,
+            along: 0.0,
+            ball: None,
+        };
+        if l2 < 1e-10 {
+            cone.ball = Some((a, r1.max(r2)));
+        } else if a2 <= 1e-8 {
+            cone.ball = Some((if r1 >= r2 { a } else { b }, r1.max(r2)));
+        } else {
+            cone.il2 = 1.0 / l2;
+            let inv_l = cone.il2.sqrt();
+            cone.axis = ba * inv_l;
+            cone.across = (a2 * cone.il2).sqrt();
+            cone.along = rr * inv_l;
+        }
+        cone
+    }
+
+    /// The outward normal at `p` and its signed distance. Exact.
+    #[inline]
+    fn at(&self, p: Vec3A) -> (Vec3A, f32) {
+        let ball = |c: Vec3A, r: f32, fallback: Vec3A| {
+            let d = p - c;
+            let len = d.length();
+            (if len > 1e-6 { d / len } else { fallback }, len - r)
+        };
+        if let Some((c, r)) = self.ball {
+            return ball(c, r, Vec3A::Y);
+        }
+        let pa = p - self.a;
+        let y = pa.dot(self.ba);
+        let z = y - self.l2;
+        let x_vec = pa * self.l2 - self.ba * y;
+        let x2 = x_vec.length_squared();
+        let k = self.krr * x2;
+        let al2 = self.a2 * self.l2;
+        if z * z.abs() * al2 > k {
+            return ball(self.b, self.r2, self.axis);
+        }
+        if y * y.abs() * al2 < k {
+            return ball(self.a, self.r1, -self.axis);
+        }
+        let dist = ((x2 * self.a2 * self.il2).sqrt() + y * self.rr) * self.il2 - self.r1;
+        let radial = if x2 < 1e-10 {
+            self.axis
+                .cross(Vec3A::Z)
+                .try_normalize()
+                .unwrap_or(Vec3A::X)
+        } else {
+            x_vec / x2.sqrt()
+        };
+        let n = (radial * self.across + self.axis * self.along)
+            .try_normalize()
+            .unwrap_or(radial);
+        (n, dist)
+    }
+}
+
+/// Signed distance from `p` to a round cone (a capsule with radius `r1` at `a` and `r2` at
+/// `b`), and the outward normal there. Exact.
+pub fn tapered_capsule(p: Vec3, a: Vec3, b: Vec3, r1: f32, r2: f32) -> (Vec3, f32) {
+    let (n, d) = Cone::new(a.into(), b.into(), r1, r2).at(p.into());
+    (n.into(), d)
+}
+
+/// `e` turned `part` of the way of the rotation that takes direction `a` to direction `b`:
+/// about the same axis, by the angle a normalized blend of the two rotations gives (within
+/// 4% of `part` of the angle up to 150 degrees, and no trigonometry).
+#[inline]
+fn turned(e: Vec3A, a: Vec3A, b: Vec3A, part: f32) -> Vec3A {
+    let c = a.dot(b);
+    // The whole turn as a quaternion (xyz, w), then its blend with no turn.
+    let (xyz, w) = if c > -0.9999 {
+        let half = (0.5 + 0.5 * c).sqrt();
+        (a.cross(b) * (0.5 / half), half)
+    } else {
+        (a.any_orthonormal_vector(), 0.0)
+    };
+    let (xyz, w) = (xyz * part, 1.0 - part + part * w);
+    let inv = (xyz.length_squared() + w * w).sqrt().recip();
+    let (xyz, w) = (xyz * inv, w * inv);
+    let t = xyz.cross(e) * 2.0;
+    e + t * w + xyz.cross(t)
+}
+
+/// Hair's density and momentum around the head, for its pressure against itself and the pull
+/// toward its mean velocity.
+#[derive(Debug, Clone, Default)]
+struct Grid {
+    min: Vec3,
+    cell: f32,
+    dims: [usize; 3],
+    /// What every point adds to the cells around it.
+    weight: f32,
+    density: Vec<f32>,
+    momentum: Vec<Vec3>,
+}
+
+impl Grid {
+    /// `pos` are the points in the head's frame (the cells are a lattice fixed to the head, so
+    /// what the hair feels from itself doesn't change with where the person stands or faces,
+    /// and still hair rests in one place); `vel` their velocities in the world.
+    fn build(
+        &mut self,
+        pos: impl Iterator<Item = Vec3> + Clone,
+        vel: &[Vec3],
+        weight: f32,
+        cell: f32,
+    ) {
+        let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        for p in pos.clone() {
+            if p.is_finite() {
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+        }
+        if !(lo.is_finite() && hi.is_finite()) {
+            self.dims = [0; 3];
+            return;
+        }
+        let extent = (hi - lo).max_element();
+        self.cell = cell.max(extent / (GRID_MAX - 6) as f32);
+        self.weight = weight;
+        self.min = ((lo / self.cell).floor() - Vec3::splat(2.0)) * self.cell;
+        let dims = ((hi - self.min) / self.cell).ceil() + Vec3::splat(3.0);
+        self.dims = [
+            (dims.x as usize).min(GRID_MAX),
+            (dims.y as usize).min(GRID_MAX),
+            (dims.z as usize).min(GRID_MAX),
+        ];
+        let cells = self.dims[0] * self.dims[1] * self.dims[2];
+        self.density.clear();
+        self.density.resize(cells, 0.0);
+        self.momentum.clear();
+        self.momentum.resize(cells, Vec3::ZERO);
+        for (p, v) in pos.zip(vel) {
+            let Some((c, f)) = self.cell_of(p) else {
+                continue;
+            };
+            let g = Vec3::ONE - f;
+            for (dz, wz) in [(0, g.z), (1, f.z)] {
+                for (dy, wy) in [(0, g.y), (1, f.y)] {
+                    for (dx, wx) in [(0, g.x), (1, f.x)] {
+                        let w = weight * wx * wy * wz;
+                        let i = self.index(c[0] + dx, c[1] + dy, c[2] + dz);
+                        self.density[i] += w;
+                        self.momentum[i] += *v * w;
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn index(&self, x: usize, y: usize, z: usize) -> usize {
+        (z * self.dims[1] + y) * self.dims[0] + x
+    }
+
+    /// The cell `p` is in and where in it (0..1), when all eight corners around it exist.
+    #[inline]
+    fn cell_of(&self, p: Vec3) -> Option<([usize; 3], Vec3)> {
+        if self.dims[0] < 2 || self.dims[1] < 2 || self.dims[2] < 2 {
+            return None;
+        }
+        let rel = (p - self.min) / self.cell - Vec3::splat(0.5);
+        let max = Vec3::new(
+            self.dims[0] as f32 - 1.001,
+            self.dims[1] as f32 - 1.001,
+            self.dims[2] as f32 - 1.001,
+        );
+        if !(rel.cmpge(Vec3::ZERO).all() && rel.cmple(max).all()) {
+            return None;
+        }
+        let c = rel.floor();
+        Some(([c.x as usize, c.y as usize, c.z as usize], rel - c))
+    }
+
+    /// Density, its gradient (per meter) and the mean velocity of the hair around the point
+    /// at `p` moving at `own`, without what that point itself added to the grid: its own
+    /// share has a gradient wherever the point isn't on a cell corner, and left in, every
+    /// point pushes itself about (with few strands a cell, hair in still air never rests).
+    fn sample(&self, p: Vec3, own: Vec3) -> (f32, Vec3, Vec3) {
+        let Some((c, f)) = self.cell_of(p) else {
+            return (0.0, Vec3::ZERO, Vec3::ZERO);
+        };
+        let g = Vec3::ONE - f;
+        // The point's own share where it is: the sum of its squared corner weights.
+        let sq = g * g + f * f;
+        let own_density = self.weight * sq.x * sq.y * sq.z;
+        let own_grad = Vec3::new(
+            (2.0 * f.x - 1.0) * sq.y * sq.z,
+            (2.0 * f.y - 1.0) * sq.z * sq.x,
+            (2.0 * f.z - 1.0) * sq.x * sq.y,
+        ) * (self.weight / self.cell);
+        let i = |dx: usize, dy: usize, dz: usize| self.index(c[0] + dx, c[1] + dy, c[2] + dz);
+        let ids = [
+            i(0, 0, 0),
+            i(1, 0, 0),
+            i(0, 1, 0),
+            i(1, 1, 0),
+            i(0, 0, 1),
+            i(1, 0, 1),
+            i(0, 1, 1),
+            i(1, 1, 1),
+        ];
+        let d = ids.map(|k| self.density[k]);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let density = lerp(
+            lerp(lerp(d[0], d[1], f.x), lerp(d[2], d[3], f.x), f.y),
+            lerp(lerp(d[4], d[5], f.x), lerp(d[6], d[7], f.x), f.y),
+            f.z,
+        );
+        let density = (density - own_density).max(0.0);
+        let inv = 1.0 / self.cell;
+        let grad = Vec3::new(
+            (d[1] - d[0]) * g.y * g.z
+                + (d[3] - d[2]) * f.y * g.z
+                + (d[5] - d[4]) * g.y * f.z
+                + (d[7] - d[6]) * f.y * f.z,
+            (d[2] - d[0]) * g.x * g.z
+                + (d[3] - d[1]) * f.x * g.z
+                + (d[6] - d[4]) * g.x * f.z
+                + (d[7] - d[5]) * f.x * f.z,
+            (d[4] - d[0]) * g.x * g.y
+                + (d[5] - d[1]) * f.x * g.y
+                + (d[6] - d[2]) * g.x * f.y
+                + (d[7] - d[3]) * f.x * f.y,
+        ) * inv
+            - own_grad;
+        let mut mean = Vec3::ZERO;
+        if density > 0.25 {
+            let m = ids.map(|k| self.momentum[k]);
+            let momentum = m[0]
+                .lerp(m[1], f.x)
+                .lerp(m[2].lerp(m[3], f.x), f.y)
+                .lerp(m[4].lerp(m[5], f.x).lerp(m[6].lerp(m[7], f.x), f.y), f.z);
+            mean = (momentum - own * own_density) / density.max(0.5);
+        }
+        (density, grad, mean)
+    }
+}
+
+/// What every strand reads during one step.
+struct Step<'a> {
+    cfg: TressConfig,
+    verts: &'a [TressVertex],
+    frames: &'a [crate::solver::Frame],
+    /// The capsules in every substep, `caps` of them each.
+    posed: &'a [Posed],
+    caps: usize,
+    pads: &'a [f32],
+    grid: &'a Grid,
+    ground: &'a [[f32; 4]],
+    substeps: u32,
+    dt: f32,
+    time: f32,
+    gravity: Vec3,
+    /// The head, its velocity this step, and how much of its jolt the hair follows rigidly.
+    carrier: crate::solver::Frame,
+    carrier_vel: Vec3,
+    carried: Vec3,
+    wind_dir: Vec3,
+    wind_strength: f32,
+    /// Extra damping, 1/s (a body settling).
+    settle: f32,
+}
+
+impl Tress {
+    /// Whether the hair can be stepped as `sim`'s particles.
+    pub fn fits(&self, sim: &Sim) -> bool {
+        self.verts.len() == sim.pos.len()
+            && self.strands.iter().all(|s| {
+                (s.first + s.count) as usize <= sim.pos.len()
+                    && (s.frame as usize) < sim.frames.len()
+                    && s.count as usize <= MAX_VERTS
+            })
+            && self
+                .capsules
+                .iter()
+                .all(|c| (c.frame as usize) < sim.frames.len())
+            && (self.carrier as usize) < sim.frames.len()
+    }
+
+    /// Forget the head's last velocity (after a teleport, or putting the hair at rest).
+    pub fn calm(&mut self) {
+        self.carrier_vel = Vec3::ZERO;
+        self.carrier_moved = Vec3::ZERO;
+        self.still.clear();
+    }
+
+    /// How many strands sleep.
+    pub fn asleep(&self) -> usize {
+        self.still.iter().filter(|s| **s >= SLEEPS_AFTER).count()
+    }
+
+    /// Whether the body or the air moved since the hair last lay still: the frames against
+    /// the head, the head's turn (where down is), and the air past it.
+    fn disturbed(&mut self, sim: &Sim, air: f32) -> bool {
+        let carrier = sim.frames[self.carrier as usize];
+        let to_head = carrier.to_rot.conjugate();
+        let now = |k: usize, f: &crate::solver::Frame| {
+            if k == self.carrier as usize {
+                (Vec3::ZERO, carrier.to_rot)
+            } else {
+                (to_head * (f.to_pos - carrier.to_pos), to_head * f.to_rot)
+            }
+        };
+        let moved = air > STILL_AIR
+            || self.held_at.len() != sim.frames.len()
+            || sim.frames.iter().enumerate().any(|(k, f)| {
+                let ((pos, rot), (was_pos, was_rot)) = (now(k, f), self.held_at[k]);
+                pos.distance_squared(was_pos) > STILL_BONE * STILL_BONE
+                    || rot.dot(was_rot).abs() < STILL_TURN
+            });
+        if moved {
+            self.held_at.clear();
+            let held: Vec<_> = sim
+                .frames
+                .iter()
+                .enumerate()
+                .map(|(k, f)| now(k, f))
+                .collect();
+            self.held_at = held;
+        }
+        moved
+    }
+
+    /// Advance `sim`'s particles by `dt`: its frames are the bones from the step's start to
+    /// its end, its wind the air at the head (m/s).
+    pub fn step(&mut self, sim: &mut Sim, dt: f32) {
+        if !self.fits(sim) || dt <= 0.0 {
+            return;
+        }
+        let cfg = self.config;
+        let per = cfg.substeps.max(1);
+        let substeps = ((per as f32 * dt * 60.0 - 1e-3).ceil() as u32).clamp(1, per * 4);
+        // The head through the air: a run is wind in the hair, and what the hair's own motion
+        // is measured against.
+        let carrier = sim.frames[self.carrier as usize];
+        let moved = (carrier.to_pos - carrier.from_pos) / dt;
+        let jolt = (moved - self.carrier_moved).length() / dt;
+        self.carrier_moved = moved;
+        let follow = FOLLOWED * smoothstep(60.0, 400.0, jolt);
+        // Its velocity over the last tenth of a second or so: a single step's jerk isn't a
+        // speed the hair is carried at (measured against it, the speed limit flung the hair
+        // ahead of a head moved 30 cm in one step).
+        self.carrier_vel += (moved - self.carrier_vel) * (dt / CARRIED_OVER).min(1.0);
+        let carrier_vel = self.carrier_vel;
+        let wind = sim.params.wind - carrier_vel;
+        let speed = wind.length();
+        let (wind_dir, wind_strength) = if speed > 1e-4 {
+            (wind / speed, (speed * cfg.wind_feel).min(6.0))
+        } else {
+            (Vec3::X, 0.0)
+        };
+        // The grid's cells hold a few strands each, as the source's do with its 1792 guides:
+        // fewer strands take larger cells, and each point weighs what makes the densities
+        // the source's constants are for.
+        let cell = (CELL * (SOURCE_STRANDS / self.strands.len().max(1) as f32).sqrt())
+            .clamp(CELL, CELL * 3.0);
+        let weight = SOURCE_POINTS / self.verts.len().max(1) as f32 * (CELL / cell).powi(3);
+        let to_head = carrier.from_rot.conjugate();
+        self.grid.build(
+            sim.pos.iter().map(|p| to_head * (*p - carrier.from_pos)),
+            &sim.vel,
+            weight,
+            cell,
+        );
+        // Hair that lies still sleeps until the body or the air moves.
+        if self.still.len() != self.strands.len() {
+            self.still.clear();
+            self.still.resize(self.strands.len(), 0.0);
+            self.held_at.clear();
+        }
+        if self.disturbed(sim, speed) {
+            self.still.fill(0.0);
+        }
+        let caps = self.capsules.len().min(MAX_CAPSULES);
+        self.posed.clear();
+        for s in 0..substeps {
+            let frac = (s + 1) as f32 / substeps as f32;
+            for c in &self.capsules[..caps] {
+                let frame = sim.frames[c.frame as usize];
+                let (pos, rot) = frame.pose(frac);
+                let (a, b) = (pos + rot * c.a, pos + rot * c.b);
+                self.posed.push(Posed {
+                    cone: Cone::new(a.into(), b.into(), c.ra, c.rb),
+                    friction: c.friction,
+                    body: c.body,
+                    center: ((a + b) * 0.5).into(),
+                    reach: a.distance(b) * 0.5 + c.ra.max(c.rb),
+                });
+            }
+        }
+        // A point moves against the head's velocity no faster than the speed limit, and a
+        // capsule as its bone does: how near the two must start a step to meet within it.
+        let h = dt / substeps as f32;
+        let carried = (carrier.to_pos - carrier.from_pos) * follow;
+        let slack = 0.045 + MAX_SPEED * dt + carrier_vel.length() * h + carried.length();
+        self.pads.clear();
+        for k in 0..caps {
+            let first = self.posed[k].center;
+            let travel = (1..substeps as usize)
+                .map(|s| {
+                    (self.posed[s * caps + k].center
+                        - first
+                        - Vec3A::from(carrier_vel) * (s as f32 * h))
+                        .length()
+                })
+                .fold(0.0, f32::max);
+            self.pads.push(slack + travel);
+        }
+        let step = Step {
+            cfg,
+            verts: &self.verts,
+            frames: &sim.frames,
+            posed: &self.posed,
+            caps,
+            pads: &self.pads,
+            grid: &self.grid,
+            ground: &sim.ground,
+            substeps,
+            dt,
+            time: sim.params.time,
+            gravity: sim.params.gravity,
+            carrier,
+            carrier_vel,
+            carried: carried / substeps as f32,
+            wind_dir,
+            wind_strength,
+            settle: sim.params.damping.max(0.0),
+        };
+        // Strands share nothing but what they read: runs of whole strands side by side.
+        let threads = leaf_pool().thread_num().max(1);
+        let per_run = (self.strands.len().div_ceil(threads)).max(16);
+        let mut runs = Vec::new();
+        let (mut pos, mut vel) = (&mut sim.pos[..], &mut sim.vel[..]);
+        let mut at = 0usize;
+        for (strands, still) in self
+            .strands
+            .chunks(per_run)
+            .zip(self.still.chunks_mut(per_run))
+        {
+            let end = strands
+                .iter()
+                .map(|s| (s.first + s.count) as usize)
+                .max()
+                .unwrap_or(at);
+            let start = strands.iter().map(|s| s.first as usize).min().unwrap_or(at);
+            if start < at || end < start {
+                // Strands out of order: nothing to hand out safely.
+                return;
+            }
+            let (_, p) = std::mem::take(&mut pos).split_at_mut(start - at);
+            let (_, v) = std::mem::take(&mut vel).split_at_mut(start - at);
+            let (p, rest_p) = p.split_at_mut(end - start);
+            let (v, rest_v) = v.split_at_mut(end - start);
+            (pos, vel) = (rest_p, rest_v);
+            at = end;
+            runs.push((strands, still, start, p, v));
+        }
+        let step = &step;
+        if runs.len() > 1 {
+            leaf_pool().scope(|scope| {
+                for (strands, still, base, p, v) in runs {
+                    scope.spawn(async move {
+                        for (s, still) in strands.iter().zip(still) {
+                            step.strand(s, still, base, p, v);
+                        }
+                    });
+                }
+            });
+        } else {
+            for (strands, still, base, p, v) in runs {
+                for (s, still) in strands.iter().zip(still) {
+                    step.strand(s, still, base, p, v);
+                }
+            }
+        }
+    }
+}
+
+impl Step<'_> {
+    /// Which of the capsules in `among` are within `pad` (or each its own of `pads`) of
+    /// touching `p`.
+    #[inline]
+    fn near(caps: &[Posed], among: u32, p: Vec3A, pad: f32, pads: Option<&[f32]>) -> u32 {
+        let (mut left, mut near) = (among, 0u32);
+        while left != 0 {
+            let k = left.trailing_zeros() as usize;
+            left &= left - 1;
+            let c = &caps[k];
+            let reach = c.reach + pad + pads.map_or(0.0, |pads| pads[k]);
+            if p.distance_squared(c.center) < reach * reach {
+                near |= 1 << k;
+            }
+        }
+        near
+    }
+
+    /// Margin kept from a capsule by a point grown `sunk` deep in its kind.
+    #[inline]
+    fn margin(base: f32, sunk: [f32; 2], body: bool) -> f32 {
+        base - sunk[body as usize]
+    }
+
+    /// The capsules of `among` that `p` could touch in a substep's constraint passes, with
+    /// how far off each is now.
+    fn close(&self, caps: &[Posed], among: u32, p: Vec3A, base: f32, sunk: [f32; 2]) -> Close {
+        let mut close = Close {
+            at: p,
+            ..Close::default()
+        };
+        let mut left = Self::near(caps, among, p, REACHED + FILLET + base, None);
+        while left != 0 {
+            let k = left.trailing_zeros() as usize;
+            left &= left - 1;
+            let c = &caps[k];
+            let sd = c.cone.at(p).1;
+            if sd - Self::margin(base, sunk, c.body) > REACHED + FILLET {
+                continue;
+            }
+            let n = close.n as usize;
+            if n < close.cap.len() {
+                (close.cap[n], close.sd[n]) = (k as u8, sd);
+                close.n += 1;
+            } else if let Some(worst) = (0..n).max_by(|a, b| close.sd[*a].total_cmp(&close.sd[*b]))
+                && sd < close.sd[worst]
+            {
+                (close.cap[worst], close.sd[worst]) = (k as u8, sd);
+            }
+        }
+        close
+    }
+
+    /// Push `p` out of the capsules `close` to it: the
+    /// body's blended smooth first (a 5 mm fillet in the creases of neck and shoulders), then
+    /// every capsule exactly. Friction holds the point where it is pressed on, and acts on
+    /// `prev`.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve(
+        &self,
+        caps: &[Posed],
+        close: &Close,
+        mut p: Vec3A,
+        mut prev: Vec3A,
+        base: f32,
+        sunk: [f32; 2],
+        smooth_body: bool,
+    ) -> (Vec3A, Vec3A) {
+        // A distance changes no more than the point moves: what was further off than the
+        // point has come since is still clear.
+        let moved = p.distance(close.at);
+        let near = &close.cap[..close.n as usize];
+        if smooth_body {
+            let margin = Self::margin(base, sunk, true);
+            let mut found: Option<(f32, Vec3A, f32)> = None;
+            for (k, sd) in near.iter().zip(close.sd) {
+                let c = &caps[*k as usize];
+                if !c.body || sd - moved > margin + FILLET {
+                    continue;
+                }
+                let (n, sd) = c.cone.at(p);
+                let d = sd - margin;
+                let fric = self.cfg.friction.max(c.friction);
+                found = Some(match found {
+                    None => (d, n, fric),
+                    Some((sd0, n0, f0)) => {
+                        let h = (FILLET - (sd0 - d).abs()).max(0.0) / FILLET;
+                        let blend = sd0.min(d) - 0.25 * FILLET * h * h;
+                        let smaller = d < sd0;
+                        let (n_min, n_other) = if smaller { (n, n0) } else { (n0, n) };
+                        let n = n_min
+                            .lerp(n_other, 0.5 * h)
+                            .try_normalize()
+                            .unwrap_or(n_min);
+                        (blend, n, if smaller { fric } else { f0 })
+                    }
+                });
+            }
+            if let Some((d, n, fric)) = found
+                && d < 0.0
+            {
+                p -= n * d;
+                let dp = p - prev;
+                let dn = dp.dot(n);
+                let fric = fric.clamp(0.0, 0.94);
+                prev = p - (dp - n * dn) * (1.0 - fric * 0.55) - n * dn.max(0.0) * 0.08;
+            }
+        }
+        let moved = p.distance(close.at);
+        for (k, sd) in near.iter().zip(close.sd) {
+            let c = &caps[*k as usize];
+            let margin = Self::margin(base, sunk, c.body);
+            if sd - moved > margin {
+                continue;
+            }
+            let (n, sd) = c.cone.at(p);
+            if sd < margin {
+                let fric = self.cfg.friction.max(c.friction).clamp(0.0, 0.94);
+                p += n * (margin - sd);
+                let dp = p - prev;
+                let dn = dp.dot(n);
+                prev = p - (dp - n * dn) * (1.0 - fric * 0.50) - n * dn.max(0.0) * 0.05;
+            }
+        }
+        (p, prev)
+    }
+
+    /// `p` at exactly `len` from `parent` and outside every capsule `close` to it: onto the
+    /// sphere around the parent, out of what it is in, then along that capsule's tangent
+    /// plane back to the sphere.
+    #[allow(clippy::too_many_arguments)]
+    fn exact(
+        &self,
+        caps: &[Posed],
+        close: &Close,
+        mut p: Vec3A,
+        parent: Vec3A,
+        len: f32,
+        base: f32,
+        sunk: [f32; 2],
+        fallback: Vec3A,
+    ) -> Vec3A {
+        let onto = |p: Vec3A| {
+            let delta = p - parent;
+            let dist = delta.length();
+            if dist > 1e-7 {
+                parent + delta * (len / dist)
+            } else {
+                parent + fallback * len
+            }
+        };
+        p = onto(p);
+        let near = &close.cap[..close.n as usize];
+        // What the point is within a centimeter of: it moves no further in these passes.
+        let moved = p.distance(close.at) + 0.01;
+        let mut left = 0u32;
+        for (i, sd) in close.sd[..near.len()].iter().enumerate() {
+            let body = caps[near[i] as usize].body;
+            if sd - moved <= Self::margin(base, sunk, body) {
+                left |= 1 << i;
+            }
+        }
+        if left == 0 {
+            return p;
+        }
+        for pass in 0..5 {
+            if pass > 0 {
+                p = onto(p);
+            }
+            let mut hit = false;
+            let mut some = left;
+            while some != 0 {
+                let c = &caps[near[some.trailing_zeros() as usize] as usize];
+                some &= some - 1;
+                let (n, sd) = c.cone.at(p);
+                let margin = Self::margin(base, sunk, c.body);
+                if sd >= margin {
+                    continue;
+                }
+                hit = true;
+                p += n * (margin - sd);
+                let rel = p - parent;
+                let h = rel.dot(n);
+                if h.abs() < len * 0.999 {
+                    let tang = rel - n * h;
+                    let along = tang.try_normalize().unwrap_or_else(|| {
+                        (fallback - n * fallback.dot(n))
+                            .try_normalize()
+                            .or_else(|| n.cross(Vec3A::Y).try_normalize())
+                            .unwrap_or(Vec3A::X)
+                    });
+                    p = parent + n * h + along * (len * len - h * h).max(0.0).sqrt();
+                }
+            }
+            if !hit {
+                return p;
+            }
+        }
+        while left != 0 {
+            let c = &caps[near[left.trailing_zeros() as usize] as usize];
+            left &= left - 1;
+            let (n, sd) = c.cone.at(p);
+            let margin = Self::margin(base, sunk, c.body);
+            if sd < margin {
+                p += n * (margin - sd);
+            }
+        }
+        p
+    }
+
+    /// Keep `p` (particle `i`) above the ground.
+    #[inline]
+    fn above_ground(&self, i: usize, p: Vec3A) -> Vec3A {
+        let g = match self.ground.len() {
+            0 => return p,
+            1 => self.ground[0],
+            _ => match self.ground.get(i) {
+                Some(g) => *g,
+                None => return p,
+            },
+        };
+        let n = Vec3A::new(g[0], g[1], g[2]);
+        let d = n.dot(p) + g[3] - 0.002;
+        if d < 0.0 { p - n * d } else { p }
+    }
+
+    /// Step one strand through every substep. `pos` and `vel` hold particles from `base` on,
+    /// `still` how long the strand has lain still.
+    fn strand(
+        &self,
+        strand: &TressStrand,
+        still: &mut f32,
+        base: usize,
+        pos: &mut [Vec3],
+        vel: &mut [Vec3],
+    ) {
+        let n = strand.count as usize;
+        if !(2..=MAX_VERTS).contains(&n) {
+            return;
+        }
+        let first = strand.first as usize;
+        let v = &self.verts[first..first + n];
+        let run = first - base..first - base + n;
+        let frame = self.frames[strand.frame as usize];
+        if *still >= SLEEPS_AFTER {
+            // Asleep: it rides its frame (which has barely moved, or it would be awake).
+            let (from_pos, from_rot) = frame.pose(0.0);
+            let (to_pos, to_rot) = frame.pose(1.0);
+            let turn = to_rot * from_rot.conjugate();
+            for i in run {
+                pos[i] = to_pos + turn * (pos[i] - from_pos);
+                vel[i] = Vec3::ZERO;
+            }
+            return;
+        }
+        let cfg = self.cfg;
+        let h = self.dt / self.substeps as f32;
+        let inv_h = 1.0 / h;
+        // Per-substep gains are the source's at its 6 substeps of a 60 Hz frame.
+        let per_substep = h * 360.0;
+        let u = Vec3A::from(self.carrier_vel);
+        let carried = Vec3A::from(self.carried);
+        let limit = |vel: Vec3A| {
+            let rel = vel - u;
+            let speed2 = rel.length_squared();
+            if speed2 > MAX_SPEED * MAX_SPEED {
+                u + rel * (MAX_SPEED / speed2.sqrt())
+            } else {
+                vel
+            }
+        };
+        let mut p = [Vec3A::ZERO; MAX_VERTS];
+        let mut prev = [Vec3A::ZERO; MAX_VERTS];
+        let mut rest = [Vec3A::ZERO; MAX_VERTS];
+        let (start_pos, start_rot) = frame.pose(0.0);
+        for i in 0..n {
+            rest[i] = v[i].rest.into();
+            let (x, w) = (pos[run.start + i], vel[run.start + i]);
+            if x.is_finite() && w.is_finite() {
+                p[i] = x.into();
+                prev[i] = (x - w * h).into();
+            } else {
+                p[i] = (start_pos + start_rot * v[i].rest).into();
+                prev[i] = p[i];
+            }
+        }
+        // What holds for each point through the step: its gains, and the air and the hair
+        // around it where it starts (both are smooth over the centimeter it moves in a step).
+        let mut held = [Held::default(); MAX_VERTS];
+        let eff_wind = self.wind_strength;
+        let turb =
+            cfg.turbulence * (0.22 * eff_wind.min(4.0) + 0.07 * (eff_wind * eff_wind).min(6.0));
+        let time = self.time + 0.5 * self.dt;
+        // The turbulence at every fourth point (its eddies are decimeters wide, the points
+        // two centimeters apart), the others between.
+        const EVERY: usize = 4;
+        let mut eddies = [Vec3A::ZERO; MAX_VERTS / EVERY + 2];
+        if eff_wind > 0.0 && turb > 0.0 {
+            let drift = self.wind_dir * (time * (0.45 + 0.35 * eff_wind.min(4.0)));
+            for (k, eddy) in eddies[..(n - 1).div_ceil(EVERY) + 1].iter_mut().enumerate() {
+                let at = Vec3::from(p[(k * EVERY).min(n - 1)]);
+                *eddy = curl_noise(at * cfg.turbulence_freq - drift).into();
+            }
+        }
+        let (c_pos, c_rot) = self.carrier.pose(0.0);
+        let to_head = c_rot.conjugate();
+        let all = if self.caps >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << self.caps) - 1
+        };
+        for i in 1..n {
+            let k = &mut held[i];
+            k.edge = rest[i] - rest[i - 1];
+            k.dir = k.edge.try_normalize().unwrap_or(Vec3A::ZERO);
+            let pw = v[i].pin.clamp(0.0, 1.0);
+            if pw > 0.001 {
+                k.pin = (1.0 - (1.0 - (pw * 0.92).min(0.96)).powf(h * 60.0)).clamp(0.0, 0.85);
+            }
+            let boost = match i {
+                1 => 2.3,
+                2 => 1.45,
+                _ => 1.0,
+            };
+            let stiff = (v[i].stiffness * cfg.stiffness).clamp(0.0, 1.0);
+            k.shape = (stiff.powf(1.42) * 0.064 * boost * per_substep).clamp(0.0, 0.28);
+            k.bend = (v[i].bend * cfg.stiffness).clamp(0.0, 1.0);
+            for (skip, chord) in k.chord.iter_mut().enumerate() {
+                let skip = skip + 1;
+                if i >= skip && i + skip < n {
+                    *chord = rest[i + skip].distance(rest[i - skip]);
+                }
+            }
+            k.damp = (-(cfg.damping * v[i].damping.max(0.1) * 60.0 + self.settle) * h).exp();
+            k.aero = cfg.air_drag * smoothstep(0.0, 0.15, v[i].t);
+            let ramp = smoothstep(0.0, 0.22, v[i].t);
+            k.margin = [0.0005 + 0.0022 * ramp, 0.0004 + 0.0018 * ramp];
+            k.smooth = v[i].t > 0.16;
+            k.near = Self::near(&self.posed[..self.caps], all, p[i], 0.0, Some(self.pads));
+            if eff_wind > 0.0 {
+                let gust = 1.0
+                    + cfg.gust
+                        * (0.55 * (time * 2.3 + p[i].x * 3.2 + strand.seed * 1.7).sin()
+                            + 0.45 * (time * 4.1 - p[i].z * 2.8 + p[i].y * 1.9).sin());
+                let mut wind = Vec3A::from(self.wind_dir) * (eff_wind * 0.68 * gust.max(0.15));
+                if turb > 0.0 {
+                    let (at, part) = (i / EVERY, (i % EVERY) as f32 / EVERY as f32);
+                    let mut curl = eddies[at].lerp(eddies[at + 1], part);
+                    // Updrafts are damped: gusts sweep the hair sideways, not up.
+                    if curl.y > 0.0 {
+                        curl.y *= 0.22;
+                    }
+                    wind += curl * turb;
+                }
+                if wind.y > 0.12 {
+                    wind.y = 0.12 + (wind.y - 0.12) * 0.15;
+                }
+                k.wind = wind;
+            }
+            k.acc = self.gravity.into();
+            if cfg.self_collision > 0.001 {
+                let (density, grad, mean) = self
+                    .grid
+                    .sample(to_head * (Vec3::from(p[i]) - c_pos), vel[run.start + i]);
+                let mut pressure = -(c_rot * grad / (density + 6.0)) * (0.065 * cfg.self_collision);
+                if pressure.y > 0.0 {
+                    pressure.y *= 0.12;
+                }
+                let len = pressure.length();
+                if len > 2.8 {
+                    pressure *= 2.8 / len;
+                }
+                k.acc += Vec3A::from(pressure * smoothstep(0.08, 0.30, v[i].t));
+                if density > 0.5 && cfg.cohesion > 0.001 {
+                    let w = (density / 14.0).clamp(0.0, 1.0) * cfg.cohesion * cfg.self_collision;
+                    k.mean = mean.into();
+                    k.cohere = (w * h * 10.0).clamp(0.0, 0.28);
+                }
+            }
+        }
+        let inv_aniso = 1.0 / cfg.aniso.max(1.0);
+        let iterations = cfg.iterations.clamp(1, 8);
+        let settle = (-self.settle * h).exp();
+        let mut close = [Close::default(); MAX_VERTS];
+        let seg = (1..n).map(|i| held[i].edge.length()).sum::<f32>() / (n - 1) as f32;
+        let inner = cfg.inner_friction.max(0.0) * h / (seg * seg).max(1e-8);
+        for s in 0..self.substeps {
+            let frac = (s + 1) as f32 / self.substeps as f32;
+            let (h_pos, h_quat) = frame.pose(frac);
+            let h_rot = engine_core::glam::Mat3A::from_quat(h_quat);
+            let caps = &self.posed[s as usize * self.caps..(s as usize + 1) * self.caps];
+            // 1. The root rides the frame.
+            let h_pos = Vec3A::from(h_pos);
+            let root = h_pos + h_rot * rest[0];
+            // 0. Friction inside the lock: every point's velocity spread along the strand
+            //    from the root's (an implicit step of its diffusion, solved down and up the
+            //    strand).
+            if inner > 0.0 {
+                let mut w = [Vec3A::ZERO; MAX_VERTS];
+                let mut c = [0.0f32; MAX_VERTS];
+                w[0] = (root - (p[0] + carried)) * inv_h;
+                for i in 1..n {
+                    let (b, up) = if i == n - 1 {
+                        (1.0 + inner, 0.0)
+                    } else {
+                        (1.0 + 2.0 * inner, -inner)
+                    };
+                    let denom = b + inner * c[i - 1];
+                    c[i] = up / denom;
+                    w[i] = ((p[i] - prev[i]) * inv_h + w[i - 1] * inner) / denom;
+                }
+                for i in (1..n - 1).rev() {
+                    w[i] -= w[i + 1] * c[i];
+                }
+                for i in 1..n {
+                    prev[i] = p[i] - w[i] * h;
+                }
+            }
+            p[0] = root;
+            prev[0] = p[0];
+            // 2. Forces and prediction.
+            for i in 1..n {
+                let k = &held[i];
+                p[i] += carried;
+                prev[i] += carried;
+                let mut vel = limit((p[i] - prev[i]) * inv_h);
+                let tangent = (p[i] - p[i - 1]).try_normalize().unwrap_or(Vec3A::NEG_Y);
+                let rel = k.wind - (vel - u);
+                let along = tangent * rel.dot(tangent);
+                let eff = (rel - along) + along * inv_aniso;
+                let mut aero = eff * (k.aero * (0.45 + 0.50 * eff.length().min(6.5)));
+                aero.y = aero.y.min(2.5);
+                let len2 = aero.length_squared();
+                if len2 > 24.0 * 24.0 {
+                    aero *= 24.0 / len2.sqrt();
+                }
+                if k.cohere > 0.0 {
+                    vel = vel.lerp(k.mean, k.cohere);
+                }
+                vel = u + (vel - u) * k.damp;
+                prev[i] = p[i];
+                p[i] += vel * h + (k.acc + aero) * (h * h);
+            }
+            // 3. The head carries the first points softly.
+            for i in 1..n {
+                if held[i].pin > 0.0 {
+                    p[i] = p[i].lerp(h_pos + h_rot * rest[i], held[i].pin);
+                }
+            }
+            // 4. Every segment turns toward its grown direction relative to the one before
+            //    (70% of the way of the segment before's turn from how it was grown).
+            for i in 1..n {
+                let k = held[i].shape;
+                if k <= 1e-5 {
+                    continue;
+                }
+                let mut edge = h_rot * held[i].edge;
+                if i >= 2
+                    && held[i - 1].dir != Vec3A::ZERO
+                    && let Some(now) = (p[i - 1] - p[i - 2]).try_normalize()
+                {
+                    edge = turned(edge, h_rot * held[i - 1].dir, now, 0.70);
+                }
+                let diff = (p[i - 1] + edge - p[i]) * k;
+                if i >= 2 {
+                    p[i - 1] -= diff * 0.5;
+                    p[i] += diff * 0.5;
+                } else {
+                    p[i] += diff;
+                }
+            }
+            // The capsules each point can touch in this substep.
+            for i in 1..n {
+                close[i] = if held[i].near == 0 {
+                    Close::default()
+                } else {
+                    self.close(caps, held[i].near, p[i], held[i].margin[0], v[i].sunk)
+                };
+            }
+            // 5. Bends, lengths and the body.
+            for it in 0..iterations {
+                if it == 0 {
+                    for skip in [1usize, 2] {
+                        let gain = if skip == 1 { 0.082 } else { 0.060 };
+                        if n < 2 * skip + 1 {
+                            continue;
+                        }
+                        for (i, k) in held.iter().enumerate().take(n - skip).skip(skip) {
+                            let kb = k.bend;
+                            if kb < 0.01 {
+                                continue;
+                            }
+                            let (a, b) = (i - skip, i + skip);
+                            let chord = k.chord[skip - 1];
+                            let d = p[b] - p[a];
+                            let len = d.length();
+                            if len > 1e-6 && chord > 1e-6 {
+                                let corr = d * ((len - chord) / len) * (gain * kb);
+                                // The root doesn't move; the other end takes it all.
+                                if a == 0 {
+                                    p[b] -= corr;
+                                } else {
+                                    p[a] += corr * 0.5;
+                                    p[b] -= corr * 0.5;
+                                }
+                            }
+                        }
+                    }
+                }
+                for i in 1..n {
+                    let len = v[i].rest_len;
+                    let delta = p[i] - p[i - 1];
+                    let dist = delta.length();
+                    if dist > 1e-7 {
+                        if it + 1 < iterations {
+                            let corr = delta * ((dist - len) / dist);
+                            if i >= 2 {
+                                p[i - 1] += corr * 0.5;
+                                p[i] -= corr * 0.5;
+                            } else {
+                                p[i] -= corr;
+                            }
+                        } else {
+                            p[i] = p[i - 1] + delta * (len / dist);
+                        }
+                    } else {
+                        let dir = if held[i].dir == Vec3A::ZERO {
+                            Vec3A::NEG_Y
+                        } else {
+                            held[i].dir
+                        };
+                        p[i] = p[i - 1] + h_rot * dir * len;
+                    }
+                }
+                for i in 1..n {
+                    if close[i].n != 0 {
+                        (p[i], prev[i]) = self.resolve(
+                            caps,
+                            &close[i],
+                            p[i],
+                            prev[i],
+                            held[i].margin[0],
+                            v[i].sunk,
+                            held[i].smooth,
+                        );
+                    }
+                    p[i] = self.above_ground(first + i, p[i]);
+                }
+            }
+            // 6. Exact lengths outside every capsule; the snap adds no speed.
+            for i in 1..n {
+                let dir = if held[i].dir == Vec3A::ZERO {
+                    Vec3A::NEG_Y
+                } else {
+                    held[i].dir
+                };
+                let exact = self.exact(
+                    caps,
+                    &close[i],
+                    p[i],
+                    p[i - 1],
+                    v[i].rest_len,
+                    held[i].margin[1],
+                    v[i].sunk,
+                    h_rot * dir,
+                );
+                prev[i] += exact - p[i];
+                p[i] = exact;
+            }
+            // 7. Velocities: a little of the segment before's (no chatter at the tips), the
+            //    speed limit, and rest for what barely moves.
+            let mut before = u;
+            for i in 1..n {
+                let mut w = limit(((p[i] - prev[i]) * inv_h).lerp(before, 0.045));
+                w = u + (w - u) * settle;
+                if (w - u).length_squared() < 0.03 * 0.03 {
+                    w = u + (w - u) * 0.82;
+                }
+                prev[i] = p[i] - w * h;
+                before = w;
+            }
+        }
+        let (end_pos, end_rot) = frame.pose(1.0);
+        let mut fastest = 0.0f32;
+        for i in 1..n {
+            fastest = fastest.max(((p[i] - prev[i]) * inv_h - u).length_squared());
+        }
+        // A body settling into place under its damping is slow all the way: no rest for it
+        // halfway.
+        *still = if fastest < RESTFUL * RESTFUL && self.settle <= 0.0 {
+            *still + self.dt
+        } else {
+            0.0
+        };
+        for i in 0..n {
+            let (mut x, mut w) = (Vec3::from(p[i]), Vec3::from((p[i] - prev[i]) * inv_h));
+            if !x.is_finite() || (x - end_pos).length_squared() > 25.0 {
+                x = end_pos + end_rot * v[i].rest;
+                w = self.carrier_vel;
+            }
+            if !w.is_finite() {
+                w = self.carrier_vel;
+            }
+            pos[run.start + i] = x;
+            vel[run.start + i] = if i == 0 { Vec3::ZERO } else { w };
+        }
+    }
+}
+
+/// The capsules a point could touch in one substep's constraint passes: how far off each was
+/// when the point was at `at`.
+#[derive(Clone, Copy, Default)]
+struct Close {
+    at: Vec3A,
+    n: u8,
+    cap: [u8; 6],
+    sd: [f32; 6],
+}
+
+/// What holds for a point of a strand through one step.
+#[derive(Clone, Copy, Default)]
+struct Held {
+    /// The segment to the point before as grown, in the strand's frame, and its direction
+    /// (zero without one).
+    edge: Vec3A,
+    dir: Vec3A,
+    /// Per-substep gains: toward where the head carries the point, toward its grown
+    /// direction, on its bends; what is left of its speed; its share of the air's drag.
+    pin: f32,
+    shape: f32,
+    bend: f32,
+    damp: f32,
+    aero: f32,
+    /// As-grown distances between the points one and two to either side.
+    chord: [f32; 2],
+    /// Clearances kept from the capsules: sliding off them, and in the last exact pass.
+    margin: [f32; 2],
+    /// Far enough down the strand to feel the body's creases blended.
+    smooth: bool,
+    /// The capsules it can reach within the step.
+    near: u32,
+    /// Gravity and the hair's pressure, the wind there, and the velocity of the hair around
+    /// it with how much of it the point takes on each substep.
+    acc: Vec3A,
+    wind: Vec3A,
+    mean: Vec3A,
+    cohere: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::solver::Frame;
+
+    /// A head of straight strands hanging from a ring around a sphere, with a neck below.
+    fn head(strands: usize, points: usize) -> (Sim, Tress) {
+        let mut sim = Sim::new(DVec3::ZERO);
+        let frame = sim.add_frame(Vec3::ZERO, Quat::IDENTITY);
+        let mut tress = Tress {
+            carrier: frame,
+            ..Tress::default()
+        };
+        tress.capsules.push(TressCapsule {
+            frame,
+            a: Vec3::ZERO,
+            ra: 0.09,
+            b: Vec3::new(0.0, -0.02, 0.0),
+            rb: 0.085,
+            friction: 0.22,
+            body: false,
+        });
+        tress.capsules.push(TressCapsule {
+            frame,
+            a: Vec3::new(0.0, -0.08, 0.0),
+            ra: 0.05,
+            b: Vec3::new(0.0, -0.2, 0.0),
+            rb: 0.06,
+            friction: 0.3,
+            body: true,
+        });
+        let seg = 0.02;
+        for s in 0..strands {
+            let angle = s as f32 / strands as f32 * std::f32::consts::TAU;
+            let root = Vec3::new(angle.cos(), 0.25, angle.sin()).normalize() * 0.092;
+            let first = sim.len() as u32;
+            for k in 0..points {
+                // Out a little, then down.
+                let rest = root
+                    + Vec3::new(root.x, 0.0, root.z).normalize() * (0.01 * k.min(2) as f32)
+                    - Vec3::Y * (seg * k as f32);
+                let rest = if k == 0 { root } else { rest };
+                sim.add_particle(rest, 0.001);
+                let t = k as f32 / (points - 1) as f32;
+                tress.verts.push(TressVertex {
+                    rest,
+                    rest_len: 0.0,
+                    t,
+                    stiffness: 0.5 - 0.36 * t,
+                    bend: 0.46 - 0.3 * t,
+                    pin: match k {
+                        0 => 1.0,
+                        1 => 0.38,
+                        2 => 0.12,
+                        _ => 0.0,
+                    },
+                    damping: 1.0,
+                    sunk: [0.0; 2],
+                });
+            }
+            for k in 1..points {
+                let i = first as usize + k;
+                tress.verts[i].rest_len = tress.verts[i].rest.distance(tress.verts[i - 1].rest);
+            }
+            sim.pin(first, frame, root);
+            tress.strands.push(TressStrand {
+                first,
+                count: points as u32,
+                frame,
+                seed: s as f32 * 0.37 % 1.0,
+            });
+        }
+        (sim, tress)
+    }
+
+    fn stretch(sim: &Sim, tress: &Tress) -> f32 {
+        let mut worst = 0.0f32;
+        for s in &tress.strands {
+            for i in s.first as usize + 1..(s.first + s.count) as usize {
+                let len = sim.pos[i].distance(sim.pos[i - 1]);
+                worst = worst.max((len / tress.verts[i].rest_len - 1.0).abs());
+            }
+        }
+        worst
+    }
+
+    fn deepest(sim: &Sim, tress: &Tress) -> f32 {
+        let mut deepest = f32::MAX;
+        for (i, p) in sim.pos.iter().enumerate() {
+            if tress.verts[i].t == 0.0 {
+                continue;
+            }
+            for c in &tress.capsules {
+                let f = sim.frames[c.frame as usize];
+                let (a, b) = (f.to_pos + f.to_rot * c.a, f.to_pos + f.to_rot * c.b);
+                deepest = deepest.min(tapered_capsule(*p, a, b, c.ra, c.rb).1);
+            }
+        }
+        deepest
+    }
+
+    /// The source project's head shake: 6.8 rad/s, 45 degrees each way, in bursts.
+    fn shake(time: f32) -> (Vec3, Quat) {
+        let env = (0.9 * time).sin().abs().powf(0.4);
+        let shake = (6.8 * time).sin() * env;
+        let rot = Quat::from_euler(
+            EulerRot::YXZ,
+            0.78 * shake,
+            0.14 * (3.4 * time).sin(),
+            0.24 * (6.8 * time + 0.6).sin() * env,
+        );
+        (
+            Vec3::new(0.018 * shake, 0.006 * (6.8 * time).cos().abs(), 0.0),
+            rot,
+        )
+    }
+
+    #[test]
+    fn round_cone_distance_matches_spheres_along_the_axis() {
+        let (a, b) = (Vec3::ZERO, Vec3::new(0.0, -0.3, 0.0));
+        // Beside the middle of an untapered capsule.
+        let (n, d) = tapered_capsule(Vec3::new(0.2, -0.15, 0.0), a, b, 0.05, 0.05);
+        assert!((d - 0.15).abs() < 1e-5 && (n - Vec3::X).length() < 1e-4);
+        // Beyond each end: the end's sphere.
+        let (n, d) = tapered_capsule(Vec3::new(0.0, 0.2, 0.0), a, b, 0.05, 0.02);
+        assert!((d - 0.15).abs() < 1e-5 && (n - Vec3::Y).length() < 1e-4);
+        let (_, d) = tapered_capsule(Vec3::new(0.0, -0.5, 0.0), a, b, 0.05, 0.02);
+        assert!((d - 0.18).abs() < 1e-5);
+        // Tapered: never further out than the linearly tapered spheres along the axis.
+        for k in 0..50 {
+            let p = Vec3::new(0.03 + 0.002 * k as f32, -0.006 * k as f32, 0.01);
+            let (_, d) = tapered_capsule(p, a, b, 0.05, 0.02);
+            let spheres = (0..=100)
+                .map(|s| {
+                    let t = s as f32 / 100.0;
+                    p.distance(a.lerp(b, t)) - (0.05 + (0.02 - 0.05) * t)
+                })
+                .fold(f32::MAX, f32::min);
+            assert!(d <= spheres + 1e-4, "{d} {spheres}");
+        }
+    }
+
+    #[test]
+    fn hair_keeps_its_length_and_stays_out_of_the_head_through_a_head_shake() {
+        let (mut sim, mut tress) = head(48, 20);
+        let dt = 1.0 / 60.0;
+        let mut worst_stretch = 0.0f32;
+        let mut deepest_in = f32::MAX;
+        let mut swung = 0.0f32;
+        for step in 0..600 {
+            let (pos, rot) = shake(step as f32 * dt);
+            sim.set_frame(0, pos, rot);
+            tress.step(&mut sim, dt);
+            sim.params.time += dt;
+            for f in &mut sim.frames {
+                (f.from_pos, f.from_rot) = (f.to_pos, f.to_rot);
+            }
+            assert!(sim.pos.iter().all(|p| p.is_finite()));
+            worst_stretch = worst_stretch.max(stretch(&sim, &tress));
+            deepest_in = deepest_in.min(deepest(&sim, &tress));
+            // How far the tips are from where the head alone would carry them.
+            for s in &tress.strands {
+                let tip = (s.first + s.count - 1) as usize;
+                swung = swung.max(sim.pos[tip].distance(pos + rot * tress.verts[tip].rest));
+            }
+        }
+        assert!(worst_stretch < 0.015, "stretched {worst_stretch}");
+        assert!(deepest_in > -1e-4, "{deepest_in} m inside a capsule");
+        assert!(swung > 0.05, "the hair swings in a shake: {swung} m");
+    }
+
+    #[test]
+    fn hair_comes_to_rest_and_blows_downwind() {
+        let (mut sim, mut tress) = head(32, 20);
+        let dt = 1.0 / 60.0;
+        let run = |sim: &mut Sim, tress: &mut Tress, steps: usize, wind: Vec3| {
+            sim.params.wind = wind;
+            for _ in 0..steps {
+                tress.step(sim, dt);
+                sim.params.time += dt;
+            }
+        };
+        run(&mut sim, &mut tress, 300, Vec3::ZERO);
+        let fastest = sim.vel.iter().fold(0.0f32, |m, v| m.max(v.length()));
+        assert!(fastest < 0.02, "still air: at rest ({fastest} m/s)");
+        let mean_x = |sim: &Sim| sim.pos.iter().map(|p| p.x).sum::<f32>() / sim.len() as f32;
+        let calm = mean_x(&sim);
+        run(&mut sim, &mut tress, 240, Vec3::new(5.0, 0.0, 0.0));
+        let blown = mean_x(&sim);
+        assert!(
+            blown > calm + 0.01,
+            "a 5 m/s wind moves the hair: {calm} {blown}"
+        );
+        // It hangs, even in a gale: not flat out, not over the head.
+        run(&mut sim, &mut tress, 240, Vec3::new(14.0, 0.0, 0.0));
+        let tips_up = tress
+            .strands
+            .iter()
+            .filter(|s| sim.pos[(s.first + s.count - 1) as usize].y > 0.05)
+            .count();
+        assert!(
+            tips_up < tress.strands.len() / 4,
+            "{tips_up} tips above the head"
+        );
+        assert!(deepest(&sim, &tress) > -1e-4);
+        run(&mut sim, &mut tress, 900, Vec3::ZERO);
+        assert!(
+            (mean_x(&sim) - calm).abs() < 0.01,
+            "and falls back: {} {calm}",
+            mean_x(&sim)
+        );
+    }
+
+    /// `cargo test -p engine_softbody --release --lib tress::tests::cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement"]
+    fn cost_of_a_head_of_hair() {
+        let (mut sim, mut tress) = head(300, 20);
+        // As many capsules as a person has: shoulders, arms and a torso under the neck.
+        for k in 0..20 {
+            let side = if k % 2 == 0 { -1.0 } else { 1.0 };
+            let row = (k / 2) as f32;
+            tress.capsules.push(TressCapsule {
+                frame: 0,
+                a: Vec3::new(side * 0.04, -0.2 - 0.02 * row, 0.02 * (row - 4.0)),
+                ra: 0.05,
+                b: Vec3::new(side * (0.1 + 0.01 * row), -0.24 - 0.02 * row, 0.0),
+                rb: 0.045,
+                friction: 0.4,
+                body: true,
+            });
+        }
+        let dt = 1.0 / 60.0;
+        sim.params.wind = Vec3::new(3.0, 0.0, 0.0);
+        let started = std::time::Instant::now();
+        for step in 0..300 {
+            let (pos, rot) = shake(step as f32 * dt);
+            sim.set_frame(0, pos, rot);
+            tress.step(&mut sim, dt);
+            sim.params.time += dt;
+            for f in &mut sim.frames {
+                (f.from_pos, f.from_rot) = (f.to_pos, f.to_rot);
+            }
+        }
+        println!(
+            "{} strands, {} points: {:.2} ms a step on {} threads",
+            tress.strands.len(),
+            sim.len(),
+            started.elapsed().as_secs_f64() * 1000.0 / 300.0,
+            leaf_pool().thread_num()
+        );
+    }
+
+    #[test]
+    fn a_moving_head_takes_its_hair_along() {
+        let (mut sim, mut tress) = head(24, 16);
+        let dt = 1.0 / 60.0;
+        // A dash: 20 m/s within a step, held for a second.
+        let mut at = Vec3::ZERO;
+        for step in 0..90 {
+            let v = if step >= 10 { 20.0 } else { 0.0 };
+            at += Vec3::new(0.0, 0.0, v * dt);
+            sim.frames[0] = Frame {
+                from_pos: sim.frames[0].to_pos,
+                from_rot: Quat::IDENTITY,
+                to_pos: at,
+                to_rot: Quat::IDENTITY,
+            };
+            tress.step(&mut sim, dt);
+            sim.params.time += dt;
+            assert!(stretch(&sim, &tress) < 0.02, "step {step}");
+        }
+        assert!(deepest(&sim, &tress) > -1e-4);
+        // Streaming behind, attached.
+        let behind = sim.pos.iter().map(|p| p.z - at.z).sum::<f32>() / sim.len() as f32;
+        assert!(behind < -0.01 && behind > -0.5, "{behind}");
+    }
+}

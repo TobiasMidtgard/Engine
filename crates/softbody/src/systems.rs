@@ -2062,7 +2062,7 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
     let origin = b.sim.origin;
 
     // Frames.
-    let poses = frame_poses(b, ctx);
+    let mut poses = frame_poses(b, ctx);
     // A frame that jumps further in one step than anything moves (a respawn, a boat sent
     // back to its mooring) carries the whole body with it instead of dragging it across.
     let jump = (5.0f32).max(2.0 * b.radius);
@@ -2080,6 +2080,14 @@ fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<
         .flatten();
     if let Some((i, p, r)) = teleport {
         b.sim.carry(i, p, r);
+    }
+    // Scalp hair follows bones posed once a drawn frame: evenly, not in stairs.
+    if b.sim.tress.is_some() {
+        if b.steps == 0 || teleport.is_some() {
+            b.cadence.reset();
+        } else {
+            b.cadence.spread(&mut poses, &b.sim.frames);
+        }
     }
     for (i, pose) in poses.iter().enumerate() {
         if let Some((p, r)) = *pose {

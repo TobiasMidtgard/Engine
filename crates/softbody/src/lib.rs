@@ -12,6 +12,7 @@ pub mod gpu_cloth;
 pub mod grab;
 pub mod guides;
 pub mod hair;
+pub mod hair_body;
 pub mod render;
 pub mod rope;
 pub mod settings;
@@ -19,6 +20,7 @@ pub mod solver;
 pub mod strand_draw;
 pub mod sway;
 pub mod systems;
+pub mod tress;
 pub mod volume;
 
 use engine_core::prelude::*;
