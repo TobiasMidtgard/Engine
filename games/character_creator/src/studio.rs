@@ -65,6 +65,13 @@ fn daylight() -> bool {
     std::env::args().any(|a| a == "--daylight")
 }
 
+/// `--floor <hex>`: the floor's color (RRGGBB, with or without `#` or `0x`).
+fn floor_arg() -> Option<u32> {
+    let v = std::env::args().skip_while(|a| a != "--floor").nth(1)?;
+    let v = v.trim_start_matches('#').trim_start_matches("0x");
+    u32::from_str_radix(v, 16).ok().filter(|c| *c <= 0xff_ffff)
+}
+
 pub fn setup(
     mut commands: Commands,
     mut settings: ResMut<RenderSettings>,
@@ -73,8 +80,10 @@ pub fn setup(
     let daylight = daylight();
     // Light bounced off the ground takes the floor's color (the atmosphere's default ground
     // is grass, which tinted chins and the undersides of hair green; shaded blond hair went
-    // olive).
-    let floor = if daylight { 0xb08850 } else { 0x2e2d2b };
+    // olive). Outdoors it is neutral grey pavement (albedo about 0.25): the sandy floor it
+    // replaced bounced almost no blue, so shaded brown hair went maroon and faces orange.
+    // `--floor <hex>` picks another (e.g. `--floor b08850`).
+    let floor = floor_arg().unwrap_or(if daylight { 0x8c8881 } else { 0x2e2d2b });
     if let Some(mut atmosphere) = atmosphere {
         let c = StandardMaterial::hex(floor).base_color;
         atmosphere.ground_color = [c[0], c[1], c[2]];
