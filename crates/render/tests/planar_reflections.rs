@@ -1,10 +1,14 @@
 //! Planar reflections: a mirror shows what lies above its plane reflected, where the main camera
 //! sees it, including what is off the top of the screen, and never what lies under the plane.
 //! A small test feature draws the mirror's rectangle with its picture, as a water shader does.
-//! Needs a GPU or lavapipe; passes with a note when neither is available.
+//! The same with the picture traced by the frame's rays in place of the mirror's view
+//! (`trial_cut_more::RAY_MIRROR_PICTURES`), which needs ray queries (lavapipe has them). Needs
+//! a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
+use engine_render::settings::shade_skip::COUNT_MESH_RUNS;
+use engine_render::settings::trial_cut_more::{RAY_MIRROR_PICTURES, RAY_WORLD};
 use engine_render::{
     FrameContext, GpuShared, PlanarReflection, RenderDisabled, ViewData, capture_now,
     planar_reflection_picture, rendering_reflection,
@@ -255,7 +259,11 @@ fn mirrored(p: DVec3) -> DVec3 {
     DVec3::new(p.x, -p.y, p.z)
 }
 
-fn render(name: &str) -> Option<(image::RgbImage, f64)> {
+/// The balls over the mirror, not yet rendered; `traced`: the frame's rays trace the mirror's
+/// picture (`trial_cut_more::RAY_MIRROR_PICTURES`), with probe GI on ray-tracing hardware
+/// through the frame's ray scene (a few probes a frame: their rays are most of a frame's time
+/// on a software GPU), the trace counted.
+fn ball_app(traced: bool) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -272,6 +280,15 @@ fn render(name: &str) -> Option<(image::RgbImage, f64)> {
         s.film_grain = 0.0;
         s.screen_space_gi = false;
         s.probe_gi = false;
+        if traced {
+            s.probe_gi = true;
+            s.gi_hardware_rays = true;
+            s.gi_probe_spacing = 1.0;
+            s.gi_probe_grid = [16, 8, 16];
+            s.gi_probes_per_frame = 16;
+            s.trial_cuts_more |= RAY_WORLD | RAY_MIRROR_PICTURES;
+            s.debug_skip |= COUNT_MESH_RUNS;
+        }
     }
     let w = &mut app.world;
     w.spawn((
@@ -303,6 +320,23 @@ fn render(name: &str) -> Option<(image::RgbImage, f64)> {
             StandardMaterial::color(0.1, 0.2, 0.8),
         ),
     ));
+    app
+}
+
+/// What [`render`] saw: the shot and the frame's numbers.
+struct Rendered {
+    shot: image::RgbImage,
+    diagnostics: Diagnostics,
+}
+
+impl Rendered {
+    fn get(&self, key: &str) -> f64 {
+        self.diagnostics.get(key).unwrap_or(-1.0)
+    }
+}
+
+fn render(name: &str, traced: bool) -> Option<Rendered> {
+    let mut app = ball_app(traced);
     app.update_n(5);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
@@ -315,20 +349,15 @@ fn render(name: &str) -> Option<(image::RgbImage, f64)> {
     if let Ok(out) = std::env::var("ENGINE_SHOTS") {
         let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
     }
-    let views = app
-        .world
-        .resource::<Diagnostics>()
-        .get("render.extra_views")
-        .unwrap_or(0.0);
-    Some((image::open(&path).expect("read the shot").to_rgb8(), views))
+    Some(Rendered {
+        shot: image::open(&path).expect("read the shot").to_rgb8(),
+        diagnostics: app.world.resource::<Diagnostics>().clone(),
+    })
 }
 
-#[test]
-fn a_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_it() {
-    let Some((shot, views)) = render("mirror.png") else {
-        return;
-    };
-    assert_eq!(views, 1.0, "render.extra_views");
+/// The red ball's reflection, the yellow one's (the ball itself off the top of the screen), the
+/// red ball itself, and no green (the ball under the plane) anywhere.
+fn assert_reflects_what_is_above(shot: &image::RgbImage, what: &str) {
     let at = |p: DVec3| {
         let q = pixel(p);
         let inside = q.cmpge(IVec2::ZERO).all() && q.cmplt(WINDOW.as_ivec2()).all();
@@ -344,24 +373,72 @@ fn a_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_it() {
     let red = at(mirrored(RED));
     assert!(
         red[0] > red[1] + 60 && red[0] > red[2] + 60,
-        "the red ball's reflection: {red:?}"
+        "{what}: the red ball's reflection: {red:?}"
     );
     let yellow = at(mirrored(YELLOW));
     assert!(
         yellow[0] > yellow[2] + 60 && yellow[1] > yellow[2] + 60,
-        "the yellow ball's reflection: {yellow:?}"
+        "{what}: the yellow ball's reflection: {yellow:?}"
     );
     // The red ball itself, above the mirror, is red too.
     let direct = at(RED);
-    assert!(direct[0] > direct[2] + 60, "the red ball: {direct:?}");
+    assert!(
+        direct[0] > direct[2] + 60,
+        "{what}: the red ball: {direct:?}"
+    );
     let green = shot
         .pixels()
         .filter(|p| p.0[1] as i32 > p.0[0] as i32 + 60 && p.0[1] as i32 > p.0[2] as i32 + 60)
         .count();
     assert!(
         green == 0,
-        "{green} pixels show the green ball under the mirror"
+        "{what}: {green} pixels show the green ball under the mirror"
     );
+}
+
+#[test]
+fn a_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_it() {
+    let Some(r) = render("mirror.png", false) else {
+        return;
+    };
+    assert_eq!(r.get("render.extra_views"), 1.0, "render.extra_views");
+    assert_reflects_what_is_above(&r.shot, "drawn");
+}
+
+/// The same with the picture traced by the frame's rays: the mirror's view is not drawn, and
+/// the picture holds the yellow ball off the top of the screen (a ray's hit, lit by its own
+/// light), the red ball (the screen's, or a ray's) and nothing under the plane.
+#[test]
+fn a_traced_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_it() {
+    let Some(r) = render("mirror-traced.png", true) else {
+        return;
+    };
+    if r.get("render.ray.supported") != 1.0 {
+        eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+        return;
+    }
+    assert_eq!(r.get("render.ray.on"), 1.0, "the ray scene is on");
+    assert_eq!(r.get("render.ray.losses"), 0.0);
+    assert_eq!(r.get("render.ray.mirror_pictures"), 1.0, "a traced picture");
+    // Sized to the part of the screen the mirror covers, most of the lower half of 400 x 300 at
+    // resolution 1 (a picture is never under 32 x 32, 1,024 texels).
+    assert!(
+        r.get("render.ray.mirror_texels") > 40_000.0,
+        "its texels: {}",
+        r.get("render.ray.mirror_texels")
+    );
+    assert!(
+        r.get("render.extra_views") <= 0.0,
+        "no view drawn: {}",
+        r.get("render.extra_views")
+    );
+    // Its rays were counted: the yellow ball can only be a ray's.
+    assert!(
+        r.get("render.ray.mirror_rays") > 0.0,
+        "rays: {}",
+        r.get("render.ray.mirror_rays")
+    );
+    assert_reflects_what_is_above(&r.shot, "traced");
 }
 
 /// A white wall behind the mirror with a post's shadow on it, seen in the mirror: rendered with
@@ -505,6 +582,78 @@ fn a_mirror_switched_off_and_on_keeps_its_view() {
     assert!(
         after.depth == before.depth,
         "the same depth target, not built anew"
+    );
+}
+
+/// A mirror whose picture the frame's rays trace has one every frame from its view camera,
+/// which is placed but not drawn; drawn again, the view's first picture is not kept (a reader
+/// sees none for a frame and starts over, as when a mirror comes on: the water lets a mirror's
+/// first pictures settle), then its pictures come from the view's own targets, kept while it
+/// was traced.
+#[test]
+fn a_traced_mirror_drawn_again_starts_over_with_its_own_view() {
+    let mut app = ball_app(true);
+    app.world.resource_mut::<RenderSettings>().trial_cuts_more &= !RAY_MIRROR_PICTURES;
+    app.update_n(3);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let get = |app: &App, key: &str| app.world.resource::<Diagnostics>().get(key).unwrap_or(-1.0);
+    if get(&app, "render.ray.supported") != 1.0 {
+        eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+        return;
+    }
+    let mirror = app
+        .world
+        .query_filtered::<Entity, With<PlanarReflection>>()
+        .single(&app.world)
+        .unwrap();
+    let picture = |app: &App| planar_reflection_picture(&app.world, mirror).cloned();
+    let drawn = picture(&app).expect("a drawn picture");
+    assert_eq!(get(&app, "render.extra_views"), 1.0, "the mirror's view");
+    let traced = |app: &mut App, on: bool| {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        if on {
+            s.trial_cuts_more |= RAY_MIRROR_PICTURES;
+        } else {
+            s.trial_cuts_more &= !RAY_MIRROR_PICTURES;
+        }
+    };
+    traced(&mut app, true);
+    for frame in 0..3 {
+        app.update();
+        let p = picture(&app).unwrap_or_else(|| panic!("frame {frame}: no traced picture"));
+        assert_eq!(
+            p.camera, drawn.camera,
+            "frame {frame}: the same view camera"
+        );
+        assert!(p.depth != drawn.depth, "frame {frame}: traced, not drawn");
+        assert_eq!(
+            get(&app, "render.ray.mirror_pictures"),
+            1.0,
+            "frame {frame}"
+        );
+        assert_eq!(
+            get(&app, "render.extra_views"),
+            0.0,
+            "frame {frame}: no view drawn"
+        );
+    }
+    traced(&mut app, false);
+    app.update();
+    assert!(
+        picture(&app).is_none(),
+        "the view's first picture after traced ones is not kept"
+    );
+    assert_eq!(get(&app, "render.extra_views"), 1.0, "the view is drawn");
+    assert_eq!(get(&app, "render.ray.mirror_pictures"), 0.0);
+    app.update();
+    let again = picture(&app).expect("a drawn picture again");
+    assert_eq!(again.camera, drawn.camera, "the same view camera");
+    assert!(
+        again.depth == drawn.depth,
+        "the view's own targets, kept while it was traced"
     );
 }
 

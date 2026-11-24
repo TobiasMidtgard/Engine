@@ -28,8 +28,14 @@
 //! with [`PlanarReflectionPicture::view_proj`]: a point of the plane lands exactly where the
 //! mirror shows it from the main camera. While one renders, [`rendering_reflection`] says which
 //! mirror's view is drawing, so the mirror's own surface (the water) can stay out of it.
+//!
+//! With `trial_cut_more::RAY_MIRROR_PICTURES` the frame's rays trace the picture instead
+//! ([`crate::ray_mirror`]): the view camera is placed as before ([`TracedPlacement`]) but not
+//! drawn, and each texel's ray from the mirrored eye goes on from where it meets the plane as
+//! the main view's ray reflected there. The picture has the same mip chain, depth, projection
+//! ([`mirror_view_proj`]) and exposure, so its readers sample it as before.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine_core::prelude::*;
 
@@ -122,9 +128,37 @@ impl MirrorCamera {
     }
 }
 
-/// The view camera of each mirror.
+/// The view camera of each mirror, and which mirrors' pictures the frame's rays trace.
 #[derive(Resource, Default)]
-pub(crate) struct MirrorViews(HashMap<Entity, Entity>);
+pub(crate) struct MirrorViews {
+    cameras: HashMap<Entity, Entity>,
+    /// The mirrors whose picture (in [`MirrorPictures`]) the frame's rays traced
+    /// ([`keep_traced`]).
+    traced: HashSet<Entity>,
+    /// Mirrors drawn again this frame after a traced picture: the view's first picture is not
+    /// kept ([`keep_picture`]), so that a reader sees none for a frame and starts over, as when
+    /// a mirror comes on (the water lets a mirror's first pictures settle before it shows them:
+    /// a view that has not drawn for a while starts without history or metered exposure).
+    resettle: HashSet<Entity>,
+}
+
+/// A mirror whose picture the frame's rays trace this frame ([`place_reflection_views`] with
+/// `traced`): its view camera, placed as for drawing but off, and that view.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TracedPlacement {
+    pub mirror: Entity,
+    pub camera: Entity,
+    pub view: MirrorCamera,
+    /// The view camera's transform: the mirrored eye, turned as a proper camera.
+    pub at: GlobalTransform,
+}
+
+/// The unjittered view-projection of mirror view `m` from a camera at `at` (relative to its
+/// eye): what `build_view` makes of the view camera, and so a picture's `view_proj`.
+pub(crate) fn mirror_view_proj(m: &MirrorCamera, at: &GlobalTransform) -> Mat4 {
+    crate::frame::off_axis_infinite_reverse(m.tangents, m.near)
+        * Mat4::from_quat(at.rotation().inverse())
+}
 
 /// What a mirror's view rendered: its HDR scene color with a mip chain and its depth, with the
 /// projection and exposure they were made with. See [`planar_reflection_picture`].
@@ -312,25 +346,30 @@ fn place(
 /// Place every mirror's view camera for the main camera: spawn it for a new mirror, place it
 /// and size its picture, turn it off (and drop its picture) while the main camera is below
 /// the mirror or doesn't see it, and drop it with its mirror. The renderer calls this before
-/// the extra views render.
-pub(crate) fn place_reflection_views(world: &mut World) {
+/// the extra views render. `traced`: the frame's rays trace the pictures
+/// (`trial_cut_more::RAY_MIRROR_PICTURES`); each placed camera is then left off, and the
+/// placements returned for the renderer to trace ([`crate::ray_mirror`]).
+pub(crate) fn place_reflection_views(world: &mut World, traced: bool) -> Vec<TracedPlacement> {
     let mirrors: Vec<(Entity, PlanarReflection, GlobalTransform)> = world
         .query::<(Entity, &PlanarReflection, &GlobalTransform)>()
         .iter(world)
         .map(|(e, m, gt)| (e, *m, *gt))
         .collect();
     if mirrors.is_empty() && !world.contains_resource::<MirrorViews>() {
-        return;
+        return Vec::new();
     }
     let mut views = world.remove_resource::<MirrorViews>().unwrap_or_default();
+    // (What `keep_picture` did not take last frame: its view did not draw.)
+    views.resettle.clear();
     let gone: Vec<(Entity, Entity)> = views
-        .0
+        .cameras
         .iter()
         .filter(|(mirror, _)| !mirrors.iter().any(|m| m.0 == **mirror))
         .map(|(m, c)| (*m, *c))
         .collect();
     for (mirror, camera) in gone {
-        views.0.remove(&mirror);
+        views.cameras.remove(&mirror);
+        views.traced.remove(&mirror);
         world.despawn(camera);
         if let Some(mut pictures) = world.get_resource_mut::<MirrorPictures>() {
             pictures.pictures.remove(&mirror);
@@ -343,14 +382,15 @@ pub(crate) fn place_reflection_views(world: &mut World) {
         .map(|w| UVec2::new(w.width.max(1), w.height.max(1)))
         .unwrap_or(UVec2::ONE);
     let (_, viewport) = crate::frame::camera_viewport(world, window);
+    let mut placed = Vec::new();
     for (entity, mirror, at) in mirrors {
-        let placed = main
+        let placement = main
             .as_ref()
             .filter(|_| mirror.on)
             .and_then(|(_, camera, eye)| {
                 place(&mirror, &at, camera, eye, viewport).map(|p| (p, *camera))
             });
-        let camera = *views.0.entry(entity).or_insert_with(|| {
+        let camera = *views.cameras.entry(entity).or_insert_with(|| {
             world
                 .spawn((
                     Camera {
@@ -370,14 +410,23 @@ pub(crate) fn place_reflection_views(world: &mut World) {
                 .id()
         });
         let Ok(mut e) = world.get_entity_mut(camera) else {
-            views.0.remove(&entity);
+            views.cameras.remove(&entity);
+            views.traced.remove(&entity);
             continue;
         };
-        match placed {
+        match placement {
             Some((placement, main_camera)) => {
                 let previous = e.get::<MirrorCamera>().map_or(UVec2::ZERO, |m| m.size);
                 let size =
                     crate::portal::picture_size(placement.pixels, mirror.resolution, previous);
+                let view = MirrorCamera {
+                    mirror: entity,
+                    tangents: placement.tangents,
+                    near: placement.near,
+                    size,
+                    plane_point: at.translation(),
+                    plane_normal: (at.rotation() * Vec3::Y).normalize(),
+                };
                 e.insert((
                     Camera {
                         projection: Projection::Perspective {
@@ -385,19 +434,12 @@ pub(crate) fn place_reflection_views(world: &mut World) {
                             near: placement.near,
                         },
                         exposure: main_camera.exposure,
-                        active: true,
+                        active: !traced,
                         order: main_camera.order.saturating_sub(1),
                     },
                     placement.transform.to_transform(),
                     placement.transform,
-                    MirrorCamera {
-                        mirror: entity,
-                        tangents: placement.tangents,
-                        near: placement.near,
-                        size,
-                        plane_point: at.translation(),
-                        plane_normal: (at.rotation() * Vec3::Y).normalize(),
-                    },
+                    view,
                 ));
                 if e.get::<ExtraView>()
                     .is_none_or(|x| x.quality != mirror.quality)
@@ -407,6 +449,20 @@ pub(crate) fn place_reflection_views(world: &mut World) {
                         ..ExtraView::window()
                     });
                 }
+                if traced {
+                    placed.push(TracedPlacement {
+                        mirror: entity,
+                        camera,
+                        view,
+                        at: placement.transform,
+                    });
+                } else if views.traced.remove(&entity) {
+                    // Drawn again: the traced picture goes, and the view's first is not kept.
+                    if let Some(mut pictures) = world.get_resource_mut::<MirrorPictures>() {
+                        pictures.pictures.remove(&entity);
+                    }
+                    views.resettle.insert(entity);
+                }
             }
             None => {
                 if let Some(mut c) = e.get_mut::<Camera>()
@@ -414,6 +470,7 @@ pub(crate) fn place_reflection_views(world: &mut World) {
                 {
                     c.active = false;
                 }
+                views.traced.remove(&entity);
                 if let Some(mut pictures) = world.get_resource_mut::<MirrorPictures>() {
                     pictures.pictures.remove(&entity);
                 }
@@ -421,6 +478,31 @@ pub(crate) fn place_reflection_views(world: &mut World) {
         }
     }
     world.insert_resource(views);
+    placed
+}
+
+/// Keep `picture`, which the frame's rays trace this frame, as `mirror`'s
+/// ([`crate::ray_mirror`]).
+pub(crate) fn keep_traced(world: &mut World, mirror: Entity, picture: PlanarReflectionPicture) {
+    world
+        .get_resource_or_init::<MirrorPictures>()
+        .pictures
+        .insert(mirror, picture);
+    world
+        .get_resource_or_init::<MirrorViews>()
+        .traced
+        .insert(mirror);
+}
+
+/// `mirror` was placed to be traced, but the frame's rays trace nothing this frame (the ray
+/// scene went): no picture, and its readers start over.
+pub(crate) fn drop_traced(world: &mut World, mirror: Entity) {
+    if let Some(mut pictures) = world.get_resource_mut::<MirrorPictures>() {
+        pictures.pictures.remove(&mirror);
+    }
+    if let Some(mut views) = world.get_resource_mut::<MirrorViews>() {
+        views.traced.remove(&mirror);
+    }
 }
 
 /// Mip levels of a picture `size` pixels: down to about 8 pixels on its short side, at most 6.
@@ -484,7 +566,13 @@ pub(crate) fn keep_picture(
         plane_point,
         plane_normal,
     };
-    pictures.pictures.insert(mirror.mirror, picture);
+    // Drawn again after traced pictures: this first one is not kept (`MirrorViews::resettle`).
+    let resettle = world
+        .get_resource_mut::<MirrorViews>()
+        .is_some_and(|mut views| views.resettle.remove(&mirror.mirror));
+    if !resettle {
+        pictures.pictures.insert(mirror.mirror, picture);
+    }
     world.insert_resource(pictures);
 }
 
@@ -566,6 +654,84 @@ mod tests {
         // A proper rotation: winding and culling stay as they are.
         let r = p.transform.rotation();
         assert!((r.length() - 1.0).abs() < 1e-5);
+    }
+
+    /// A traced picture's projection is the one its view camera would draw it with
+    /// (`build_view`'s unjittered view-projection), so its readers find a plane point's
+    /// reflection where they did in the drawn picture.
+    #[test]
+    fn a_traced_pictures_projection_is_its_views() {
+        let mirror = PlanarReflection::new(Vec2::new(40.0, 40.0));
+        let at =
+            GlobalTransform::from_translation_rotation(DVec3::new(0.0, 2.0, 0.0), Quat::IDENTITY);
+        let eye = looking(DVec3::new(3.0, 5.0, 12.0), DVec3::new(-2.0, 2.0, -6.0));
+        let p = place(
+            &mirror,
+            &at,
+            &Camera::perspective(60.0),
+            &eye,
+            UVec2::new(800, 450),
+        )
+        .expect("seen");
+        let view = MirrorCamera {
+            mirror: Entity::PLACEHOLDER,
+            tangents: p.tangents,
+            near: p.near,
+            size: UVec2::new(400, 160),
+            plane_point: at.translation(),
+            plane_normal: Vec3::Y,
+        };
+        let mut world = World::new();
+        world.insert_resource(crate::settings::RenderSettings::default());
+        world.insert_resource(crate::settings::Atmosphere::default());
+        world.insert_resource(crate::components::AmbientLight::default());
+        world.insert_resource(Time::default());
+        let camera = world
+            .spawn((
+                Camera {
+                    projection: Projection::Perspective {
+                        fov_y_deg: 60.0,
+                        near: p.near,
+                    },
+                    active: false,
+                    ..Default::default()
+                },
+                p.transform,
+                view,
+            ))
+            .id();
+        world.insert_resource(RenderingExtraView(camera));
+        let built = crate::frame::build_view(
+            &mut world,
+            400,
+            160,
+            None,
+            Vec2::new(0.3, -0.2),
+            &mut crate::frame::ExposureState::default(),
+            0,
+        );
+        let ours = mirror_view_proj(&view, &p.transform);
+        assert!(
+            built.unjittered_view_proj.abs_diff_eq(ours, 1e-6),
+            "{} vs {ours}",
+            built.unjittered_view_proj
+        );
+        // And it puts a point of the plane where the main camera sees it, flipped left to
+        // right (the picture's readers project plane points with it).
+        let q = DVec3::new(-1.0, 2.0, 2.0);
+        let rel = (q - p.transform.translation()).as_vec3();
+        let c = ours * rel.extend(1.0);
+        let v = eye.rotation().as_dquat().inverse() * (q - eye.translation());
+        let tangent = DVec2::new(v.x, v.y) / -v.z;
+        let (t, ndc) = (p.tangents, Vec2::new(c.x, c.y) / c.w);
+        let expected = Vec2::new(
+            ((-tangent.x as f32 - t.x) / (t.y - t.x)) * 2.0 - 1.0,
+            ((tangent.y as f32 - t.z) / (t.w - t.z)) * 2.0 - 1.0,
+        );
+        assert!(
+            (ndc - expected).abs().max_element() < 1e-4,
+            "{ndc} vs {expected}"
+        );
     }
 
     #[test]

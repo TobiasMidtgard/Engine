@@ -107,6 +107,7 @@ pub mod plant_wind;
 pub mod portal;
 mod prepare;
 mod probe_gi;
+mod ray_mirror;
 pub mod ray_scene;
 pub mod renderer;
 pub mod rock;
@@ -647,6 +648,11 @@ mod tests {
             (
                 "shadow_restore",
                 include_str!("shaders/shadow_restore.wgsl").into(),
+                false,
+            ),
+            (
+                "mirror_depth",
+                include_str!("shaders/mirror_depth.wgsl").into(),
                 false,
             ),
         ];

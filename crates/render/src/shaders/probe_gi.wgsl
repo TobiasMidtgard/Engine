@@ -174,6 +174,14 @@ fn probe_ray_firefly(c: vec3<f32>) -> vec3<f32> {
 // through shadow rays, its emissive, and last frame's probes (light bounced more than once).
 // `spacing` is the probes' spacing, which sizes how far shadow rays look.
 fn hit_radiance(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>, t: f32, spacing: f32, albedo: vec3<f32>, emissive: vec3<f32>, lights_most: u32) -> vec3<f32> {
+    // Last frame's probes: light bounced more than once.
+    let indirect = probe_gi(p, n, -dir);
+    return hit_radiance_with(p, n, t, spacing, albedo, emissive, lights_most, indirect.rgb * indirect.a);
+}
+
+// `hit_radiance` with the light bounced onto the point given: `bounced` (irradiance, lux-like:
+// diffuse light is albedo / PI times it).
+fn hit_radiance_with(p: vec3<f32>, n: vec3<f32>, t: f32, spacing: f32, albedo: vec3<f32>, emissive: vec3<f32>, lights_most: u32, bounced: vec3<f32>) -> vec3<f32> {
     let lift = p + n * max(0.002, t * 1e-4);
     var light = vec3<f32>(0.0);
     // Sun, through a shadow ray, and through the leaves above: leaf cards are not in the
@@ -204,9 +212,7 @@ fn hit_radiance(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>, t: f32, spacing: f32
         let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(pl.color_radius.w));
         light += pl.color_radius.rgb * falloff * nl;
     }
-    // Last frame's probes: light bounced more than once.
-    let indirect = probe_gi(p, n, -dir);
-    light += indirect.rgb * indirect.a;
+    light += bounced;
     return albedo * INV_PI * light + emissive;
 }
 

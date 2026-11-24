@@ -87,7 +87,7 @@ fn frame_and_gpu_times_reach_diagnostics() {
 /// passes still add up to the frame. Passes with a note on a GPU without ray queries.
 #[test]
 fn the_ray_pass_reports_its_parts() {
-    ray_pass_parts(false);
+    ray_pass_parts(false, false);
 }
 
 /// The same with every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`): its rows are
@@ -95,11 +95,21 @@ fn the_ray_pass_reports_its_parts() {
 /// "world reflections" and "reflections".
 #[test]
 fn every_pixels_reflection_reports_its_parts() {
-    ray_pass_parts(true);
+    ray_pass_parts(true, false);
 }
 
-fn ray_pass_parts(full: bool) {
-    use engine_render::settings::trial_cut_more::{RAY_REFLECTIONS, RAY_WORLD};
+/// The same with a mirror's picture traced by the frame's rays in place of a view of its own
+/// (`trial_cut_more::RAY_MIRROR_PICTURES`): its rows are "ray mirror pictures", in the ray
+/// pass after the reflections, and "ray mirror levels", the picture's levels and depth.
+#[test]
+fn a_traced_mirror_picture_reports_its_parts() {
+    ray_pass_parts(false, true);
+}
+
+fn ray_pass_parts(full: bool, mirror: bool) {
+    use engine_render::settings::trial_cut_more::{
+        RAY_MIRROR_PICTURES, RAY_REFLECTIONS, RAY_WORLD,
+    };
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -118,7 +128,17 @@ fn ray_pass_parts(full: bool) {
         if full {
             s.trial_cuts_more |= RAY_REFLECTIONS;
         }
+        if mirror {
+            s.trial_cuts_more |= RAY_MIRROR_PICTURES;
+        }
         s.ray_sun_shadows = true;
+    }
+    if mirror {
+        // A pond's mirror on the floor in front of the cube.
+        app.world.spawn((
+            Transform::from_xyz(0.0, -0.49, 1.5),
+            engine_render::PlanarReflection::new(Vec2::splat(2.0)).with_resolution(0.5),
+        ));
     }
     app.world.spawn((
         Camera::perspective(60.0),
@@ -157,20 +177,22 @@ fn ray_pass_parts(full: bool) {
     assert_eq!(get("render.ray.losses"), Some(0.0));
     // Every pixel's reflection replaces both the world reflections and the screen's (whose
     // resolve is "reflections"); without it, neither of its own passes runs.
-    let (reflections, resolve, others) = if full {
+    let (reflections, resolve, mut others) = if full {
         (
             "ray reflections",
             "ray reflections resolve",
-            ["world reflections", "reflections"],
+            vec!["world reflections", "reflections"],
         )
     } else {
         (
             "world reflections",
             "reflections",
-            ["ray reflections", "ray reflections resolve"],
+            vec!["ray reflections", "ray reflections resolve"],
         )
     };
-    for step in [
+    // A traced mirror's two rows; without one, neither.
+    let mirror_steps = ["ray mirror pictures", "ray mirror levels"];
+    let mut steps = vec![
         "ray scene",
         "ray scene build",
         "ray inputs",
@@ -179,7 +201,29 @@ fn ray_pass_parts(full: bool) {
         reflections,
         resolve,
         "probe gi copies",
-    ] {
+    ];
+    if mirror {
+        assert_eq!(
+            get("render.ray.mirror_pictures"),
+            Some(1.0),
+            "a traced picture"
+        );
+        // (Absent: no extra view was ever drawn, not even in the frame the ray scene starts.)
+        assert_eq!(
+            get("render.extra_views").unwrap_or(0.0),
+            0.0,
+            "no view drawn for it"
+        );
+        assert_eq!(
+            get("render.extra_views_new_ms"),
+            None,
+            "no view made for it"
+        );
+        steps.extend(mirror_steps);
+    } else {
+        others.extend(mirror_steps);
+    }
+    for step in steps {
         assert!(
             get(&format!("render.cpu.{step}")).is_some_and(|ms| ms >= 0.0),
             "no CPU time for {step}"
@@ -204,13 +248,17 @@ fn ray_pass_parts(full: bool) {
     eprintln!("GPU passes {passes:?}");
     let inside = get("render.gpu_times_inside_passes") == Some(1.0);
     eprintln!("timestamps inside a pass: {inside}");
-    for pass in [
+    let mut gpu_passes = vec![
         "ray scene build",
         "ray inputs",
         "probe gi",
         "probe gi copies",
         resolve,
-    ] {
+    ];
+    if mirror {
+        gpu_passes.push("ray mirror levels");
+    }
+    for pass in gpu_passes {
         assert!(
             get(&format!("render.gpu.{pass}")).is_some_and(|ms| ms >= 0.0),
             "no GPU time for {pass}"
@@ -219,7 +267,11 @@ fn ray_pass_parts(full: bool) {
     // (Without such timestamps the two run under "probe gi"; the reflections still get a row
     // in a frame whose probe grid scrolled, where they have a pass of their own.)
     if inside {
-        for pass in ["ray shadows", reflections] {
+        let mut inside_passes = vec!["ray shadows", reflections];
+        if mirror {
+            inside_passes.push("ray mirror pictures");
+        }
+        for pass in inside_passes {
             assert!(
                 get(&format!("render.gpu.{pass}")).is_some_and(|ms| ms >= 0.0),
                 "{pass}: a GPU row of its own where the device times inside a pass"

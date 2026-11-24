@@ -9,14 +9,15 @@
 //! `shade_skip::RAY_REFLECT_RAYS_ONLY` or not: screen-space reflections over world reflections
 //! draw the mirror as before), no ground colour map is made or drawn
 //! (`trial_cut_more::RAY_GROUND_MAP`, with `RenderSettings::ray_ground_every_frame` or not),
-//! and the rays walk the probes' own scene in software, so the picture is the one drawn with
-//! the switches off. A test binary of its own: the variable is the whole process's, read when the device is
+//! no mirror's picture is traced (`trial_cut_more::RAY_MIRROR_PICTURES`: its view is drawn as
+//! before), and the rays walk the probes' own scene in software, so the picture is the one
+//! drawn with the switches off. A test binary of its own: the variable is the whole process's, read when the device is
 //! made. Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::settings::trial_cut_more::{
-    RAY_GROUND_MAP, RAY_PROBES, RAY_REFLECTIONS, RAY_SUN, RAY_WORLD,
+    RAY_GROUND_MAP, RAY_MIRROR_PICTURES, RAY_PROBES, RAY_REFLECTIONS, RAY_SUN, RAY_WORLD,
 };
 use engine_render::{RenderDisabled, capture_now};
 
@@ -51,8 +52,12 @@ fn app(switches: bool) -> App {
         s.gi_probes_per_frame = 16 * 8 * 16 / 4;
         s.gi_hysteresis = 0.5;
         if switches {
-            s.trial_cuts_more |=
-                RAY_WORLD | RAY_PROBES | RAY_SUN | RAY_REFLECTIONS | RAY_GROUND_MAP;
+            s.trial_cuts_more |= RAY_WORLD
+                | RAY_PROBES
+                | RAY_SUN
+                | RAY_REFLECTIONS
+                | RAY_GROUND_MAP
+                | RAY_MIRROR_PICTURES;
             s.ray_sun_shadows = true;
             s.ray_ground_every_frame = true;
             s.debug_skip |= engine_render::settings::shade_skip::RAY_LEAVES_SOLID
@@ -80,8 +85,9 @@ fn slab(w: &mut World, center: DVec3, size: DVec3, material: StandardMaterial) {
 }
 
 /// A sunlit yard: the ground, a mirror facing the camera, a red wall behind the camera that
-/// only world reflections show in the mirror, and a block whose shadow and bounce the probes
-/// carry.
+/// only world reflections show in the mirror, a block whose shadow and bounce the probes
+/// carry, and a pond's mirror on the ground (nothing here reads its picture: it shows only in
+/// the counts).
 fn yard(w: &mut World) {
     let gray = |albedo: f32| StandardMaterial::color(albedo, albedo, albedo).with_roughness(0.9);
     w.spawn((
@@ -114,6 +120,10 @@ fn yard(w: &mut World) {
         DVec3::new(1.0, 1.6, 1.0),
         gray(0.7),
     );
+    w.spawn((
+        Transform::from_translation(DVec3::new(1.6, -0.29, -2.2)),
+        engine_render::PlanarReflection::new(Vec2::splat(1.2)).with_resolution(0.5),
+    ));
     w.spawn((
         DirectionalLight {
             illuminance: 110_000.0,
@@ -179,9 +189,11 @@ fn without_ray_queries_the_switches_change_nothing() {
             ("render.gi.probes_raised", 0.0),
             ("render.gi.probes_updated", 512.0),
             ("render.gi.probes_budget_cut", 0.0),
+            // The pond's mirror: its view drawn.
+            ("render.extra_views", 1.0),
             // Never published: the meshes prepare nothing for a scene that is not made, no
-            // ray is shot toward the sun, no pixel's reflection is traced, and no ground
-            // colour map is drawn.
+            // ray is shot toward the sun, no pixel's reflection is traced, no ground colour
+            // map is drawn, and no mirror's picture is traced.
             ("render.meshes.ray_looked", -1.0),
             ("render.ray.instances", -1.0),
             ("render.ray.sun_rays", -1.0),
@@ -201,6 +213,15 @@ fn without_ray_queries_the_switches_change_nothing() {
             ("render.ray.ground_mb", -1.0),
             ("render.cpu.ray ground map", -1.0),
             ("render.gpu.ray ground map", -1.0),
+            ("render.ray.mirror_pictures", -1.0),
+            ("render.ray.mirror_texels", -1.0),
+            ("render.ray.mirror_mb", -1.0),
+            ("render.ray.mirror_screen", -1.0),
+            ("render.ray.mirror_rays", -1.0),
+            ("render.ray.mirror_reused", -1.0),
+            ("render.cpu.ray mirror pictures", -1.0),
+            ("render.cpu.ray mirror levels", -1.0),
+            ("render.gpu.ray mirror levels", -1.0),
         ] {
             assert_eq!(diag(app, name), expected, "{what}: {name}");
         }

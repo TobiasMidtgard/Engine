@@ -52,6 +52,19 @@ const FULL_LAMPS_ROUGHNESS: f32 = 0.3;
 const FULL_SCREEN_EDGE: f32 = 0.08;
 // How far above the face the prepass drew a reflection is kept (the cosine to the face).
 const FULL_ABOVE_FACE: f32 = 0.05;
+// When last frame's picture stands for a surface the screen's march or a ray met
+// (`full_picture_stands`): unless the camera sees it more edge on than the reflection does, by
+// more than this in its own Fresnel reflection's share of its light (Schlick's (1 - cos)^5).
+// Seen so, what the camera saw there is mostly the surface's reflection of what lies beside
+// it, which the reflection doesn't see: seen from just above, the underside of a ball over a
+// mirror came out darker than the ball's own light in the mirror, in specks. Seen less edge on
+// by the camera than by the reflection (the ground in a wall mirror), the picture still stands:
+// the ray's own light, which leaves out the surface's reflection altogether, is farther off.
+// A wall seen in the floor in front of it is seen at the same angle both ways.
+const FULL_FRESNEL_GAP: f32 = 0.05;
+// Never more edge on to the camera than this cosine: the pixels there are outlines, which hold
+// the background beside them.
+const FULL_OUTLINE_MIN: f32 = 0.1;
 
 var<workgroup> full_group_counts: array<atomic<u32>, 4>;
 
@@ -126,9 +139,20 @@ fn full_march(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> F
                 let m_scene = full_scene_depth(mix(a.xy, b.xy, mid));
                 if (m_scene > 0.0 && m_ray > m_scene) { hi = mid; } else { lo = mid; }
             }
-            hit.uv = mix(a.xy, b.xy, hi);
-            hit.found = true;
-            return hit;
+            // The ray crossed what the screen shows there, rather than passed behind its
+            // outline: where it went behind, it lies behind the surface by no more than a
+            // surface's thickness or than it moves in depth across a pixel (a step can span
+            // several). Else, under a ball, the march met the ball's outline and its near side's
+            // light speckled the reflection of the underside the ray goes on to meet.
+            let cross_uv = mix(a.xy, b.xy, hi);
+            let cross_ray = 1.0 / mix(inv_a, inv_b, hi);
+            let cross_scene = full_scene_depth(cross_uv);
+            let pixel_span = step_span * f32(steps) / max(pixels, f32(steps));
+            if (cross_ray - cross_scene < max(0.1 + 0.02 * cross_scene, pixel_span * 1.5)) {
+                hit.uv = cross_uv;
+                hit.found = true;
+                return hit;
+            }
         }
         prev_k = k;
         k += dk;
@@ -187,11 +211,24 @@ fn full_seen_at(uv: vec2<f32>) -> vec3<f32> {
     return min(c / frame.reflections.y, vec3<f32>(60000.0));
 }
 
-// What last frame's picture shows of camera-relative point `p` on a surface facing `n`, where
-// the camera sees that surface there now (the prepass drew a surface as deep, facing about the
-// same way, at the pixel `p` projects onto): rgb, and its share (0: the camera doesn't see it;
-// under 1 within the screen's outer 8%, where the hit's own light takes over).
-fn full_seen(p: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
+// Whether last frame's picture of a surface facing `n`, seen along unit `v` (toward the
+// camera), stands for the light it sends back along unit `back` (toward where a reflection's
+// ray comes from): `FULL_FRESNEL_GAP`, `FULL_OUTLINE_MIN`.
+fn full_picture_stands(n: vec3<f32>, v: vec3<f32>, back: vec3<f32>) -> bool {
+    let nv = dot(n, v);
+    let seen = pow(1.0 - saturate(nv), 5.0);
+    let reflected = pow(1.0 - saturate(dot(n, back)), 5.0);
+    return nv > FULL_OUTLINE_MIN && seen - reflected < FULL_FRESNEL_GAP;
+}
+
+// What last frame's picture shows of camera-relative point `p` on a surface facing `n`, for a
+// ray that met it along unit `dir`, where the camera sees that surface there now (the prepass
+// drew a surface as deep, facing about the same way, at the pixel `p` projects onto) and its
+// picture stands for the ray's (`full_picture_stands`): rgb, and its share (0: the camera
+// doesn't see it; under 1 within the screen's outer 8%, where the hit's own light takes over).
+fn full_seen(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
+    let v = select(normalize(-p), frame.inv_view[2].xyz, frame.exposure.w > 0.5);
+    if (!full_picture_stands(n, v, -dir)) { return vec4<f32>(0.0); }
     let c = frame.view_proj * vec4<f32>(p, 1.0);
     if (c.w <= 0.0) { return vec4<f32>(0.0); }
     let ndc = c.xy / c.w;
@@ -213,7 +250,10 @@ fn full_seen(p: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
 }
 
 // The light a ray's hit `s` at distance `t` along `dir` from `origin` sends back along it, as
-// `shade_hit` lights a world reflection's hit, with the lamps of a pixel of `roughness`.
+// `shade_hit` lights a world reflection's hit, with the lamps of a pixel of `roughness`. Where
+// last frame's probes don't cover the hit (past their grid: a far shore, a hill, a ball above
+// a lake), the light bounced onto it is the sky's that `shade_surface` guesses there rather
+// than none, which left a reflected thing's shaded side black.
 fn full_hit_light(origin: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, roughness: f32) -> vec3<f32> {
     var p = origin + dir * t;
     if (any(s.n != s.face)) {
@@ -222,7 +262,21 @@ fn full_hit_light(origin: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, roug
         p += s.face * (max(0.002, t * 1e-4) * (1.0 - dot(s.n, s.face)));
     }
     let lamps = select(0u, min(FULL_LAMPS_MOST, u32(ray_scene.lights.x)), roughness <= FULL_LAMPS_ROUGHNESS);
-    return hit_radiance(p, s.n, dir, t, frame.gi_volume.w, s.albedo, s.emissive, lamps);
+    let indirect = probe_gi(p, s.n, -dir);
+    var bounced = indirect.rgb * indirect.a;
+    if (indirect.a < 1.0) {
+        bounced += full_sky_guess(p, s.n) * (1.0 - indirect.a);
+    }
+    return hit_radiance_with(p, s.n, t, frame.gi_volume.w, s.albedo, s.emissive, lamps, bounced);
+}
+
+// The light `shade_surface` guesses bounced onto camera-relative `p` with normal `n` where the
+// probes don't cover it (irradiance, lux-like): the sky's around `n`, less what the cover over
+// `p` hides (the top-down maps and the indoor volumes), and the ambient fill.
+fn full_sky_guess(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let sky_vis = sky_visibility(p, n);
+    let fill = frame.ambient.rgb;
+    return ((sky_ambient_covered(n, sky_vis) - fill) * sky_vis + fill) * PI;
 }
 
 // The reflection at pixel `pixel`, written to `full_out`, and what it adds to the counts
@@ -237,7 +291,6 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
         textureStore(full_out, pixel, vec4<f32>(0.0));
         return vec4<u32>(0u);
     }
-    var counts = vec4<u32>(1u, 0u, 0u, 0u);
     let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(size);
     let pos = view_position(uv, z);
     let rel = (frame.inv_view * vec4<f32>(pos, 0.0)).xyz;
@@ -256,6 +309,43 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
     }
     let origin = rel + face * (0.02 + 0.002 * depth);
     let noise = interleaved_gradient_noise(vec2<f32>(px) + frame.time.w * 5.588238);
+    // The ray's cone: a pixel across where it starts, widening by a pixel's angle and the
+    // lobe's (as wide all along when orthographic), which picks the level of the hit's tile.
+    let pixel_m = 2.0 / (abs(frame.proj[1][1]) * frame.viewport.y);
+    let cone = select(vec2<f32>(pixel_m * depth, pixel_m + alpha), vec2<f32>(pixel_m, alpha), frame.exposure.w > 0.5);
+    let found = reflect_at(origin, dir, depth, roughness, cone, noise);
+    textureStore(full_out, pixel, found.out);
+    var counts = found.counts;
+    counts.x = 1u;
+    return counts;
+}
+
+// What a reflection found (`reflect_at`).
+struct Reflected {
+    // As `full_out` holds it: rgb cd/m^2 (not pre-exposed, at most 60000); w the distance to
+    // what it met, -1 open sky past the cover map's reach, 0 nothing.
+    out: vec4<f32>,
+    // What it adds to the counts: y the screen answered, z a ray was traced, w the ray's hit
+    // was taken from last frame's picture (x is the caller's).
+    counts: vec4<u32>,
+    // The ray met the back of a single-sided surface: it started inside something.
+    inside: bool,
+    // It met nothing but the sky: past an opening the camera sees the sky through, or past
+    // the reach of the cover map's march (and no hit of the march in the screen's outer band).
+    sky: bool,
+};
+
+// The reflection along unit `dir` from camera-relative `origin` (just off the surface) of a
+// surface of perceptual `roughness` at view depth `depth`, its ray's cone `cone` (as
+// `ray_surface` takes it), `noise` its pixel's: the screen first, where last frame's picture
+// exists, then a ray through the ray scene.
+fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, cone: vec2<f32>, noise: f32) -> Reflected {
+    var found: Reflected;
+    found.out = vec4<f32>(0.0);
+    found.counts = vec4<u32>(0u);
+    found.inside = false;
+    found.sky = false;
+    let size = vec2<i32>(textureDimensions(full_depth));
 
     // The screen first, where last frame's picture exists. A surface the march met within the
     // screen's outer 8% is last frame's picture only by its share there (`screen`, at
@@ -275,16 +365,19 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
             let hit_px = clamp(vec2<i32>(floor(m.uv * frame.viewport.xy)), vec2<i32>(0), size - 1);
             let hit_n = oct_decode(textureLoad(full_normal, hit_px, 0).xy);
             let prev_uv = m.uv - textureLoad(full_motion, hit_px, 0).xy;
-            // The surface met faces the reflection (its back is not what the camera saw), and
+            let hit_rel = (frame.inv_view * vec4<f32>(view_position(m.uv, textureLoad(full_depth, hit_px, 0)), 0.0)).xyz;
+            let hit_v = select(normalize(-hit_rel), frame.inv_view[2].xyz, frame.exposure.w > 0.5);
+            // The surface met faces the reflection (its back is not what the camera saw), the
+            // camera's picture of it stands for the reflection's (`full_picture_stands`), and
             // last frame's picture holds it.
-            if (dot(hit_n, dir) < -0.1 && all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0))) {
-                let hit_rel = (frame.inv_view * vec4<f32>(view_position(m.uv, textureLoad(full_depth, hit_px, 0)), 0.0)).xyz;
+            if (dot(hit_n, dir) < -0.1 && full_picture_stands(hit_n, hit_v, -dir)
+                && all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0))) {
                 screen = vec4<f32>(full_seen_at(prev_uv), full_edge(m.uv) * full_edge(prev_uv));
                 screen_t = max(distance(hit_rel, origin), 1e-3);
                 if (screen.a >= 1.0) {
-                    textureStore(full_out, pixel, vec4<f32>(screen.rgb, screen_t));
-                    counts.y = 1u;
-                    return counts;
+                    found.out = vec4<f32>(screen.rgb, screen_t);
+                    found.counts.y = 1u;
+                    return found;
                 }
             }
         }
@@ -293,7 +386,7 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
     }
 
     // A ray through the ray scene.
-    counts.z = 1u;
+    found.counts.z = 1u;
     let t_max = min(384.0, 400.0 * exp(-5.0 * roughness));
     let hit = trace_reflect(origin, dir, t_max);
     // Where the march saw open sky along the reflection, the camera sees through there: an
@@ -306,25 +399,21 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
         let indirect = probe_gi(p, -dir, -dir);
         out = vec4<f32>(VOLUME_WALL_ALBEDO * INV_PI * indirect.rgb * indirect.a, max(wall, 1e-3));
     } else if (hit.instance != RAY_NONE) {
-        // The ray's cone: a pixel across where it starts, widening by a pixel's angle and the
-        // lobe's (as wide all along when orthographic), which picks the level of the hit's
-        // tile.
-        let pixel_m = 2.0 / (abs(frame.proj[1][1]) * frame.viewport.y);
-        let cone = select(vec2<f32>(pixel_m * depth, pixel_m + alpha), vec2<f32>(pixel_m, alpha), frame.exposure.w > 0.5);
         let s = ray_surface(ray_last, origin, dir, cone);
         // The back of a single-sided surface: the ray started inside something, so it
         // reflects nothing of its own.
+        found.inside = s.inside;
         if (!s.inside) {
             // (Where the march met it in the screen's outer band, its picture is `screen`'s.)
             var seen = vec4<f32>(0.0);
             if (frame.reflections.y > 0.0 && screen.a <= 0.0) {
-                seen = full_seen(origin + dir * hit.t, s.face);
+                seen = full_seen(origin + dir * hit.t, s.face, dir);
             }
             var lit = vec3<f32>(0.0);
             if (seen.a < 1.0) {
                 lit = full_hit_light(origin, dir, hit.t, s, roughness);
             }
-            if (seen.a > 0.0 || screen.a > 0.0) { counts.w = 1u; }
+            if (seen.a > 0.0 || screen.a > 0.0) { found.counts.w = 1u; }
             out = vec4<f32>(min(mix(lit, seen.rgb, seen.a), vec3<f32>(60000.0)), max(hit.t, 1e-3));
         }
     } else if (escaped) {
@@ -332,18 +421,21 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
         // in the trees): the sky, which the cover overhead doesn't dim (it would under a roof
         // or a canopy, `shade_surface`), as ssr.wgsl `fs_ssr` reflects an escaped march.
         out = vec4<f32>(min(sample_env_rough(dir, roughness) + frame.ambient.rgb, vec3<f32>(60000.0)), max(escape_t, 1e-3));
+        found.sky = true;
     } else if (REFLECT_MISS_SEES_SKY && t_max >= SKY_MARCH_REACH_M) {
         // Nothing within the reach of the cover map's march (`specular_sky_visibility`): the
         // sky there is open as far as the scene's things go.
         out = vec4<f32>(0.0, 0.0, 0.0, -1.0);
+        found.sky = true;
     }
     if (screen.a > 0.0) {
         // The march's hit in the screen's outer band: over what the ray met by its share, or
         // as it is where the ray met nothing (something the ray scene leaves out).
         out = select(vec4<f32>(screen.rgb, screen_t), vec4<f32>(mix(out.rgb, screen.rgb, screen.a), out.w), out.w > 0.0);
+        found.sky = false;
     }
-    textureStore(full_out, pixel, out);
-    return counts;
+    found.out = out;
+    return found;
 }
 
 @compute @workgroup_size(8, 8, 1)

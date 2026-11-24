@@ -169,12 +169,13 @@ fn shader_source(rays: Rays) -> String {
             include_str!("../shaders/probe_gi_trace_hw.wgsl")
         ),
         // (Every pixel's reflection is a dispatch of this program too, after the probes', and
-        // so is Rendering's check of the probes.)
+        // so are the mirrors' pictures and Rendering's check of the probes.)
         Rays::World => format!(
-            "{}\n{}\n{body}\n{}\n{}",
+            "{}\n{}\n{body}\n{}\n{}\n{}",
             crate::ray_scene::shader_lib(1),
             include_str!("../shaders/probe_gi_rays.wgsl"),
             include_str!("../shaders/ray_reflect.wgsl"),
+            include_str!("../shaders/ray_mirror.wgsl"),
             include_str!("../shaders/ray_probe_check.wgsl")
         ),
     }
@@ -617,6 +618,8 @@ struct Active {
     sun: Option<SunRays>,
     /// Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`), on the frame's ray scene.
     full: Option<FullReflections>,
+    /// The mirrors' pictures (`trial_cut_more::RAY_MIRROR_PICTURES`), on the frame's ray scene.
+    mirrors: Option<MirrorPrograms>,
     /// Rendering's check of the probes (`RenderSettings::ray_probe_check`), on the frame's
     /// ray scene.
     check: Option<ProbeCheck>,
@@ -700,6 +703,24 @@ struct FullReflections {
     counting: bool,
     /// The last frame that asked traced every pixel's reflection.
     traced: bool,
+}
+
+/// The mirrors' pictures traced in the frame's ray pass (`cs_mirror_picture`, ray_mirror.wgsl;
+/// their targets are the renderer's, `crate::ray_mirror`): the program, what each picture binds
+/// this frame, and their count.
+struct MirrorPrograms {
+    pipeline: wgpu::ComputePipeline,
+    /// Group 2: the inputs every pixel's reflection reads (the prepass's normals and depth,
+    /// the motion, last frame's picture), the picture's trace, its colour and depth, `counts`.
+    layout: wgpu::BindGroupLayout,
+    /// The texels, those the screen answered, the rays traced and their hits taken from last
+    /// frame's picture, counted by the pass while `shade_skip::COUNT_MESH_RUNS` is set.
+    counts: GpuCounts,
+    /// This frame's pictures ([`ProbeGi::begin_mirrors`]) with their sizes, until the pass
+    /// takes them.
+    inputs: Vec<(wgpu::BindGroup, UVec2)>,
+    /// This frame's pictures are counted, and wait for their counts to be copied out.
+    counting: bool,
 }
 
 /// Rendering's check of the probes (`RenderSettings::ray_probe_check`, ray_probe_check.wgsl
@@ -1396,6 +1417,57 @@ impl ProbeGi {
                 traced: false,
             }
         });
+        // The mirrors' pictures: what every pixel's reflection reads, the picture's trace, what
+        // it found (the colour's level 0 and the depth), and their count.
+        let mirrors = world.then(|| {
+            let texture = |filterable: bool| wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            };
+            let written = |format: wgpu::TextureFormat| wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            };
+            let inputs = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ray mirror inputs"),
+                entries: &[
+                    layout_entry(20, S::COMPUTE, texture(false)),
+                    layout_entry(
+                        21,
+                        S::COMPUTE,
+                        wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                    ),
+                    layout_entry(22, S::COMPUTE, texture(false)),
+                    layout_entry(23, S::COMPUTE, texture(true)),
+                    layout_entry(26, S::COMPUTE, uniform),
+                    layout_entry(27, S::COMPUTE, written(wgpu::TextureFormat::Rgba16Float)),
+                    layout_entry(28, S::COMPUTE, written(wgpu::TextureFormat::R32Float)),
+                    layout_entry(29, S::COMPUTE, storage(false)),
+                ],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("ray mirror pictures"),
+                bind_group_layouts: &[
+                    Some(&shared.frame_layout),
+                    Some(scene_layout),
+                    Some(&inputs),
+                ],
+                immediate_size: 0,
+            });
+            MirrorPrograms {
+                pipeline: pipeline("cs_mirror_picture", &pipeline_layout),
+                layout: inputs,
+                counts: GpuCounts::new(device, "ray mirror counts"),
+                inputs: Vec::new(),
+                counting: false,
+            }
+        });
         // Rendering's check of the probes: where its sums go.
         let check = world.then(|| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1462,6 +1534,7 @@ impl ProbeGi {
             hw: hardware.then(|| rt::HwScene::new(device)),
             sun,
             full,
+            mirrors,
             check,
             reflect_inputs: None,
             sun_inputs: None,
@@ -3150,6 +3223,114 @@ impl ProbeGi {
         }
     }
 
+    /// Whether the frame's ray pass can trace the mirrors' pictures (`crate::ray_mirror`):
+    /// while the rays trace the frame's ray scene.
+    /// Once after the frame's ray scene went: the rows [`publish`](Self::publish) keeps while
+    /// it traces the scene (every pixel's reflection and the mirrors' pictures) read "not
+    /// traced" (0) and "not counted" (-1), not their last values.
+    pub(crate) fn publish_rays_none(d: &mut Diagnostics) {
+        d.set("render.ray.reflect_full", 0.0);
+        for row in [
+            "reflect_pixels",
+            "reflect_screen",
+            "reflect_rays",
+            "reflect_reused",
+            "mirror_screen",
+            "mirror_rays",
+            "mirror_reused",
+        ] {
+            d.set(&format!("render.ray.{row}"), -1.0);
+        }
+    }
+
+    pub fn traces_mirrors(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.mirrors.is_some())
+    }
+
+    /// Before the frame's ray pass: what the trace of each mirror's picture due this frame
+    /// binds (group 2 of `cs_mirror_picture`): the prepass's maps and last frame's `picture` as
+    /// every pixel's reflection reads them, and the picture's own; their count cleared when
+    /// `count` asks for it. Says whether any is due.
+    pub fn begin_mirrors<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &crate::targets::Targets,
+        picture: &wgpu::TextureView,
+        due: impl Iterator<Item = crate::ray_mirror::MirrorTarget<'a>>,
+        count: bool,
+    ) -> bool {
+        let Some(mirrors) = self.active.as_mut().and_then(|a| a.mirrors.as_mut()) else {
+            return false;
+        };
+        mirrors.counts.take();
+        mirrors.inputs.clear();
+        fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::TextureView(view),
+            }
+        }
+        for target in due {
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ray mirror inputs"),
+                layout: &mirrors.layout,
+                entries: &[
+                    view(20, &targets.prepass_normal.view),
+                    view(21, &targets.prepass_depth.view),
+                    view(22, &targets.motion.view),
+                    view(23, picture),
+                    wgpu::BindGroupEntry {
+                        binding: 26,
+                        resource: target.uniform.as_entire_binding(),
+                    },
+                    view(27, target.color),
+                    view(28, target.depth),
+                    wgpu::BindGroupEntry {
+                        binding: 29,
+                        resource: mirrors.counts.counts.as_entire_binding(),
+                    },
+                ],
+            });
+            mirrors.inputs.push((group, target.size));
+        }
+        let any = !mirrors.inputs.is_empty();
+        mirrors.counting = any && count;
+        if mirrors.counting {
+            mirrors.counts.clear(encoder);
+        } else {
+            mirrors.counts.latest = None;
+        }
+        any
+    }
+
+    /// In the frame's ray pass (the frame's group and the ray scene's set): trace the mirrors'
+    /// pictures [`begin_mirrors`](Self::begin_mirrors) made ready, in a frame whose probe grid
+    /// scrolled in the pass after the atlas copies (they light their hits with the probes, as
+    /// the reflections do).
+    pub fn dispatch_mirror_pictures(&mut self, pass: &mut wgpu::ComputePass<'_>) {
+        let Some(mirrors) = self.active.as_mut().and_then(|a| a.mirrors.as_mut()) else {
+            return;
+        };
+        if mirrors.inputs.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&mirrors.pipeline);
+        for (group, size) in mirrors.inputs.drain(..) {
+            pass.set_bind_group(2, &group, &[]);
+            pass.dispatch_workgroups(size.x.div_ceil(8), size.y.div_ceil(8), 1);
+        }
+    }
+
+    /// After the pass that traced the mirrors' pictures: copy their counts out, when they
+    /// were counted.
+    pub fn end_mirrors(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(mirrors) = self.active.as_mut().and_then(|a| a.mirrors.as_mut()) {
+            let counted = std::mem::take(&mut mirrors.counting);
+            mirrors.counts.copy(encoder, counted);
+        }
+    }
+
     /// After the frame's ray pass: copy the atlas rows the probes' update wrote into the
     /// atlas the frame samples, and the probes' and the sun's counts out. (The reflections'
     /// inputs stay for a pass that follows these copies:
@@ -3271,6 +3452,19 @@ impl ProbeGi {
             d.set("render.ray.reflect_screen", screen);
             d.set("render.ray.reflect_rays", rays);
             d.set("render.ray.reflect_reused", reused);
+        }
+        // The mirrors' pictures traced in the frame's ray pass (while the frame's ray scene is
+        // traced): their counts in the latest frame read back (-1: not counted now): those the
+        // screen answered, the rays traced, and the rays' hits taken from last frame's picture
+        // (the texels are `render.ray.mirror_texels`).
+        if let Some(mirrors) = self.active.as_ref().and_then(|a| a.mirrors.as_ref()) {
+            let [_, screen, rays, reused] = mirrors
+                .counts
+                .latest
+                .map_or([-1.0; 4], |n| n.map(f64::from));
+            d.set("render.ray.mirror_screen", screen);
+            d.set("render.ray.mirror_rays", rays);
+            d.set("render.ray.mirror_reused", reused);
         }
         // Rendering's check of the probes, once a readback arrived (none while it is off): the
         // probe nearest the camera's irradiance (lux, its luminance) facing each axis

@@ -210,8 +210,11 @@ pub mod shade_skip {
     /// meshes' `mesh_runs` and the grass's `grass_runs`; needs pipeline statistics queries),
     /// the fog's froxels lit (volumetrics.rs) and the sun's rays and those stopped
     /// (`RenderSettings::ray_sun_shadows`; `render.gi.sun_rays`, `render.gi.sun_hits`; read in
-    /// probe_gi.wgsl `cs_sun`), and the sun's trace against the still shadow images
-    /// (`trial_cut_more::RAY_SUN`; `render.ray.sun_*`; read in ray_sun.wgsl).
+    /// probe_gi.wgsl `cs_sun`), the sun's trace against the still shadow images
+    /// (`trial_cut_more::RAY_SUN`; `render.ray.sun_*`; read in ray_sun.wgsl), every pixel's
+    /// reflection (`trial_cut_more::RAY_REFLECTIONS`; `render.ray.reflect_*`; ray_reflect.wgsl)
+    /// and the traced mirror pictures (`trial_cut_more::RAY_MIRROR_PICTURES`;
+    /// `render.ray.mirror_*`; ray_mirror.wgsl).
     pub const COUNT_MESH_RUNS: u32 = 262144;
     /// Skinned meshes are not posed (they freeze where they are; a new one stays in its bind
     /// pose): what posing them on the GPU costs in `compute meshes`.
@@ -533,6 +536,24 @@ pub mod trial_cut_more {
     /// (9.3 MiB while on, with its depth); `RenderSettings::ray_ground_every_frame` draws it
     /// every frame for a measurement. Off by default.
     pub const RAY_GROUND_MAP: u32 = 512;
+    /// Every [`crate::PlanarReflection`]'s picture (a lake mirror's) traced in the frame's ray
+    /// pass in place of the extra view that draws it, with [`RAY_WORLD`] (ray_mirror.rs,
+    /// ray_mirror.wgsl; passes "ray mirror pictures", in the ray pass after the reflections,
+    /// and "ray mirror levels"; `gpu_sweep` rows `ray_mirror_pictures`,
+    /// `count_ray_mirror_pictures`, read against `ray_world` and `water_no_mirror`): the
+    /// mirror's view camera is placed as before but not drawn, and each texel's ray from the
+    /// mirrored eye meets the plane and goes on from there as the main view's ray reflected in
+    /// it, traced as every pixel's reflection traces one at roughness 0 ([`RAY_REFLECTIONS`]:
+    /// the screen first, then a ray 384 m long through the frame's ray scene, lit as a world
+    /// reflection's hit, the sky beyond, then what the screen shows farther out). The picture
+    /// keeps its mip chain, depth, projection and exposure, so its readers (the water's
+    /// `mirror_reflection`) sample it as before. Main view only. `render.ray.mirror_pictures`,
+    /// `mirror_texels`, `mirror_mb` (about 18 bytes a texel while on: 13.5 MB at the lake);
+    /// with `shade_skip::COUNT_MESH_RUNS` they are counted (`render.ray.mirror_screen`,
+    /// `mirror_rays`, `mirror_reused`). A mirror drawn again after its traced pictures keeps
+    /// no picture for a frame, so its readers start over (the water's settling frames). Off by
+    /// default.
+    pub const RAY_MIRROR_PICTURES: u32 = 1024;
 }
 
 /// What the screen shows.

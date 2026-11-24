@@ -447,6 +447,24 @@ fn variants() -> Vec<Variant> {
             "ray_ground_map drawn every frame (`ray_ground_every_frame`, a measurement): pass `ray ground map` is one draw's cost, the features' part and the map's levels; the picture is ray_ground_map's",
         ),
         v(
+            "ray_mirror_pictures",
+            r,
+            json!({"trial_cuts_more": 1040, "gi_hardware_rays": true}),
+            "ray_world with the lake mirror's picture traced in the frame's ray pass in place of the extra view that draws it: each texel is the reflection, at roughness 0, of where its ray from the mirrored eye meets the plane (passes `ray mirror pictures` and `ray mirror levels`; render.extra_views 0; render.ray.mirror_pictures, mirror_texels, mirror_mb). Its cost is this row against ray_world at the lake; the drawn mirror's is the baseline against water_no_mirror",
+        ),
+        v(
+            "count_ray_mirror_pictures",
+            r,
+            json!({"trial_cuts_more": 1040, "gi_hardware_rays": true, "debug_skip": 262_144}),
+            "a count of the traced mirror pictures' texels (render.ray.mirror_screen: answered by the screen's march; mirror_rays: traced; mirror_reused: rays whose hit the camera sees, which take last frame's picture)",
+        ),
+        v(
+            "water_no_mirror",
+            "WaterSettings",
+            json!({"mirror_reflections": false}),
+            "a control, not a cut: no lake mirror, the water's screen-space reflections alone; the baseline against it is what the drawn mirror costs (render.extra_views, extra_views_ms, extra_views_gpu_ms)",
+        ),
+        v(
             "check_ray_probe",
             r,
             json!({"trial_cuts_more": 48, "gi_hardware_rays": true, "ray_probe_check": true}),

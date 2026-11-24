@@ -752,6 +752,11 @@ pub struct Renderer {
     ray_losses: u32,
     /// A ray scene's numbers stand in the diagnostics (`render.ray.*`).
     ray_published: bool,
+    /// The mirrors' pictures the frame's rays trace (`trial_cut_more::RAY_MIRROR_PICTURES`),
+    /// and the mirrors placed for it this frame ([`Self::render_extra_views`]), until the main
+    /// view's extract takes them.
+    ray_mirrors: crate::ray_mirror::RayMirrors,
+    mirrors_placed: Vec<crate::planar_reflection::TracedPlacement>,
     /// Shadow maps whose static image a feature asked to draw again (`shadow_static_changed`
     /// after the main view's `prepare_frame`), for the next frame.
     static_requests: [bool; SHADOW_MAPS],
@@ -1611,6 +1616,8 @@ impl Renderer {
             ray_epoch: 0,
             ray_losses: 0,
             ray_published: false,
+            ray_mirrors: Default::default(),
+            mirrors_placed: Vec::new(),
         })
     }
 
@@ -1955,7 +1962,14 @@ impl Renderer {
     fn render_extra_views(&mut self, world: &mut World) -> Vec<Composite> {
         self.main_thread_submit_ms = 0.0;
         crate::portal::place_portal_views(world);
-        crate::planar_reflection::place_reflection_views(world);
+        // (The mirrors' pictures traced in the main view's ray pass are placed, not drawn. The
+        // switch alone decides: the probes trace the frame's ray scene from this frame's
+        // prepare on whenever it is wanted, so asking them here would draw the views of the
+        // frame the scene starts in, and keep their state while they are traced. A frame that
+        // can't trace after all has no picture: `RayMirrors::publish`.)
+        let traced =
+            crate::ray_mirror::RayMirrors::wanted(&crate::settings::effective(world), &self.shared);
+        self.mirrors_placed = crate::planar_reflection::place_reflection_views(world, traced);
         let mut views: Vec<_> = world
             .query::<(
                 Entity,
@@ -2488,6 +2502,12 @@ impl Renderer {
             // Here, as no other thread submits until the prepare threads start.
             self.probe_gi.swap_compacted(&self.shared.queue);
             self.extract_ray_scene(world, &settings);
+            // The mirrors' pictures this frame's rays trace, for the features to sample.
+            let placed = std::mem::take(&mut self.mirrors_placed);
+            let wanted = crate::ray_mirror::RayMirrors::wanted(&settings, &self.shared);
+            let can_trace = self.ray_scene.is_some() && self.probe_gi.traces_mirrors();
+            self.ray_mirrors
+                .publish(world, &self.shared, &view, placed, (wanted, can_trace));
         }
         self.prepare_shared.clear();
         self.prepare_shared
@@ -3497,8 +3517,19 @@ impl Renderer {
                 count_sun,
             );
             traced_sun = traces_sun;
-            if ray_work.any() || traces_sun {
+            // The mirrors' pictures the frame's rays trace (`trial_cut_more::RAY_MIRROR_PICTURES`,
+            // ray_mirror.rs), placed in the extract: after the reflections, lit as theirs are.
+            let mirrors = self.probe_gi.begin_mirrors(
+                &self.shared.device,
+                &mut encoder,
+                &self.targets,
+                &self.effects.previous_picture(&self.targets).view,
+                self.ray_mirrors.due(),
+                count_sun,
+            );
+            if ray_work.any() || traces_sun || mirrors {
                 let reflections_last = ray_work.any_reflections() && ray_work.scrolled;
+                let mirrors_last = mirrors && ray_work.scrolled;
                 // (Every pixel's reflection has a mark of its own: they are not the half-size
                 // world reflections.)
                 let reflections_mark = if ray_work.full_reflections {
@@ -3534,24 +3565,52 @@ impl Renderer {
                         self.perf.pass_inside(&mut cpu, &mut pass, reflections_mark);
                         self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
                     }
+                    if mirrors && !mirrors_last {
+                        self.perf
+                            .pass_inside(&mut cpu, &mut pass, "ray mirror pictures");
+                        self.probe_gi.dispatch_mirror_pictures(&mut pass);
+                    }
                 }
                 if ray_work.any() {
                     self.perf.pass(&mut cpu, &mut encoder, "probe gi copies");
                     self.probe_gi.end_rays(&mut encoder);
                 }
                 ray.end_sun(&mut encoder);
-                if reflections_last {
-                    self.perf.pass(&mut cpu, &mut encoder, reflections_mark);
+                if reflections_last || mirrors_last {
+                    self.perf.pass(
+                        &mut cpu,
+                        &mut encoder,
+                        if reflections_last {
+                            reflections_mark
+                        } else {
+                            "ray mirror pictures"
+                        },
+                    );
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("rays after the probes"),
                         timestamp_writes: None,
                     });
                     pass.set_bind_group(0, frame_group, &[]);
                     pass.set_bind_group(1, ray.group(), &[]);
-                    self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
+                    if reflections_last {
+                        self.probe_gi.dispatch_reflections(&mut pass, &self.targets);
+                    }
+                    if mirrors_last {
+                        if reflections_last {
+                            self.perf
+                                .pass_inside(&mut cpu, &mut pass, "ray mirror pictures");
+                        }
+                        self.probe_gi.dispatch_mirror_pictures(&mut pass);
+                    }
                 }
                 if ray_work.full_reflections {
                     self.probe_gi.end_reflections(&mut encoder);
+                }
+                if mirrors {
+                    // Each picture's levels and its depth, for the features that sample it.
+                    self.perf.pass(&mut cpu, &mut encoder, "ray mirror levels");
+                    self.ray_mirrors.finish(&self.shared, &mut encoder);
+                    self.probe_gi.end_mirrors(&mut encoder);
                 }
             }
         }
@@ -4154,11 +4213,14 @@ impl Renderer {
                 match &self.ray_scene {
                     Some(ray) => {
                         ray.publish(d);
+                        self.ray_mirrors.publish_diagnostics(d);
                         self.ray_published = true;
                     }
                     // Once after a scene went: its rows read zero from then on.
                     None if std::mem::take(&mut self.ray_published) => {
                         crate::ray_scene::RayScene::publish_none(d);
+                        crate::ray_mirror::RayMirrors::publish_none(d);
+                        crate::probe_gi::ProbeGi::publish_rays_none(d);
                     }
                     None => {}
                 }
