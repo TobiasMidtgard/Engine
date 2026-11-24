@@ -850,6 +850,7 @@ fn grow_scalp(
             if !settle(&mut pts, sp, collider, lm, rest) {
                 continue;
             }
+            spread_in_front(&mut pts, sp, collider, lm, rest);
             // Hanging hair waves as whole hanks, shorter and deeper the curlier it is: the
             // locks of a hank (a chunk, below) wave together, in a plane of their own and out
             // of step with the hank beside them, so the hair falls in wavy pieces that part
@@ -900,15 +901,19 @@ fn grow_scalp(
     // Hanging locks gather into chunks: each lock is drawn toward the mean shape of the locks
     // rooted near it (on its own side of the part), down from the crown and loosening a little
     // at the ends, so the hair falls in hanks with gaps between them.
+    // (And on its own side of the shoulder: drawn toward locks that hang behind it, a lock in
+    // front of the shoulder ended up between them, inside the body, and the body pushed its
+    // hairs out wherever its skin was nearest, strewn over the chest toward the arm.)
     if g.gravity > 0.5 && CHUNK_GATHER > 0.0 {
-        let mut chunks: HashMap<([i32; 3], bool), Vec<usize>> = HashMap::new();
+        let mut chunks: HashMap<([i32; 3], bool, bool), Vec<usize>> = HashMap::new();
         for (i, (sp, _)) in guides.iter().enumerate() {
             let d = sp.rest - head;
             let side = parted && d.z > PART_END_Z && d.x > PART_X;
+            let front = falls_front(d, hash01(sp.rest)) > 0.0;
             let key = (strand_center(sp.rest, CHUNK_CELL) * 1000.0)
                 .as_ivec3()
                 .to_array();
-            chunks.entry((key, side)).or_default().push(i);
+            chunks.entry((key, side, front)).or_default().push(i);
         }
         for members in chunks.values().filter(|m| m.len() >= 2) {
             let n = guides[members[0]].1.len();
@@ -1294,6 +1299,7 @@ fn grow_scalp(
                     jitter,
                     root,
                     lm,
+                    FACE_TO_COLLAR,
                 );
             }
             *p = collider.push_out(*p, off_skin(t));
@@ -1405,8 +1411,13 @@ const ON_HEAD_ABOVE: f32 = -0.11;
 /// Hair growing this far ahead of the head's center (about the ear) falls in front of the
 /// shoulder, the rest behind it, m.
 const FALLS_FRONT_Z: f32 = 0.005;
-/// How far the locks in front of a shoulder spread across the chest, m.
+/// How far a lock in front of a shoulder drifts toward the chest while it is laid, m.
 const FRONT_SPREAD: f32 = 0.04;
+/// How far the settled locks in front of a shoulder are then set apart across the chest, the
+/// hairline's furthest in, m.
+const FRONT_ACROSS: f32 = 0.055;
+/// How far the outermost of them lies out over the front of the shoulder, m.
+const FRONT_OUT: f32 = 0.012;
 /// A hanging guide is laid down its side of the shoulder from this far under the head's
 /// center (under the ear), m.
 const DRAPES_BELOW: f32 = -0.06;
@@ -1499,7 +1510,8 @@ fn settle(
                         pts[k].x = prev[k].x;
                     }
                 }
-                let aside = keep_off_face(pts[k], &mut face_side, jitter, pts[0], lm);
+                let aside =
+                    keep_off_face(pts[k], &mut face_side, jitter, pts[0], lm, FACE_TO_CHEST);
                 let p = pts[k] + (aside - pts[k]) * 0.35;
                 let mut out = collider.push_out(p, lie(k));
                 touching[k] = (out - p).length_squared() > 0.0;
@@ -1542,6 +1554,74 @@ fn settle(
         .windows(2)
         .any(|w| w[1].y - w[0].y > 0.5 * w[1].distance(w[0]));
     !folds && !rises
+}
+
+/// Spreads a settled guide that hangs in front of a shoulder across the chest.
+///
+/// Settled one by one, with nothing but gravity and the body, every lock in front hangs
+/// straight down from the side of the head: ten thousand hairs in a rope two centimetres wide
+/// down each side of the chest, where real hair, which takes up room and is held by the hair
+/// beside it and by the clothes it lies on, lies as a curtain a hand wide. So below the jaw
+/// each lock moves across: the hair from the hairline toward the middle of the chest, the hair
+/// from beside the ear a little out over the front of the shoulder, in the order they hang
+/// beside the face, with some mixing. From there down it hangs as hair does: straight under
+/// where the body last held it forward, and further forward only where the body is in the way.
+fn spread_in_front(
+    pts: &mut [Vec3],
+    sp: SkinPoint,
+    collider: &SkinCollider,
+    lm: &Landmarks,
+    rest: &Landmarks,
+) {
+    let d = sp.rest - rest.head;
+    if falls_front(d, hash01(sp.rest)) < 0.0 {
+        return;
+    }
+    let jaw = lm.head.y + ON_HEAD_ABOVE;
+    let Some(start) = pts.iter().position(|p| p.y < jaw) else {
+        return;
+    };
+    if start < 2 || pts[start].z < lm.head.z {
+        return;
+    }
+    let lengths: Vec<f32> = pts.windows(2).map(|w| (w[1] - w[0]).length()).collect();
+    let side = (pts[start].x - lm.head.x).signum();
+    let order = smoothstep(FALLS_FRONT_Z, 0.09, d.z);
+    let mixed = 0.7 * order + 0.3 * hash01(sp.rest + Vec3::X);
+    let across = side * (FRONT_OUT - (FRONT_OUT + FRONT_ACROSS) * mixed);
+    let layer = ((d.y + 0.04) / 0.14).clamp(0.0, 1.0);
+    let clear = 0.0023 + 0.0065 * layer;
+    let mut z = pts[start - 1].z;
+    for p in pts.iter_mut().skip(start) {
+        p.x += across * smoothstep(0.0, 0.07, jaw - p.y);
+        p.z = z;
+        for _ in 0..60 {
+            if collider.push_out(*p, clear) == *p {
+                break;
+            }
+            p.z += 0.002;
+        }
+        z = p.z;
+    }
+    // Smooth again (the body's steps), and each point back at its own distance along the hair.
+    for _ in 0..2 {
+        let before = pts.to_vec();
+        for k in start..pts.len() - 1 {
+            pts[k] = before[k] * 0.5 + (before[k - 1] + before[k + 1]) * 0.25;
+        }
+    }
+    let path = pts.to_vec();
+    let mut seg = start - 1;
+    let mut left = 0.0;
+    for k in start..pts.len() {
+        left += lengths[k - 1];
+        while seg + 2 < path.len() && left > path[seg + 1].distance(path[seg]) {
+            left -= path[seg + 1].distance(path[seg]);
+            seg += 1;
+        }
+        let dir = (path[seg + 1] - path[seg]).normalize_or(Vec3::NEG_Y);
+        pts[k] = path[seg] + dir * left;
+    }
 }
 
 /// Which side of the shoulder hair rooted `d` from the head's center (rest space) falls on:
@@ -1650,14 +1730,21 @@ fn keep_off_forehead(p: Vec3, jitter: f32, lm: &Landmarks) -> Vec3 {
     p
 }
 
-fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, root: Vec3, lm: &Landmarks) -> Vec3 {
+fn keep_off_face(
+    p: Vec3,
+    side: &mut Option<f32>,
+    jitter: f32,
+    root: Vec3,
+    lm: &Landmarks,
+    down_to: f32,
+) -> Vec3 {
     let d = p - lm.head;
-    // In front of the ears, from the forehead down to the shoulders.
-    if d.y > 0.06 || d.y < -0.26 || d.z < 0.025 {
+    // In front of the ears, from the forehead down to `down_to` (fading out over 6 cm).
+    if d.y > 0.06 || d.y < down_to || d.z < 0.025 {
         return p;
     }
     let t = ((0.06 - d.y) / 0.06).clamp(0.0, 1.0);
-    let below = ((d.y + 0.26) / 0.06).clamp(0.0, 1.0);
+    let below = ((d.y - down_to) / 0.06).clamp(0.0, 1.0);
     let fade = t * t * (3.0 - 2.0 * t) * below;
     // (Beside the cheekbone, which is 65 to 70 mm from the middle of the face: at 83 to 97 the
     // hair beside the face hung two or three centimetres out from the temple, in the air.)
@@ -1685,6 +1772,15 @@ fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, root: Vec3, lm: &
     };
     Vec3::new(x, p.y, p.z + (z - p.z) * back)
 }
+
+/// A lock is kept aside of the face while it is grown and settled down to here under the
+/// head's center (the chest), m.
+const FACE_TO_CHEST: f32 = -0.26;
+/// And a hair of it only down to here (the collarbone): below the jaw its lock places it.
+/// (Kept aside down to the chest as well, every hair in front of a shoulder was held 7 to 8 cm
+/// out and back at the ear's depth, whatever its lock did: ten thousand hairs in a rope
+/// 2 cm wide from the jaw to the chest.)
+const FACE_TO_COLLAR: f32 = -0.17;
 
 /// The band behind the hairline over which hair turns from growing back off the face to its
 /// style's flow (m up the head).
@@ -1945,7 +2041,7 @@ fn grow_hair(
         }
         let mut p = p_prev + next_dir * seg;
         if g.gravity > 0.5 {
-            p = keep_off_face(p, &mut face_side, jitter, pts[0], lm);
+            p = keep_off_face(p, &mut face_side, jitter, pts[0], lm, FACE_TO_CHEST);
         }
         let offset = 0.0008 + loft * (t / 0.4).min(1.0) * lift * tuck(a, t);
         p = collider.push_out(p, offset);
