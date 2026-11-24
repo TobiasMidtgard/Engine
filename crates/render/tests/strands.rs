@@ -1047,6 +1047,11 @@ fn groom_scene(budget_mb: Option<f32>) -> (App, engine_assets::Handle<StrandGroo
         s.sharpness = 0.0;
         s.screen_space_reflections = false;
         s.screen_space_gi = false;
+        // The strands' own drawing is compared here. With the sun's trace
+        // (`trial_cut_more::RAY_SUN`) the fur's tenfold growth also changed 2 pixels of the
+        // curtain's part, by up to 20 levels (lavapipe, 24 Nov 2026), where the shadow maps
+        // alone change none.
+        s.trial_cuts_more &= !engine_render::settings::trial_cut_more::RAY_SUN;
         if let Some(mb) = budget_mb {
             s.upload_budget_headless = true;
             s.upload_mb_per_frame = mb;

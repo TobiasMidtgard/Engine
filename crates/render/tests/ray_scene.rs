@@ -28,7 +28,7 @@ use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::rock::rock;
 use engine_render::settings::shade_skip;
-use engine_render::settings::trial_cut_more::{RAY_GROUND_MAP, RAY_WORLD};
+use engine_render::settings::trial_cut_more::{RAY_GROUND_MAP, RAY_WORLD, RAYS};
 use engine_render::{
     FrameContext, GpuShared, GroundAlbedoView, RayClass, RayGeometryState, RayKey, RayLook,
     RaySceneOut, RaySource, RaySphere, RayView, RenderDisabled, capture_now, wgpu,
@@ -72,6 +72,9 @@ fn app(ray_world: bool) -> App {
         s.gi_probe_grid = [16, 8, 16];
         s.gi_probes_per_frame = ALL_PROBES;
         s.gi_hysteresis = 0.5;
+        // The ray-traced lighting's parts are off here whatever the defaults hold: a test
+        // that wants one sets it (`set_ray_world`, `set_ground_map`).
+        s.trial_cuts_more &= !RAYS;
     }
     set_ray_world(&mut app, ray_world);
     app

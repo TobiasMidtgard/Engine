@@ -41,6 +41,9 @@ fn shoot(casters: Casters) -> Option<(f64, image::RgbImage)> {
         s.anti_aliasing = AntiAliasing::None;
         s.film_grain = 0.0;
         s.shadow_cascade_reuse = 0;
+        // The cascades' own shadows: the sun's trace (`trial_cut_more::RAY_SUN`) would cast
+        // the pillars' where it reaches, whichever cascades draw them.
+        s.trial_cuts_more &= !engine_render::settings::trial_cut_more::RAY_SUN;
     }
     let w = &mut app.world;
     w.spawn((

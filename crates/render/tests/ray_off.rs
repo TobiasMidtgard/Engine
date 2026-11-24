@@ -19,9 +19,7 @@
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
-use engine_render::settings::trial_cut_more::{
-    RAY_GROUND_MAP, RAY_MIRROR_PICTURES, RAY_PROBES, RAY_REFLECTIONS, RAY_SUN, RAY_WATER, RAY_WORLD,
-};
+use engine_render::settings::trial_cut_more::RAYS;
 use engine_render::{FrameContext, RenderDisabled, capture_now};
 
 const W: u32 = 160;
@@ -54,14 +52,10 @@ fn app(switches: bool) -> App {
         // A quarter of the grid a frame: four times as many would show.
         s.gi_probes_per_frame = 16 * 8 * 16 / 4;
         s.gi_hysteresis = 0.5;
+        // Every part of the ray-traced lighting on, or none whatever the defaults hold.
+        s.trial_cuts_more &= !RAYS;
         if switches {
-            s.trial_cuts_more |= RAY_WORLD
-                | RAY_PROBES
-                | RAY_SUN
-                | RAY_REFLECTIONS
-                | RAY_GROUND_MAP
-                | RAY_MIRROR_PICTURES
-                | RAY_WATER;
+            s.trial_cuts_more |= RAYS;
             s.ray_sun_shadows = true;
             s.ray_ground_every_frame = true;
             s.debug_skip |= engine_render::settings::shade_skip::RAY_LEAVES_SOLID

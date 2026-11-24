@@ -108,7 +108,7 @@ fn a_traced_mirror_picture_reports_its_parts() {
 
 fn ray_pass_parts(full: bool, mirror: bool) {
     use engine_render::settings::trial_cut_more::{
-        RAY_MIRROR_PICTURES, RAY_REFLECTIONS, RAY_WORLD,
+        RAY_MIRROR_PICTURES, RAY_REFLECTIONS, RAY_WORLD, RAYS,
     };
     engine_core::log::init("error");
     let mut app = App::new();
@@ -124,7 +124,9 @@ fn ray_pass_parts(full: bool, mirror: bool) {
         s.perf_log_secs = 0.01;
         s.probe_gi = true;
         s.gi_hardware_rays = true;
-        s.trial_cuts_more |= RAY_WORLD;
+        // The frame's ray scene with the parts asked for and no others, whatever the
+        // defaults hold.
+        s.trial_cuts_more = (s.trial_cuts_more & !RAYS) | RAY_WORLD;
         if full {
             s.trial_cuts_more |= RAY_REFLECTIONS;
         }

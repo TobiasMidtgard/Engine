@@ -63,7 +63,9 @@ pub fn app(bits: u32) -> App {
         s.gi_probe_grid = [16, 8, 16];
         s.gi_probes_per_frame = 16;
         s.gi_hysteresis = 0.5;
-        s.trial_cuts_more |= bits;
+        // `bits` and no other part of the ray-traced lighting, whatever the defaults hold.
+        s.trial_cuts_more =
+            (s.trial_cuts_more & !engine_render::settings::trial_cut_more::RAYS) | bits;
     }
     // The lake mirror would answer every pixel of the pool.
     app.world.resource_mut::<WaterSettings>().mirror_reflections = false;

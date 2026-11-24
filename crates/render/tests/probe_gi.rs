@@ -53,6 +53,9 @@ fn app(probe_gi: bool) -> App {
         s.gi_probe_grid = [16, 8, 16];
         s.gi_probes_per_frame = 16 * 8 * 16;
         s.gi_hysteresis = 0.5;
+        // The ray-traced lighting's parts are off here whatever the defaults hold: a test
+        // that wants one sets it.
+        s.trial_cuts_more &= !engine_render::settings::trial_cut_more::RAYS;
     }
     app
 }

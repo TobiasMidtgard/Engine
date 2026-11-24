@@ -15,7 +15,7 @@
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::settings::shade_skip::{COUNT_MESH_RUNS, RAY_REFLECT_RAYS_ONLY};
-use engine_render::settings::trial_cut_more::{RAY_REFLECTIONS, RAY_WORLD};
+use engine_render::settings::trial_cut_more::{RAY_REFLECTIONS, RAY_WORLD, RAYS};
 use engine_render::{RenderDisabled, capture_now};
 
 const W: u32 = 160;
@@ -52,7 +52,9 @@ fn app(full: bool) -> App {
         s.gi_probe_grid = [16, 8, 16];
         s.gi_probes_per_frame = 16;
         s.gi_hysteresis = 0.5;
-        s.trial_cuts_more |= RAY_WORLD;
+        // The frame's ray scene with every pixel's reflection or without, and no other part of
+        // the ray-traced lighting, whatever the defaults hold.
+        s.trial_cuts_more = (s.trial_cuts_more & !RAYS) | RAY_WORLD;
         if full {
             s.trial_cuts_more |= RAY_REFLECTIONS;
         }
@@ -325,6 +327,29 @@ fn a_mirror_reflects_a_wall_behind_the_camera_at_every_pixel() {
         "sharper than the half-size world reflections ({:.0}% against {:.0}%)",
         (red + blue) * 100.0,
         (half_red + half_blue) * 100.0
+    );
+
+    // Without world reflections (`RenderSettings::world_reflections` off) no reflection is
+    // traced, every pixel's or half-size: screen-space reflections over the sky, so the wall
+    // behind the camera isn't in the mirror.
+    let mut none = striped_yard(true);
+    none.world
+        .resource_mut::<RenderSettings>()
+        .world_reflections = false;
+    none.update_n(8);
+    assert_traced(&none, false, "without world reflections");
+    let (none_red, none_blue) = stripe_shares(&picture(&mut none, "mirror_none.png"));
+    eprintln!(
+        "without world reflections: {:.0}% red, {:.0}% blue",
+        none_red * 100.0,
+        none_blue * 100.0
+    );
+    assert!(
+        none_red + none_blue + 0.2 < red + blue,
+        "without world reflections the mirror still shows the wall behind the camera \
+         ({:.0}% against {:.0}% with them)",
+        (none_red + none_blue) * 100.0,
+        (red + blue) * 100.0
     );
 }
 

@@ -2477,10 +2477,12 @@ impl Renderer {
         let previous =
             self.effects.has_previous() && view.history_valid && self.prev_exposure > 0.0;
         // Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`) needs no picture of last
-        // frame: the first frames' are its rays' alone.
+        // frame: the first frames' are its rays' alone. It is the world reflections' way, so
+        // `world_reflections` off leaves it off too.
         let both = crate::settings::trial_cut_more::RAY_WORLD
             | crate::settings::trial_cut_more::RAY_REFLECTIONS;
         let full_reflections = !is_extra
+            && settings.world_reflections
             && settings.trial_cuts_more & both == both
             && self.ray_scene.is_some()
             && self.probe_gi.traces_ray_world();
@@ -3491,8 +3493,8 @@ impl Renderer {
             self.perf.pass(&mut cpu, &mut encoder, "ray inputs");
             let alternate =
                 settings.trial_cuts & crate::settings::trial_cut::REFLECTIONS_ALTERNATE != 0;
-            let full =
-                settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_REFLECTIONS != 0;
+            let full = settings.world_reflections
+                && settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_REFLECTIONS != 0;
             let reflections = if !ssr {
                 None
             } else if full {

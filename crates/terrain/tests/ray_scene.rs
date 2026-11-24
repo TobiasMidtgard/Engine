@@ -7,7 +7,7 @@
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
-use engine_render::settings::trial_cut_more::{RAY_GROUND_MAP, RAY_WORLD};
+use engine_render::settings::trial_cut_more::{RAY_GROUND_MAP, RAY_WORLD, RAYS};
 use engine_render::{RenderDisabled, capture_now};
 use engine_terrain::{FlatPad, PlanetTerrain, TerrainPlugin};
 
@@ -35,7 +35,9 @@ fn app() -> App {
         s.probe_gi = true;
         s.gi_hardware_rays = true;
         s.gi_probes_per_frame = 16;
-        s.trial_cuts_more |= RAY_WORLD;
+        // The frame's ray scene and no other part of the ray-traced lighting, whatever the
+        // defaults hold.
+        s.trial_cuts_more = (s.trial_cuts_more & !RAYS) | RAY_WORLD;
     }
     // A flat square 4 km across, its pad level at the origin.
     let pad = FlatPad::default();
@@ -182,7 +184,9 @@ fn meadow(map: bool) -> App {
         s.gi_probe_grid = [16, 8, 16];
         s.gi_probes_per_frame = 16 * 8 * 16;
         s.gi_hysteresis = 0.5;
-        s.trial_cuts_more |= RAY_WORLD;
+        // The frame's ray scene, with the ground colour map or without, and no other part of
+        // the ray-traced lighting, whatever the defaults hold.
+        s.trial_cuts_more = (s.trial_cuts_more & !RAYS) | RAY_WORLD;
         if map {
             s.trial_cuts_more |= RAY_GROUND_MAP;
         }

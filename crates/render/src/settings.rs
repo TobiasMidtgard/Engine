@@ -508,7 +508,8 @@ pub mod trial_cut_more {
     /// way to it. Off by default.
     pub const RAY_SUN: u32 = 128;
     /// A reflection for every pixel up to `RenderSettings::ssr_max_roughness`, with
-    /// [`RAY_WORLD`], in place of screen-space reflections over world reflections at half size
+    /// [`RAY_WORLD`] and `RenderSettings::world_reflections`, in place of screen-space
+    /// reflections over world reflections at half size
     /// (ray_reflect.wgsl; pass "ray reflections", the last of the frame's ray pass; `gpu_sweep`
     /// rows `ray_reflections`, `ray_reflections_rays_only`, `count_ray_reflections`). Each
     /// pixel's reflection marches the screen first, as screen-space reflections did, and takes
@@ -571,6 +572,17 @@ pub mod trial_cut_more {
     /// no picture for a frame, so its readers start over (the water's settling frames). Off by
     /// default.
     pub const RAY_MIRROR_PICTURES: u32 = 1024;
+    /// Every bit of the ray-traced lighting round: [`RAY_WORLD`] and the parts that need it.
+    /// A test about one part, or about the frame without the rays, clears these from the
+    /// defaults and sets what it is about, so that it means the same when the round's bits
+    /// join [`DEFAULT`].
+    pub const RAYS: u32 = RAY_WORLD
+        | RAY_PROBES
+        | RAY_SUN
+        | RAY_REFLECTIONS
+        | RAY_GROUND_MAP
+        | RAY_WATER
+        | RAY_MIRROR_PICTURES;
 }
 
 /// What the screen shows.
@@ -692,7 +704,9 @@ pub struct RenderSettings {
     /// screen, or hidden behind something) is traced against the probes' scene at half
     /// resolution and lit like a probe ray's hit (sun and lamps through shadow rays, glow,
     /// bounce light from the probes), instead of reflecting the sky. Needs
-    /// `screen_space_reflections` and `probe_gi`.
+    /// `screen_space_reflections` and `probe_gi`. With `trial_cut_more::RAY_REFLECTIONS`
+    /// they are every pixel's own ray; off, neither is traced, and screen-space reflections
+    /// over the sky stand.
     pub world_reflections: bool,
     /// Screen-space global illumination: diffuse light bounced off nearby surfaces that are on
     /// screen (sunlit walls tint the ground, lamps and emissive surfaces light their

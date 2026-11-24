@@ -24,7 +24,7 @@ use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::settings::shade_skip::RAY_SUN_TRACE_ONLY;
 use engine_render::settings::trial_cut::MESHES_ONCE;
-use engine_render::settings::trial_cut_more::{RAY_SUN, RAY_WORLD};
+use engine_render::settings::trial_cut_more::{RAY_SUN, RAY_WORLD, RAYS};
 use engine_render::{
     GpuShared, RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere,
     RayView, RenderDisabled, capture_now,
@@ -64,7 +64,9 @@ fn app(trace: bool) -> App {
         s.gi_probe_grid = [16, 8, 16];
         s.gi_probes_per_frame = 16;
         s.gi_hysteresis = 0.5;
-        s.trial_cuts_more |= RAY_WORLD;
+        // The frame's ray scene with the sun's trace or without, and no other part of the
+        // ray-traced lighting, whatever the defaults hold.
+        s.trial_cuts_more = (s.trial_cuts_more & !RAYS) | RAY_WORLD;
         if trace {
             s.trial_cuts_more |= RAY_SUN;
         }

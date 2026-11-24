@@ -8,7 +8,7 @@
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::settings::shade_skip::COUNT_MESH_RUNS;
-use engine_render::settings::trial_cut_more::{RAY_MIRROR_PICTURES, RAY_WORLD};
+use engine_render::settings::trial_cut_more::{RAY_MIRROR_PICTURES, RAY_WORLD, RAYS};
 use engine_render::{
     FrameContext, GpuShared, PlanarReflection, RenderDisabled, Screenshots, ViewData, capture_now,
     planar_reflection_picture, rendering_reflection,
@@ -285,6 +285,9 @@ fn ball_app_with(traced: bool, feature: impl RenderFeature) -> App {
         s.film_grain = 0.0;
         s.screen_space_gi = false;
         s.probe_gi = false;
+        // No part of the ray-traced lighting but what a test asks for, whatever the
+        // defaults hold.
+        s.trial_cuts_more &= !RAYS;
         if traced {
             s.probe_gi = true;
             s.gi_hardware_rays = true;
