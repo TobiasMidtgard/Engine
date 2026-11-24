@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use engine_core::math::{Quat, UVec3, Vec3};
 
 use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle, Rng};
+use crate::clothes::{Cut, Top};
 use crate::mesh::{
     BROW_CENTER, BROW_HALF, BROW_INNER, BROW_LENGTH, Landmarks, MASKS, Mask, SkinMesh, lerp_table,
     smoothstep,
@@ -308,6 +309,8 @@ pub struct SkinCollider<'a> {
     skin: &'a SkinMesh,
     cells: HashMap<[i32; 3], Vec<u32>>,
     cell: f32,
+    /// How far the clothes stand off each skin vertex, m (empty: bare all over).
+    clothes: Vec<f32>,
 }
 
 impl<'a> SkinCollider<'a> {
@@ -317,7 +320,33 @@ impl<'a> SkinCollider<'a> {
         for (i, p) in skin.positions.iter().enumerate() {
             cells.entry(Self::key(*p, cell)).or_default().push(i as u32);
         }
-        Self { skin, cells, cell }
+        Self {
+            skin,
+            cells,
+            cell,
+            clothes: Vec::new(),
+        }
+    }
+
+    /// The same skin under the clothes of `a`: hair is kept off the cloth over it.
+    ///
+    /// Clothes are the skin moved out a few millimetres under the neckline (clothes.rs), after
+    /// the hair is grown: long hair laid a millimetre off the bare skin of the chest and back
+    /// ended up inside the cloth, and showed as broken ends dipping in and out of a shirt.
+    pub fn dressed(mut self, a: &Appearance, rest: &Landmarks) -> Self {
+        let off = match Cut::of(a).top {
+            Top::None => return self,
+            Top::Shirt | Top::Tshirt => ON_SHIRT,
+            Top::Gambeson | Top::Mail => ON_COAT,
+        };
+        let neckline = rest.head.y + ON_HEAD_ABOVE;
+        self.clothes = self
+            .skin
+            .rest
+            .iter()
+            .map(|r| off * smoothstep(0.0, 0.02, neckline - r.y))
+            .collect();
+        self
     }
 
     fn key(p: Vec3, cell: f32) -> [i32; 3] {
@@ -357,6 +386,7 @@ impl<'a> SkinCollider<'a> {
         };
         let n = self.skin.normals[i];
         let h = (p - self.skin.positions[i]).dot(n);
+        let offset = offset + self.clothes.get(i).copied().unwrap_or(0.0);
         if h < offset { p + n * (offset - h) } else { p }
     }
 }
@@ -371,7 +401,7 @@ pub fn grow_all(
     lm: &Landmarks,
     rest: &Landmarks,
 ) -> Vec<StrandSet> {
-    let collider = SkinCollider::new(skin);
+    let collider = SkinCollider::new(skin).dressed(a, rest);
     let mut out = Vec::new();
     if let Some(s) = grow_scalp(a, skin, &collider, lm, rest) {
         out.push(s);
@@ -919,14 +949,21 @@ fn grow_scalp(
         // all the time, a few percent of them at any length; 4% here), which stand a little off the
         // combed surface over the top and back: the fine halo real long hair shows against the
         // light, where a groom of only full-length hairs has the clean edge of a wig.
-        let broken = g.gravity > 0.5
+        let regrowing = g.gravity > 0.5
             && !flyaway
             && fine >= 1.0
             && d.y > 0.03
             && d.z < 0.03
             && r.f32() < 0.04;
+        // (Not beside the part or at its back end: there the hair arcs up off the head before
+        // it falls to its side, a short hair in it ends at the top of the arc, and with no
+        // longer hair lying over it a few dozen stood bare against the sky, a tuft of wires.
+        // Those stay full length.)
+        let short = if regrowing { r.range(0.1, 0.4) } else { 1.0 };
+        let broken = regrowing
+            && !(parted && (d.x - PART_X).abs() < 0.06 && d.z > PART_END_Z - 0.04 && d.y > 0.07);
         if broken {
-            scale *= r.range(0.1, 0.4);
+            scale *= short;
         }
         let inland = ((d.y - line) / HAIRLINE_BAND).clamp(0.0, 1.0);
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale, inland);
@@ -1062,8 +1099,14 @@ fn grow_scalp(
                 let axis = (pts[last] - pts[0]).normalize_or(Vec3::NEG_Y);
                 let d = Vec3::new(r.normal(), r.normal(), r.normal());
                 let dir = (d - axis * d.dot(axis)).normalize_or(Vec3::X);
-                let amp = CHILD_WAVE * r.range(0.6, 1.4);
-                let waves = 2.35 * r.range(0.85, 1.2) * (g.length / 0.45).max(0.5);
+                // (As long as the hair is: a hair a few centimetres long, broken or growing
+                // back, with the waves of a full-length one was a zigzag of wire.)
+                let own = len_of(&pts);
+                let amp = CHILD_WAVE * r.range(0.6, 1.4) * (own / 0.15).min(1.0);
+                let waves = 2.35
+                    * r.range(0.85, 1.2)
+                    * (g.length / 0.45).max(0.5)
+                    * (own / g.length).min(1.0);
                 let phase = r.range(0.0, std::f32::consts::TAU);
                 for (k, p) in pts.iter_mut().enumerate() {
                     let t = k as f32 / last as f32;
@@ -1072,10 +1115,11 @@ fn grow_scalp(
                 }
             }
         }
-        if broken {
+        if regrowing {
             // Standing off the hair over it, more toward the tip.
             let out = (sp.p - lm.head).normalize_or(Vec3::Y);
-            let lift = r.range(0.003, 0.01);
+            // (Drawn either way, so the hairs after this one grow as they did.)
+            let lift = r.range(0.003, 0.01) * if broken { 1.0 } else { 0.0 };
             let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
@@ -1237,6 +1281,10 @@ fn grow_scalp(
     Some(set)
 }
 
+/// How far hair lies off the skin under a shirt (its cloth stands 3 to 5 mm off the skin), m.
+const ON_SHIRT: f32 = 0.006;
+/// And under a padded coat (11 to 13 mm thick), m.
+const ON_COAT: f32 = 0.015;
 /// The length from its root over which a hanging hair holds its own direction, m.
 const STIFF_ROOT: f32 = 0.06;
 /// Hair lies held on the head down to this far under the head's center (about the jaw), m.
