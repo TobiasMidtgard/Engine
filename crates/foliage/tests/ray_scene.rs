@@ -10,7 +10,7 @@ use engine_foliage::FoliagePlugin;
 use engine_foliage::scenery::{GroundLayer, GroundSurface, GroundVertex, Rock};
 use engine_render::RenderDisabled;
 use engine_render::prelude::*;
-use engine_render::settings::trial_cut_more::RAY_WORLD;
+use engine_render::settings::trial_cut_more::{RAY_WORLD, RAYS};
 
 fn diag(app: &App, name: &str) -> f64 {
     app.world
@@ -40,7 +40,9 @@ fn app() -> App {
         s.probe_gi = true;
         s.gi_hardware_rays = true;
         s.gi_probes_per_frame = 16;
-        s.trial_cuts_more |= RAY_WORLD;
+        // The scene alone: the round's other ray parts stay as they were off, whatever the
+        // defaults turn on.
+        s.trial_cuts_more = (s.trial_cuts_more & !RAYS) | RAY_WORLD;
     }
     app.world
         .insert_resource(engine_foliage::FoliageLoading::in_frame());
