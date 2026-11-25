@@ -58,13 +58,13 @@ pub mod terrain;
 pub use air::{AirSample, Atmospheres, BodyAtmosphere};
 pub use character::{
     Appearance, AppearanceBodies, AppearanceRequest, BodyFit, CharacterQuality, FaceControls,
-    FurCoat, FurCoatDrawer, FurStyle, HairCapsule, HairGuide, HairGuides, HairGuidesPosed,
-    HandControls, HandPose, HandShape, Outfit, draws_appearances, draws_fur_coats,
+    FurCoat, FurCoatDrawer, FurStyle, HairBody, HairBodyPart, HairCapsule, HairGuide, HairGuides,
+    HairGuidesPosed, HandControls, HandPose, HandShape, Outfit, draws_appearances, draws_fur_coats,
 };
 pub use combat::{
     Approach, AttackPhase, AttackWindow, BodyHit, BodyInjuries, BodyZone, CombatDifficulty,
-    CombatSkills, DifficultyTier, ItemClass, Knockback, Loadout, MeleeContact, MeleeJudge,
-    ZoneInjury, judges_melee,
+    CombatSkills, CuttingEdge, DifficultyTier, ItemClass, Knockback, Loadout, MeleeContact,
+    MeleeJudge, ZoneInjury, judges_melee,
 };
 pub use cover::{CoverCell, CoverKind, GroundCover};
 pub use environment::*;

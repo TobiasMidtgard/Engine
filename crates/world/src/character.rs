@@ -642,6 +642,17 @@ pub struct HairGuidesPosed {
     /// The shapes the simulation held the hair out of at this step (same space as `points`);
     /// the drawing side keeps the hairs between guides out of them too. Empty: none.
     pub capsules: Vec<HairCapsule>,
+    /// Each [`HairBody`] part's bone as the simulation posed it at this step (model space), in
+    /// `HairBody::parts` order. Empty: no body held the hair out.
+    pub body: Vec<BonePose>,
+    /// Per guide: how wet the lock is, 0 dry to 1 soaked. Empty: dry.
+    pub wet: Vec<f32>,
+    /// Per guide: the share of its grown length left on the head after blades cut it (1 uncut).
+    /// Empty: uncut.
+    pub cut: Vec<f32>,
+    /// Per guide: 0 while the piece last cut off still falls (its points are the guide's points
+    /// past `cut`), rising to 1 when it is gone. Empty: nothing falls.
+    pub shed: Vec<f32>,
 }
 
 /// A tapered capsule the hair simulation keeps hair out of: a sphere of radius `ra` at `a`
@@ -652,6 +663,46 @@ pub struct HairCapsule {
     pub ra: f32,
     pub b: Vec3,
     pub rb: f32,
+}
+
+/// The body a person's hair lies on and slides off, clothes included: the signed distance to
+/// the dressed skin, sampled in boxes that ride bones. The look module (which knows the skin
+/// and what is worn over it) writes it next to [`HairGuides`], in the same space and for the
+/// same `version`; the hair simulation holds the guides out of it, and the drawing side the
+/// hairs between them.
+///
+/// The distance at a point is the parts' distances there blended by their weights, each part
+/// sampled where its bone carries the point back to [`HairGuides::grown_on`]; a point in no
+/// part's box is outside the body.
+#[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HairBody {
+    pub version: u32,
+    pub parts: Vec<HairBodyPart>,
+}
+
+impl HairBody {
+    /// Meters per unit of [`HairBodyPart::distance`].
+    pub const UNIT: f32 = 1.0e-5;
+}
+
+/// One bone's box of a [`HairBody`].
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HairBodyPart {
+    /// Index into the person's `SkeletonPose` bones: the box rides this bone.
+    pub bone: u16,
+    /// The box's low corner and the spacing of its samples, m, in the person's model space at
+    /// [`HairGuides::grown_on`].
+    pub min: Vec3,
+    pub cell: f32,
+    /// Samples along x, y and z.
+    pub size: [u16; 3],
+    /// Per sample (x fastest, then y, then z): the signed distance to the dressed skin in
+    /// [`HairBody::UNIT`]s, negative inside.
+    pub distance: Arc<[i16]>,
+    /// Per sample: how much this bone carries the skin nearest to it, 0..=255.
+    pub weight: Arc<[u8]>,
 }
 
 impl HairGuidesPosed {
@@ -929,6 +980,7 @@ mod tests {
                 .flat_map(|g| g.points.clone())
                 .collect(),
             capsules: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(posed.guide(&guides, 1), Some(&guides.guides[1].points[..]));
         assert_eq!(posed.guide(&guides, 2), None);

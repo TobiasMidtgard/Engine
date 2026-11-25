@@ -465,6 +465,24 @@ pub(crate) fn register(app: &mut App) {
         );
 }
 
+/// A sharp edge in the world: a sword's, an axe's, a knife's. It goes on the entity that carries
+/// the item's `GlobalTransform`, from whoever puts the item in the world (who also keeps
+/// `sharpness` as the edge dulls or is honed). Readers follow the edge from step to step and
+/// cut what it sweeps through: the hair simulation cuts the locks a sharp, fast edge crosses
+/// and lets a blunt or slow one push them aside.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CuttingEdge {
+    /// The edge's ends in the entity's local space, m: nearest the grip, and the point.
+    pub heel: Vec3,
+    pub tip: Vec3,
+    /// Unit, local: the way the edge faces (from the blade's back to its edge).
+    pub facing: Vec3,
+    /// Whether the back is an edge too (a double-edged sword).
+    pub double: bool,
+    /// 0..1: 0 blunt (a training blade), 0.5 a sword kept for use, 0.8 freshly honed, 1 a razor.
+    pub sharpness: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

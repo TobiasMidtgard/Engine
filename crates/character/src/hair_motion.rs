@@ -231,6 +231,7 @@ mod tests {
             version: 3,
             points: g.guides[0].points.iter().map(|p| carry(*p)).collect(),
             capsules: Vec::new(),
+            ..Default::default()
         };
         let mut out = Vec::new();
         guide_motion(&g, Some(&posed), Some(&turned), &mut out);

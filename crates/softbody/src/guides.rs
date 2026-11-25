@@ -779,6 +779,7 @@ pub fn write_posed_guides(
                     version: hair.version,
                     points: points.collect(),
                     capsules: capsules.collect(),
+                    ..Default::default()
                 });
             }
         }

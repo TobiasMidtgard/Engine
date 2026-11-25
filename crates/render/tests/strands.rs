@@ -448,6 +448,7 @@ fn render_guided(guides: Guides, shot: &str) -> Option<RgbImage> {
                 version: 0,
                 points,
                 capsules,
+                ..Default::default()
             });
         }
         Guides::WhenDrawn => {
