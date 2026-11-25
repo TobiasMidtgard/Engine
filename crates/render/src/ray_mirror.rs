@@ -41,7 +41,18 @@
 //! takes what the view drew there, by its coverage, over what the screen shows or the sky: only
 //! what lies past where its ray begins to give way to the view (drawn from one near plane, the
 //! view also holds what the rays hit, which a neighbouring texel would fringe). A hit in the
-//! reach's last tenth blends into it by distance where the view drew the same thing.
+//! reach's last tenth blends into it by distance where the view drew the same thing. Where the
+//! screen doesn't show the sky there, the sky is the one the view drew, its clouds and fog as a
+//! drawn view's, in place of the environment map's (a 256 × 128 picture, unfogged, 1.4° a
+//! texel, the weather's clouds marched into it more cheaply: the small ones were lost). The
+//! picture never takes the light's disc (the sun's, or the moon's when it is the light:
+//! `frame.sun_dir`) from the screen or the view: the water's glitter is that light's
+//! reflection, so a disc would show it a second time. Within three times its radius of the
+//! light (and two of the far view's texels more with the far view, for its anti-aliasing) the
+//! sky is the one just past that, drawn out toward the light, or taken from beside it where
+//! that would lie under the plane (under a low sun, where the ground is); every hit there, and
+//! what the screen or the view drew there, is held to half again the environment map's sky, as
+//! their anti-aliasing blends the disc into an outline in front of it.
 
 use std::collections::HashMap;
 

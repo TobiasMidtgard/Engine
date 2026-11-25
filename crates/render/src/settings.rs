@@ -564,7 +564,8 @@ pub mod trial_cut_more {
     /// it, traced as every pixel's reflection traces one at roughness 0 ([`RAY_REFLECTIONS`]:
     /// the screen first, then a ray 384 m long through the frame's ray scene, its hit lit as
     /// every pixel's reflection's is and fogged over its whole mirrored path as the drawn view
-    /// fogs what it draws, the sky beyond, then what the screen shows farther out). The picture
+    /// fogs what it draws, then what the screen shows farther out, then the sky, never with the
+    /// light's disc: the water's glitter is that light's reflection). The picture
     /// keeps its mip chain, depth, projection and exposure, so its readers (the water's
     /// `mirror_reflection`) sample it as before. With temporal anti-aliasing each frame's rays
     /// go through another point of their texels and the picture keeps a history of its own
@@ -583,12 +584,18 @@ pub mod trial_cut_more {
     /// draws only what lies past them and a little more (far terrain, far levels of detail,
     /// impostors) and the sky (its own shading and fog, as the drawn mirror's view has them). Past
     /// its own ray's reach a texel takes what the view drew there, laid by its coverage over what
-    /// the screen shows along the ray or the sky (the view's own sky is left out of its read, and
-    /// so is what lies short of where its ray begins to give way to the view, which the rays hit:
-    /// the view adds no fringe round it); without it such a texel is what the screen shows, else
-    /// the sky. A hit in the reach's last tenth blends into what the view drew there by its
-    /// distance, where that is the same thing, so a ridge across the reach shows no line where the
-    /// rays end. The view is an extra view (`render.extra_views`, `extra_views_gpu_ms`);
+    /// the screen shows along the ray or the sky (the view's own sky is left out of its coverage,
+    /// and so is what lies short of where its ray begins to give way to the view, which the rays
+    /// hit: the view adds no fringe round it); without it such a texel is what the screen shows,
+    /// else the sky. The sky is the screen's where it shows the sky that way, else the one the
+    /// view drew there (its clouds as the drawn mirror has them: the environment map lost the
+    /// small ones), else the environment map's; within three times its radius of the frame's
+    /// light (the sun, or the moon when it is the light), and two of the view's texels more, the
+    /// sky just past that, as the picture never shows the light's disc (the water's glitter is
+    /// that light's reflection). A hit in the reach's
+    /// last tenth blends into what the view drew there by its distance, where that is the same
+    /// thing, so a ridge across the reach shows no line where the rays end. The view is an
+    /// extra view (`render.extra_views`, `extra_views_gpu_ms`);
     /// `render.ray.mirror_far` (views drawn for traced pictures this frame), `mirror_far_texels`
     /// (their texels). `gpu_sweep` rows `ray_mirror_far` and `ray_mirror_far_half` against
     /// `ray_mirror_pictures`. Main view only. Off by default.

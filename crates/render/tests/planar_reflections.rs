@@ -6,8 +6,11 @@
 //! hits fogged over their mirrored path as the drawn mirror's are, and a wall past the rays'
 //! reach above the top of the screen in it with the picture's far view
 //! (`trial_cut_more::RAY_MIRROR_FAR`) as with the mirror drawn, where the rays alone leave sky,
-//! the far view adding nothing round what the rays hit and leaving no hole round it either, and
-//! taking over from the rays with no line along a wall across the end of their reach.
+//! the far view adding nothing round what the rays hit and leaving no hole round it either,
+//! taking over from the rays with no line along a wall across the end of their reach, and
+//! giving the sky it drew where the screen doesn't show it, clouds and haze, as the drawn
+//! mirror shows it; and no disc of the sun in a traced mirror, from the screen or the far view,
+//! where the drawn one shows it, nor the ground round it under a low sun.
 //! Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
@@ -20,6 +23,7 @@ use engine_render::{
     FrameContext, GpuShared, PlanarReflection, RenderDisabled, Screenshots, ViewData, capture_now,
     planar_reflection_picture, rendering_reflection,
 };
+use engine_world::WeatherState;
 
 const WINDOW: UVec2 = UVec2::new(400, 300);
 const FOV: f32 = 60.0;
@@ -579,10 +583,11 @@ const PILLAR_WALL: DVec3 = DVec3::new(-175.0, 230.0, -600.0);
 /// What the rays hit in a traced mirror stays theirs alone with its far view
 /// (`trial_cut_more::RAY_MIRROR_FAR`), which draws it too (from one near plane for the whole
 /// picture, short of every texel's reach, at a quarter of the picture's size each way): beside a
-/// pillar's reflection, where the rays pass it, the picture shows the sky as it does without the
-/// far view, with no quarter-size fringe of the pillar round its outline, and a wall past the
-/// rays' reach behind the other pillar, as the drawn mirror shows it, with no hole of sky round
-/// the pillar's outline where the far view's pillar hides the wall.
+/// pillar's reflection, where the rays pass it, the picture shows the sky as the drawn mirror
+/// does (the one the far view drew there, which the screen doesn't show), with no quarter-size
+/// fringe of the pillar round its outline, and a wall past the rays' reach behind the other
+/// pillar, as the drawn mirror shows it, with no hole of sky round the pillar's outline where
+/// the far view's pillar hides the wall.
 #[test]
 fn a_traced_mirrors_far_view_adds_no_fringe_round_what_its_rays_hit() {
     let mut shots = Vec::new();
@@ -689,25 +694,27 @@ fn a_traced_mirrors_far_view_adds_no_fringe_round_what_its_rays_hit() {
         }
     }
     let green = |c: [u8; 3]| c[1] > c[0].saturating_add(30) && c[1] > c[2].saturating_add(10);
-    // Round the right pillar the sky, in the traced pictures alike (they hold the same hits, so
-    // only what the far view adds tells them apart), one to four pixels out.
+    // Round the right pillar the sky, as the drawn mirror shows it (the far view's own there:
+    // the screen doesn't show it), two to four pixels out (clear of the drawn and the traced
+    // pictures' own outlines, which lie a little apart): a fringe of the far view's pillar would
+    // tint it orange.
     let mut worst = (0, IVec2::ZERO);
-    for out in 1..=4 {
+    for out in 2..=4 {
         for q in ring(PILLARS[1], out) {
-            let d = apart(at(traced, q), at(far, q));
+            let d = apart(at(drawn, q), at(far, q));
             if d > worst.0 {
                 worst = (d, q);
             }
         }
     }
     eprintln!(
-        "round the pillar against the sky the far view's picture is at most {} from the rays \
-         alone's (at {})",
+        "round the pillar against the sky the far view's picture is at most {} from the drawn \
+         mirror's (at {})",
         worst.0, worst.1
     );
     assert!(
         worst.0 <= 8,
-        "the far view fringes the pillar's reflection: {} apart from the rays alone at {}",
+        "the far view fringes the pillar's reflection: {} apart from the drawn mirror at {}",
         worst.0,
         worst.1
     );
@@ -877,6 +884,553 @@ fn a_ridge_across_the_end_of_a_traced_mirrors_rays_shows_no_line_with_its_far_vi
         far_step <= drawn_step + 8,
         "a line where the rays end: a step of {far_step} along the face, {drawn_step} drawn"
     );
+}
+
+/// The cover (`WeatherState::cloud_cover`) of the sky's own cloud layer (sky.wgsl `cloud_layer`,
+/// on by default with `RenderSettings::sky_cloud_layer`) for
+/// [`a_traced_mirrors_far_view_shows_the_clouds_it_drew_off_the_screen`]: most of the sky
+/// clouded, with small clouds and ragged edges a degree or less across.
+const CLOUD_COVER: f32 = 0.6;
+
+/// Renders `traced` (with its far view where `far`) after `setup`, as `name`; None (with a note)
+/// without a GPU or ray queries.
+fn render_with(
+    traced: bool,
+    far: bool,
+    name: &str,
+    setup: impl FnOnce(&mut App),
+) -> Option<image::RgbImage> {
+    let mut app = ball_app(traced);
+    if far {
+        app.world.resource_mut::<RenderSettings>().trial_cuts_more |= RAY_MIRROR_FAR;
+    }
+    setup(&mut app);
+    app.update_n(5);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return None;
+    }
+    let d = app.world.resource::<Diagnostics>().clone();
+    if traced {
+        if d.get("render.ray.supported") != Some(1.0) {
+            eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+            return None;
+        }
+        assert_eq!(
+            d.get("render.ray.mirror_pictures"),
+            Some(1.0),
+            "{name}: traced"
+        );
+        assert_eq!(
+            d.get("render.ray.mirror_far"),
+            Some(if far { 1.0 } else { 0.0 }),
+            "{name}: its far view"
+        );
+    }
+    let dir = std::env::temp_dir().join("engine-planar-reflections");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(name);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+    }
+    Some(image::open(&path).expect("read the shot").to_rgb8())
+}
+
+/// The mirror left of the balls' reflections, which shows the sky 11° to 37° up there, above
+/// the top of the screen (10° up at most), under most of the clouds of [`CLOUD_COVER`].
+const SKY_XS: std::ops::RangeInclusive<u32> = 30..=160;
+const SKY_YS: std::ops::RangeInclusive<u32> = 120..=230;
+
+/// Checks that [`SKY_XS`] by [`SKY_YS`] lies on the mirror and reflects the sky above the top of
+/// the screen, at its four corners.
+fn assert_sky_region_off_the_screen() {
+    let toward = Transform::from_translation(EYE).looking_at(TARGET, Vec3::Y);
+    let aspect = WINDOW.x as f32 / WINDOW.y as f32;
+    let t = (FOV.to_radians() * 0.5).tan();
+    for (x, y) in [
+        (*SKY_XS.start(), *SKY_YS.start()),
+        (*SKY_XS.end(), *SKY_YS.start()),
+        (*SKY_XS.start(), *SKY_YS.end()),
+        (*SKY_XS.end(), *SKY_YS.end()),
+    ] {
+        let ndc = Vec2::new(
+            (x as f32 + 0.5) / WINDOW.x as f32 * 2.0 - 1.0,
+            1.0 - (y as f32 + 0.5) / WINDOW.y as f32 * 2.0,
+        );
+        let ray = toward.rotation * Vec3::new(ndc.x * t * aspect, ndc.y * t, -1.0);
+        // Where the pixel's ray meets the mirror, and the sky's elevation it reflects (°).
+        let on = EYE + ray.as_dvec3() * (EYE.y / -f64::from(ray.y));
+        let up = (-ray.normalize().y).asin().to_degrees();
+        assert!(
+            on.x.abs() < f64::from(SIZE) * 0.5 && on.z.abs() < f64::from(SIZE) * 0.5 && up > 10.5,
+            "pixel {x}, {y} sees {on} on the mirror, the sky {up:.1}° up"
+        );
+    }
+}
+
+/// How far `a` stands from `b` over [`SKY_XS`] by [`SKY_YS`], on average (levels of 255).
+fn sky_apart(a: &image::RgbImage, b: &image::RgbImage) -> f64 {
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in SKY_YS {
+        for x in SKY_XS {
+            let (p, q) = (a.get_pixel(x, y).0, b.get_pixel(x, y).0);
+            for c in 0..3 {
+                sum += f64::from(p[c].abs_diff(q[c]));
+            }
+            n += 3.0;
+        }
+    }
+    sum / n
+}
+
+/// The clouds' detail over [`SKY_XS`] by [`SKY_YS`]: how far each pixel's brightness stands from
+/// the mean of the 9 by 9 round it, on average. The sky's smooth rise toward the horizon and the
+/// clouds' broad shapes, which the environment map keeps, add next to nothing.
+fn sky_detail(a: &image::RgbImage) -> f64 {
+    let luma = |x: u32, y: u32| {
+        let p = a.get_pixel(x, y).0.map(f64::from);
+        0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
+    };
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in SKY_YS {
+        for x in SKY_XS {
+            let mut round = 0.0;
+            for dy in 0..9 {
+                for dx in 0..9 {
+                    round += luma(x + dx - 4, y + dy - 4) / 81.0;
+                }
+            }
+            sum += (luma(x, y) - round).abs();
+            n += 1.0;
+        }
+    }
+    sum / n
+}
+
+/// The sky a traced mirror shows with its far view (`trial_cut_more::RAY_MIRROR_FAR`), where the
+/// screen doesn't show it, is the one the view drew there, small clouds and all, as the drawn
+/// mirror shows it. Across the reflection of the clouded sky above the top of the screen, with
+/// the view at the picture's own size (`RenderSettings::ray_mirror_far_scale` 1, so its sky is
+/// the drawn mirror's to the texel), the far view's picture stands closer to the drawn
+/// mirror's than the environment map's does and keeps most of the clouds' detail (over a clear
+/// sky's), where the environment map, a 256 by 128 picture, keeps under half. No fog, which the
+/// environment map's sky hasn't
+/// ([`a_traced_mirrors_far_view_shows_the_haze_it_drew_off_the_screen`]), and no wind, which
+/// would move the clouds by each run's own time.
+#[test]
+fn a_traced_mirrors_far_view_shows_the_clouds_it_drew_off_the_screen() {
+    assert_sky_region_off_the_screen();
+    let mut shots = Vec::new();
+    for (traced, far, cover, name) in [
+        (false, false, CLOUD_COVER, "clouds-drawn.png"),
+        (true, false, CLOUD_COVER, "clouds-traced.png"),
+        (true, true, CLOUD_COVER, "clouds-far-view.png"),
+        (false, false, 0.0, "clouds-none-drawn.png"),
+    ] {
+        let Some(shot) = render_with(traced, far, name, |app| {
+            app.world.insert_resource(WeatherState {
+                cloud_cover: cover,
+                fog: 0.0,
+                wind: Vec3::ZERO,
+                ..Default::default()
+            });
+            app.world.resource_mut::<FogSettings>().density = 0.0;
+            app.world
+                .resource_mut::<RenderSettings>()
+                .ray_mirror_far_scale = 1.0;
+        }) else {
+            return;
+        };
+        assert_reflects_what_is_above(&shot, name);
+        shots.push(shot);
+    }
+    let (drawn, traced, far, clear) = (&shots[0], &shots[1], &shots[2], &shots[3]);
+    let (far_off, traced_off) = (sky_apart(far, drawn), sky_apart(traced, drawn));
+    // The clouds' own detail: over the clear sky's.
+    let base = sky_detail(clear);
+    let [drawn_detail, far_detail, traced_detail] =
+        [drawn, far, traced].map(|a| sky_detail(a) - base);
+    eprintln!(
+        "over the clouded sky's reflection the far view's picture is {far_off:.2} from the drawn \
+         mirror's on average, the rays alone's {traced_off:.2} (the clouds themselves {:.2}); \
+         the clouds' detail is {drawn_detail:.2} drawn, {far_detail:.2} with the far view, \
+         {traced_detail:.2} with the rays alone, over the clear sky's {base:.2}",
+        sky_apart(clear, drawn)
+    );
+    assert!(
+        drawn_detail > 0.4,
+        "the drawn mirror shows clouds: their detail {drawn_detail:.2} over the clear sky's"
+    );
+    assert!(
+        far_off < 0.5 * traced_off,
+        "the far view's clouds stand {far_off:.2} from the drawn mirror's, the environment \
+         map's {traced_off:.2}"
+    );
+    assert!(
+        far_detail > 0.75 * drawn_detail && traced_detail < 0.5 * drawn_detail,
+        "the far view keeps the clouds' detail, {far_detail:.2} of the drawn mirror's \
+         {drawn_detail:.2}, the environment map less: {traced_detail:.2}"
+    );
+}
+
+/// The traced mirror's sky from its far view is also fogged as the drawn mirror's: under the
+/// default haze and the weather's ground fog, with a clear sky and no wind, the far view's
+/// picture of the sky above the top of the screen stands close to the drawn mirror's, and the
+/// environment map's (unfogged) far apart: in the cone round the sun it left a hole about 20
+/// levels darker than the sky round it.
+#[test]
+fn a_traced_mirrors_far_view_shows_the_haze_it_drew_off_the_screen() {
+    assert_sky_region_off_the_screen();
+    let mut shots = Vec::new();
+    for (traced, far, name) in [
+        (false, false, "haze-drawn.png"),
+        (true, false, "haze-traced.png"),
+        (true, true, "haze-far-view.png"),
+    ] {
+        let Some(shot) = render_with(traced, far, name, |app| {
+            app.world.insert_resource(WeatherState {
+                cloud_cover: 0.0,
+                wind: Vec3::ZERO,
+                ..Default::default()
+            });
+        }) else {
+            return;
+        };
+        assert_reflects_what_is_above(&shot, name);
+        shots.push(shot);
+    }
+    let (drawn, traced, far) = (&shots[0], &shots[1], &shots[2]);
+    let (far_off, traced_off) = (sky_apart(far, drawn), sky_apart(traced, drawn));
+    eprintln!(
+        "over the hazy sky's reflection the far view's picture is {far_off:.2} from the drawn \
+         mirror's on average, the rays alone's {traced_off:.2}"
+    );
+    assert!(
+        far_off < 0.2 * traced_off,
+        "the far view's haze stands {far_off:.2} from the drawn mirror's, the environment \
+         map's {traced_off:.2}"
+    );
+}
+
+/// Toward the sun for [`a_traced_mirror_shows_no_disc_of_the_sun`] with the camera as
+/// [`ball_app`] has it: 30° up and 30° left of straight ahead, above the top of the screen (10°
+/// up at most), its reflection on the mirror left of the balls'.
+const SUN_ABOVE: DVec3 = DVec3::new(-0.433, 0.5, -0.75);
+/// Where the camera looks instead for the sun on the screen: level, ahead.
+const LEVEL: DVec3 = DVec3::new(0.0, 2.5, -10.0);
+/// Toward the sun with the camera level: 18° up and 25° left, on the screen (30° up at most),
+/// its reflection on the mirror (below 9.5° down) and the rings round that on the screen.
+const SUN_SEEN: DVec3 = DVec3::new(-0.402, 0.309, -0.862);
+/// The sun's disc across, degrees: a few of the far view's texels, and the cone the traced
+/// picture keeps it out of (three times its radius) with a ring round it on the mirror.
+const SUN_DISC_DEG: f32 = 4.0;
+/// A pixel this bright in every channel is the sun's disc or the glow round it, the disc as the
+/// traced picture holds it too (it keeps the sky to 60 000 cd/m², about 226 here): the sky
+/// round the sun is darker.
+const SUN_BRIGHT: u8 = 200;
+
+/// Where the camera looking from [`EYE`] at `target` sees `p`, pixels.
+fn pixel_toward(target: DVec3, p: DVec3) -> IVec2 {
+    pixel_from(EYE, target, p)
+}
+
+/// Where the camera looking from `eye` at `target` sees `p`, pixels.
+fn pixel_from(eye: DVec3, target: DVec3, p: DVec3) -> IVec2 {
+    let view = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+    let v = view.rotation.inverse() * (p - eye).as_vec3();
+    let aspect = WINDOW.x as f32 / WINDOW.y as f32;
+    let f = 1.0 / (FOV.to_radians() * 0.5).tan();
+    let ndc = Vec2::new(f / aspect * v.x, f * v.y) / -v.z;
+    IVec2::new(
+        ((ndc.x + 1.0) * 0.5 * WINDOW.x as f32).floor() as i32,
+        ((1.0 - ndc.y) * 0.5 * WINDOW.y as f32).floor() as i32,
+    )
+}
+
+/// Where the camera looking from [`EYE`] at `target` sees the 24 directions `angle` (degrees)
+/// from unit `about`, round it.
+fn ring_toward(target: DVec3, about: DVec3, angle: f64) -> Vec<IVec2> {
+    let u = about.cross(DVec3::Y).normalize();
+    let v = about.cross(u);
+    let (s, c) = angle.to_radians().sin_cos();
+    (0..24)
+        .map(|k| {
+            let phi = f64::from(k) / 24.0 * std::f64::consts::TAU;
+            let d = about * c + (u * phi.cos() + v * phi.sin()) * s;
+            pixel_toward(target, EYE + d * 1000.0)
+        })
+        .collect()
+}
+
+/// The pixels as bright as the sun within 40 of `at`: how many, and their middle.
+fn sun_blob(shot: &image::RgbImage, at: IVec2) -> (u32, DVec2) {
+    let (mut n, mut sum) = (0u32, DVec2::ZERO);
+    for dy in -40..=40 {
+        for dx in -40..=40 {
+            let p = at + IVec2::new(dx, dy);
+            if p.cmplt(IVec2::ZERO).any() || p.cmpge(WINDOW.as_ivec2()).any() {
+                continue;
+            }
+            if shot
+                .get_pixel(p.x as u32, p.y as u32)
+                .0
+                .iter()
+                .all(|&v| v >= SUN_BRIGHT)
+            {
+                n += 1;
+                sum += p.as_dvec2();
+            }
+        }
+    }
+    (
+        n,
+        if n > 0 {
+            sum / f64::from(n)
+        } else {
+            DVec2::ZERO
+        },
+    )
+}
+
+/// A traced mirror leaves the sun's disc out of its picture, from the screen and from its far
+/// view (`trial_cut_more::RAY_MIRROR_FAR`) alike, where the drawn mirror shows it (its view
+/// draws the sky with the disc): the water's glitter is the sun's reflection, so a disc in the
+/// picture would be the sun a second time. With the sun above the top of the screen the far
+/// view's sky holds the disc; with the camera level the screen shows the sun, which the
+/// picture would read there. Within three times the sun's radius of its reflection the traced
+/// pictures take the sky just past that cone, so it shows no hole either: as the sky just
+/// outside it, where the environment map's sky stood about 20 levels darker than the fogged sky
+/// round it.
+#[test]
+fn a_traced_mirror_shows_no_disc_of_the_sun() {
+    let sun = |toward: DVec3| {
+        move |app: &mut App| {
+            let mut q = app.world.query::<(&mut DirectionalLight, &mut Transform)>();
+            for (mut light, mut at) in q.iter_mut(&mut app.world) {
+                light.angular_size_deg = SUN_DISC_DEG;
+                *at = Transform::default().looking_at(-toward, Vec3::Y);
+            }
+        }
+    };
+    let level = |toward: DVec3| {
+        let lit = sun(toward);
+        move |app: &mut App| {
+            lit(app);
+            let mut q = app.world.query::<(&Camera, &mut Transform)>();
+            for (_, mut at) in q.iter_mut(&mut app.world) {
+                *at = Transform::from_translation(EYE).looking_at(LEVEL, Vec3::Y);
+            }
+        }
+    };
+    let mut shots = Vec::new();
+    for (traced, far, name, camera) in [
+        (false, false, "sun-above-drawn.png", TARGET),
+        (true, true, "sun-above-far-view.png", TARGET),
+        (false, false, "sun-seen-drawn.png", LEVEL),
+        (true, false, "sun-seen-traced.png", LEVEL),
+    ] {
+        let shot = if camera == TARGET {
+            render_with(traced, far, name, sun(SUN_ABOVE))
+        } else {
+            render_with(traced, far, name, level(SUN_SEEN))
+        };
+        let Some(shot) = shot else {
+            return;
+        };
+        shots.push((shot, camera));
+    }
+    for (toward, camera, shown) in [(SUN_ABOVE, TARGET, 0), (SUN_SEEN, LEVEL, 2)] {
+        let toward = toward.normalize();
+        let sun_at = pixel_toward(camera, EYE + toward * 1000.0);
+        let seen = sun_at.cmpge(IVec2::ZERO).all() && sun_at.cmplt(WINDOW.as_ivec2()).all();
+        assert_eq!(
+            seen,
+            camera == LEVEL,
+            "the sun at {sun_at} with the camera toward {camera}"
+        );
+        // Its reflection: where the camera's ray along its direction mirrored meets the mirror,
+        // well inside it.
+        let down = mirrored(toward);
+        let on = EYE + down * (EYE.y / -down.y);
+        assert!(
+            on.x.abs() < f64::from(SIZE) * 0.4 && on.z.abs() < f64::from(SIZE) * 0.4,
+            "the sun's reflection meets the mirror at {on}"
+        );
+        let q = pixel_toward(camera, EYE + down * 1000.0);
+        let (drawn, traced) = (&shots[shown].0, &shots[shown + 1].0);
+        let (d, t) = (sun_blob(drawn, q), sun_blob(traced, q));
+        let middle = |shot: &image::RgbImage| shot.get_pixel(q.x as u32, q.y as u32).0;
+        eprintln!(
+            "the sun's reflection at {q} (the sun {}): drawn {:?}, {} bright pixels round {:.1}; \
+             traced {:?}, {} round {:.1}",
+            if seen {
+                "on screen"
+            } else {
+                "above the screen"
+            },
+            middle(drawn),
+            d.0,
+            d.1,
+            middle(traced),
+            t.0,
+            t.1
+        );
+        assert!(
+            d.0 > 100 && d.1.distance(q.as_dvec2()) < 3.0,
+            "the drawn mirror shows the sun at {q}: {} bright pixels round {:.1}",
+            d.0,
+            d.1
+        );
+        assert_eq!(
+            t.0,
+            0,
+            "the traced mirror shows the sun's disc at {q} (the sun {}): {} bright pixels round \
+             {:.1}",
+            if seen {
+                "on screen"
+            } else {
+                "above the screen"
+            },
+            t.0,
+            t.1
+        );
+        // No hole round it: inside the cone the traced picture stands as the sky just outside.
+        let cone = 1.5 * f64::from(SUN_DISC_DEG);
+        let mean = |ring: &[IVec2]| {
+            let mut sum = [0.0f64; 3];
+            for p in ring {
+                assert!(
+                    p.cmpge(IVec2::ZERO).all() && p.cmplt(WINDOW.as_ivec2()).all(),
+                    "the ring round the sun's reflection leaves the screen at {p}"
+                );
+                let c = traced.get_pixel(p.x as u32, p.y as u32).0;
+                for (s, v) in sum.iter_mut().zip(c) {
+                    *s += f64::from(v) / ring.len() as f64;
+                }
+            }
+            sum
+        };
+        let inside = mean(&ring_toward(camera, down, 0.8 * cone));
+        let outside = mean(&ring_toward(camera, down, cone + 2.0));
+        let step = (0..3)
+            .map(|c| (inside[c] - outside[c]).abs())
+            .fold(0.0, f64::max);
+        eprintln!(
+            "round it the traced picture is {inside:.1?} inside the cone and {outside:.1?} just \
+             outside: {step:.1} apart"
+        );
+        assert!(
+            step < 8.0,
+            "a hole round the sun's reflection at {q}: {inside:.1?} inside the cone, {outside:.1?} \
+             just outside"
+        );
+        if seen {
+            // The screen shows the sun itself, in both pictures.
+            for (shot, name) in [(drawn, "drawn"), (traced, "traced")] {
+                let s = sun_blob(shot, sun_at);
+                assert!(
+                    s.0 > 100,
+                    "{name}: the sun on the screen at {sun_at}: {} bright pixels",
+                    s.0
+                );
+            }
+        }
+    }
+}
+
+/// The camera's eye for [`a_traced_mirror_under_a_low_sun_shows_the_sky_beside_it_not_the_ground`]:
+/// 0.3 m above the mirror, which then shows the sky down to about 1° up past the sun's
+/// reflection.
+const LOW_EYE: DVec3 = DVec3::new(0.0, 0.3, 5.0);
+/// Where it looks: level, ahead (the screen shows the sun and the sky round it)...
+const LOW_LEVEL: DVec3 = DVec3::new(0.0, 0.3, -10.0);
+/// ...or pitched down 30°, the top of the screen on the horizon and the sun above it (the far
+/// view's sky).
+const LOW_PITCHED: DVec3 = DVec3::new(0.0, -4.7, -3.66);
+/// Toward the sun: 4° up and 15° left.
+const SUN_LOW: DVec3 = DVec3::new(-0.2582, 0.06976, -0.9636);
+
+/// Under a low sun the sky a traced mirror takes round its disc is the sky beside it, not the
+/// ground: the way straight off the sun from a direction just under it leads under the plane,
+/// where the screen, the far view and the environment map show the ground below the horizon.
+/// Between the sun's reflection and the mirror's far edge, inside the cone round the sun, the
+/// traced picture is no darker than the sky's reflection beside the cone at the same height.
+#[test]
+fn a_traced_mirror_under_a_low_sun_shows_the_sky_beside_it_not_the_ground() {
+    let setup = |target: DVec3| {
+        move |app: &mut App| {
+            let mut q = app.world.query::<(&mut DirectionalLight, &mut Transform)>();
+            for (mut light, mut at) in q.iter_mut(&mut app.world) {
+                light.angular_size_deg = SUN_DISC_DEG;
+                *at = Transform::default().looking_at(-SUN_LOW, Vec3::Y);
+            }
+            let mut q = app.world.query::<(&Camera, &mut Transform)>();
+            for (_, mut at) in q.iter_mut(&mut app.world) {
+                *at = Transform::from_translation(LOW_EYE).looking_at(target, Vec3::Y);
+            }
+        }
+    };
+    let mut shots = Vec::new();
+    for (far, name, target) in [
+        (false, "low-sun-traced.png", LOW_LEVEL),
+        (true, "low-sun-far-view.png", LOW_PITCHED),
+    ] {
+        let Some(shot) = render_with(true, far, name, setup(target)) else {
+            return;
+        };
+        shots.push((shot, target));
+    }
+    // The sky `up` (°) high and `left` (°) left of ahead.
+    let toward = |up: f64, left: f64| {
+        let (up, left) = (up.to_radians(), left.to_radians());
+        DVec3::new(-up.cos() * left.sin(), up.sin(), -up.cos() * left.cos())
+    };
+    let sun = SUN_LOW.normalize();
+    for ((shot, target), what) in shots.iter().zip(["the screen's sky", "the far view's sky"]) {
+        // The mean colour of the picture where the mirror reflects the sky 1.4° to 2° up,
+        // around `left`.
+        let patch = |left: f64| {
+            let mut sum = [0.0f64; 3];
+            for up in [1.4, 1.7, 2.0] {
+                for off in [-0.5, 0.0, 0.5] {
+                    let d = toward(up, left + off);
+                    let on = LOW_EYE + mirrored(d) * (LOW_EYE.y / d.y);
+                    let p = pixel_from(LOW_EYE, *target, LOW_EYE + mirrored(d) * 1000.0);
+                    assert!(
+                        on.x.abs() < f64::from(SIZE) * 0.45
+                            && on.z.abs() < f64::from(SIZE) * 0.45
+                            && p.cmpge(IVec2::ZERO).all()
+                            && p.cmplt(WINDOW.as_ivec2()).all(),
+                        "the sky {up}° up and {}° left reflects at {on} on the mirror, {p} on \
+                         the screen",
+                        left + off
+                    );
+                    let c = shot.get_pixel(p.x as u32, p.y as u32).0;
+                    for (s, v) in sum.iter_mut().zip(c) {
+                        *s += f64::from(v) / 9.0;
+                    }
+                }
+            }
+            sum
+        };
+        let luma = |c: [f64; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let under = patch(15.0);
+        let (left, right) = (patch(25.0), patch(5.0));
+        let beside = [0, 1, 2].map(|c| 0.5 * (left[c] + right[c]));
+        eprintln!(
+            "{what}: under the low sun's reflection the traced picture is {under:.1?} (the sky \
+             {:.1}° from the sun), beside it {beside:.1?}",
+            toward(1.7, 15.0).angle_between(sun).to_degrees()
+        );
+        assert!(
+            luma(under) > luma(beside) - 8.0,
+            "{what}: under the low sun's reflection the traced picture is {under:.1?}, darker than \
+             the sky beside it, {beside:.1?}"
+        );
+    }
 }
 
 /// A wall 400 m wide and 60 m high, 120 m off, within the rays' reach and above the top of the
@@ -1062,8 +1616,8 @@ fn a_glossy_thing_shines_in_a_traced_mirror_as_in_a_drawn_one() {
         // reflected there rises toward them on screen but passes far behind them, so nothing
         // of theirs shows (pixels darker than the stretch's median by more than 10 levels:
         // 9 and 14 before, under the march's old crossing rule and a filtered read of the
-        // sky beside the balls' outlines, `mirror_sky`; 5 and 6 with the march's rule alone;
-        // 0 in the drawn mirror).
+        // sky beside the balls' outlines, now in `mirror_screen_sky`; 5 and 6 with the
+        // march's rule alone; 0 in the drawn mirror).
         let specks: usize = [(140u32, 172u32), (228, 260)]
             .iter()
             .map(|&(x0, x1)| {

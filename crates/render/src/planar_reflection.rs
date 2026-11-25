@@ -37,8 +37,9 @@
 //! `trial_cut_more::RAY_MIRROR_FAR` the view is drawn as the picture's far view: through the
 //! same frustum, at `RenderSettings::ray_mirror_far_scale` of its size, with its near plane a
 //! tenth short of where the trace's shortest rays end ([`far_near`]), so it draws only what
-//! lies past them and a little more; the trace takes its colour past its rays' reach and
-//! blends its last tenth into it ([`MirrorPictures::far`]).
+//! lies past them and a little more; the trace takes its colour past its rays' reach (its sky
+//! too, where the screen doesn't show the sky there) and blends its last tenth into it
+//! ([`MirrorPictures::far`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -217,8 +218,9 @@ pub(crate) struct MirrorPictures {
     pub chains: HashMap<Entity, wgpu::Texture>,
     /// The far views drawn this frame for traced pictures (`trial_cut_more::RAY_MIRROR_FAR`),
     /// which the frame's ray pass reads past a texel's ray's reach (laid by its coverage over
-    /// what the screen shows along the ray, or the sky; the screen isn't marched where the view
-    /// covers the whole read), and where a hit lies in the reach's last
+    /// what the screen shows along the ray, or the sky: the screen's, else the view's own clear
+    /// of the cone round the light, else the environment map's; the screen isn't marched where
+    /// the view covers the whole read), and where a hit lies in the reach's last
     /// [`crate::ray_mirror::MIRROR_FAR_OVERLAP`], which blends into it by distance.
     /// Emptied as the views are placed, before they draw.
     pub far: HashMap<Entity, PlanarReflectionPicture>,
