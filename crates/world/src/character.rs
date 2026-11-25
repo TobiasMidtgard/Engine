@@ -671,9 +671,10 @@ pub struct HairCapsule {
 /// same `version`; the hair simulation holds the guides out of it, and the drawing side the
 /// hairs between them.
 ///
-/// The distance at a point is the parts' distances there blended by their weights, each part
-/// sampled where its bone carries the point back to [`HairGuides::grown_on`]; a point in no
-/// part's box is outside the body.
+/// The distance at a point is the nearest part's: each part is sampled where its bone carries
+/// the point back to [`HairGuides::grown_on`] and holds the distance to the skin its own bone
+/// carries; parts whose skin is within 12 mm of the nearest count with it, by their weights
+/// (the skin two bones share at a joint). A point in no part's box is outside the body.
 #[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HairBody {
@@ -698,10 +699,10 @@ pub struct HairBodyPart {
     pub cell: f32,
     /// Samples along x, y and z.
     pub size: [u16; 3],
-    /// Per sample (x fastest, then y, then z): the signed distance to the dressed skin in
-    /// [`HairBody::UNIT`]s, negative inside.
+    /// Per sample (x fastest, then y, then z): the signed distance to the dressed skin this bone
+    /// carries, in [`HairBody::UNIT`]s, negative inside.
     pub distance: Arc<[i16]>,
-    /// Per sample: how much this bone carries the skin nearest to it, 0..=255.
+    /// Per sample: this bone's weight on that nearest skin of its own, 0..=255.
     pub weight: Arc<[u8]>,
 }
 
