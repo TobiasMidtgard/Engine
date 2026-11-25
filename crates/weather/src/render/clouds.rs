@@ -288,12 +288,75 @@ struct ShadowCache {
     uniform: wgpu::Buffer,
     update_group: wgpu::BindGroup,
     copy_group: wgpu::BindGroup,
+    /// Which rows to march, and what the cache holds.
+    schedule: ShadowSchedule,
+}
+
+/// What the cloud shadow cache is filled for: the map's corner (world texels), the world's
+/// turn, the sun.
+type ShadowFill = ([i64; 2], f32, Vec3);
+
+/// Which rows of the cloud shadow cache to march, and what it was last filled for. Every view
+/// plans in its prepare, but only the view that marches the cache (the cloud writer, which
+/// runs the update pass in `compute`) commits its plan. A lake mirror's view prepares before
+/// the main view each frame and, while it borrows the main view's lighting
+/// (`mirror_shares_lighting`, the default, once the main view has drawn a frame), doesn't
+/// march: had its plan been kept, the main view would march only two of the four bands for
+/// good (the count going up by two a frame), and a teleport's full refresh, planned in the
+/// mirror's prepare, would be lost, leaving half the map with what it held before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ShadowSchedule {
+    /// Plans marched so far, picking the next band.
     frames: u32,
     /// Rows to march this frame: all of them, or a quarter band.
     rows: (u32, u32),
-    /// What the cache was last filled for: the map's corner (world texels), the world's
-    /// turn, the sun.
-    last: Option<([i64; 2], f32, Vec3)>,
+    /// What the cache was last filled for.
+    last: Option<ShadowFill>,
+    /// What the latest plan is for, and whether it fills all of the cache.
+    planned: Option<(ShadowFill, bool)>,
+}
+
+impl ShadowSchedule {
+    fn new(size: u32) -> Self {
+        Self {
+            frames: 0,
+            rows: (0, size),
+            last: None,
+            planned: None,
+        }
+    }
+
+    /// Plans the rows for a map of `size` texels at `corner` (world texels), the world's turn
+    /// `yaw` and the sun `sun`: all of it when that would show (a jump such as a world shift
+    /// or a teleport, the world turned, or the sun moved more than a few texels' worth of
+    /// shadow), else the next quarter band. Nothing is kept until [`Self::commit`].
+    fn plan(&mut self, size: u32, corner: [i64; 2], yaw: f32, sun: Vec3) {
+        let full = self.last.is_none_or(|(c, y, s)| {
+            let jump = (corner[0] - c[0]).abs().max((corner[1] - c[1]).abs());
+            jump > size as i64 / 8 || y != yaw || s.dot(sun) < 0.99999
+        });
+        let band = size.div_ceil(4);
+        self.rows = if full {
+            (0, size)
+        } else {
+            let first = (self.frames % 4) * band;
+            (first, band.min(size - first))
+        };
+        self.planned = Some(((corner, yaw, sun), full));
+    }
+
+    /// The latest plan was marched: the cache holds it now.
+    fn commit(&mut self) {
+        let Some(((corner, yaw, sun), full)) = self.planned.take() else {
+            return;
+        };
+        if full {
+            self.last = Some((corner, yaw, sun));
+        } else if let Some(last) = &mut self.last {
+            last.0 = corner;
+        }
+        self.frames = self.frames.wrapping_add(1);
+    }
 }
 
 #[repr(C)]
@@ -346,9 +409,7 @@ impl ShadowCache {
             uniform,
             update_group,
             copy_group,
-            frames: 0,
-            rows: (0, size),
-            last: None,
+            schedule: ShadowSchedule::new(size),
         }
     }
 }
@@ -1191,26 +1252,10 @@ impl RenderFeature for CloudFeature {
                 ((origin.x - half) / texel).round() as i64,
                 ((origin.z - half) / texel).round() as i64,
             ];
-            let yaw = sim.frame.yaw as f32;
-            // Refresh all of it when it would show: a jump (a world shift, a teleport), the
-            // world turned, or the sun moved more than a few texels' worth of shadow.
-            let full = cache.last.is_none_or(|(c, y, sun)| {
-                let jump = (corner[0] - c[0]).abs().max((corner[1] - c[1]).abs());
-                jump > size as i64 / 8 || y != yaw || sun.dot(view.sun_dir) < 0.99999
-            });
-            if full {
-                cache.last = Some((corner, yaw, view.sun_dir));
-            } else if let Some(last) = &mut cache.last {
-                last.0 = corner;
-            }
-            let band = size.div_ceil(4);
-            cache.rows = if full {
-                (0, size)
-            } else {
-                let first = (cache.frames % 4) * band;
-                (first, band.min(size - first))
-            };
-            cache.frames = cache.frames.wrapping_add(1);
+            // Kept only if this view marches it (`compute`, as the cloud writer).
+            cache
+                .schedule
+                .plan(size, corner, sim.frame.yaw as f32, view.sun_dir);
             // Indices wrap in the shader; keep them in i32 (any world fits many times over).
             let wrap = |i: i64| i.rem_euclid(size as i64 * 1024) as i32;
             let u = ShadowCacheUniform {
@@ -1367,7 +1412,7 @@ impl RenderFeature for CloudFeature {
             pass.dispatch_workgroups(n, n, n);
             self.noise_ready = true;
         }
-        if let (Some(target), Some(cache)) = (&ctx.cloud_shadows, &self.shadow_cache) {
+        if let (Some(target), Some(cache)) = (&ctx.cloud_shadows, &mut self.shadow_cache) {
             let pass = |encoder: &mut wgpu::CommandEncoder,
                         label: &str,
                         view: &wgpu::TextureView,
@@ -1404,7 +1449,7 @@ impl RenderFeature for CloudFeature {
                 wgpu::LoadOp::Load,
                 &g.shadow_update,
                 &cache.update_group,
-                Some(cache.rows),
+                Some(cache.schedule.rows),
             );
             pass(
                 encoder,
@@ -1415,6 +1460,7 @@ impl RenderFeature for CloudFeature {
                 &cache.copy_group,
                 None,
             );
+            cache.schedule.commit();
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1522,6 +1568,59 @@ impl RenderFeature for CloudFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lake_mirrors_view_leaves_the_cloud_shadow_cache_to_the_view_that_marches_it() {
+        // The renderer's order each frame: a lake mirror's view prepares first and, while it
+        // borrows the main view's lighting, doesn't march the cache; then the main view
+        // prepares and marches it.
+        let size = 512;
+        let band = size / 4;
+        let sun = Vec3::new(0.3, 0.8, 0.5).normalize();
+        let mut s = ShadowSchedule::new(size);
+        let frame = |s: &mut ShadowSchedule, corner: [i64; 2], mirror: bool| {
+            if mirror {
+                s.plan(size, corner, 0.0, sun);
+            }
+            s.plan(size, corner, 0.0, sun);
+            let rows = s.rows;
+            s.commit();
+            rows
+        };
+        let here = [100, 200];
+        // The first frame fills all of it, then a band a frame in turn: all four in four.
+        assert_eq!(frame(&mut s, here, true), (0, size));
+        let firsts: Vec<u32> = (0..4).map(|_| frame(&mut s, here, true).0).collect();
+        assert_eq!(firsts, [band, 2 * band, 3 * band, 0]);
+        assert!((0..4).all(|_| frame(&mut s, here, true).1 == band));
+        // A teleport: the mirror's view plans the full refresh first; the main view marches
+        // it, and then a band a frame again.
+        let there = [100 + size as i64, 200];
+        assert_eq!(frame(&mut s, there, true), (0, size));
+        assert_eq!(frame(&mut s, there, true).1, band);
+        // Without a mirror the same: a band a frame in turn, a full refresh on a jump.
+        let mut alone = ShadowSchedule::new(size);
+        assert_eq!(frame(&mut alone, here, false), (0, size));
+        let firsts: Vec<u32> = (0..4).map(|_| frame(&mut alone, here, false).0).collect();
+        assert_eq!(firsts, [band, 2 * band, 3 * band, 0]);
+        assert_eq!(frame(&mut alone, there, false), (0, size));
+        // A small move marches a band and follows the corner; the sun turning refreshes all.
+        assert_eq!(frame(&mut alone, [there[0] + 3, 200], false).1, band);
+        assert_eq!(alone.last.map(|l| l.0), Some([there[0] + 3, 200]));
+        let turned = Vec3::new(0.5, 0.6, 0.5).normalize();
+        alone.plan(size, [there[0] + 3, 200], 0.0, turned);
+        assert_eq!(alone.rows, (0, size));
+        // A plan nobody marched leaves the cache as it was.
+        assert_eq!(alone.last.map(|l| l.2), Some(sun));
+        // The main view's first frame, before it has lighting to lend: the mirror's view
+        // marches (and fills) the cache itself, then the main view marches a band.
+        let mut first = ShadowSchedule::new(size);
+        first.plan(size, here, 0.0, sun);
+        assert_eq!(first.rows, (0, size));
+        first.commit();
+        assert_eq!(frame(&mut first, here, false).1, band);
+        assert_eq!(first.frames, 2);
+    }
 
     #[test]
     fn every_block_order_marches_each_pixel_once_a_round() {
