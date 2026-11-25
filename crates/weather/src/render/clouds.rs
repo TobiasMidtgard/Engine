@@ -252,6 +252,21 @@ fn block_offset(side: u32, frame: u32) -> (f32, f32) {
     order[frame as usize % order.len()]
 }
 
+/// The scale a view's clouds march at, of its pixels each way: the main view's
+/// `resolution_scale`. Reflections and insets are wavy or small: half that, times how much
+/// finer than its own pixels the view's detail is wanted (`ViewData::detail`: a traced lake
+/// mirror's far view stands in for a picture four times its size each way, so at the defaults
+/// it marches as finely as the picture's drawn mirror view). Never finer than the view's own
+/// pixels: a smaller far view, or clouds marched finer than these, keep to its own.
+fn march_scale(resolution_scale: f32, extra_view: bool, detail: f32) -> f32 {
+    let scale = if extra_view {
+        resolution_scale * 0.5 * detail.max(1.0)
+    } else {
+        resolution_scale
+    };
+    scale.clamp(0.125, 1.0)
+}
+
 /// The block side for a frame doing `share` of the work spread over frames
 /// (`engine_render::FramePacing::share`), given the side in use: the side whose block takes as
 /// long to march in full as a 2x2 block does at the pacing rate (2 / sqrt(share)), changed only
@@ -1002,14 +1017,7 @@ impl RenderFeature for CloudFeature {
             return;
         }
         self.replace_sky = settings.replace_sky;
-        // Reflections and insets are wavy or small: march them at half the scale. A view whose
-        // pixels stand in for a finer picture's (a traced lake mirror's far view,
-        // `ViewData::detail`) marches that much finer, as finely as the picture's drawn mirror.
-        let scale = if view.extra_view {
-            settings.resolution_scale * 0.5 * view.detail.max(1.0)
-        } else {
-            settings.resolution_scale
-        };
+        let scale = march_scale(settings.resolution_scale, view.extra_view, view.detail);
         let side = if !settings.temporal {
             1
         } else if settings.temporal_side >= 2 {
@@ -1545,6 +1553,19 @@ mod tests {
             }
             assert_eq!(quarters, [true; 4], "frames {start}..{}", start + 4);
         }
+    }
+
+    #[test]
+    fn a_traced_mirrors_far_view_marches_its_clouds_as_finely_as_a_drawn_mirrors_view() {
+        // A lake mirror's 1504 x 864 picture at 1440p, and its far view at a quarter of that
+        // each way: the far view's march is as wide as the drawn mirror view's.
+        let (picture, far) = (1504.0f32, 376.0f32);
+        let drawn = picture * march_scale(0.5, true, 1.0);
+        let traced = far * march_scale(0.5, true, picture / far);
+        assert_eq!((drawn, traced), (376.0, 376.0));
+        // The main view at its own scale, and no view finer than its own pixels.
+        assert_eq!(march_scale(0.5, false, 1.0), 0.5);
+        assert_eq!(march_scale(1.0, true, 8.0), 1.0);
     }
 
     #[test]

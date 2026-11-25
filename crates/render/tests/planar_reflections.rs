@@ -489,8 +489,8 @@ const FAR_WALL_POINT: DVec3 = DVec3::new(-250.0, 180.0, -595.0);
 /// end, and past their reach a texel takes what it drew. Without it the rays alone show the sky
 /// there. What lies within the rays' reach is still theirs (the balls' reflections), and nothing
 /// under the plane shows. The far view asks the features for the picture's detail
-/// (`ViewData::detail`, the picture's size over its own), so the weather's clouds march as
-/// finely in it as in the drawn mirror's view; every other view asks for its own.
+/// (`ViewData::detail`, the picture's size over its own), so the weather's clouds march in it
+/// as finely as in the drawn mirror's view at the defaults; every other view asks for its own.
 #[test]
 fn a_traced_mirrors_far_view_shows_what_lies_past_its_rays_off_the_screen() {
     let mut shots = Vec::new();
@@ -1127,9 +1127,10 @@ fn sky_detail(a: &image::RgbImage) -> f64 {
 /// the drawn mirror's to the texel), the far view's picture stands closer to the drawn
 /// mirror's than the environment map's does and keeps most of the clouds' detail (over a clear
 /// sky's), where the environment map, a 256 by 128 picture, keeps under half. These are the sky
-/// pass's own clouds, drawn per pixel; the weather's, marched by the view's pixels, march as
-/// finely in a far view of any size as in the drawn mirror's view, as it asks for the picture's
-/// detail ([`a_traced_mirrors_far_view_shows_what_lies_past_its_rays_off_the_screen`]). No fog,
+/// pass's own clouds, drawn per pixel; the weather's, marched by the view's pixels, march in the
+/// far view as finely as in the drawn mirror's view up to the far view's own pixels (exactly so
+/// at the defaults), as it asks for the picture's detail
+/// ([`a_traced_mirrors_far_view_shows_what_lies_past_its_rays_off_the_screen`]). No fog,
 /// which the environment map's sky hasn't
 /// ([`a_traced_mirrors_far_view_shows_the_haze_it_drew_off_the_screen`]), and no wind, which
 /// would move the clouds by each run's own time.
@@ -1542,6 +1543,89 @@ fn a_traced_mirror_under_a_low_sun_shows_the_sky_beside_it_not_the_ground() {
             luma(under) > luma(beside) - 8.0,
             "{what}: under the low sun's reflection the traced picture is {under:.1?}, darker than \
              the sky beside it, {beside:.1?}"
+        );
+    }
+}
+
+/// The game's own sun, about half a degree across, under temporal anti-aliasing as in the game:
+/// the screen's history and the far view's spread its disc by a texel or two, which stays
+/// inside the cone the traced picture keeps it out of (three times its radius, at least 0.0047
+/// rad: about 4 pixels here; for the far view two of its texels more), so the traced pictures
+/// show no disc where the drawn mirror shows it: above the top of the screen through the far
+/// view (`trial_cut_more::RAY_MIRROR_FAR`), and on it through the screen.
+#[test]
+fn a_traced_mirror_shows_no_disc_of_the_games_sun_under_temporal_anti_aliasing() {
+    for (toward, camera, far, what) in [
+        (SUN_ABOVE, TARGET, true, "above the screen"),
+        (SUN_SEEN, LEVEL, false, "on screen"),
+    ] {
+        let toward = toward.normalize();
+        let mut shots = Vec::new();
+        for traced in [false, true] {
+            let mut app = ball_app(traced);
+            {
+                let mut s = app.world.resource_mut::<RenderSettings>();
+                s.anti_aliasing = AntiAliasing::Taa;
+                if traced && far {
+                    s.trial_cuts_more |= RAY_MIRROR_FAR;
+                }
+            }
+            let mut q = app.world.query::<(&DirectionalLight, &mut Transform)>();
+            for (light, mut at) in q.iter_mut(&mut app.world) {
+                assert!(
+                    (light.angular_size_deg - 0.53).abs() < 1e-3,
+                    "the game's sun"
+                );
+                *at = Transform::default().looking_at(-toward, Vec3::Y);
+            }
+            let mut q = app.world.query::<(&Camera, &mut Transform)>();
+            for (_, mut at) in q.iter_mut(&mut app.world) {
+                *at = Transform::from_translation(EYE).looking_at(camera, Vec3::Y);
+            }
+            app.update_n(24);
+            if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+                eprintln!("skipping: no GPU ({})", d.0);
+                return;
+            }
+            if traced {
+                let d = app.world.resource::<Diagnostics>();
+                if d.get("render.ray.supported") != Some(1.0) {
+                    eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+                    return;
+                }
+                assert_eq!(d.get("render.ray.mirror_pictures"), Some(1.0), "traced");
+            }
+            let name = format!(
+                "small-sun-{}-{}.png",
+                if far { "above" } else { "seen" },
+                if traced { "traced" } else { "drawn" }
+            );
+            let dir = std::env::temp_dir().join("engine-planar-reflections");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(&name);
+            capture_now(&mut app.world, &path).expect("screenshot");
+            if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+                let _ = std::fs::copy(&path, std::path::Path::new(&out).join(&name));
+            }
+            shots.push(image::open(&path).expect("read the shot").to_rgb8());
+        }
+        let q = pixel_toward(camera, EYE + mirrored(toward) * 1000.0);
+        let (d, t) = (sun_blob(&shots[0], q), sun_blob(&shots[1], q));
+        eprintln!(
+            "the game's sun {what}, its reflection at {q}: drawn {} bright pixels round {:.1}, \
+             traced {} round {:.1}",
+            d.0, d.1, t.0, t.1
+        );
+        assert!(
+            d.0 > 0 && d.1.distance(q.as_dvec2()) < 3.0,
+            "the drawn mirror shows the sun {what} at {q}: {} bright pixels round {:.1}",
+            d.0,
+            d.1
+        );
+        assert_eq!(
+            t.0, 0,
+            "the traced mirror shows the sun's disc ({what}) at {q}: {} bright pixels round {:.1}",
+            t.0, t.1
         );
     }
 }

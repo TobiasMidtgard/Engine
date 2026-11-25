@@ -590,10 +590,13 @@ pub mod trial_cut_more {
     /// else the sky. The sky is the screen's where it shows the sky that way, else the one the
     /// view drew there clear of what it drew round it (its clouds as the drawn mirror has them:
     /// the view asks for the picture's detail, `ViewData::detail`, and the weather marches its
-    /// clouds that finely; the environment map lost the small ones), else the environment
-    /// map's; within three times its radius of the frame's light (the sun, or the moon when it
-    /// is the light), and two of the view's texels more, the sky just past that, as the picture
-    /// never shows the light's disc (the water's glitter is that light's reflection). A hit in
+    /// clouds that finely, up to the view's own pixels: at the defaults, exactly as a drawn
+    /// mirror view's; the environment map lost the small ones), else the environment map's;
+    /// within three times its radius of the frame's light (the sun, or the moon when it is the
+    /// light), the sky just past that (the view's and the environment map's past two of the
+    /// view's texels more, for its anti-aliasing; the screen's picture holds the disc no
+    /// wider), as the picture never shows the light's disc (the water's glitter is that light's
+    /// reflection). A hit in
     /// the reach's last tenth blends into what the view drew there by its distance, where that
     /// is the same thing, so a ridge across the reach shows no line where the rays end. The view
     /// is an extra view (`render.extra_views`, `extra_views_gpu_ms`);

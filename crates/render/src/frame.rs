@@ -248,9 +248,11 @@ pub struct ViewData {
     pub extra_view: bool,
     /// How much finer than its own pixels the view's detail is wanted: 1, but on a traced lake
     /// mirror's far view (`trial_cut_more::RAY_MIRROR_FAR`), whose pixels stand in for the
-    /// picture's far sky and far shores: the picture's size over its own (4 by default).
-    /// Features that size their work by the view's pixels scale it by this, as the weather's
-    /// cloud march does, so the far view's clouds come out as fine as a drawn mirror's.
+    /// picture's far sky and far shores: the picture's size over its own (4 by default). The
+    /// weather's cloud march scales by it, up to the view's own pixels, so at the defaults the
+    /// far view's clouds are marched as finely as a drawn mirror view's (a quarter of the
+    /// picture each way). Nothing else reads it yet: the far view's froxel fog, its culling of
+    /// small things and its levels of detail keep to its own pixels.
     pub detail: f32,
     /// Camera world position: the rendering origin.
     pub origin: DVec3,

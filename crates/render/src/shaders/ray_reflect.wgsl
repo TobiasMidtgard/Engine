@@ -355,6 +355,10 @@ struct Reflected {
     // It met nothing but the sky: past an opening the camera sees the sky through, or past
     // the reach of the cover map's march (and no hit of the march in the screen's outer band).
     sky: bool,
+    // Some of `out` is last frame's picture: the screen answered, wholly or by its share in
+    // the screen's outer band, or the ray's hit was read from it (the traced mirror holds what
+    // the picture shows within the light's cone to the sky round it).
+    from_picture: bool,
 };
 
 // The reflection along unit `dir` from camera-relative `origin` (just off the surface) of a
@@ -369,6 +373,7 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
     found.counts = vec4<u32>(0u);
     found.inside = false;
     found.sky = false;
+    found.from_picture = false;
     let size = vec2<i32>(textureDimensions(full_depth));
 
     // The screen first, where last frame's picture exists. A surface the march met within the
@@ -402,6 +407,7 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
                 if (screen.a >= 1.0) {
                     found.out = vec4<f32>(screen.rgb, screen_t);
                     found.counts.y = 1u;
+                    found.from_picture = true;
                     return found;
                 }
             }
@@ -440,7 +446,10 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
                 lit = reflected_fog(reflected_hit_light(origin, dir, hit.t, s, roughness),
                     origin + dir * hit.t, fog_from, noise);
             }
-            if (seen.a > 0.0 || screen.a > 0.0) { found.counts.w = 1u; }
+            if (seen.a > 0.0 || screen.a > 0.0) {
+                found.counts.w = 1u;
+                found.from_picture = true;
+            }
             out = vec4<f32>(min(mix(lit, seen.rgb, seen.a), vec3<f32>(60000.0)), max(hit.t, 1e-3));
         }
     } else if (escaped) {
@@ -460,6 +469,7 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
         // as it is where the ray met nothing (something the ray scene leaves out).
         out = select(vec4<f32>(screen.rgb, screen_t), vec4<f32>(mix(out.rgb, screen.rgb, screen.a), out.w), out.w > 0.0);
         found.sky = false;
+        found.from_picture = true;
     }
     found.out = out;
     return found;

@@ -47,12 +47,14 @@
 //! clouds and fog as a drawn view's, in place of the environment map's (a 256 × 128 picture,
 //! unfogged, 1.4° a texel, the weather's clouds marched into it more cheaply: the small ones
 //! were lost). The view asks the features for the picture's detail
-//! ([`crate::ViewData::detail`]), so the weather marches its clouds as finely in it as in a
-//! drawn mirror's view. The picture never takes the light's disc (the sun's, or the moon's when
+//! ([`crate::ViewData::detail`]), so the weather marches its clouds in it as finely as in a
+//! drawn mirror's view, up to the view's own pixels (at the defaults, exactly as finely). The
+//! picture never takes the light's disc (the sun's, or the moon's when
 //! it is the light: `frame.sun_dir`) from the screen or the view: the water's glitter is that
 //! light's reflection, so a disc would show it a second time. Within three times its radius of
-//! the light (and two of the far view's texels more with the far view, for its anti-aliasing)
-//! the sky is the one just past that, drawn out toward the light, or taken from beside it where
+//! the light the sky is the one just past that (the far view's, and the environment map's in
+//! its stead, past two of the far view's texels more, for its anti-aliasing; the screen's
+//! picture holds the disc no wider), drawn out toward the light, or taken from beside it where
 //! that would lie under the plane (under a low sun, where the ground is); what the screen or
 //! the view drew there, along the texel's ray or along the camera's to it (they part by the
 //! parallax between the eye and the mirrored eye), is held to half again the environment map's

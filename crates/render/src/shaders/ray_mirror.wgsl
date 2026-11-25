@@ -42,8 +42,9 @@
 // and a hit in the last tenth of the reach blends into it by distance where it drew the same
 // thing, so a ridge across the reach shows no line. Where the screen doesn't show the sky that
 // way, the sky is the one the view drew there, clear of what it drew round it, its clouds and
-// fog as a drawn view's (the sky pass's, and the weather's, which marches its clouds as finely
-// in it as in the drawn mirror's view: `ViewData::detail`), and the environment map only where
+// fog as a drawn view's (the sky pass's, and the weather's, which marches its clouds in it as
+// finely as in the drawn mirror's view up to its own pixels, at the defaults exactly:
+// `ViewData::detail`), and the environment map only where
 // the view drew none: that is a 256 by 128 picture of the sky (1.4 degrees a texel; the weather
 // also marches its clouds into it more cheaply), unfogged, which lost the small clouds
 // (`mirror_far`).
@@ -222,7 +223,9 @@ fn mirror_far_view(uv: vec2<f32>, lo: f32, full: f32, hi: f32) -> FarView {
     let far = mirror_trace.far;
     if (far.x <= 0.0) { return out; }
     let size = vec2<i32>(textureDimensions(mirror_far_depth));
-    let p = uv * vec2<f32>(size) - 0.5;
+    // (Kept to the view's texels: a read past its edge reads the edge's, and each read texel's
+    // 8 neighbours are then the view's own, not copies of the edge texel clamped off it.)
+    let p = clamp(uv * vec2<f32>(size) - 0.5, vec2<f32>(0.0), vec2<f32>(size - 1));
     let base = vec2<i32>(floor(p));
     let f = p - floor(p);
     let widen = mirror_far_widen();
@@ -293,8 +296,9 @@ fn mirror_far_view(uv: vec2<f32>, lo: f32, full: f32, hi: f32) -> FarView {
 // drew as its sky there (`view.sky`, its read at the picture's texel, where it holds any clear
 // of the cone round the light and of what it drew; beside what it drew, `view.away`, read again
 // a little farther from that), else the environment map. The view's sky has the clouds and the
-// fog as a drawn view's (the weather marches its clouds as finely in it as in the drawn
-// mirror's view: `ViewData::detail`); the environment map lost the small clouds (a 256 by 128
+// fog as a drawn view's (the weather marches its clouds in it as finely as in the drawn
+// mirror's view up to its own pixels: `ViewData::detail`); the environment map lost the small
+// clouds (a 256 by 128
 // picture, the weather's clouds marched into it more cheaply) and has no fog. Within
 // `mirror_at_sun`'s cone the sky is the one just past it (`mirror_off_sun`): past the cone
 // alone for the screen's (its picture holds the disc no wider), past it widened by two of the
@@ -315,8 +319,8 @@ fn mirror_far(origin: vec3<f32>, dir: vec3<f32>, noise: f32, view: FarView) -> v
                 var seen = full_seen_at(prev_uv);
                 // (Within the cone along the texel's ray, or along the camera's to the hit,
                 // where the screen's picture holds it: they part by the parallax of twice the
-                // camera's height over the plane, as much as the cone across for a ridge 500 m
-                // off seen from 5 m up.)
+                // camera's height over the plane, for a ridge 500 m off seen from 5 m up 1.15
+                // degrees, past the 0.81 of the cone round the game's sun.)
                 if (mirror_at_sun(dir, 0.0) || mirror_at_sun(normalize(hit), 0.0)) {
                     seen = min(seen, mirror_sun_cap(dir));
                 }
@@ -469,14 +473,15 @@ fn mirror_texel(id: vec2<u32>, size: vec2<u32>) -> vec4<u32> {
                     rgb = mix(rgb, view.rgb, smoothstep(m.far.z, MIRROR_T_MAX, t) * view.cover);
                 }
             }
-            // Within the cone round the light a hit taken from last frame's picture (the screen
-            // answered, or the ray's hit was read from it) no brighter than half again the
-            // environment map's sky there (`mirror_sun_cap`): the picture blends the disc into
-            // the outline of what stands in front of it. Within the cone along the texel's ray,
-            // or along the camera's to the hit, where the picture holds it (`mirror_far`). A
-            // hit the rays light alone holds no disc and keeps its light: in fog it glows
-            // toward the light, brighter than the cap.
-            if ((found.counts.y | found.counts.w) != 0u
+            // Within the cone round the light a hit any of which is last frame's picture (the
+            // screen answered, wholly or by its share in the screen's outer band, or the ray's
+            // hit was read from it: `from_picture`) no brighter than half again the environment
+            // map's sky there (`mirror_sun_cap`): the picture blends the disc into the outline
+            // of what stands in front of it. Within the cone along the texel's ray, or along the
+            // camera's to the hit, where the picture holds it (`mirror_far`). A hit the rays
+            // light alone holds no disc and keeps its light: in fog it glows toward the light,
+            // brighter than the cap.
+            if (found.from_picture
                 && (mirror_at_sun(dir, 0.0) || mirror_at_sun(normalize(origin + dir * t), 0.0))) {
                 rgb = min(rgb, mirror_sun_cap(dir));
             }
