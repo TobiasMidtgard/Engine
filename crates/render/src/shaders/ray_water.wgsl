@@ -14,9 +14,9 @@ const WATER_RAY_WALL_ALBEDO: f32 = 0.3;
 
 // The reflection along unit `r` of the water at camera-relative `rel`, of perceptual roughness
 // `rough`, from the frame's ray scene: pre-exposed rgb, and in a 1 where it met something within
-// a world reflection's reach (`400 exp(-5 rough)` m, at most 384) or a wall an indoor volume
-// stands for. 0 where it met nothing, started inside something, points below the horizon (it
-// would meet the water itself), or the water is rougher than `ssr_max_roughness`: there the
+// every pixel's reflection's reach (`400 exp(-5 rough)` m, at most 384) or a wall an indoor
+// volume stands for. 0 where it met nothing, started inside something, points below the horizon
+// (it would meet the water itself), or the water is rougher than `ssr_max_roughness`: there the
 // screen's march and the sky stand. Its hit is lit as every pixel's reflection lights its hits
 // (ray_hit_light.wgsl `reflected_hit_light`: the sun, the lamps on water this smooth, the probes
 // or the sky's guess, its glow and its own shine, and the height fog's part), and what it meets

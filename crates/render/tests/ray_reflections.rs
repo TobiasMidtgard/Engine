@@ -831,10 +831,12 @@ fn a_rug_too_rough_to_reflect_leaves_the_floor_beside_it_as_it_is() {
 }
 
 /// Indoors in thick fog, the floor's reflection of the far wall where the rays answer it (the
-/// wall off the top of the screen) is as dark as where the screen does: the haze over what the
-/// rays light is lit by what the room leaves of the sky and the sun, as the camera's haze in the
-/// room is (`fog_sky_visibility`: next to nothing). Lit as open air, it laid a bright veil over
-/// the reflection.
+/// wall off the top of the screen) stands about as far from where the screen answers it as in
+/// clear air, darker where the rays answer in both (25 Nov, lavapipe: 9.3 levels of 255 apart in
+/// the fog, 7.9 in clear air; the test lets the fog add 4): the haze over what the rays light is
+/// lit by what the room leaves of the sky and the sun, as the camera's haze in the room is
+/// (`fog_sky_visibility`: next to nothing). Lit as open air, it laid a bright veil over the
+/// reflection (38.4 levels apart).
 #[test]
 fn indoors_a_reflections_fog_is_as_dark_as_the_rooms() {
     let eye = DVec3::new(0.0, 1.6, 3.4);

@@ -434,7 +434,7 @@ fn variants() -> Vec<Variant> {
             "ray_reflections",
             r,
             json!({"trial_cuts_more": 80, "gi_hardware_rays": true}),
-            "ray_world with a reflection for every pixel up to the reflections' roughness limit, in place of screen-space reflections over world reflections at half size: each marches the screen first and takes last frame's picture of what it meets, else a ray through the frame's ray scene up to 384 m (shorter as the surface roughens), lit as a world reflection's where the camera does not see its hit (pass `ray reflections`, read against ray_world's `world reflections`), then blurred over each pixel's reflection lobe (pass `ray reflections resolve`, read against ray_world's `reflections`)",
+            "ray_world with a reflection for every pixel up to the reflections' roughness limit, in place of screen-space reflections over world reflections at half size: each marches the screen first and takes last frame's picture of what it meets, else a ray through the frame's ray scene up to 384 m (shorter as the surface roughens) where the camera does not see its hit, its hit lit as `shade_surface` lights a surface (its own shine, and inside the height fog as a surface there) and fogged from the camera to it (pass `ray reflections`, read against ray_world's `world reflections`), then blurred over each pixel's reflection lobe (pass `ray reflections resolve`, read against ray_world's `reflections`)",
         ),
         v(
             "ray_reflections_rays_only",

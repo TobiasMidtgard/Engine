@@ -180,14 +180,15 @@ fn hit_radiance(p: vec3<f32>, n: vec3<f32>, dir: vec3<f32>, t: f32, spacing: f32
 }
 
 // `hit_radiance` with the light bounced onto the point given: `bounced` (irradiance, lux-like:
-// diffuse light is albedo / PI times it). A reflection's hit is lit as this lights a probe's,
-// and with its own shine, by ray_hit_light.wgsl `reflected_hit_lit`: change them together.
-// (Only a reflection's hit is lit inside the height fog as `shade_surface` lights a surface
-// there, its sun dimmed by the fog above and lit by what that fog scatters down. A probe's is
-// lit as in clear air: by the whole sun wherever its shadow ray gets out, however much of it the
-// fog takes (deep in a bank, far brighter than a surface there), and without the fog's own
-// light (darker in shade). Matching it wants a `sky_visibility` per hit: after run E, if its
-// numbers leave room (Rendering, 25 Nov).)
+// diffuse light is albedo / PI times it). A traced reflection's hit (every pixel's reflection, a
+// mirror's traced picture, the water's ray) is lit as this lights a probe's, and with its own
+// shine, by ray_hit_light.wgsl `reflected_hit_lit`: change them together. (Only those hits are
+// lit inside the height fog as `shade_surface` lights a surface there, the sun dimmed by the fog
+// above and lit by what that fog scatters down. A probe's, and a half-size world reflection's
+// (`cs_reflect`, through `shade_hit`), are lit as in clear air: by the whole sun wherever its
+// shadow ray gets out, however much of it the fog takes (deep in a bank, far brighter than a
+// surface there), and without the fog's own light (darker in shade). Matching it wants a
+// `sky_visibility` per hit: after run E, if its numbers leave room (Rendering, 25 Nov).)
 fn hit_radiance_with(p: vec3<f32>, n: vec3<f32>, t: f32, spacing: f32, albedo: vec3<f32>, emissive: vec3<f32>, lights_most: u32, bounced: vec3<f32>) -> vec3<f32> {
     let lift = p + n * max(0.002, t * 1e-4);
     var light = vec3<f32>(0.0);

@@ -246,10 +246,14 @@ fn reflected_path_fog(rgb: vec3<f32>, eye: vec3<f32>, hit: vec3<f32>) -> vec3<f3
 // the cover leaves of the sky (`fog_sky_visibility`: in a room or a cave by neither the sky nor
 // the sun) and by the sun past the far shadow map's mountains and the clouds
 // (`height_fog_sun_visibility`, its samples turned by `noise`), held to the fog's opacity limit;
-// then the air's haze. For every pixel's reflection and the water's own ray: last frame's
-// picture holds what the screen answers them fogged so from the camera (within the volumetric
-// range by the froxels' fog), and the main view's `surface_fog`, and the water's, then fog the
-// camera's leg to the surface over both (ray_reflect.wgsl `reflect_full_pixel` says why).
+// then the air's haze. For every pixel's reflection and the water's own ray, what the screen
+// answers them is held fogged so from the camera: in last frame's picture for every pixel's
+// reflection, in this frame's scene colour before transparents for the water's march (water.wgsl
+// `trace_reflection`). Within the volumetric range that is the froxels' fog, lit through the
+// shadow cascades and by the lamps and holding the fog volumes, none of which this has: with
+// volumetric fog on (the default) the two can still step apart there. The main view's
+// `surface_fog`, and the water's, then fog the camera's leg to the surface over both
+// (ray_reflect.wgsl `reflect_full_pixel` says why).
 fn reflected_camera_fog(rgb: vec3<f32>, hit: vec3<f32>, noise: f32) -> vec3<f32> {
     if (shade_skip(SKIP_SURFACE_FOG)) { return rgb; }
     let dist = length(hit);

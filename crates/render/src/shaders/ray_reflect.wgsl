@@ -316,11 +316,15 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
     // The rays' light is fogged from the camera to the hit, as last frame's picture holds what
     // the screen answers, which the main view fogs again from the camera to the surface. The
     // true reflected leg starts at `origin`, but a reflection the rays fog less than the screen
-    // does would brighten as it left the screen, which shows in motion, where one a little over
-    // fogged doesn't (Rendering, 25 Nov). Whoever gives the screen's answers their true leg
-    // flips this to the leg from `origin` with it (`vec4<f32>(origin, 1.0)`, whose haze then
-    // wants the sun's shadows along it: `reflected_path_fog`), and the water's ray with it
-    // (ray_water.wgsl).
+    // does would change as it left the screen (more of its own light, less of the fog's: darker
+    // where the fog outshines it, brighter where it outshines the fog), which shows in motion,
+    // where one a little over fogged doesn't (Rendering, 25 Nov). With volumetric fog on, the
+    // screen's answers within its range carry the froxels' fog, lit through the shadow cascades
+    // and by the lamps and holding the fog volumes, which the rays' fog hasn't: there the two can
+    // still step apart (ray_hit_light.wgsl `reflected_camera_fog`). Whoever gives the screen's
+    // answers their true leg flips this to the leg from `origin` with it
+    // (`vec4<f32>(origin, 1.0)`, whose haze then wants the sun's shadows along it:
+    // `reflected_path_fog`), and the water's ray with it (ray_water.wgsl).
     let found = reflect_at(origin, dir, depth, roughness, cone, noise, vec4<f32>(0.0));
     textureStore(full_out, pixel, found.out);
     var counts = found.counts;

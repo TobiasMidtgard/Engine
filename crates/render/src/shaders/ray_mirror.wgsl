@@ -5,11 +5,13 @@
 // ray from that eye meets the plane at a point past which it is exactly the main view's ray
 // through that point reflected in the plane. So the texel is that point's reflection at
 // roughness 0: the screen first (last frame's picture, where the march meets what the camera
-// saw), then a ray through the ray scene 384 m long, lit as a world reflection's hit (or taken
-// from last frame's picture where the camera sees the hit), then, past it, what the screen
-// shows farther along (hills beyond the ray's reach), then the sky: last frame's picture where
-// the screen shows the sky in that direction, else the environment map. The depth is what the
-// drawn view's would be: the near plane over the depth along the mirrored view, 0 for the sky.
+// saw), then a ray through the ray scene 384 m long, its hit lit as every pixel's reflection
+// lights its hits (ray_hit_light.wgsl `reflected_hit_light`, or taken from last frame's picture
+// where the camera sees it) and, where the ray lights it, fogged over its whole mirrored path
+// (below), then, past it, what the screen shows farther along (hills beyond the ray's reach),
+// then the sky: last frame's picture where the screen shows the sky in that direction, else the
+// environment map. The depth is what the drawn view's would be: the near plane over the depth
+// along the mirrored view, 0 for the sky.
 // A texel whose ray starts inside something standing in the plane (a post, a hull) gets the
 // near plane's depth, nearer than any point of the plane the picture holds, which the
 // picture's readers drop as under the plane wherever in the texel they read it (at a grazing

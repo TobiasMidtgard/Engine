@@ -9,8 +9,12 @@
 //! size. Each texel's ray from the mirrored eye meets the plane at a point, and past it is
 //! exactly the main view's ray through that point reflected in the plane. So each texel is
 //! every pixel's reflection (ray_reflect.wgsl `reflect_at`) at roughness 0 from that point: the
-//! screen first, then a ray 384 m long through the frame's ray scene, lit as a world
-//! reflection's hit, then what the screen shows farther out, then the sky (ray_mirror.wgsl).
+//! screen first, then a ray 384 m long through the frame's ray scene, its hit lit as every
+//! pixel's reflection lights its hits (ray_hit_light.wgsl `reflected_hit_light`, or taken from
+//! last frame's picture where the camera sees it) and, where the ray lights it, fogged over its
+//! whole mirrored path from the mirrored eye (`reflected_path_fog`, where every pixel's
+//! reflection fogs from the camera), then what the screen shows farther out, then the sky
+//! (ray_mirror.wgsl).
 //! Its depth is what the drawn view's would be (reverse-Z, the near plane over the depth along
 //! the mirrored view), so the picture's readers (the water's `mirror_reflection`) find what
 //! lies beyond the plane and what under it as before.
