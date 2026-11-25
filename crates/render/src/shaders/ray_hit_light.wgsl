@@ -3,8 +3,12 @@
 // ray pass composes it with lib_ray at group 1 (probe_gi::shader_source, `Rays::World`: every
 // pixel's reflection and the mirrors' pictures, ray_reflect.wgsl `reflect_at`); the water's
 // bodies with lib_ray at group 3 (ray_scene::water_reflection_lib). probe_gi.wgsl
-// `hit_radiance_with` lights a probe's hit as this lights a reflection's, but for its shine, through
-// either walk's `trace_scene`: change them together.
+// `hit_radiance_with` lights a probe's hit as this lights a reflection's, but for its shine and
+// the height fog's part (below), through either walk's `trace_scene`: change them together.
+// The ray pass and the water's bodies also take the fog and haze over what their rays light
+// from here (`reflected_camera_fog`, `reflected_path_fog`); a probe's hit takes none (and
+// probe_gi.wgsl can't call them: `Rays::Software` and `Rays::Hardware` don't compose this
+// file).
 
 // The leaves for the probes' rays and their hits' shadow rays while the canopy map holds no
 // crown (`frame.canopy.w` 0: the setting is off, or no crown is near): the crowns as their
@@ -53,7 +57,12 @@ fn hit_unshadowed(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> bool {
 // shine (`reflected_hit_lit`). Where last frame's probes don't cover the hit (past their grid: a
 // far shore, a hill, a ball above a lake), the light bounced onto it is the sky's that
 // `shade_surface` guesses there rather than none, which left a reflected thing's shaded side
-// black.
+// black. Inside the height fog it is lit as `shade_surface` lights a surface there
+// (`height_fog_sunlight`): the sun's beam as far as the fog above lets it through, and the
+// sunlight that fog scatters down onto it from the whole sky above, as far as the cover over
+// the point leaves the sky open. Lit as in clear air, a green wall deep in a fog bank shone in
+// its reflection with the sun the camera saw the fog take from it, 38 levels of 255 greener off
+// the screen than on it.
 fn reflected_hit_light(origin: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, roughness: f32) -> vec3<f32> {
     var p = origin + dir * t;
     if (any(s.n != s.face)) {
@@ -64,10 +73,23 @@ fn reflected_hit_light(origin: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface,
     let lamps = select(0u, min(HIT_LAMPS_MOST, u32(ray_scene.lights.x)), roughness <= HIT_LAMPS_ROUGHNESS);
     let indirect = probe_gi(p, s.n, -dir);
     var bounced = indirect.rgb * indirect.a;
-    if (indirect.a < 1.0) {
-        bounced += reflected_sky_guess(s.n, sky_visibility(p, s.n)) * (1.0 - indirect.a);
+    let in_fog = height_fog_sunlight(p);
+    // The fog's light onto the point with the sky open.
+    var fog_open = vec3<f32>(0.0);
+    if (in_fog.y > 0.0) {
+        fog_open = frame.sun_color.rgb * sun_transmittance(p) * cloud_shadow(p)
+            * (in_fog.y * (0.5 + 0.5 * dot(s.n, fog_up(p))));
     }
-    return reflected_hit_lit(p, dir, t, s, lamps, bounced);
+    if (indirect.a < 1.0 || in_fog.y > 0.0) {
+        let sky_vis = sky_visibility(p, s.n);
+        if (indirect.a < 1.0) {
+            bounced += reflected_sky_guess(s.n, sky_vis) * (1.0 - indirect.a);
+        }
+        // (Its share of the sunlight above, from the sky above the point: as `shade_surface`
+        // adds it whether the probes cover the point or not, which see the sky without it.)
+        bounced += fog_open * sky_vis;
+    }
+    return reflected_hit_lit(p, dir, t, s, lamps, bounced, in_fog.x, fog_open);
 }
 
 // The light `shade_surface` guesses bounced onto a point with normal `n` where the probes
@@ -89,8 +111,13 @@ fn reflected_sky_guess(n: vec3<f32>, sky_vis: f32) -> vec3<f32> {
 // Zanuttini 2012, as `shade_surface` dims its own: a room's glossy floor in a mirror doesn't
 // shine with the sky). The camera's picture holds this shine where it stands for the
 // reflection's (ray_reflect.wgsl `full_picture_stands`); lit without it, a glossy floor seen in
-// a wall mirror was flat and dark, and a ball over a lake had no highlight in it.
-fn reflected_hit_lit(p: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, lights_most: u32, bounced: vec3<f32>) -> vec3<f32> {
+// a wall mirror was flat and dark, and a ball over a lake had no highlight in it. `sun_through`
+// is the share of the sun's beam the height fog above lets through to `p`
+// (`height_fog_sunlight`'s x), which dims the sun's light and highlight (its shadow ray is
+// traced wherever any gets through); `fog_open` the fog's light onto `p` with the sky open
+// (irradiance), which `bounced` holds as far as the cover leaves it, so the open sky the shine
+// is measured against holds it too (as `shade_surface`'s guess does).
+fn reflected_hit_lit(p: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, lights_most: u32, bounced: vec3<f32>, sun_through: f32, fog_open: vec3<f32>) -> vec3<f32> {
     let n = s.n;
     let v = -dir;
     let shine = s.roughness < HIT_SHINE_ROUGH || s.metallic > 0.0;
@@ -106,13 +133,14 @@ fn reflected_hit_lit(p: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, lights
     let reach = frame.gi_volume.w * 256.0;
     var light = vec3<f32>(0.0);
     var spec = vec3<f32>(0.0);
-    // The sun, through a shadow ray, and through the leaves above (as `hit_radiance_with`).
+    // The sun, through a shadow ray, and through the leaves above (as `hit_radiance_with`) and
+    // the fog above.
     let l = frame.sun_dir.xyz;
     let n_dot_l = dot(n, l);
-    if (n_dot_l > 0.0 && dot(frame.sun_color.rgb, frame.sun_color.rgb) > 0.0
+    if (n_dot_l > 0.0 && sun_through > 0.0 && dot(frame.sun_color.rgb, frame.sun_color.rgb) > 0.0
         && sky_volume_wall(lift, l, reach) == SKY_VOLUME_NO_WALL && hit_unshadowed(lift, l, reach)) {
         let e = frame.sun_color.rgb * sun_transmittance(p) * cloud_shadow(p) * n_dot_l
-            * canopy_ray_transmittance(lift, l);
+            * canopy_ray_transmittance(lift, l) * sun_through;
         light += e;
         if (shine) {
             let h = normalize(v + l);
@@ -146,10 +174,98 @@ fn reflected_hit_lit(p: vec3<f32>, dir: vec3<f32>, t: f32, s: RaySurface, lights
     var out = s.albedo * INV_PI * (light + bounced) + s.emissive;
     if (shine) {
         let r = reflect(dir, n);
-        let open = luminance(reflected_sky_guess(n, 1.0));
+        let open = luminance(reflected_sky_guess(n, 1.0) + fog_open);
         let sky_share = saturate(luminance(bounced) / max(open, 1e-4));
         out += spec + sample_env_rough(r, rough) * env_brdf_approx(f0, rough, n_dot_v) * sky_share
             * specular_horizon_fade(r, s.face);
     }
     return out;
+}
+
+// The air's haze over `dist` metres from camera-relative `eye` along unit `dir`, for radiance
+// `rgb` (cd/m^2), as `surface_fog` takes it from the camera: one march, or within `AIR_NEAR` a
+// short one thinned in proportion, with the overcast cloud deck's grey light.
+fn reflected_path_air(rgb: vec3<f32>, eye: vec3<f32>, dir: vec3<f32>, dist: f32) -> vec3<f32> {
+    let deck = (fog_sky_light() + frame.ambient.rgb) * smoothstep(0.55, 0.88, frame.weather.z);
+    if (dist > AIR_NEAR) {
+        let a = atmosphere(eye, dir, dist, 8);
+        return rgb * a.transmittance + a.radiance * frame.sun_color.rgb
+            + (vec3<f32>(1.0) - a.transmittance) * deck;
+    }
+    let a = atmosphere(eye, dir, AIR_NEAR, 2);
+    let k = dist / AIR_NEAR;
+    let t = pow(max(a.transmittance, vec3<f32>(1e-6)), vec3<f32>(k));
+    let lost = max(vec3<f32>(1.0) - a.transmittance, vec3<f32>(1e-6));
+    let share = select(vec3<f32>(k), (vec3<f32>(1.0) - t) / lost, lost > vec3<f32>(1e-4));
+    return rgb * t + a.radiance * share * frame.sun_color.rgb + (vec3<f32>(1.0) - t) * deck;
+}
+
+// The fog and haze along the straight path from camera-relative `eye` to a hit the rays lit at
+// camera-relative `hit`, for its radiance `rgb` (cd/m^2): the height fog analytic and lit as
+// `surface_fog` lights it past the volumetric range, by what the cover leaves of the sky as the
+// camera's fog of the hit would be (`fog_sky_visibility`: in a room or a cave by neither the
+// sky nor the sun) but with the sun unshadowed along the path (the far shadow map's mountains
+// and the clouds are read along the camera's lines only), held to the fog's opacity limit; then
+// the air's haze. For a mirror's traced picture: the whole mirrored path from the mirrored eye
+// through the plane, the line a drawn mirror view sees the hit by (its camera is the mirrored
+// eye), so a traced hit is fogged as the drawn mirror and the far view fog what they draw, and a
+// ridge across the rays' reach meets the far view without a line (Rendering's ask).
+fn reflected_path_fog(rgb: vec3<f32>, eye: vec3<f32>, hit: vec3<f32>) -> vec3<f32> {
+    if (shade_skip(SKIP_SURFACE_FOG)) { return rgb; }
+    let seg = hit - eye;
+    let dist = length(seg);
+    if (dist <= 1e-3) { return rgb; }
+    let dir = seg / dist;
+    var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (frame.fog.x > 0.0) {
+        // The height fog's optical depth along the path, its height linear along it
+        // (`height_fog_optical_depth` between two points).
+        let falloff = max(frame.fog.y, 1e-5);
+        let ha = max(fog_height(eye) - frame.fog.z, -100.0);
+        let hb = max(fog_height(hit) - frame.fog.z, -100.0);
+        let ea = exp(-falloff * ha);
+        let dh = hb - ha;
+        var tau = frame.fog.x * dist * ea;
+        if (abs(dh) > 0.01) {
+            tau = frame.fog.x * dist * (ea - exp(-falloff * hb)) / (falloff * dh);
+        }
+        let tr = exp(-tau);
+        if (tr < 0.9999) {
+            let light = height_fog_lit(dir, 0.5 * (eye + hit),
+                height_fog_sunlight_between(eye, hit), fog_sky_visibility(hit), 1.0);
+            fog = vec4<f32>(light * (1.0 - tr), tr);
+        }
+    }
+    fog = limit_fog_opacity(fog);
+    return reflected_path_air(rgb * fog.a + fog.rgb, eye, dir, dist);
+}
+
+// The fog and haze from the camera to a hit the rays lit at camera-relative `hit`, for its
+// radiance `rgb` (cd/m^2), as `surface_fog` takes them for a point the camera sees past the
+// volumetric range (or anywhere with volumetric fog off): the height fog analytic, lit by what
+// the cover leaves of the sky (`fog_sky_visibility`: in a room or a cave by neither the sky nor
+// the sun) and by the sun past the far shadow map's mountains and the clouds
+// (`height_fog_sun_visibility`, its samples turned by `noise`), held to the fog's opacity limit;
+// then the air's haze. For every pixel's reflection and the water's own ray: last frame's
+// picture holds what the screen answers them fogged so from the camera (within the volumetric
+// range by the froxels' fog), and the main view's `surface_fog`, and the water's, then fog the
+// camera's leg to the surface over both (ray_reflect.wgsl `reflect_full_pixel` says why).
+fn reflected_camera_fog(rgb: vec3<f32>, hit: vec3<f32>, noise: f32) -> vec3<f32> {
+    if (shade_skip(SKIP_SURFACE_FOG)) { return rgb; }
+    let dist = length(hit);
+    if (dist <= 1e-3) { return rgb; }
+    let dir = hit / dist;
+    var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (frame.fog.x > 0.0) {
+        let tr = exp(-height_fog_optical_depth(dir, 0.0, dist));
+        if (tr < 0.9999) {
+            let lit = fog_sky_visibility(hit);
+            let sun = height_fog_sun_visibility(dir, 0.0, dist, tr, noise);
+            let at = height_fog_scatter_point(dir, 0.0, dist, tr);
+            let in_fog = height_fog_sunlight_along(dir, 0.0, dist, tr);
+            fog = vec4<f32>(height_fog_lit(dir, at, in_fog, lit, sun) * (1.0 - tr), tr);
+        }
+    }
+    fog = limit_fog_opacity(fog);
+    return reflected_path_air(rgb * fog.a + fog.rgb, vec3<f32>(0.0), dir, dist);
 }

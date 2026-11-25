@@ -515,14 +515,17 @@ pub mod trial_cut_more {
     /// pixel's reflection marches the screen first, as screen-space reflections did, and takes
     /// what it meets from last frame's picture; otherwise a ray through the frame's ray scene,
     /// `min(384, 400 exp(-5 roughness))` m long, whose hit is taken from last frame's picture
-    /// too where the camera sees it, and is lit as a world reflection's elsewhere (the sun
-    /// through a shadow ray, the two nearest lamps through shadow rays up to roughness 0.3,
-    /// the probes), with its own shine where it is glossy or metal (the sun's and the lamps'
-    /// highlights and its sky, ray_hit_light.wgsl). A pass "ray reflections resolve" blurs
-    /// them over each pixel's reflection lobe into what shading reads (ssr.wgsl
-    /// `fs_reflect_resolve`), from the first frame on: a frame without last frame's picture
-    /// has the rays alone. With
-    /// `shade_skip::COUNT_MESH_RUNS` they are counted (`render.ray.reflect_pixels`,
+    /// too where the camera sees it, and elsewhere is lit by its own light as `shade_surface`
+    /// lights a surface (the sun through a shadow ray, the two nearest lamps through shadow
+    /// rays up to roughness 0.3, the probes; inside the height fog, the sun the fog above lets
+    /// through and the light that fog scatters down), with its own shine where it is glossy or
+    /// metal (the sun's and the lamps' highlights and its sky, ray_hit_light.wgsl), and fogged
+    /// from the camera to the hit, as last frame's picture holds what the screen answers
+    /// (ray_hit_light.wgsl `reflected_camera_fog`). A pass "ray
+    /// reflections resolve" blurs them over each pixel's reflection lobe into what shading
+    /// reads (ssr.wgsl `fs_reflect_resolve`), from the first frame on: a frame without last
+    /// frame's picture has the rays alone. With `shade_skip::COUNT_MESH_RUNS`
+    /// they are counted (`render.ray.reflect_pixels`,
     /// `reflect_screen`, `reflect_rays`, `reflect_reused`); `shade_skip::RAY_REFLECT_RAYS_ONLY`
     /// traces every one as a ray. 29.5 MB at 2560x1440 while on. Off by default.
     pub const RAY_REFLECTIONS: u32 = 64;
@@ -544,7 +547,7 @@ pub mod trial_cut_more {
     /// `ray_world`): a calm water body's pixel (waves of 0.25 m or less) no rougher than
     /// `RenderSettings::ssr_max_roughness`, where the lake mirror's picture doesn't answer, asks
     /// the frame's ray scene along its reflection, up to `min(384, 400 exp(-5 roughness))` m,
-    /// and the hit is lit as every pixel's reflection lights its hits; faded by roughness as the
+    /// and the hit is lit and fogged as every pixel's reflection's are; faded by roughness as the
     /// screen's march is (`1 - 2 roughness`), under the march and over the sky: what the march
     /// would show if the screen went on. Through [`crate::FrameContext::ray_group`], bound at
     /// group 3 of the water bodies' own pipeline: main view only, and nothing while the scene
@@ -559,9 +562,9 @@ pub mod trial_cut_more {
     /// mirror's view camera is placed as before but not drawn, and each texel's ray from the
     /// mirrored eye meets the plane and goes on from there as the main view's ray reflected in
     /// it, traced as every pixel's reflection traces one at roughness 0 ([`RAY_REFLECTIONS`]:
-    /// the screen first, then a ray 384 m long through the frame's ray scene, lit as a world
-    /// reflection's hit and fogged over its whole mirrored path as the drawn view fogs what it
-    /// draws, the sky beyond, then what the screen shows farther out). The picture
+    /// the screen first, then a ray 384 m long through the frame's ray scene, its hit lit as
+    /// every pixel's reflection's is and fogged over its whole mirrored path as the drawn view
+    /// fogs what it draws, the sky beyond, then what the screen shows farther out). The picture
     /// keeps its mip chain, depth, projection and exposure, so its readers (the water's
     /// `mirror_reflection`) sample it as before. With temporal anti-aliasing each frame's rays
     /// go through another point of their texels and the picture keeps a history of its own

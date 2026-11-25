@@ -19,7 +19,11 @@ const WATER_RAY_WALL_ALBEDO: f32 = 0.3;
 // would meet the water itself), or the water is rougher than `ssr_max_roughness`: there the
 // screen's march and the sky stand. Its hit is lit as every pixel's reflection lights its hits
 // (ray_hit_light.wgsl `reflected_hit_light`: the sun, the lamps on water this smooth, the probes
-// or the sky's guess, its glow and its own shine).
+// or the sky's guess, its glow and its own shine, and the height fog's part), and what it meets
+// is fogged from the camera to it, as every pixel's reflection fogs its hits and as the screen's
+// march holds what it finds (`reflected_camera_fog`; the water's own fog then covers the camera's
+// leg to the water over both, as ray_reflect.wgsl `reflect_full_pixel` has it and flips with
+// it).
 fn ray_reflection(rel: vec3<f32>, r: vec3<f32>, rough: f32) -> vec4<f32> {
     if (rough > frame.reflections.z || r.y <= 0.0) { return vec4<f32>(0.0); }
     // Off the surface by as much as the mirror's picture lifts its rays (ray_mirror.wgsl).
@@ -30,7 +34,9 @@ fn ray_reflection(rel: vec3<f32>, r: vec3<f32>, rough: f32) -> vec4<f32> {
     if (wall < SKY_VOLUME_NO_WALL) {
         // A wall of an indoor volume (a cave's rock): lit by the probes around it.
         let g = probe_gi(origin + r * wall, -r, -r);
-        return vec4<f32>(pre_expose(WATER_RAY_WALL_ALBEDO * INV_PI * g.rgb * g.a), 1.0);
+        let lit = WATER_RAY_WALL_ALBEDO * INV_PI * g.rgb * g.a;
+        let fogged = reflected_camera_fog(lit, origin + r * wall, frame_noise(pixel_of(rel)));
+        return vec4<f32>(pre_expose(fogged), 1.0);
     }
     if (hit.row == RAY_NONE) { return vec4<f32>(0.0); }
     // The ray's cone: a pixel across where it starts, widening by a pixel's angle and the
@@ -42,5 +48,7 @@ fn ray_reflection(rel: vec3<f32>, r: vec3<f32>, rough: f32) -> vec4<f32> {
     let s = ray_surface(hit, origin, r, cone);
     // The back of a single-sided surface: the ray started inside something.
     if (s.inside) { return vec4<f32>(0.0); }
-    return vec4<f32>(pre_expose(min(reflected_hit_light(origin, r, hit.t, s, rough), vec3<f32>(60000.0))), 1.0);
+    let light = reflected_hit_light(origin, r, hit.t, s, rough);
+    let lit = reflected_camera_fog(light, origin + r * hit.t, frame_noise(pixel_of(rel)));
+    return vec4<f32>(pre_expose(min(lit, vec3<f32>(60000.0))), 1.0);
 }

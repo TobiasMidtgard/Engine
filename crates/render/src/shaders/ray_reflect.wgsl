@@ -1,8 +1,8 @@
 // Every pixel's reflection (`trial_cut_more::RAY_REFLECTIONS`, probe_gi/mod.rs
 // `dispatch_reflections`): one reflection for each prepass pixel up to the roughness limit
 // (`frame.reflections.z`), in the frame's ray pass after the sun's trace. Composed after
-// probe_gi.wgsl on the frame's ray scene (lib_ray.wgsl, probe_gi_rays.wgsl), so a ray's hit is
-// lit as a world reflection's is (`hit_radiance`).
+// probe_gi.wgsl on the frame's ray scene (lib_ray.wgsl, probe_gi_rays.wgsl), whose hits
+// ray_hit_light.wgsl lights as `shade_surface` lights a surface (`reflected_hit_light`).
 //
 // Each pixel's reflection leaves along the lobe's dominant direction, as ssr.wgsl and
 // `cs_reflect` reflect, kept above the face the prepass drew (a normal map's bend can turn it
@@ -14,11 +14,14 @@
 // (`min(384, 400 exp(-5 roughness))` m: a rough reflection's blur hides what is far). A hit the
 // camera sees now (it projects onto the screen where the prepass drew the same surface) is
 // taken from last frame's picture too, mixed with its own light over the screen's outer 8%;
-// any other hit is lit as a world reflection's: its tile, the sun through a shadow ray and the
+// any other hit is lit by its own light: its tile, the sun through a shadow ray and the
 // leaves above, the two nearest lamps through shadow rays up to roughness 0.3 (none above),
-// last frame's probes. A ray that meets nothing past where the march passed over the sky (a
-// window, a gap in the trees) sees the sky. ssr.wgsl `fs_reflect_resolve` blurs the result over
-// each pixel's lobe.
+// last frame's probes, and inside the height fog as `shade_surface` lights a surface there; and
+// fogged from the camera to the hit, as last frame's picture holds what the screen answers
+// (ray_hit_light.wgsl `reflected_camera_fog`; the main view then fogs the camera's leg to the
+// surface over both, `reflect_full_pixel`). A ray that meets nothing past where the march passed
+// over the sky (a window, a gap in the trees) sees the sky. ssr.wgsl `fs_reflect_resolve` blurs
+// the result over each pixel's lobe.
 //
 // Last frame's picture exists from the second frame of a view on (`frame.reflections.y`, its
 // pre-exposure, is 0 before): until then every reflection is a ray's, lit by its own light.
@@ -310,11 +313,29 @@ fn reflect_full_pixel(pixel: vec2<u32>) -> vec4<u32> {
     // lobe's (as wide all along when orthographic), which picks the level of the hit's tile.
     let pixel_m = 2.0 / (abs(frame.proj[1][1]) * frame.viewport.y);
     let cone = select(vec2<f32>(pixel_m * depth, pixel_m + alpha), vec2<f32>(pixel_m, alpha), frame.exposure.w > 0.5);
-    let found = reflect_at(origin, dir, depth, roughness, cone, noise);
+    // The rays' light is fogged from the camera to the hit, as last frame's picture holds what
+    // the screen answers, which the main view fogs again from the camera to the surface. The
+    // true reflected leg starts at `origin`, but a reflection the rays fog less than the screen
+    // does would brighten as it left the screen, which shows in motion, where one a little over
+    // fogged doesn't (Rendering, 25 Nov). Whoever gives the screen's answers their true leg
+    // flips this to the leg from `origin` with it (`vec4<f32>(origin, 1.0)`, whose haze then
+    // wants the sun's shadows along it: `reflected_path_fog`), and the water's ray with it
+    // (ray_water.wgsl).
+    let found = reflect_at(origin, dir, depth, roughness, cone, noise, vec4<f32>(0.0));
     textureStore(full_out, pixel, found.out);
     var counts = found.counts;
     counts.x = 1u;
     return counts;
+}
+
+// What a ray lit at camera-relative `hit`, `rgb` (cd/m^2), fogged as `reflect_at`'s `fog_from`
+// says: with w 0 from the camera, as `surface_fog` fogs a point the camera sees
+// (ray_hit_light.wgsl `reflected_camera_fog`, its samples turned by `noise`: every pixel's
+// reflection); with w 1 along the straight path from camera-relative xyz (`reflected_path_fog`:
+// a mirror's traced picture, from the mirrored eye).
+fn reflected_fog(rgb: vec3<f32>, hit: vec3<f32>, fog_from: vec4<f32>, noise: f32) -> vec3<f32> {
+    if (fog_from.w > 0.5) { return reflected_path_fog(rgb, fog_from.xyz, hit); }
+    return reflected_camera_fog(rgb, hit, noise);
 }
 
 // What a reflection found (`reflect_at`).
@@ -335,8 +356,10 @@ struct Reflected {
 // The reflection along unit `dir` from camera-relative `origin` (just off the surface) of a
 // surface of perceptual `roughness` at view depth `depth`, its ray's cone `cone` (as
 // `ray_surface` takes it), `noise` its pixel's: the screen first, where last frame's picture
-// exists, then a ray through the ray scene.
-fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, cone: vec2<f32>, noise: f32) -> Reflected {
+// exists, then a ray through the ray scene. What the ray lights itself is fogged as `fog_from`
+// says (`reflected_fog`); what the screen or last frame's picture answers is fogged as the
+// camera saw it.
+fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, cone: vec2<f32>, noise: f32, fog_from: vec4<f32>) -> Reflected {
     var found: Reflected;
     found.out = vec4<f32>(0.0);
     found.counts = vec4<u32>(0u);
@@ -395,7 +418,8 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
         // A wall of an indoor volume (a cave's rock): lit by the probes around it.
         let p = origin + dir * wall;
         let indirect = probe_gi(p, -dir, -dir);
-        out = vec4<f32>(VOLUME_WALL_ALBEDO * INV_PI * indirect.rgb * indirect.a, max(wall, 1e-3));
+        out = vec4<f32>(reflected_fog(VOLUME_WALL_ALBEDO * INV_PI * indirect.rgb * indirect.a,
+            p, fog_from, noise), max(wall, 1e-3));
     } else if (hit.instance != RAY_NONE) {
         let s = ray_surface(ray_last, origin, dir, cone);
         // The back of a single-sided surface: the ray started inside something, so it
@@ -409,7 +433,8 @@ fn reflect_at(origin: vec3<f32>, dir: vec3<f32>, depth: f32, roughness: f32, con
             }
             var lit = vec3<f32>(0.0);
             if (seen.a < 1.0) {
-                lit = reflected_hit_light(origin, dir, hit.t, s, roughness);
+                lit = reflected_fog(reflected_hit_light(origin, dir, hit.t, s, roughness),
+                    origin + dir * hit.t, fog_from, noise);
             }
             if (seen.a > 0.0 || screen.a > 0.0) { found.counts.w = 1u; }
             out = vec4<f32>(min(mix(lit, seen.rgb, seen.a), vec3<f32>(60000.0)), max(hit.t, 1e-3));

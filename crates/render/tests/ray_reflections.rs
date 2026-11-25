@@ -9,8 +9,12 @@
 //! when the box leaves the screen (screen first, then the ray's own light), and the hit a ray
 //! meets where the camera sees it is taken from last frame's picture; a rough floor reflects an
 //! overhead glow 6 m up and not one 40 m up, which a mirror floor reflects; indoors, a mirror
-//! floor shows the sky through a window. Needs a GPU with ray queries (lavapipe has them);
-//! passes with a note without.
+//! floor shows the sky through a window; in thick fog a wall's reflection keeps its fogged
+//! colour where the rays take over from the screen (the rays' light lit inside the fog as the
+//! camera's surfaces are and fogged as the screen's picture is), in a bank that hides the sun
+//! and in a layer that lets some of it through and lights the wall with its own light, and
+//! indoors the fog over what the rays light is as dark as the room's. Needs a GPU with ray
+//! queries (lavapipe has them); passes with a note without.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -468,10 +472,165 @@ fn a_reflection_keeps_its_colour_as_its_subject_leaves_the_screen() {
     );
 }
 
+/// The fog round [`wall_in_fog`]'s wall: none; a bank alike at every height, whose column
+/// above (300 optical depths) lets no sun through to the wall and scatters next to none down
+/// onto it (a third of a percent), so only the sky lights it; or a layer thinning upward as
+/// the default fog does (by e every 50 m), which lets about a fifth of the sun through to where
+/// the floor shows the wall and scatters about as much light again down onto it
+/// (`height_fog_sunlight`). Both leave 30 to 40% of the wall's light after 40 m.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Fog {
+    Clear,
+    Bank,
+    Layer,
+}
+
+/// The height fog `fog`, alone: analytic (the froxels' fog is lit by the shadow maps, which the
+/// rays don't read) and scattering alike in every direction.
+fn set_fog(app: &mut App, fog: Fog) {
+    app.world.resource_mut::<RenderSettings>().volumetric_fog = false;
+    let mut f = app.world.resource_mut::<FogSettings>();
+    f.density = if fog == Fog::Clear { 0.0 } else { 0.03 };
+    f.height_falloff = if fog == Fog::Layer { 0.02 } else { 0.0001 };
+    f.sun_scattering = 0.0;
+}
+
+/// A mirror floor and a green wall 30 m wide and 15 m high, 40 m ahead of the camera 1 m up,
+/// pitched by `pitch` degrees, in `fog` ([`set_fog`]), so the screen's fog and the rays' are
+/// the same fog.
+fn wall_in_fog(pitch: f64, fog: Fog) -> App {
+    let mut app = app(true);
+    set_fog(&mut app, fog);
+    let w = &mut app.world;
+    ground(w, 0.0, metal(0.05));
+    slab(
+        w,
+        DVec3::new(0.0, 7.5, -36.5),
+        DVec3::new(30.0, 15.0, 1.0),
+        rough(0.1, 0.6, 0.1),
+    );
+    sun(w, DVec3::new(0.25, -0.7, -0.6));
+    let eye = DVec3::new(0.0, 1.0, 4.0);
+    camera(
+        w,
+        eye,
+        eye + DVec3::new(0.0, pitch.to_radians().tan(), -1.0),
+    );
+    app
+}
+
+/// The wall's reflection seen 12 to 18 degrees below the horizon (the wall stands 1.4 to 22
+/// degrees below it in the mirror floor; this is the wall 7.5 to 12 m up), across its middle.
+fn reflection_of_wall(p: &image::RgbImage, pitch: f64) -> [f32; 3] {
+    mean_rgb(p, row_of(-12.0, pitch)..row_of(-18.0, pitch), 70..90)
+}
+
+/// The rays' own light is fogged from the camera to the wall, as the camera's picture of the
+/// wall is, and the wall is lit inside the fog as the camera's surfaces are (the sun dimmed by
+/// the fog above it, and the fog's own light): in thick fog the wall's reflection keeps its
+/// colour as the wall leaves the screen and the rays take over from the screen, within a
+/// twentieth of what the fog changes, where the rays' light lit and fogged as in clear air
+/// stands far apart. In a bank the sun never reaches the wall; in a layer a fifth of it does,
+/// and the fog's own light about as much again. (25 Nov, lavapipe: 0.3 and 0.4 levels of 255
+/// apart in the bank and the layer, of the 104 and 52 the fog changes; 96 and 48 with neither
+/// the fog nor the fog's light on the rays' hits, 38 and 18 with their fog alone, and 6.4 in
+/// the layer without the fog's own light.)
+#[test]
+fn a_reflection_in_fog_keeps_its_colour_where_the_rays_take_over() {
+    let mut shots = Vec::new();
+    for (pitch, fog, what, name) in [
+        (
+            -10.0,
+            Fog::Bank,
+            "the wall in view, in a fog bank",
+            "fog_bank_wall_in_view.png",
+        ),
+        (
+            -45.0,
+            Fog::Bank,
+            "the wall off the screen, in a fog bank",
+            "fog_bank_wall_left.png",
+        ),
+        (
+            -10.0,
+            Fog::Layer,
+            "the wall in view, in a fog layer",
+            "fog_layer_wall_in_view.png",
+        ),
+        (
+            -45.0,
+            Fog::Layer,
+            "the wall off the screen, in a fog layer",
+            "fog_layer_wall_left.png",
+        ),
+        (
+            -45.0,
+            Fog::Clear,
+            "the wall off the screen, clear",
+            "clear_wall_left.png",
+        ),
+    ] {
+        let mut app = wall_in_fog(pitch, fog);
+        app.update_n(8);
+        if !can_run(&app) {
+            return;
+        }
+        assert_traced(&app, true, what);
+        let [pixels, screen, rays, reused] = reflect_counts(&mut app);
+        eprintln!(
+            "{what}: {pixels} pixels under the limit, {screen} from the screen, {rays} rays, \
+             {reused} reused"
+        );
+        if pitch > -20.0 {
+            assert!(screen > 400, "{what}: the screen answers ({screen})");
+        } else {
+            assert!(
+                rays > 400 && reused < 50,
+                "{what}: the rays answer with their own light ({rays} rays, {reused} reused)"
+            );
+        }
+        shots.push(reflection_of_wall(&picture(&mut app, name), pitch));
+    }
+    let clear = shots[4];
+    // How far apart two colours are in the channel that differs most.
+    let apart = |a: [f32; 3], b: [f32; 3]| (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max);
+    let fogs = [
+        (Fog::Bank, shots[0], shots[1]),
+        (Fog::Layer, shots[2], shots[3]),
+    ];
+    // (Both told before either is judged.)
+    for (fog, in_view, left) in fogs {
+        eprintln!(
+            "the wall's reflection in the {fog:?}: {in_view:.1?} in view, {left:.1?} off the \
+             screen ({:.1} apart; {clear:.1?} off the screen without fog, {:.1} apart)",
+            apart(left, in_view),
+            apart(clear, in_view)
+        );
+    }
+    for (fog, in_view, left) in fogs {
+        let (fogged, off) = (apart(clear, in_view), apart(left, in_view));
+        assert!(
+            fogged > 20.0,
+            "the {fog:?} changes the wall's reflection: {in_view:.1?} in view, {clear:.1?} \
+             without fog"
+        );
+        assert!(
+            off < 0.05 * fogged,
+            "in the {fog:?} the rays' light is lit and fogged as the screen's picture is: \
+             {left:.1?} against {in_view:.1?} ({off:.1} apart, the fog makes {fogged:.1})"
+        );
+    }
+}
+
 /// A closed room (inside x -3..3, y 0..3, z -4..4) with a window in the far wall (x -1..1,
 /// y 1.2..2.6) and a polished metal floor, seen from near the back wall, an indoor volume
 /// around it (sky light 0.02): reflections.rs `room_app` with every pixel's reflection.
 fn room_with_window() -> App {
+    room_seen(DVec3::new(0.0, 1.6, 3.4), DVec3::new(0.0, 1.0, -4.0))
+}
+
+/// [`room_with_window`]'s room, its camera at `eye` looking at `target`.
+fn room_seen(eye: DVec3, target: DVec3) -> App {
     let mut app = app(true);
     let w = &mut app.world;
     w.spawn((
@@ -479,7 +638,7 @@ fn room_with_window() -> App {
             exposure: Exposure::Manual { ev100: 12.0 },
             ..Camera::perspective((2.0 * HALF_FOV) as f32)
         },
-        Transform::from_xyz(0.0, 1.6, 3.4).looking_at(DVec3::new(0.0, 1.0, -4.0), Vec3::Y),
+        Transform::from_translation(eye).looking_at(target, Vec3::Y),
     ));
     w.spawn((
         DirectionalLight::default(),
@@ -668,5 +827,87 @@ fn a_rug_too_rough_to_reflect_leaves_the_floor_beside_it_as_it_is() {
     assert!(
         (0..3).all(|c| (beside[c] - away[c]).abs() <= 0.08 * away[c].max(10.0)),
         "the floor beside the rug reflects as it does away from it: {beside:?} against {away:?}"
+    );
+}
+
+/// Indoors in thick fog, the floor's reflection of the far wall where the rays answer it (the
+/// wall off the top of the screen) is as dark as where the screen does: the haze over what the
+/// rays light is lit by what the room leaves of the sky and the sun, as the camera's haze in the
+/// room is (`fog_sky_visibility`: next to nothing). Lit as open air, it laid a bright veil over
+/// the reflection.
+#[test]
+fn indoors_a_reflections_fog_is_as_dark_as_the_rooms() {
+    let eye = DVec3::new(0.0, 1.6, 3.4);
+    // Where the floor shows the far wall 2 m up and 2 m left of the middle (beside the window)
+    // and around it: the wall's points mirrored in the floor.
+    let images = [
+        DVec3::new(-2.0, -2.0, -4.0),
+        DVec3::new(-2.3, -1.8, -4.0),
+        DVec3::new(-1.7, -2.2, -4.0),
+    ];
+    let mut shots = Vec::new();
+    for (pitch, fog, what, name) in [
+        (
+            -10.0_f64,
+            Fog::Bank,
+            "the far wall in view, in fog",
+            "room_fog_in_view.png",
+        ),
+        (
+            -55.0,
+            Fog::Bank,
+            "the far wall off the screen, in fog",
+            "room_fog_left.png",
+        ),
+        (
+            -10.0,
+            Fog::Clear,
+            "the far wall in view, clear",
+            "room_clear_in_view.png",
+        ),
+        (
+            -55.0,
+            Fog::Clear,
+            "the far wall off the screen, clear",
+            "room_clear_left.png",
+        ),
+    ] {
+        let mut app = room_seen(eye, eye + DVec3::new(0.0, pitch.to_radians().tan(), -1.0));
+        set_fog(&mut app, fog);
+        app.update_n(8);
+        if !can_run(&app) {
+            return;
+        }
+        assert_traced(&app, true, what);
+        let [pixels, screen, rays, reused] = reflect_counts(&mut app);
+        eprintln!(
+            "{what}: {pixels} pixels under the limit, {screen} from the screen, {rays} rays, \
+             {reused} reused"
+        );
+        let p = picture(&mut app, name);
+        let mut c = [0.0f32; 3];
+        for at in images {
+            let one = colour_at(&app, &p, at);
+            for k in 0..3 {
+                c[k] += one[k] / images.len() as f32;
+            }
+        }
+        shots.push(c);
+    }
+    let [fog_in_view, fog_left, clear_in_view, clear_left] =
+        [shots[0], shots[1], shots[2], shots[3]];
+    let apart = |a: [f32; 3], b: [f32; 3]| (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max);
+    eprintln!(
+        "the far wall in the floor: in fog {fog_in_view:.1?} in view, {fog_left:.1?} off the \
+         screen ({:.1} apart); clear {clear_in_view:.1?} in view, {clear_left:.1?} off the screen \
+         ({:.1} apart)",
+        apart(fog_left, fog_in_view),
+        apart(clear_left, clear_in_view)
+    );
+    assert!(
+        apart(fog_left, fog_in_view) <= apart(clear_left, clear_in_view) + 4.0,
+        "indoors the rays' fog is the room's: {fog_left:.1?} off the screen against \
+         {fog_in_view:.1?} in view, where clear air leaves them {:.1} apart",
+        apart(clear_left, clear_in_view)
     );
 }

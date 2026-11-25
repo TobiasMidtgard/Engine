@@ -16,9 +16,10 @@
 // angle a texel spans metres of the plane), as they drop what a drawn view shows under it.
 //
 // A hit the rays light takes the fog and haze of its whole mirrored path, from the mirrored eye
-// through the plane, as the drawn view fogs what it draws (`mirror_path_fog`; every pixel's
-// reflection has none on its reflected leg); one the screen answers is last frame's picture,
-// fogged as the camera saw it.
+// through the plane, as the drawn view fogs what it draws (ray_hit_light.wgsl
+// `reflected_path_fog`, from the mirrored eye, where every pixel's reflection fogs its hits from
+// the camera, as the screen's answers are: `reflected_camera_fog`); one the screen answers is
+// last frame's picture, fogged as the camera saw it.
 //
 // Not in the picture: what lies past the ray's reach that the screen doesn't show, unless the
 // picture has a far view (`trial_cut_more::RAY_MIRROR_FAR`): the mirror's view drawn through
@@ -117,61 +118,6 @@ fn mirror_far(origin: vec3<f32>, dir: vec3<f32>, noise: f32) -> vec4<f32> {
     return vec4<f32>(mirror_sky(dir), 0.0);
 }
 
-// The air's haze over `dist` metres from camera-relative `eye` along unit `dir`, for radiance
-// `rgb` (cd/m^2), as `surface_fog` takes it from the camera: one march, or within `AIR_NEAR` a
-// short one thinned in proportion, with the overcast cloud deck's grey light.
-fn mirror_path_air(rgb: vec3<f32>, eye: vec3<f32>, dir: vec3<f32>, dist: f32) -> vec3<f32> {
-    let deck = (fog_sky_light() + frame.ambient.rgb) * smoothstep(0.55, 0.88, frame.weather.z);
-    if (dist > AIR_NEAR) {
-        let a = atmosphere(eye, dir, dist, 8);
-        return rgb * a.transmittance + a.radiance * frame.sun_color.rgb
-            + (vec3<f32>(1.0) - a.transmittance) * deck;
-    }
-    let a = atmosphere(eye, dir, AIR_NEAR, 2);
-    let k = dist / AIR_NEAR;
-    let t = pow(max(a.transmittance, vec3<f32>(1e-6)), vec3<f32>(k));
-    let lost = max(vec3<f32>(1.0) - a.transmittance, vec3<f32>(1e-6));
-    let share = select(vec3<f32>(k), (vec3<f32>(1.0) - t) / lost, lost > vec3<f32>(1e-4));
-    return rgb * t + a.radiance * share * frame.sun_color.rgb + (vec3<f32>(1.0) - t) * deck;
-}
-
-// The fog and haze between the mirrored eye (camera-relative `eye`) and a hit the rays lit at
-// camera-relative `hit`, for its radiance `rgb` (cd/m^2): along the straight line through the
-// plane that a drawn mirror view sees the hit by (its camera is the mirrored eye), so a traced
-// hit is fogged as the drawn mirror and the far view fog what they draw, and a ridge across the
-// rays' reach meets the far view without a line (Rendering's ask). The height fog analytic and
-// lit as `surface_fog` lights it past the volumetric range, with the sky open and the sun
-// unshadowed along the path, held to the fog's opacity limit; then the air's haze.
-fn mirror_path_fog(rgb: vec3<f32>, eye: vec3<f32>, hit: vec3<f32>) -> vec3<f32> {
-    if (shade_skip(SKIP_SURFACE_FOG)) { return rgb; }
-    let seg = hit - eye;
-    let dist = length(seg);
-    if (dist <= 1e-3) { return rgb; }
-    let dir = seg / dist;
-    var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    if (frame.fog.x > 0.0) {
-        // The height fog's optical depth along the path, its height linear along it
-        // (`height_fog_optical_depth` between two points).
-        let falloff = max(frame.fog.y, 1e-5);
-        let ha = max(fog_height(eye) - frame.fog.z, -100.0);
-        let hb = max(fog_height(hit) - frame.fog.z, -100.0);
-        let ea = exp(-falloff * ha);
-        let dh = hb - ha;
-        var tau = frame.fog.x * dist * ea;
-        if (abs(dh) > 0.01) {
-            tau = frame.fog.x * dist * (ea - exp(-falloff * hb)) / (falloff * dh);
-        }
-        let tr = exp(-tau);
-        if (tr < 0.9999) {
-            let light = height_fog_lit(dir, 0.5 * (eye + hit),
-                height_fog_sunlight_between(eye, hit), 1.0, 1.0);
-            fog = vec4<f32>(light * (1.0 - tr), tr);
-        }
-    }
-    fog = limit_fog_opacity(fog);
-    return mirror_path_air(rgb * fog.a + fog.rgb, eye, dir, dist);
-}
-
 // What the far view drew at the picture's `uv`, bilinear over the four texels around it, with
 // only those counted that drew something (the view's own sky, fogged as its sky pass fogs it,
 // would ring a ridge's outline otherwise) as deep along the mirrored view as `lo` to `hi` (m),
@@ -264,8 +210,10 @@ fn mirror_texel(id: vec2<u32>, size: vec2<u32>) -> vec4<u32> {
         let origin = s + n * max(0.005, 1e-4 * length(s));
         let noise = interleaved_gradient_noise(vec2<f32>(id) + frame.time.w * 5.588238);
         // (Its cone: a texel across at the plane, widening by a texel's angle.)
+        // (Its hits the rays light are fogged over the whole mirrored path, from the mirrored
+        // eye.)
         let found = reflect_at(origin, dir, max(view_depth(s), 0.0), 0.0,
-            vec2<f32>(m.eye.w * u * len, m.eye.w), noise);
+            vec2<f32>(m.eye.w * u * len, m.eye.w), noise, vec4<f32>(m.eye.xyz, 1.0));
         counts = vec4<u32>(1u, found.counts.y, found.counts.z, found.counts.w);
         if (found.inside) {
             // Inside something standing in the plane: at the near plane, which readers drop for
@@ -294,11 +242,6 @@ fn mirror_texel(id: vec2<u32>, size: vec2<u32>) -> vec4<u32> {
         } else {
             let t = found.out.w;
             rgb = found.out.rgb;
-            if (found.counts.y == 0u && found.counts.w == 0u) {
-                // Lit by the rays (not last frame's picture, which the camera saw fogged): the
-                // fog and haze of its mirrored path.
-                rgb = mirror_path_fog(rgb, m.eye.xyz, origin + dir * t);
-            }
             depth = near / (u + t / len);
             // In the last tenth of the rays' reach the hit gives way by its distance to what
             // the far view drew there, where that is the same thing (as deep, within a tenth):
