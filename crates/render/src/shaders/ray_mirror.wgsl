@@ -15,15 +15,19 @@
 // picture's readers drop as under the plane wherever in the texel they read it (at a grazing
 // angle a texel spans metres of the plane), as they drop what a drawn view shows under it.
 //
-// Not in the picture: fog and haze on the reflected leg (every pixel's reflection has none
-// either), and what lies past the ray's reach that the screen doesn't show, unless the picture
-// has a far view (`trial_cut_more::RAY_MIRROR_FAR`): the mirror's view drawn through the same
-// frustum, smaller, with its near plane a tenth short of where the shortest rays end. Past its
-// own ray's reach a texel takes what the view drew there, laid by its coverage over what the
-// screen shows along the ray or the sky (`mirror_far_view`: only what lies past where its ray
-// begins to give way to the view, so the view adds no fringe round what the rays hit), and a
-// hit in the last tenth of the reach blends into it by distance where it drew the same thing,
-// so a ridge across the reach shows no line.
+// A hit the rays light takes the fog and haze of its whole mirrored path, from the mirrored eye
+// through the plane, as the drawn view fogs what it draws (`mirror_path_fog`; every pixel's
+// reflection has none on its reflected leg); one the screen answers is last frame's picture,
+// fogged as the camera saw it.
+//
+// Not in the picture: what lies past the ray's reach that the screen doesn't show, unless the
+// picture has a far view (`trial_cut_more::RAY_MIRROR_FAR`): the mirror's view drawn through
+// the same frustum, smaller, with its near plane a tenth short of where the shortest rays end.
+// Past its own ray's reach a texel takes what the view drew there, laid by its coverage over
+// what the screen shows along the ray or the sky (`mirror_far_view`: only what lies past where
+// its ray begins to give way to the view, so the view adds no fringe round what the rays hit),
+// and a hit in the last tenth of the reach blends into it by distance where it drew the same
+// thing, so a ridge across the reach shows no line.
 
 struct MirrorTrace {
     right: vec4<f32>,    // the mirrored view's right axis (camera-relative); w: its near plane (m)
@@ -111,6 +115,61 @@ fn mirror_far(origin: vec3<f32>, dir: vec3<f32>, noise: f32) -> vec4<f32> {
         }
     }
     return vec4<f32>(mirror_sky(dir), 0.0);
+}
+
+// The air's haze over `dist` metres from camera-relative `eye` along unit `dir`, for radiance
+// `rgb` (cd/m^2), as `surface_fog` takes it from the camera: one march, or within `AIR_NEAR` a
+// short one thinned in proportion, with the overcast cloud deck's grey light.
+fn mirror_path_air(rgb: vec3<f32>, eye: vec3<f32>, dir: vec3<f32>, dist: f32) -> vec3<f32> {
+    let deck = (fog_sky_light() + frame.ambient.rgb) * smoothstep(0.55, 0.88, frame.weather.z);
+    if (dist > AIR_NEAR) {
+        let a = atmosphere(eye, dir, dist, 8);
+        return rgb * a.transmittance + a.radiance * frame.sun_color.rgb
+            + (vec3<f32>(1.0) - a.transmittance) * deck;
+    }
+    let a = atmosphere(eye, dir, AIR_NEAR, 2);
+    let k = dist / AIR_NEAR;
+    let t = pow(max(a.transmittance, vec3<f32>(1e-6)), vec3<f32>(k));
+    let lost = max(vec3<f32>(1.0) - a.transmittance, vec3<f32>(1e-6));
+    let share = select(vec3<f32>(k), (vec3<f32>(1.0) - t) / lost, lost > vec3<f32>(1e-4));
+    return rgb * t + a.radiance * share * frame.sun_color.rgb + (vec3<f32>(1.0) - t) * deck;
+}
+
+// The fog and haze between the mirrored eye (camera-relative `eye`) and a hit the rays lit at
+// camera-relative `hit`, for its radiance `rgb` (cd/m^2): along the straight line through the
+// plane that a drawn mirror view sees the hit by (its camera is the mirrored eye), so a traced
+// hit is fogged as the drawn mirror and the far view fog what they draw, and a ridge across the
+// rays' reach meets the far view without a line (Rendering's ask). The height fog analytic and
+// lit as `surface_fog` lights it past the volumetric range, with the sky open and the sun
+// unshadowed along the path, held to the fog's opacity limit; then the air's haze.
+fn mirror_path_fog(rgb: vec3<f32>, eye: vec3<f32>, hit: vec3<f32>) -> vec3<f32> {
+    if (shade_skip(SKIP_SURFACE_FOG)) { return rgb; }
+    let seg = hit - eye;
+    let dist = length(seg);
+    if (dist <= 1e-3) { return rgb; }
+    let dir = seg / dist;
+    var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (frame.fog.x > 0.0) {
+        // The height fog's optical depth along the path, its height linear along it
+        // (`height_fog_optical_depth` between two points).
+        let falloff = max(frame.fog.y, 1e-5);
+        let ha = max(fog_height(eye) - frame.fog.z, -100.0);
+        let hb = max(fog_height(hit) - frame.fog.z, -100.0);
+        let ea = exp(-falloff * ha);
+        let dh = hb - ha;
+        var tau = frame.fog.x * dist * ea;
+        if (abs(dh) > 0.01) {
+            tau = frame.fog.x * dist * (ea - exp(-falloff * hb)) / (falloff * dh);
+        }
+        let tr = exp(-tau);
+        if (tr < 0.9999) {
+            let light = height_fog_lit(dir, 0.5 * (eye + hit),
+                height_fog_sunlight_between(eye, hit), 1.0, 1.0);
+            fog = vec4<f32>(light * (1.0 - tr), tr);
+        }
+    }
+    fog = limit_fog_opacity(fog);
+    return mirror_path_air(rgb * fog.a + fog.rgb, eye, dir, dist);
 }
 
 // What the far view drew at the picture's `uv`, bilinear over the four texels around it, with
@@ -235,6 +294,11 @@ fn mirror_texel(id: vec2<u32>, size: vec2<u32>) -> vec4<u32> {
         } else {
             let t = found.out.w;
             rgb = found.out.rgb;
+            if (found.counts.y == 0u && found.counts.w == 0u) {
+                // Lit by the rays (not last frame's picture, which the camera saw fogged): the
+                // fog and haze of its mirrored path.
+                rgb = mirror_path_fog(rgb, m.eye.xyz, origin + dir * t);
+            }
             depth = near / (u + t / len);
             // In the last tenth of the rays' reach the hit gives way by its distance to what
             // the far view drew there, where that is the same thing (as deep, within a tenth):

@@ -2,8 +2,9 @@
 //! sees it, including what is off the top of the screen, and never what lies under the plane.
 //! A small test feature draws the mirror's rectangle with its picture, as a water shader does.
 //! The same with the picture traced by the frame's rays in place of the mirror's view
-//! (`trial_cut_more::RAY_MIRROR_PICTURES`), which needs ray queries (lavapipe has them), and a
-//! wall past the rays' reach above the top of the screen in it with the picture's far view
+//! (`trial_cut_more::RAY_MIRROR_PICTURES`), which needs ray queries (lavapipe has them), its
+//! hits fogged over their mirrored path as the drawn mirror's are, and a wall past the rays'
+//! reach above the top of the screen in it with the picture's far view
 //! (`trial_cut_more::RAY_MIRROR_FAR`) as with the mirror drawn, where the rays alone leave sky,
 //! the far view adding nothing round what the rays hit and leaving no hole round it either, and
 //! taking over from the rays with no line along a wall across the end of their reach.
@@ -875,6 +876,105 @@ fn a_ridge_across_the_end_of_a_traced_mirrors_rays_shows_no_line_with_its_far_vi
     assert!(
         far_step <= drawn_step + 8,
         "a line where the rays end: a step of {far_step} along the face, {drawn_step} drawn"
+    );
+}
+
+/// A wall 400 m wide and 60 m high, 120 m off, within the rays' reach and above the top of the
+/// screen: only its reflection shows, by the mirror's middle.
+const FOG_WALL: DVec3 = DVec3::new(0.0, 60.0, -120.0);
+/// A point of its face, left of the balls, whose reflection is on the mirror.
+const FOG_WALL_POINT: DVec3 = DVec3::new(-30.0, 45.0, -118.0);
+
+/// What the rays light in a traced mirror is fogged over its mirrored path, from the mirrored
+/// eye through the plane, as the drawn mirror fogs what it draws: in thick fog a wall within
+/// the rays' reach, above the top of the screen, reflects about as the drawn mirror shows it,
+/// where the traced picture without the fog's share of it stands far apart.
+#[test]
+fn a_traced_mirrors_hits_are_fogged_as_the_drawn_mirrors_are() {
+    let mut shots = Vec::new();
+    for (traced, fog, name) in [
+        (false, true, "fog-wall-drawn.png"),
+        (true, true, "fog-wall-traced.png"),
+        (true, false, "fog-wall-traced-clear.png"),
+    ] {
+        let mut app = ball_app(traced);
+        // The height fog alone, analytic in both pictures (the froxels' fog is lit by the
+        // shadow maps, which the trace doesn't read), 100 m deep at the mirror.
+        app.world.resource_mut::<RenderSettings>().volumetric_fog = false;
+        app.world.resource_mut::<FogSettings>().density = if fog { 0.01 } else { 0.0 };
+        app.world.spawn((
+            Transform::from_translation(FOG_WALL),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [400.0, 60.0, 4.0],
+                },
+                StandardMaterial::color(0.75, 0.35, 0.05),
+            ),
+        ));
+        app.update_n(5);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let d = app.world.resource::<Diagnostics>().clone();
+        if traced {
+            if d.get("render.ray.supported") != Some(1.0) {
+                eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+                return;
+            }
+            assert_eq!(
+                d.get("render.ray.mirror_pictures"),
+                Some(1.0),
+                "{name}: traced"
+            );
+        }
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+        }
+        shots.push(image::open(&path).expect("read the shot").to_rgb8());
+    }
+    let foot = DVec3::new(FOG_WALL_POINT.x, FOG_WALL.y - 30.0, FOG_WALL_POINT.z);
+    assert!(
+        pixel(foot).y < 0,
+        "the wall is on screen at {}",
+        pixel(foot)
+    );
+    // The mean colour over the 3 x 3 pixels around the wall's reflection, and how far apart two
+    // are in the channel that differs most (the fog turns the orange wall toward its own grey
+    // blue: the blue climbs and the red falls, whatever the mean of the three does).
+    let q = pixel(mirrored(FOG_WALL_POINT));
+    let colour = |shot: &image::RgbImage| {
+        let mut sum = [0.0f32; 3];
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let p = shot.get_pixel((q.x + dx) as u32, (q.y + dy) as u32).0;
+                for (s, v) in sum.iter_mut().zip(p) {
+                    *s += f32::from(v) / 9.0;
+                }
+            }
+        }
+        sum
+    };
+    let apart = |a: [f32; 3], b: [f32; 3]| (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max);
+    let (drawn, traced, clear) = (colour(&shots[0]), colour(&shots[1]), colour(&shots[2]));
+    eprintln!(
+        "the wall's reflection at {q} in fog: drawn {drawn:.1?}, traced {traced:.1?}; traced \
+         without the fog {clear:.1?}"
+    );
+    let (fogged, off) = (apart(clear, drawn), apart(traced, drawn));
+    assert!(
+        fogged > 20.0,
+        "the fog changes the wall's reflection: {drawn:.1?} drawn in fog, {clear:.1?} traced \
+         without it"
+    );
+    assert!(
+        off < 0.2 * fogged,
+        "the traced reflection in fog ({traced:.1?}) is fogged as the drawn one ({drawn:.1?}): \
+         {off:.1} apart, and {fogged:.1} without the fog ({clear:.1?})"
     );
 }
 

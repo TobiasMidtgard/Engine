@@ -560,7 +560,8 @@ pub mod trial_cut_more {
     /// mirrored eye meets the plane and goes on from there as the main view's ray reflected in
     /// it, traced as every pixel's reflection traces one at roughness 0 ([`RAY_REFLECTIONS`]:
     /// the screen first, then a ray 384 m long through the frame's ray scene, lit as a world
-    /// reflection's hit, the sky beyond, then what the screen shows farther out). The picture
+    /// reflection's hit and fogged over its whole mirrored path as the drawn view fogs what it
+    /// draws, the sky beyond, then what the screen shows farther out). The picture
     /// keeps its mip chain, depth, projection and exposure, so its readers (the water's
     /// `mirror_reflection`) sample it as before. With temporal anti-aliasing each frame's rays
     /// go through another point of their texels and the picture keeps a history of its own
