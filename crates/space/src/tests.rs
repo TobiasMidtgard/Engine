@@ -550,6 +550,21 @@ fn far_bodies_get_spheres_rings_and_stay_visible() {
         jupiter.2 > 1.0 && (apparent - 7e-4).abs() < 1e-5,
         "{apparent}"
     );
+    // So are stars light years away, far past MAX_DOT_DISTANCE_M (dimmed by as much as they
+    // are widened, so their light stays true), but not the planets of other stars.
+    for star in ["Proxima Centauri", "Sirius B", "Tau Ceti"] {
+        let imp = of(star)[0];
+        let d = s.body(star).unwrap().world_position.length();
+        let apparent = imp.1.radius_m * imp.2 as f64 / d;
+        assert!(d > look::MAX_DOT_DISTANCE_M, "{star}");
+        assert!(
+            imp.2 > 1.0 && (apparent - 7e-4).abs() < 1e-5,
+            "{star}: {apparent}"
+        );
+    }
+    let planet = s.body("Proxima Centauri b").unwrap();
+    assert!(planet.world_position.length() > look::MAX_DOT_DISTANCE_M);
+    assert_eq!(of("Proxima Centauri b")[0].2, 1.0);
 }
 
 #[test]

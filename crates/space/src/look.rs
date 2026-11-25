@@ -414,14 +414,17 @@ pub(crate) fn spawn_impostors(
 /// Planets and moons farther than this (m) are not enlarged into dots: they are drawn at
 /// their true, sub-pixel size, so a planet of another star doesn't shine beside its star the
 /// way Jupiter shines in our sky (at 2000 AU even Jupiter would be far too faint to see).
+/// Stars are enlarged at any distance: `star_instance` dims them by as much as their disc
+/// grows, so their light stays true (drawn far smaller than a pixel, the disc's anti-aliased
+/// edge would show them hundreds of millions of times too bright).
 pub const MAX_DOT_DISTANCE_M: f64 = 2_000.0 * crate::orbit::AU;
 
 /// Keep far bodies at least `min_apparent_radius_rad` wide as seen from the active camera
-/// (out to [`MAX_DOT_DISTANCE_M`]).
+/// (stars at any distance, planets and moons out to [`MAX_DOT_DISTANCE_M`]).
 pub(crate) fn scale_impostors(
     settings: Res<SpaceSettings>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    bodies: Query<&Transform, (With<CelestialBody>, Without<BodyImpostor>)>,
+    bodies: Query<(&Transform, &CelestialBody), Without<BodyImpostor>>,
     mut impostors: Query<(&ChildOf, &BodyImpostor, &mut Transform), Without<CelestialBody>>,
 ) {
     let Some(eye) = cameras
@@ -433,11 +436,11 @@ pub(crate) fn scale_impostors(
         return;
     };
     for (parent, imp, mut tf) in &mut impostors {
-        let Ok(body) = bodies.get(parent.parent()) else {
+        let Ok((at, body)) = bodies.get(parent.parent()) else {
             continue;
         };
-        let distance = (body.translation - eye).length();
-        let scale = if distance > MAX_DOT_DISTANCE_M {
+        let distance = (at.translation - eye).length();
+        let scale = if distance > MAX_DOT_DISTANCE_M && body.kind != BodyKind::Star {
             1.0
         } else {
             (settings.min_apparent_radius_rad * distance / imp.radius_m).max(1.0) as f32
