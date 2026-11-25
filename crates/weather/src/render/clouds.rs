@@ -1002,9 +1002,11 @@ impl RenderFeature for CloudFeature {
             return;
         }
         self.replace_sky = settings.replace_sky;
-        // Reflections and insets are wavy or small: march them at half the scale.
+        // Reflections and insets are wavy or small: march them at half the scale. A view whose
+        // pixels stand in for a finer picture's (a traced lake mirror's far view,
+        // `ViewData::detail`) marches that much finer, as finely as the picture's drawn mirror.
         let scale = if view.extra_view {
-            settings.resolution_scale * 0.5
+            settings.resolution_scale * 0.5 * view.detail.max(1.0)
         } else {
             settings.resolution_scale
         };

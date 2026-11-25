@@ -246,6 +246,12 @@ pub struct ViewData {
     /// the camera (temporal accumulation, streaming) key it by `camera`, or leave it as the
     /// main view left it.
     pub extra_view: bool,
+    /// How much finer than its own pixels the view's detail is wanted: 1, but on a traced lake
+    /// mirror's far view (`trial_cut_more::RAY_MIRROR_FAR`), whose pixels stand in for the
+    /// picture's far sky and far shores: the picture's size over its own (4 by default).
+    /// Features that size their work by the view's pixels scale it by this, as the weather's
+    /// cloud march does, so the far view's clouds come out as fine as a drawn mirror's.
+    pub detail: f32,
     /// Camera world position: the rendering origin.
     pub origin: DVec3,
     pub rotation: Quat,
@@ -995,10 +1001,15 @@ pub fn build_view(
     } else {
         FarShadowView::default()
     };
+    let detail = camera_entity
+        .and_then(|e| world.get::<crate::planar_reflection::MirrorCamera>(e))
+        .filter(|m| m.far && m.size.x > 0)
+        .map_or(1.0, |m| (m.picture.x as f32 / m.size.x as f32).max(1.0));
 
     ViewData {
         camera: camera_entity,
         extra_view: world.contains_resource::<RenderingExtraView>(),
+        detail,
         origin,
         rotation,
         view,

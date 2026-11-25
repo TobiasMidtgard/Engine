@@ -92,6 +92,11 @@ struct MirrorFeature {
     group: Option<wgpu::BindGroup>,
 }
 
+/// Each view [`MirrorFeature`] was asked to draw, in order: whether it was an extra view, and
+/// its [`ViewData::detail`].
+#[derive(Resource, Default)]
+struct ViewDetails(Vec<(bool, f32)>);
+
 impl RenderFeature for MirrorFeature {
     fn name(&self) -> &str {
         "test mirror"
@@ -174,6 +179,10 @@ impl RenderFeature for MirrorFeature {
         _settings: &RenderSettings,
     ) {
         self.group = None;
+        world
+            .get_resource_or_insert_with(ViewDetails::default)
+            .0
+            .push((view.extra_view, view.detail));
         let Some((_, layout, buffer)) = &self.pipeline else {
             return;
         };
@@ -479,7 +488,9 @@ const FAR_WALL_POINT: DVec3 = DVec3::new(-250.0, 180.0, -595.0);
 /// at a quarter of the picture's size each way from a tenth short of where the trace's rays
 /// end, and past their reach a texel takes what it drew. Without it the rays alone show the sky
 /// there. What lies within the rays' reach is still theirs (the balls' reflections), and nothing
-/// under the plane shows.
+/// under the plane shows. The far view asks the features for the picture's detail
+/// (`ViewData::detail`, the picture's size over its own), so the weather's clouds march as
+/// finely in it as in the drawn mirror's view; every other view asks for its own.
 #[test]
 fn a_traced_mirrors_far_view_shows_what_lies_past_its_rays_off_the_screen() {
     let mut shots = Vec::new();
@@ -511,6 +522,19 @@ fn a_traced_mirrors_far_view_shows_what_lies_past_its_rays_off_the_screen() {
         if traced && get("render.ray.supported") != 1.0 {
             eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
             return;
+        }
+        let details = &app.world.resource::<ViewDetails>().0;
+        assert_eq!(
+            details.iter().any(|&(extra, _)| extra),
+            !traced || far,
+            "{name}: the views drawn {details:?}"
+        );
+        for &(extra, detail) in details {
+            let wanted = if extra && far { 4.0 } else { 1.0 };
+            assert!(
+                (detail - wanted).abs() < 0.1,
+                "{name}: detail {detail} in a view (extra: {extra}), not {wanted}"
+            );
         }
         let dir = std::env::temp_dir().join("engine-planar-reflections");
         let _ = std::fs::create_dir_all(&dir);
@@ -579,6 +603,30 @@ const PILLAR_SIZE: [f32; 3] = [20.0, 40.0, 10.0];
 /// A green wall 250 m wide and 200 m high, 600 m off, past the rays' reach and above the top of
 /// the screen: in the reflection it lies all round the left pillar's, which it stands behind.
 const PILLAR_WALL: DVec3 = DVec3::new(-175.0, 230.0, -600.0);
+
+/// `out` pixels out from the reflection of a pillar ([`PILLAR_SIZE`], at `pillar`), round the
+/// middle half of each side: where the rays pass it.
+fn pillar_ring(pillar: DVec3, out: i32) -> Vec<IVec2> {
+    let [hx, hy, hz] = PILLAR_SIZE.map(|s| f64::from(s) * 0.5);
+    let p = |x: f64, y: f64, z: f64| pixel(mirrored(pillar + DVec3::new(x, y, z)));
+    let mut ring = Vec::new();
+    for k in 0..=8 {
+        let s = k as f64 / 8.0 - 0.5;
+        let (y, x) = (hy * s, hx * s);
+        let left = p(-hx, y, hz).x.min(p(-hx, y, -hz).x);
+        let right = p(hx, y, hz).x.max(p(hx, y, -hz).x);
+        let row = p(0.0, y, hz).y;
+        ring.push(IVec2::new(left - out, row));
+        ring.push(IVec2::new(right + out, row));
+        // (The pillar's foot is the reflection's top, its head the bottom.)
+        let top = p(x, -hy, hz).y.min(p(x, -hy, -hz).y);
+        let bottom = p(x, hy, hz).y.max(p(x, hy, -hz).y);
+        let column = p(x, 0.0, hz).x;
+        ring.push(IVec2::new(column, top - out));
+        ring.push(IVec2::new(column, bottom + out));
+    }
+    ring
+}
 
 /// What the rays hit in a traced mirror stays theirs alone with its far view
 /// (`trial_cut_more::RAY_MIRROR_FAR`), which draws it too (from one near plane for the whole
@@ -653,28 +701,7 @@ fn a_traced_mirrors_far_view_adds_no_fringe_round_what_its_rays_hit() {
     let [hx, hy, hz] = PILLAR_SIZE.map(|s| f64::from(s) * 0.5);
     let at = |shot: &image::RgbImage, q: IVec2| shot.get_pixel(q.x as u32, q.y as u32).0;
     let apart = |a: [u8; 3], b: [u8; 3]| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
-    // `out` pixels out from a pillar's reflection, round the middle half of each side: where
-    // the rays pass it.
-    let ring = |pillar: DVec3, out: i32| {
-        let p = |x: f64, y: f64, z: f64| pixel(mirrored(pillar + DVec3::new(x, y, z)));
-        let mut ring = Vec::new();
-        for k in 0..=8 {
-            let s = k as f64 / 8.0 - 0.5;
-            let (y, x) = (hy * s, hx * s);
-            let left = p(-hx, y, hz).x.min(p(-hx, y, -hz).x);
-            let right = p(hx, y, hz).x.max(p(hx, y, -hz).x);
-            let row = p(0.0, y, hz).y;
-            ring.push(IVec2::new(left - out, row));
-            ring.push(IVec2::new(right + out, row));
-            // (The pillar's foot is the reflection's top, its head the bottom.)
-            let top = p(x, -hy, hz).y.min(p(x, -hy, -hz).y);
-            let bottom = p(x, hy, hz).y.max(p(x, hy, -hz).y);
-            let column = p(x, 0.0, hz).x;
-            ring.push(IVec2::new(column, top - out));
-            ring.push(IVec2::new(column, bottom + out));
-        }
-        ring
-    };
+    let ring = pillar_ring;
     for pillar in PILLARS {
         let foot = pixel(pillar + DVec3::new(-hx, -hy, hz))
             .y
@@ -748,6 +775,89 @@ fn a_traced_mirrors_far_view_adds_no_fringe_round_what_its_rays_hit() {
         worst.0 <= 12,
         "the far view leaves a hole round the pillar's reflection in the wall's: {} apart from \
          the drawn mirror at {}",
+        worst.0,
+        worst.1
+    );
+}
+
+/// Under temporal anti-aliasing too, as in the game, the sky beside the reflection of a pillar
+/// against the sky, where the rays pass it, is the drawn mirror's: the far view's own history
+/// blends about a sixth of an outline into the sky texel beside it, a quarter of the picture's
+/// size across, so the picture takes the far view's sky only from texels whose eight neighbours
+/// drew the sky too, and beside an outline reads it again two of the view's texels away
+/// (`mirror_far_view`). Two to five pixels out, clear of the drawn mirror's own outline.
+#[test]
+fn a_traced_mirrors_far_view_adds_no_fringe_under_temporal_anti_aliasing() {
+    let mut shots = Vec::new();
+    for (traced, name) in [
+        (false, "pillar-taa-drawn.png"),
+        (true, "pillar-taa-far-view.png"),
+    ] {
+        let mut app = ball_app(traced);
+        {
+            let mut s = app.world.resource_mut::<RenderSettings>();
+            s.anti_aliasing = AntiAliasing::Taa;
+            if traced {
+                s.trial_cuts_more |= RAY_MIRROR_FAR;
+            }
+        }
+        app.world.spawn((
+            Transform::from_translation(PILLARS[1]),
+            MeshRenderer::new(
+                Shape::Cuboid { size: PILLAR_SIZE },
+                StandardMaterial::color(0.75, 0.35, 0.05),
+            ),
+        ));
+        app.update_n(24);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        if traced {
+            let d = app.world.resource::<Diagnostics>();
+            if d.get("render.ray.supported") != Some(1.0) {
+                eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+                return;
+            }
+            assert_eq!(
+                d.get("render.ray.mirror_far"),
+                Some(1.0),
+                "{name}: its far view"
+            );
+        }
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+        }
+        shots.push(image::open(&path).expect("read the shot").to_rgb8());
+    }
+    let at = |shot: &image::RgbImage, q: IVec2| shot.get_pixel(q.x as u32, q.y as u32).0;
+    let apart = |a: [u8; 3], b: [u8; 3]| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
+    let mut worst = (0, IVec2::ZERO, 0);
+    for out in 2..=5 {
+        for q in pillar_ring(PILLARS[1], out) {
+            let d = apart(at(&shots[0], q), at(&shots[1], q));
+            if d > worst.0 {
+                worst = (d, q, out);
+            }
+        }
+    }
+    eprintln!(
+        "under temporal anti-aliasing the sky round the pillar's reflection is at most {} from \
+         the drawn mirror's (at {}, {} out): drawn {:?}, far view {:?}",
+        worst.0,
+        worst.1,
+        worst.2,
+        at(&shots[0], worst.1),
+        at(&shots[1], worst.1)
+    );
+    assert!(
+        worst.0 <= 8,
+        "the far view fringes the pillar's reflection under temporal anti-aliasing: {} apart \
+         from the drawn mirror at {}",
         worst.0,
         worst.1
     );
@@ -1016,8 +1126,11 @@ fn sky_detail(a: &image::RgbImage) -> f64 {
 /// the view at the picture's own size (`RenderSettings::ray_mirror_far_scale` 1, so its sky is
 /// the drawn mirror's to the texel), the far view's picture stands closer to the drawn
 /// mirror's than the environment map's does and keeps most of the clouds' detail (over a clear
-/// sky's), where the environment map, a 256 by 128 picture, keeps under half. No fog, which the
-/// environment map's sky hasn't
+/// sky's), where the environment map, a 256 by 128 picture, keeps under half. These are the sky
+/// pass's own clouds, drawn per pixel; the weather's, marched by the view's pixels, march as
+/// finely in a far view of any size as in the drawn mirror's view, as it asks for the picture's
+/// detail ([`a_traced_mirrors_far_view_shows_what_lies_past_its_rays_off_the_screen`]). No fog,
+/// which the environment map's sky hasn't
 /// ([`a_traced_mirrors_far_view_shows_the_haze_it_drew_off_the_screen`]), and no wind, which
 /// would move the clouds by each run's own time.
 #[test]
@@ -1429,6 +1542,102 @@ fn a_traced_mirror_under_a_low_sun_shows_the_sky_beside_it_not_the_ground() {
             luma(under) > luma(beside) - 8.0,
             "{what}: under the low sun's reflection the traced picture is {under:.1?}, darker than \
              the sky beside it, {beside:.1?}"
+        );
+    }
+}
+
+/// Toward the sun for [`a_traced_mirror_shows_no_sun_on_the_crest_of_a_wall_in_front_of_it`]:
+/// 10° up and 25° left of the level camera's way, clear of the balls.
+const SUN_CREST: DVec3 = DVec3::new(-0.4162, 0.17365, -0.8925);
+/// How far off the camera the wall in front of that sun stands (its face, along the sun's way).
+const CREST_WALL_OFF: f64 = 30.0;
+
+/// The camera and the mirrored eye, 5 m apart (twice the camera's height over the mirror), see
+/// the crest of a wall 30 m off in front of the sun about 9° apart: more than the cone round the
+/// sun (three times its radius, 6° here). With the camera level the sun sits half behind the
+/// crest, and the screen's picture blends its disc into the crest's outline. A traced texel
+/// whose ray hits the crest takes last frame's picture where the camera sees the hit, though its
+/// own ray passes 9° clear of the sun. The drawn mirror shows the wall there (from the mirrored
+/// eye the crest hides the sun), and so must the traced picture: the screen's answer is held to
+/// half again the sky wherever the camera's line to the hit lies within the cone, as well as
+/// where the texel's ray does.
+#[test]
+fn a_traced_mirror_shows_no_sun_on_the_crest_of_a_wall_in_front_of_it() {
+    let toward = SUN_CREST.normalize();
+    let flat = DVec3::new(toward.x, 0.0, toward.z).normalize();
+    // The crest of the wall's face, on the sun's middle as the camera sees it.
+    let crest = DVec3::new(EYE.x, 0.0, EYE.z)
+        + flat * CREST_WALL_OFF
+        + DVec3::Y * (EYE.y + CREST_WALL_OFF * toward.y / toward.x.hypot(toward.z));
+    let setup = move |app: &mut App| {
+        let mut q = app.world.query::<(&mut DirectionalLight, &mut Transform)>();
+        for (mut light, mut at) in q.iter_mut(&mut app.world) {
+            light.angular_size_deg = SUN_DISC_DEG;
+            *at = Transform::default().looking_at(-toward, Vec3::Y);
+        }
+        let mut q = app.world.query::<(&Camera, &mut Transform)>();
+        for (_, mut at) in q.iter_mut(&mut app.world) {
+            *at = Transform::from_translation(EYE).looking_at(LEVEL, Vec3::Y);
+        }
+        // 12 m wide and 1 m thick, from the ground to the crest, facing the camera.
+        let middle = DVec3::new(crest.x, 0.5 * crest.y, crest.z) + flat * 0.5;
+        app.world.spawn((
+            Transform::from_translation(middle).looking_at(middle + flat, Vec3::Y),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [12.0, crest.y as f32, 1.0],
+                },
+                StandardMaterial::color(0.4, 0.4, 0.4),
+            ),
+        ));
+    };
+    let mut shots = Vec::new();
+    for (traced, name) in [(false, "crest-drawn.png"), (true, "crest-traced.png")] {
+        let Some(shot) = render_with(traced, false, name, setup) else {
+            return;
+        };
+        shots.push(shot);
+    }
+    let (drawn, traced) = (&shots[0], &shots[1]);
+    let sun_at = pixel_from(EYE, LEVEL, EYE + toward * 1000.0);
+    // The crest's reflection: where the camera sees the crest mirrored, on the mirror.
+    let reflection = pixel_from(EYE, LEVEL, mirrored(crest));
+    let on = EYE + (mirrored(crest) - EYE) * (EYE.y / (EYE.y + crest.y));
+    assert!(
+        on.x.abs() < f64::from(SIZE) * 0.45 && on.z.abs() < f64::from(SIZE) * 0.45,
+        "the crest's reflection meets the mirror at {on}"
+    );
+    let below = (EYE.y + crest.y).atan2(CREST_WALL_OFF);
+    eprintln!(
+        "the crest {:.1}° up from the camera (the sun's middle {:.1}°), {:.1}° from the mirrored \
+         eye; the sun at {sun_at}, the crest's reflection at {reflection}",
+        (crest.y - EYE.y).atan2(CREST_WALL_OFF).to_degrees(),
+        toward.y.asin().to_degrees(),
+        below.to_degrees()
+    );
+    for (shot, name) in [(drawn, "drawn"), (traced, "traced")] {
+        // The camera sees the sun's upper half over the crest.
+        let (n, middle) = sun_blob(shot, sun_at);
+        assert!(
+            n > 40 && middle.y < f64::from(sun_at.y) - 1.0,
+            "{name}: the sun half over the crest at {sun_at}: {n} bright pixels round {middle:.1}"
+        );
+        // Nothing as bright as the sun round the crest's reflection.
+        let (n, middle) = sun_blob(shot, reflection);
+        let brightest = (-40..=40)
+            .flat_map(|dy| (-40..=40).map(move |dx| reflection + IVec2::new(dx, dy)))
+            .filter(|p| p.cmpge(IVec2::ZERO).all() && p.cmplt(WINDOW.as_ivec2()).all())
+            .map(|p| shot.get_pixel(p.x as u32, p.y as u32).0)
+            .max_by_key(|c| c.iter().map(|&v| u32::from(v)).sum::<u32>())
+            .unwrap_or_default();
+        eprintln!(
+            "{name}: round the crest's reflection {n} pixels as bright as the sun, the brightest \
+             {brightest:?}"
+        );
+        assert_eq!(
+            n, 0,
+            "{name}: the sun on the crest's reflection at {reflection}: {n} bright pixels round \
+             {middle:.1}"
         );
     }
 }
