@@ -13,8 +13,8 @@ use engine_core::prelude::*;
 use engine_render::RenderAppExt;
 use engine_render::settings::trial_cut_more::{RAY_WATER, RAY_WORLD};
 use ray_pool::{
-    BESIDE, OVER_WALL, POOL_VIEW, Roof, WALL, app, card, colour_at, diag, has_gpu, look_at,
-    mirrored, picture,
+    BESIDE, OVER_WALL, POOL_VIEW, Roof, WALL, app, card, colour_at, diag, falls_of, has_gpu,
+    look_at, mirrored, picture, stream,
 };
 
 #[test]
@@ -183,4 +183,86 @@ fn the_walls_reflection_is_shaded_by_what_only_the_rays_see_over_it() {
         carded[kept],
         sunlit[kept]
     );
+}
+
+/// The falls' white curtains are in the ray scene (one `NoCast` instance for a stream's
+/// sheets, step 12): a stream's fall that hangs above the screen's top edge beside the wall's
+/// end shows in the pool with the bit as white water, and the sky without it, as the wall
+/// does; beyond the fall's end the sky stays as it was; and the curtains leave with the
+/// stream. (Before them the pool showed the sky there with the bit too: the falls were the
+/// screen's alone.)
+#[test]
+fn a_pool_reflects_a_fall_that_is_off_screen() {
+    let mut shots = Vec::new();
+    for (bits, name) in [
+        (RAY_WORLD, "fall-plain.png"),
+        (RAY_WORLD | RAY_WATER, "fall-rays.png"),
+    ] {
+        let mut app = app(bits);
+        let region = stream(&mut app);
+        app.update_n(1);
+        if !has_gpu(&app) {
+            return;
+        }
+        if diag(&app, "render.ray.supported") != 1.0 {
+            eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+            return;
+        }
+        let paths = falls_of(&mut app, region, 240);
+        assert!(paths.len() >= 4, "{name}: the stream's falls: {paths:?}");
+        app.update_n(8);
+        assert_eq!(diag(&app, "render.ray.losses"), 0.0, "{name}: scene lost");
+        assert_eq!(
+            diag(&app, "render.ray.class_no_cast"),
+            1.0,
+            "{name}: the stream's curtains"
+        );
+        // The middle lip's curtain where it has fallen to 9 m, 3 m down: above the screen's top
+        // edge, which is about 6 m up there.
+        let path = &paths[paths.len() / 2];
+        let fall = *path
+            .iter()
+            .min_by(|a, b| (a.y - 9.0).abs().total_cmp(&(b.y - 9.0).abs()))
+            .unwrap();
+        let p = picture(&mut app, name);
+        let at = colour_at(&app, &p, mirrored(fall));
+        let beside = colour_at(&app, &p, mirrored(BESIDE));
+        eprintln!(
+            "{name}: the fall's reflection at {fall:?}: {at:?}, the sky's beside it {beside:?}"
+        );
+        shots.push((at, beside));
+        if bits & RAY_WATER != 0 {
+            app.world.despawn(region);
+            app.update_n(3);
+            assert_eq!(
+                diag(&app, "render.ray.class_no_cast"),
+                0.0,
+                "the curtains stayed after the stream"
+            );
+        }
+    }
+    let [(plain_fall, plain_beside), (ray_fall, ray_beside)] = shots[..] else {
+        unreachable!()
+    };
+    // White where the sky was: as much more red and green as the wall's reflection gains red,
+    // and no less blue.
+    for (c, colour) in [(0, "red"), (1, "green")] {
+        assert!(
+            ray_fall[c] >= plain_fall[c] + 15.0,
+            "the fall's {colour} in the pool: {:.1} with the rays, {:.1} without",
+            ray_fall[c],
+            plain_fall[c]
+        );
+    }
+    assert!(
+        ray_fall[2] >= plain_fall[2] - 6.0,
+        "the fall's reflection lost its blue: {ray_fall:?} with the rays, {plain_fall:?} without"
+    );
+    for c in 0..3 {
+        assert!(
+            (ray_beside[c] - plain_beside[c]).abs() <= 2.0,
+            "the sky beside the fall changed: {ray_beside:?} with the rays, {plain_beside:?} \
+             without"
+        );
+    }
 }

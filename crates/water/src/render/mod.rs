@@ -163,6 +163,14 @@ fn jet_spread(lip: &crate::flow::Lip, drop: f32) -> f32 {
     spread.min(spray_reach(lip))
 }
 
+/// Half the width of the sheet over `lip` a share `frac` of the way down its path (0 at the
+/// brink, 1 at its foot), after `spread` of fanning out over rock (0.06 a point it slides down,
+/// see `fall_strip`): it spreads and frays as it falls, so neighboring lips' sheets overlap.
+/// The drawn curtain's core and its stand-in in the ray scene (`ray::curtain`) share it.
+fn sheet_half(lip: &crate::flow::Lip, frac: f32, spread: f32) -> f32 {
+    lip.width * (0.66 + 0.3 * frac + spread.min(0.35))
+}
+
 /// How far to each side of its core the spray round the jet over `lip` stays dense enough to
 /// see, meters: it grows with the root of the flow (the drops thrown off a jet spread at the
 /// same angle whatever its size, but a thread of a few litres a second throws off too few to
@@ -223,7 +231,7 @@ fn fall_strip(
         if on_rock {
             spread += 0.06;
         }
-        let half = lip.width * (0.66 + 0.3 * frac + spread.min(0.35));
+        let half = sheet_half(lip, frac, spread);
         let drop = (lip.top.y - point.pos.y) as f32;
         let jet = jet_spread(lip, drop);
         // The core's own thickness: the water over the brink at the speed it falls.
@@ -903,7 +911,7 @@ pub struct WaterFeature {
     /// The body the mirror reflects for, how many frames in a row it has had a picture there
     /// (the main view samples it only after [`MIRROR_SETTLE_FRAMES`]), and the eye last frame.
     mirror_age: (Option<Entity>, u32, DVec3),
-    /// The bodies' stand-ins in the ray scene.
+    /// The bodies' stand-ins and the falls' curtains in the ray scene.
     rays: ray::WaterRays,
     /// This view's calm bodies reflect through the frame's rays (`trial_cut_more::RAY_WATER`,
     /// [`engine_render::ray_scene::water_wanted`]): the main view only, while one is drawn.
@@ -2396,7 +2404,8 @@ impl RenderFeature for WaterFeature {
     }
 
     // One flat stand-in per body for probe light and world reflections (the ray-traced
-    // lighting round, engine-design/rt-lighting-round/plan-corrected.md, step 5).
+    // lighting round, engine-design/rt-lighting-round/plan-corrected.md, step 5), and the
+    // falls' white curtains (step 12).
     fn ray_scene(
         &mut self,
         _gpu: &GpuShared,
@@ -2916,6 +2925,23 @@ impl RenderFeature for WaterFeature {
             .as_deref()
             .map_or(&[][..], |f| f.plunges.as_slice());
         g.falls = Self::upload_falls(gpu, shared, &state, view, &plunges, &extra, feet);
+        if !view.extra_view {
+            // The same falls' curtains in the ray scene while there is one (`ray::WaterRays::
+            // take_falls`): every visible flow's, the creeks' pour-overs and the storm's threads.
+            let sources = engine_render::ray_scene::wanted(settings, shared)
+                .then(|| {
+                    state
+                        .flows
+                        .iter()
+                        .filter(|sim| sim.visible)
+                        .map(|sim| (ray::flow_falls(sim.entity), sim.falls_shared()))
+                        .chain(creek_falls.iter().map(|f| (ray::CREEK_FALLS, f)))
+                        .chain(storm_falls.iter().map(|f| (ray::STORM_FALLS, f)))
+                })
+                .into_iter()
+                .flatten();
+            self.rays.take_falls(sources, state.shifts, ray::froth(mud));
+        }
         drop(span);
         let span = tracing::info_span!("water", name = "uniform").entered();
         uniform.g = g;

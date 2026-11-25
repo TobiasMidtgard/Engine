@@ -14,7 +14,8 @@ use engine_render::{
     GpuShared, RayClass, RayGeometryState, RayKey, RayLook, RaySceneOut, RaySource, RaySphere,
     RayView, RenderDisabled, capture_now,
 };
-use engine_water::{WaterBody, WaterPlugin, WaterSettings, WaveSettings};
+use engine_water::flow::{FlowBed, FlowRegion, FlowSource};
+use engine_water::{SharedWater, WaterBody, WaterPlugin, WaterSettings, WaveSettings};
 use engine_world::WorldPlugin;
 
 pub const W: u32 = 160;
@@ -174,6 +175,74 @@ pub fn card(app: &mut App) -> Entity {
             MeshRenderer::new(Shape::Quad { size: [26.0, 12.0] }, material),
         ))
         .id()
+}
+
+/// A stream on a shelf 12 m up beside the wall's end, walled at its back and sides, that runs
+/// down it toward the pool and over its brink at z = -26 to the floor: its falls hang from x
+/// 11.5 to 16.5, where the pool mirrors them at x 1.15 to 1.65 (the wall at -1 to 1, the sky
+/// beside it at 2), their upper part above the screen's top edge. Worked out when it is built
+/// (twenty seconds of flow); it runs on after that, as every flow does with no focus to rest it.
+pub fn stream(app: &mut App) -> Entity {
+    const N: [usize; 2] = [12, 16];
+    const CELL: f32 = 0.5;
+    let heights = (0..N[0] * N[1])
+        .map(|k| {
+            let (i, j) = (k % N[0], k / N[0]);
+            let z = (j as f32 + 0.5) * CELL;
+            if z > 6.0 {
+                return 0.0;
+            }
+            // Down 10 cm a meter toward the brink.
+            let wall = if i == 0 || i + 1 == N[0] || j == 0 {
+                1.0
+            } else {
+                0.0
+            };
+            12.0 + 0.1 * (6.0 - z) + wall
+        })
+        .collect();
+    app.world
+        .spawn((
+            Transform::from_translation(DVec3::new(11.0, 0.0, -32.0)),
+            FlowRegion {
+                cells: [N[0] as u32, N[1] as u32],
+                cell_m: CELL,
+                bed: FlowBed::Heights(heights),
+                sources: vec![FlowSource {
+                    at: [3.0, 1.5],
+                    radius_m: 1.0,
+                    rate_m3_s: 0.3,
+                }],
+                open_edges: true,
+                prewarm_s: 20.0,
+                ..Default::default()
+            },
+        ))
+        .id()
+}
+
+/// The paths of `region`'s falls (world points), after frames enough for its stream to be built
+/// (at most `most`: in place in the first frame here, on a worker with `ENGINE_OFF_FRAME`);
+/// empty without falls.
+pub fn falls_of(app: &mut App, region: Entity, most: usize) -> Vec<Vec<DVec3>> {
+    let paths = |app: &App| -> Vec<Vec<DVec3>> {
+        let water = app.world.resource::<SharedWater>().0.clone();
+        let w = water.read();
+        w.flows
+            .iter()
+            .filter(|f| f.entity == region)
+            .flat_map(|f| f.falls().paths.iter())
+            .map(|p| p.iter().map(|q| q.pos).collect())
+            .collect()
+    };
+    for _ in 0..most {
+        let found = paths(app);
+        if !found.is_empty() {
+            return found;
+        }
+        app.update();
+    }
+    paths(app)
 }
 
 /// Turns the camera, from where it stands, to look at `target`.

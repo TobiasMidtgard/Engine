@@ -547,6 +547,12 @@ impl FlowSim {
         &self.falls
     }
 
+    /// [`FlowSim::falls`] as held: a new `Arc` each time they are worked out again, shared by
+    /// the copies a reader takes, so a holder can tell new falls from the ones it has.
+    pub fn falls_shared(&self) -> &std::sync::Arc<Falls> {
+        &self.falls
+    }
+
     /// Work the falls out again from the flow as it is.
     pub fn refresh_falls(&mut self) {
         let lips = self.lips(self.fall_drop());
