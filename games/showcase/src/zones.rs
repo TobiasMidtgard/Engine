@@ -1278,6 +1278,39 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 );
                 views.push(gale);
             }
+            // The calm lake as a mirror of what the screen doesn't show: from 10 m above the
+            // north-west shore, pitched down 30 degrees toward the highest peak of the skyline
+            // (1,850 m, 4.4 km off to the south-east, 23 degrees up from the water). The view's
+            // top edge sits 2.5 degrees under the horizon, so the peak and its range are in the
+            // picture only as their reflection: what the lake mirror is for, and what a
+            // reflection that only knows the screen or the nearest few hundred meters loses.
+            {
+                let toward = DVec3::new(0.5, 0.0, -0.866);
+                let eye = DVec3::new(0.0, 10.0, 0.0) - toward * 88.0;
+                let pitch = 30.0f64.to_radians();
+                let target = eye + (toward * pitch.cos() - DVec3::Y * pitch.sin()) * 20.0;
+                views.push(
+                    View::new(
+                        "lake_mirror",
+                        "The calm lake mirrors a far peak that is above the top of the screen",
+                        eye.to_array(),
+                        target.to_array(),
+                        16.5,
+                    )
+                    .warmup(20.0)
+                    .quick_warmup()
+                    // A clear, still afternoon: the mirror shows on waves under 0.25 m, and
+                    // only glassy water keeps a mountain's shape (ripples of a 3 m/s breeze
+                    // smear it over its own height).
+                    .on_arrive("weather.set", r#"{"preset": "clear", "transition_s": 0}"#)
+                    .on_arrive("weather.tune", r#"{"wind_speed_m_s": 0.3}"#)
+                    .on_leave("weather.tune", r#"{"wind_speed_m_s": null}"#)
+                    .on_leave(
+                        "weather.set",
+                        r#"{"preset": "partly_cloudy", "transition_s": 0}"#,
+                    ),
+                );
+            }
             // The float test from the south, 8 m off and 3 m up, a few seconds after a drop
             // (its cycle runs while the camera is near, so it drops as the camera arrives).
             let at = (float_test(z) - z.center).to_array();
