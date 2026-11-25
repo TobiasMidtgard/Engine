@@ -457,8 +457,8 @@ fn variants() -> Vec<Variant> {
         v(
             "ray_all",
             r,
-            json!({"trial_cuts_more": 2032, "gi_hardware_rays": true}),
-            "every bit of the ray-traced lighting round at once (`trial_cut_more::RAYS`): ray_round with the ground colour map, the water's own reflection ray and the lake mirror's picture traced in place of its extra view. What step 10 turns on by default if all seven join; read the whole frame against the baseline",
+            json!({"trial_cuts_more": 4080, "gi_hardware_rays": true}),
+            "every bit of the ray-traced lighting round at once (`trial_cut_more::RAYS`): ray_round with the ground colour map, the water's own reflection ray and the lake mirror's picture traced in place of its extra view, with its far view. What step 10 turns on by default if all eight join; read the whole frame against the baseline",
         ),
         v(
             "ray_ground_map",
@@ -477,6 +477,18 @@ fn variants() -> Vec<Variant> {
             r,
             json!({"trial_cuts_more": 1040, "gi_hardware_rays": true}),
             "ray_world with the lake mirror's picture traced in the frame's ray pass in place of the extra view that draws it: each texel is the reflection, at roughness 0, of where its ray from the mirrored eye meets the plane (passes `ray mirror pictures`, and `ray mirror levels` with the picture's own history; render.extra_views 0; render.ray.mirror_pictures, mirror_texels, mirror_mb). Its saves against ray_world at the lake are what the drawn mirror cost (its view, copy and levels: `render.extra_views_gpu_ms`, which the GPU column counts) less what the traced picture costs",
+        ),
+        v(
+            "ray_mirror_far",
+            r,
+            json!({"trial_cuts_more": 3088, "gi_hardware_rays": true}),
+            "ray_mirror_pictures with each traced picture's far view (`trial_cut_more::RAY_MIRROR_FAR`): the mirror's view drawn again at a quarter of the picture's size each way (`ray_mirror_far_scale`) with its near plane a tenth short of where the trace's rays end, so it draws only what lies past them; past the rays' reach a texel takes what it drew, and the reach's last tenth blends into it: what keeps a ridge above the top edge in the lake (render.ray.mirror_far, mirror_far_texels; the view is an extra view, render.extra_views 1, its GPU time in `render.extra_views_gpu_ms`, which the GPU column counts). Read against ray_mirror_pictures; its pictures beside ray_mirror_pictures' and ray_world's (the mirror drawn) at a stop that looks down at the lake",
+        ),
+        v(
+            "ray_mirror_far_half",
+            r,
+            json!({"trial_cuts_more": 3088, "gi_hardware_rays": true, "ray_mirror_far_scale": 0.5}),
+            "ray_mirror_far with the far view at half the picture's size each way (a quarter of its texels) in place of a quarter: what a sharper reflection of the far ridges costs. Read against ray_mirror_far; its pictures beside ray_mirror_far's and ray_world's",
         ),
         v(
             "count_ray_mirror_pictures",

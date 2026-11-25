@@ -33,7 +33,12 @@
 //! ([`crate::ray_mirror`]): the view camera is placed as before ([`TracedPlacement`]) but not
 //! drawn, and each texel's ray from the mirrored eye goes on from where it meets the plane as
 //! the main view's ray reflected there. The picture has the same mip chain, depth, projection
-//! ([`mirror_view_proj`]) and exposure, so its readers sample it as before.
+//! ([`mirror_view_proj`]) and exposure, so its readers sample it as before. With
+//! `trial_cut_more::RAY_MIRROR_FAR` the view is drawn as the picture's far view: through the
+//! same frustum, at `RenderSettings::ray_mirror_far_scale` of its size, with its near plane a
+//! tenth short of where the trace's shortest rays end ([`far_near`]), so it draws only what
+//! lies past them and a little more; the trace takes its colour past its rays' reach and
+//! blends its last tenth into it ([`MirrorPictures::far`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -46,7 +51,9 @@ use crate::frame::{RenderingExtraView, perspective_infinite_reverse};
 /// meters across (X by Z, scaled by the transform), centered on the entity.
 ///
 /// Costs an extra view of the scene while the main camera sees it from above, at about the
-/// pixels it covers on screen times `resolution`.
+/// pixels it covers on screen times `resolution` (none while the frame's rays trace its picture,
+/// `trial_cut_more::RAY_MIRROR_PICTURES`; a small one of what lies past them with
+/// `trial_cut_more::RAY_MIRROR_FAR`).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[require(Transform)]
 #[serde(default)]
@@ -104,10 +111,17 @@ pub(crate) struct MirrorCamera {
     pub mirror: Entity,
     /// Left, right, bottom, top edges of the frustum as tangents (x / -z, y / -z).
     pub tangents: Vec4,
-    /// Near plane, meters: the nearest the plane comes inside the frustum.
+    /// Near plane, meters: the nearest the plane comes inside the frustum (the far view's: a
+    /// little short of where the trace's shortest rays begin to blend into it, a tenth of the
+    /// reach short of their end, [`far_near`]).
     pub near: f32,
-    /// Picture size, pixels.
+    /// The view's size, pixels: the picture's, or the far view's.
     pub size: UVec2,
+    /// The picture's size, pixels, drawn or traced (what the next frame's size keeps to).
+    pub picture: UVec2,
+    /// The view is a traced picture's far view (`trial_cut_more::RAY_MIRROR_FAR`): what it
+    /// draws goes to [`MirrorPictures::far`], not to the mirror's picture.
+    pub far: bool,
     /// The mirror's plane: a point on it and its normal (the reflecting side).
     pub plane_point: DVec3,
     pub plane_normal: Vec3,
@@ -201,6 +215,37 @@ impl PlanarReflectionPicture {
 pub(crate) struct MirrorPictures {
     pub pictures: HashMap<Entity, PlanarReflectionPicture>,
     pub chains: HashMap<Entity, wgpu::Texture>,
+    /// The far views drawn this frame for traced pictures (`trial_cut_more::RAY_MIRROR_FAR`),
+    /// which the frame's ray pass reads past a texel's ray's reach (laid by its coverage over
+    /// what the screen shows along the ray, or the sky; the screen isn't marched where the view
+    /// covers the whole read), and where a hit lies in the reach's last
+    /// [`crate::ray_mirror::MIRROR_FAR_OVERLAP`], which blends into it by distance.
+    /// Emptied as the views are placed, before they draw.
+    pub far: HashMap<Entity, PlanarReflectionPicture>,
+}
+
+/// The far view's near plane for a traced picture through `tangents` (as [`MirrorCamera`]'s)
+/// whose nearest point of the plane is `near` away (m): where the trace's shortest rays begin
+/// to blend into it. A texel's ray from the mirrored eye, 1 along the view's axis, is
+/// `sqrt(1 + x² + y²)` long for a unit of depth, and meets the plane no nearer than `near`; the
+/// trace's ray goes on from there [`crate::ray_mirror::MIRROR_RAY_M`] (a texel at the frustum's
+/// corner the least deep), its hits blending into the far view over the last
+/// [`crate::ray_mirror::MIRROR_FAR_OVERLAP`] of that. A little short of where that begins, so
+/// that every hit that blends lies in the view.
+pub(crate) fn far_near(tangents: Vec4, near: f32) -> f32 {
+    use crate::ray_mirror::{MIRROR_FAR_OVERLAP, MIRROR_RAY_M};
+    let x = tangents.x.abs().max(tangents.y.abs());
+    let y = tangents.z.abs().max(tangents.w.abs());
+    let len = (1.0 + x * x + y * y).sqrt();
+    (near + MIRROR_RAY_M * (1.0 - MIRROR_FAR_OVERLAP) / len) * 0.98
+}
+
+/// The far view's size for a `picture`-sized traced picture at `scale` each way.
+fn far_size(picture: UVec2, scale: f32) -> UVec2 {
+    (picture.as_vec2() * scale.clamp(0.05, 1.0))
+        .ceil()
+        .as_uvec2()
+        .max(UVec2::splat(8))
 }
 
 /// The picture of the mirror `mirror` (an entity with a [`PlanarReflection`]) from this
@@ -348,8 +393,18 @@ fn place(
 /// the mirror or doesn't see it, and drop it with its mirror. The renderer calls this before
 /// the extra views render. `traced`: the frame's rays trace the pictures
 /// (`trial_cut_more::RAY_MIRROR_PICTURES`); each placed camera is then left off, and the
-/// placements returned for the renderer to trace ([`crate::ray_mirror`]).
-pub(crate) fn place_reflection_views(world: &mut World, traced: bool) -> Vec<TracedPlacement> {
+/// placements returned for the renderer to trace ([`crate::ray_mirror`]). `far`: with
+/// `traced`, each placed camera draws its picture's far view at this scale of its size
+/// (`trial_cut_more::RAY_MIRROR_FAR`, `RenderSettings::ray_mirror_far_scale`).
+pub(crate) fn place_reflection_views(
+    world: &mut World,
+    traced: bool,
+    far: Option<f32>,
+) -> Vec<TracedPlacement> {
+    let far = far.filter(|_| traced);
+    if let Some(mut pictures) = world.get_resource_mut::<MirrorPictures>() {
+        pictures.far.clear();
+    }
     let mirrors: Vec<(Entity, PlanarReflection, GlobalTransform)> = world
         .query::<(Entity, &PlanarReflection, &GlobalTransform)>()
         .iter(world)
@@ -403,6 +458,8 @@ pub(crate) fn place_reflection_views(world: &mut World, traced: bool) -> Vec<Tra
                         tangents: Vec4::new(-1.0, 1.0, -1.0, 1.0),
                         near: 1.0,
                         size: UVec2::ZERO,
+                        picture: UVec2::ZERO,
+                        far: false,
                         plane_point: at.translation(),
                         plane_normal: at.rotation() * Vec3::Y,
                     },
@@ -416,7 +473,7 @@ pub(crate) fn place_reflection_views(world: &mut World, traced: bool) -> Vec<Tra
         };
         match placement {
             Some((placement, main_camera)) => {
-                let previous = e.get::<MirrorCamera>().map_or(UVec2::ZERO, |m| m.size);
+                let previous = e.get::<MirrorCamera>().map_or(UVec2::ZERO, |m| m.picture);
                 let size =
                     crate::portal::picture_size(placement.pixels, mirror.resolution, previous);
                 let view = MirrorCamera {
@@ -424,22 +481,35 @@ pub(crate) fn place_reflection_views(world: &mut World, traced: bool) -> Vec<Tra
                     tangents: placement.tangents,
                     near: placement.near,
                     size,
+                    picture: size,
+                    far: false,
                     plane_point: at.translation(),
                     plane_normal: (at.rotation() * Vec3::Y).normalize(),
+                };
+                // What the camera draws: the picture, nothing while it is traced, or the
+                // traced picture's far view.
+                let drawn = match far {
+                    Some(scale) => MirrorCamera {
+                        near: far_near(placement.tangents, placement.near),
+                        size: far_size(size, scale),
+                        far: true,
+                        ..view
+                    },
+                    None => view,
                 };
                 e.insert((
                     Camera {
                         projection: Projection::Perspective {
                             fov_y_deg: 60.0,
-                            near: placement.near,
+                            near: drawn.near,
                         },
                         exposure: main_camera.exposure,
-                        active: !traced,
+                        active: !traced || far.is_some(),
                         order: main_camera.order.saturating_sub(1),
                     },
                     placement.transform.to_transform(),
                     placement.transform,
-                    view,
+                    drawn,
                 ));
                 if e.get::<ExtraView>()
                     .is_none_or(|x| x.quality != mirror.quality)
@@ -556,7 +626,8 @@ pub(crate) fn record_picture_levels(
 }
 
 /// Keep a mirror view's picture, its chain filled ([`record_picture_levels`]), for features to
-/// sample: the view's unjittered view-projection, eye and exposure.
+/// sample: the view's unjittered view-projection, eye and exposure. A far view's goes to
+/// [`MirrorPictures::far`], for the trace of the mirror's picture.
 pub(crate) fn keep_picture(
     world: &mut World,
     mirror: &MirrorCamera,
@@ -591,6 +662,11 @@ pub(crate) fn keep_picture(
         plane_point,
         plane_normal,
     };
+    if mirror.far {
+        pictures.far.insert(mirror.mirror, picture);
+        world.insert_resource(pictures);
+        return;
+    }
     // Drawn again after traced pictures: this first one is not kept (`MirrorViews::resettle`).
     let resettle = world
         .get_resource_mut::<MirrorViews>()
@@ -703,6 +779,8 @@ mod tests {
             tangents: p.tangents,
             near: p.near,
             size: UVec2::new(400, 160),
+            picture: UVec2::new(400, 160),
+            far: false,
             plane_point: at.translation(),
             plane_normal: Vec3::Y,
         };
@@ -790,6 +868,64 @@ mod tests {
         // margin: its top edge is about level with the camera's view.
         let margin = 2.0 * MARGIN * (30.0f32).to_radians().tan();
         assert!(p.tangents.w < 0.2 + margin, "{}", p.tangents);
+    }
+
+    /// A traced picture's far view (`trial_cut_more::RAY_MIRROR_FAR`) begins no farther than
+    /// any texel's hits begin to blend into it (where its ray meets the plane, then nine tenths
+    /// of the trace's reach), so every hit that blends lies in the view, and not much nearer,
+    /// so that it draws little the rays hold.
+    #[test]
+    fn the_far_view_begins_where_the_traces_rays_blend_into_it() {
+        let mirror = PlanarReflection::new(Vec2::new(400.0, 400.0));
+        let at = GlobalTransform::from_translation_rotation(DVec3::ZERO, Quat::IDENTITY);
+        for (eye, target) in [
+            (DVec3::new(0.0, 2.0, 10.0), DVec3::new(0.0, 0.0, -10.0)),
+            (DVec3::new(0.0, 25.0, 150.0), DVec3::new(0.0, 0.0, 110.0)),
+            (DVec3::new(30.0, 60.0, 0.0), DVec3::new(-20.0, 0.0, -40.0)),
+        ] {
+            let p = place(
+                &mirror,
+                &at,
+                &Camera::perspective(70.0),
+                &looking(eye, target),
+                UVec2::new(1600, 900),
+            )
+            .expect("seen");
+            let rot = p.transform.rotation().as_dquat();
+            let o = p.transform.translation();
+            let n = DVec3::Y;
+            let t = p.tangents;
+            let near = far_near(t, p.near) as f64;
+            let mut shortest = f64::INFINITY;
+            for i in 0..=16 {
+                for j in 0..=16 {
+                    let x = t.x + (t.y - t.x) * i as f32 / 16.0;
+                    let y = t.z + (t.w - t.z) * j as f32 / 16.0;
+                    let d = rot * DVec3::new(x as f64, y as f64, -1.0);
+                    // (From the mirrored eye under the plane, up to it.)
+                    let dn = d.dot(n);
+                    if dn <= 1e-9 {
+                        continue;
+                    }
+                    // Depth (1 along the view's axis) where the ray meets the plane, then
+                    // where the trace's ray from there begins to blend into the far view.
+                    let u = -o.dot(n) / dn;
+                    let reach = crate::ray_mirror::MIRROR_RAY_M as f64
+                        * (1.0 - crate::ray_mirror::MIRROR_FAR_OVERLAP as f64);
+                    let end = u + reach / d.length();
+                    shortest = shortest.min(end);
+                }
+            }
+            assert!(shortest.is_finite(), "{eye}: no texel meets the plane");
+            assert!(
+                near <= shortest,
+                "{eye}: the far view begins at {near:.1}, a ray's blend at {shortest:.1}"
+            );
+            assert!(
+                near >= 0.8 * shortest,
+                "{eye}: the far view begins at {near:.1}, well short of {shortest:.1}"
+            );
+        }
     }
 
     #[test]

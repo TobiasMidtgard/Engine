@@ -2,13 +2,19 @@
 //! sees it, including what is off the top of the screen, and never what lies under the plane.
 //! A small test feature draws the mirror's rectangle with its picture, as a water shader does.
 //! The same with the picture traced by the frame's rays in place of the mirror's view
-//! (`trial_cut_more::RAY_MIRROR_PICTURES`), which needs ray queries (lavapipe has them). Needs
-//! a GPU or lavapipe; passes with a note when neither is available.
+//! (`trial_cut_more::RAY_MIRROR_PICTURES`), which needs ray queries (lavapipe has them), and a
+//! wall past the rays' reach above the top of the screen in it with the picture's far view
+//! (`trial_cut_more::RAY_MIRROR_FAR`) as with the mirror drawn, where the rays alone leave sky,
+//! the far view adding nothing round what the rays hit and leaving no hole round it either, and
+//! taking over from the rays with no line along a wall across the end of their reach.
+//! Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::settings::shade_skip::COUNT_MESH_RUNS;
-use engine_render::settings::trial_cut_more::{RAY_MIRROR_PICTURES, RAY_WORLD, RAYS};
+use engine_render::settings::trial_cut_more::{
+    RAY_MIRROR_FAR, RAY_MIRROR_PICTURES, RAY_WORLD, RAYS,
+};
 use engine_render::{
     FrameContext, GpuShared, PlanarReflection, RenderDisabled, Screenshots, ViewData, capture_now,
     planar_reflection_picture, rendering_reflection,
@@ -455,6 +461,421 @@ fn a_traced_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_i
         r.get("render.ray.mirror_rays")
     );
     assert_reflects_what_is_above(&r.shot, "traced");
+}
+
+/// A wall 1.6 km wide and 200 m high, 600 m off, past the rays' reach (384 m from the plane)
+/// and above the top of the screen: only its reflection shows, across the mirror's far half.
+const FAR_WALL: DVec3 = DVec3::new(0.0, 230.0, -600.0);
+/// A point of its face, left of the balls, whose reflection is on the mirror.
+const FAR_WALL_POINT: DVec3 = DVec3::new(-250.0, 180.0, -595.0);
+
+/// A mountain off the top of the screen and past the rays' reach shows in a traced mirror with
+/// its far view (`trial_cut_more::RAY_MIRROR_FAR`) as in the drawn one: the view is drawn again
+/// at a quarter of the picture's size each way from a tenth short of where the trace's rays
+/// end, and past their reach a texel takes what it drew. Without it the rays alone show the sky
+/// there. What lies within the rays' reach is still theirs (the balls' reflections), and nothing
+/// under the plane shows.
+#[test]
+fn a_traced_mirrors_far_view_shows_what_lies_past_its_rays_off_the_screen() {
+    let mut shots = Vec::new();
+    for (traced, far, name) in [
+        (false, false, "far-wall-drawn.png"),
+        (true, false, "far-wall-traced.png"),
+        (true, true, "far-wall-far-view.png"),
+    ] {
+        let mut app = ball_app(traced);
+        if far {
+            app.world.resource_mut::<RenderSettings>().trial_cuts_more |= RAY_MIRROR_FAR;
+        }
+        app.world.spawn((
+            Transform::from_translation(FAR_WALL),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [1600.0, 200.0, 10.0],
+                },
+                StandardMaterial::color(0.75, 0.35, 0.05),
+            ),
+        ));
+        app.update_n(5);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let d = app.world.resource::<Diagnostics>().clone();
+        let get = |key: &str| d.get(key).unwrap_or(-1.0);
+        if traced && get("render.ray.supported") != 1.0 {
+            eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+            return;
+        }
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+        }
+        let shot = image::open(&path).expect("read the shot").to_rgb8();
+        if traced {
+            assert_eq!(get("render.ray.mirror_pictures"), 1.0, "{name}: traced");
+            let texels = get("render.ray.mirror_texels");
+            if far {
+                assert_eq!(get("render.ray.mirror_far"), 1.0, "{name}: a far view");
+                assert_eq!(
+                    get("render.extra_views"),
+                    1.0,
+                    "{name}: drawn as an extra view"
+                );
+                let far_texels = get("render.ray.mirror_far_texels");
+                assert!(
+                    far_texels > 0.0 && far_texels < texels / 12.0,
+                    "{name}: {far_texels} texels in the far view, {texels} in the picture"
+                );
+            } else {
+                assert_eq!(get("render.ray.mirror_far"), 0.0, "{name}: no far view");
+                assert!(get("render.extra_views") <= 0.0, "{name}: no view drawn");
+            }
+        }
+        assert_reflects_what_is_above(&shot, name);
+        shots.push(shot);
+    }
+    assert!(
+        pixel(FAR_WALL_POINT).y < 0,
+        "the wall is on screen at {}",
+        pixel(FAR_WALL_POINT)
+    );
+    let q = pixel(mirrored(FAR_WALL_POINT));
+    let at = |shot: &image::RgbImage| shot.get_pixel(q.x as u32, q.y as u32).0.map(i32::from);
+    let (drawn, traced, far) = (at(&shots[0]), at(&shots[1]), at(&shots[2]));
+    eprintln!("the wall's reflection at {q}: drawn {drawn:?}, traced {traced:?}, far view {far:?}");
+    let orange = |c: [i32; 3]| c[0] > c[2] + 40 && c[1] > c[2];
+    assert!(orange(drawn), "the drawn mirror shows the wall: {drawn:?}");
+    assert!(
+        !orange(traced),
+        "the rays alone leave the wall's place to the sky: {traced:?}"
+    );
+    assert!(orange(far), "the far view shows the wall: {far:?}");
+    for c in 0..3 {
+        assert!(
+            (far[c] - drawn[c]).abs() <= 24,
+            "the far view's wall {far:?} against the drawn mirror's {drawn:?}"
+        );
+    }
+}
+
+/// Two pillars 20 m wide and 40 m high, 280 m off either side of the balls: within the rays'
+/// reach (about 290 m along them from the plane) and past the far view's near plane (about
+/// 230 m deep here), above the top of the screen, so that only their reflections show. The
+/// left one stands in front of [`PILLAR_WALL`], the right one against the sky.
+const PILLARS: [DVec3; 2] = [
+    DVec3::new(-60.0, 90.0, -280.0),
+    DVec3::new(60.0, 90.0, -280.0),
+];
+const PILLAR_SIZE: [f32; 3] = [20.0, 40.0, 10.0];
+/// A green wall 250 m wide and 200 m high, 600 m off, past the rays' reach and above the top of
+/// the screen: in the reflection it lies all round the left pillar's, which it stands behind.
+const PILLAR_WALL: DVec3 = DVec3::new(-175.0, 230.0, -600.0);
+
+/// What the rays hit in a traced mirror stays theirs alone with its far view
+/// (`trial_cut_more::RAY_MIRROR_FAR`), which draws it too (from one near plane for the whole
+/// picture, short of every texel's reach, at a quarter of the picture's size each way): beside a
+/// pillar's reflection, where the rays pass it, the picture shows the sky as it does without the
+/// far view, with no quarter-size fringe of the pillar round its outline, and a wall past the
+/// rays' reach behind the other pillar, as the drawn mirror shows it, with no hole of sky round
+/// the pillar's outline where the far view's pillar hides the wall.
+#[test]
+fn a_traced_mirrors_far_view_adds_no_fringe_round_what_its_rays_hit() {
+    let mut shots = Vec::new();
+    for (traced, far, name) in [
+        (false, false, "pillars-drawn.png"),
+        (true, false, "pillars-traced.png"),
+        (true, true, "pillars-far-view.png"),
+    ] {
+        let mut app = ball_app(traced);
+        if far {
+            app.world.resource_mut::<RenderSettings>().trial_cuts_more |= RAY_MIRROR_FAR;
+        }
+        for at in PILLARS {
+            app.world.spawn((
+                Transform::from_translation(at),
+                MeshRenderer::new(
+                    Shape::Cuboid { size: PILLAR_SIZE },
+                    StandardMaterial::color(0.75, 0.35, 0.05),
+                ),
+            ));
+        }
+        app.world.spawn((
+            Transform::from_translation(PILLAR_WALL),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [250.0, 200.0, 10.0],
+                },
+                StandardMaterial::color(0.1, 0.5, 0.1),
+            ),
+        ));
+        app.update_n(5);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let d = app.world.resource::<Diagnostics>().clone();
+        if traced {
+            if d.get("render.ray.supported") != Some(1.0) {
+                eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+                return;
+            }
+            assert_eq!(
+                d.get("render.ray.mirror_pictures"),
+                Some(1.0),
+                "{name}: traced"
+            );
+            assert_eq!(
+                d.get("render.ray.mirror_far"),
+                Some(if far { 1.0 } else { 0.0 }),
+                "{name}: its far view"
+            );
+        }
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+        }
+        shots.push(image::open(&path).expect("read the shot").to_rgb8());
+    }
+    let (drawn, traced, far) = (&shots[0], &shots[1], &shots[2]);
+    let [hx, hy, hz] = PILLAR_SIZE.map(|s| f64::from(s) * 0.5);
+    let at = |shot: &image::RgbImage, q: IVec2| shot.get_pixel(q.x as u32, q.y as u32).0;
+    let apart = |a: [u8; 3], b: [u8; 3]| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
+    // `out` pixels out from a pillar's reflection, round the middle half of each side: where
+    // the rays pass it.
+    let ring = |pillar: DVec3, out: i32| {
+        let p = |x: f64, y: f64, z: f64| pixel(mirrored(pillar + DVec3::new(x, y, z)));
+        let mut ring = Vec::new();
+        for k in 0..=8 {
+            let s = k as f64 / 8.0 - 0.5;
+            let (y, x) = (hy * s, hx * s);
+            let left = p(-hx, y, hz).x.min(p(-hx, y, -hz).x);
+            let right = p(hx, y, hz).x.max(p(hx, y, -hz).x);
+            let row = p(0.0, y, hz).y;
+            ring.push(IVec2::new(left - out, row));
+            ring.push(IVec2::new(right + out, row));
+            // (The pillar's foot is the reflection's top, its head the bottom.)
+            let top = p(x, -hy, hz).y.min(p(x, -hy, -hz).y);
+            let bottom = p(x, hy, hz).y.max(p(x, hy, -hz).y);
+            let column = p(x, 0.0, hz).x;
+            ring.push(IVec2::new(column, top - out));
+            ring.push(IVec2::new(column, bottom + out));
+        }
+        ring
+    };
+    for pillar in PILLARS {
+        let foot = pixel(pillar + DVec3::new(-hx, -hy, hz))
+            .y
+            .max(pixel(pillar + DVec3::new(hx, -hy, hz)).y);
+        assert!(
+            foot < 0,
+            "the pillar at {pillar} is on screen down to {foot}"
+        );
+        // The rays hit it: its face in every picture.
+        let face = pixel(mirrored(pillar + DVec3::new(0.0, 0.0, hz)));
+        for (shot, name) in shots.iter().zip(["drawn", "traced", "far view"]) {
+            let c = at(shot, face).map(i32::from);
+            assert!(
+                c[0] > c[2] + 40 && c[1] > c[2],
+                "{name}: the reflection of the pillar at {pillar}, {face}: {c:?}"
+            );
+        }
+    }
+    let green = |c: [u8; 3]| c[1] > c[0].saturating_add(30) && c[1] > c[2].saturating_add(10);
+    // Round the right pillar the sky, in the traced pictures alike (they hold the same hits, so
+    // only what the far view adds tells them apart), one to four pixels out.
+    let mut worst = (0, IVec2::ZERO);
+    for out in 1..=4 {
+        for q in ring(PILLARS[1], out) {
+            let d = apart(at(traced, q), at(far, q));
+            if d > worst.0 {
+                worst = (d, q);
+            }
+        }
+    }
+    eprintln!(
+        "round the pillar against the sky the far view's picture is at most {} from the rays \
+         alone's (at {})",
+        worst.0, worst.1
+    );
+    assert!(
+        worst.0 <= 8,
+        "the far view fringes the pillar's reflection: {} apart from the rays alone at {}",
+        worst.0,
+        worst.1
+    );
+    // Round the left one the wall, as drawn, two to four pixels out (clear of the drawn and the
+    // traced pictures' own outlines, which lie a little apart); with the rays alone, the sky.
+    let mut worst = (0, IVec2::ZERO);
+    for out in 2..=4 {
+        for q in ring(PILLARS[0], out) {
+            assert!(
+                green(at(drawn, q)),
+                "drawn: the wall at {q}: {:?}",
+                at(drawn, q)
+            );
+            assert!(
+                !green(at(traced, q)),
+                "traced: the sky at {q}: {:?}",
+                at(traced, q)
+            );
+            let d = apart(at(drawn, q), at(far, q));
+            if d > worst.0 {
+                worst = (d, q);
+            }
+        }
+    }
+    eprintln!(
+        "round the pillar in front of the wall the far view's picture is at most {} from the \
+         drawn mirror's (at {})",
+        worst.0, worst.1
+    );
+    assert!(
+        worst.0 <= 12,
+        "the far view leaves a hole round the pillar's reflection in the wall's: {} apart from \
+         the drawn mirror at {}",
+        worst.0,
+        worst.1
+    );
+}
+
+/// A wall 180 m long, 50 m high and 2 m thick, edge on to the camera from 290 m off to 470 m,
+/// right of the balls and above the top of the screen: its face toward the eye reflects across
+/// the end of the rays' reach (384 m along them from the plane, about 370 m off).
+const SEAM_WALL: DVec3 = DVec3::new(60.0, 135.0, -380.0);
+const SEAM_WALL_SIZE: [f32; 3] = [2.0, 50.0, 180.0];
+
+/// How far a texel's ray goes on from the mirror to `p` (m): from where the main camera's ray
+/// to `p`'s reflection meets the plane.
+fn reach_to(p: DVec3) -> f64 {
+    let m = mirrored(p);
+    let s = EYE + (m - EYE) * (EYE.y / (EYE.y - m.y));
+    (p - s).length()
+}
+
+/// Where a ridge crosses the end of a traced mirror's reach, its far view
+/// (`trial_cut_more::RAY_MIRROR_FAR`) takes over from the rays with no line and no gap: along a
+/// wall's face from 300 m off to 420 m (short of its far end by more than a texel of the view)
+/// the reflection is the wall throughout, as the drawn mirror shows it, and changes along the
+/// face no more sharply than the drawn one's (the rays' hits blend into the view over the last
+/// tenth of their reach). With the rays alone the face ends where they do.
+#[test]
+fn a_ridge_across_the_end_of_a_traced_mirrors_rays_shows_no_line_with_its_far_view() {
+    let mut shots = Vec::new();
+    for (traced, far, name) in [
+        (false, false, "seam-drawn.png"),
+        (true, false, "seam-traced.png"),
+        (true, true, "seam-far-view.png"),
+    ] {
+        let mut app = ball_app(traced);
+        if far {
+            app.world.resource_mut::<RenderSettings>().trial_cuts_more |= RAY_MIRROR_FAR;
+        }
+        app.world.spawn((
+            Transform::from_translation(SEAM_WALL),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: SEAM_WALL_SIZE,
+                },
+                StandardMaterial::color(0.75, 0.35, 0.05),
+            ),
+        ));
+        app.update_n(5);
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        let d = app.world.resource::<Diagnostics>().clone();
+        if traced {
+            if d.get("render.ray.supported") != Some(1.0) {
+                eprintln!("skipping: the GPU cannot hold the ray scene (no ray queries)");
+                return;
+            }
+            assert_eq!(
+                d.get("render.ray.mirror_far"),
+                Some(if far { 1.0 } else { 0.0 }),
+                "{name}: its far view"
+            );
+        }
+        let dir = std::env::temp_dir().join("engine-planar-reflections");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(name);
+        capture_now(&mut app.world, &path).expect("screenshot");
+        if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+            let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+        }
+        shots.push(image::open(&path).expect("read the shot").to_rgb8());
+    }
+    let (drawn, traced, far) = (&shots[0], &shots[1], &shots[2]);
+    let face_x = SEAM_WALL.x - f64::from(SEAM_WALL_SIZE[0]) * 0.5;
+    let bottom = SEAM_WALL.y - f64::from(SEAM_WALL_SIZE[1]) * 0.5;
+    let half = f64::from(SEAM_WALL_SIZE[2]) * 0.5;
+    for z in [SEAM_WALL.z - half, SEAM_WALL.z + half] {
+        let foot = pixel(DVec3::new(face_x, bottom, z));
+        assert!(foot.y < 0, "the wall is on screen at {foot}");
+    }
+    // Along the middle of its face, a pixel each, nearest first.
+    let mut along: Vec<(f64, IVec2)> = Vec::new();
+    for k in 0..=48 {
+        let p = DVec3::new(face_x, SEAM_WALL.y, -300.0 - 2.5 * k as f64);
+        let q = pixel(mirrored(p));
+        if along.last().is_none_or(|&(_, last)| last != q) {
+            along.push((reach_to(p), q));
+        }
+    }
+    let at = |shot: &image::RgbImage, q: IVec2| shot.get_pixel(q.x as u32, q.y as u32).0;
+    let orange = |c: [u8; 3]| c[0] > c[2].saturating_add(40) && c[1] > c[2];
+    let apart = |a: [u8; 3], b: [u8; 3]| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
+    let (first, last) = (along[0].0, along[along.len() - 1].0);
+    assert!(
+        first < 340.0 && last > 420.0,
+        "the face runs from {first:.0} m to {last:.0} m along the rays"
+    );
+    let mut most = (0, IVec2::ZERO);
+    for &(t, q) in &along {
+        let (d, r, f) = (at(drawn, q), at(traced, q), at(far, q));
+        eprintln!("{t:5.0} m {q}: drawn {d:?}, traced {r:?}, far view {f:?}");
+        assert!(orange(d), "drawn: the wall at {t:.0} m, {q}: {d:?}");
+        assert!(orange(f), "far view: the wall at {t:.0} m, {q}: {f:?}");
+        if t < 340.0 {
+            assert!(orange(r), "traced: the wall at {t:.0} m, {q}: {r:?}");
+        } else if t > 400.0 {
+            assert!(!orange(r), "traced: past the rays at {t:.0} m, {q}: {r:?}");
+        }
+        let a = apart(d, f);
+        if a > most.0 {
+            most = (a, q);
+        }
+    }
+    let step = |shot: &image::RgbImage| {
+        along
+            .windows(2)
+            .map(|w| apart(at(shot, w[0].1), at(shot, w[1].1)))
+            .max()
+            .unwrap_or(0)
+    };
+    let (drawn_step, far_step) = (step(drawn), step(far));
+    eprintln!(
+        "along the face the far view's picture is at most {} from the drawn mirror's (at {}); \
+         its sharpest step {far_step}, the drawn mirror's {drawn_step}",
+        most.0, most.1
+    );
+    assert!(
+        most.0 <= 24,
+        "the far view's wall {} apart from the drawn mirror's at {}",
+        most.0,
+        most.1
+    );
+    assert!(
+        far_step <= drawn_step + 8,
+        "a line where the rays end: a step of {far_step} along the face, {drawn_step} drawn"
+    );
 }
 
 /// Above the top of the screen beside the yellow ball, so that only their reflections show: a

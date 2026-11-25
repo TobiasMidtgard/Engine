@@ -713,8 +713,11 @@ struct FullReflections {
 struct MirrorPrograms {
     pipeline: wgpu::ComputePipeline,
     /// Group 2: the inputs every pixel's reflection reads (the prepass's normals and depth,
-    /// the motion, last frame's picture), the picture's trace, its colour and depth, `counts`.
+    /// the motion, last frame's picture), the picture's trace, its colour and depth, `counts`,
+    /// and the picture's far view (its colour and depth, `trial_cut_more::RAY_MIRROR_FAR`).
     layout: wgpu::BindGroupLayout,
+    /// What a picture without a far view this frame binds in its place (1 x 1: colour, depth).
+    no_far: (wgpu::TextureView, wgpu::TextureView),
     /// The texels, those the screen answered, the rays traced and their hits taken from last
     /// frame's picture, counted by the pass while `shade_skip::COUNT_MESH_RUNS` is set.
     counts: GpuCounts,
@@ -1456,8 +1459,40 @@ impl ProbeGi {
                     layout_entry(27, S::COMPUTE, written(wgpu::TextureFormat::Rgba16Float)),
                     layout_entry(28, S::COMPUTE, written(wgpu::TextureFormat::R32Float)),
                     layout_entry(29, S::COMPUTE, storage(false)),
+                    layout_entry(31, S::COMPUTE, texture(true)),
+                    layout_entry(
+                        32,
+                        S::COMPUTE,
+                        wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                    ),
                 ],
             });
+            let stand_in = |label: &str, format: wgpu::TextureFormat| {
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some(label),
+                        size: wgpu::Extent3d {
+                            width: 1,
+                            height: 1,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default())
+            };
+            let no_far = (
+                stand_in("ray mirror no far view", wgpu::TextureFormat::Rgba16Float),
+                stand_in("ray mirror no far depth", shared.formats.depth),
+            );
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("ray mirror pictures"),
                 bind_group_layouts: &[
@@ -1470,6 +1505,7 @@ impl ProbeGi {
             MirrorPrograms {
                 pipeline: pipeline("cs_mirror_picture", &pipeline_layout),
                 layout: inputs,
+                no_far,
                 counts: GpuCounts::new(device, "ray mirror counts"),
                 inputs: Vec::new(),
                 counting: false,
@@ -3297,6 +3333,8 @@ impl ProbeGi {
             }
         }
         for target in due {
+            let (far_color, far_depth) =
+                target.far.unwrap_or((&mirrors.no_far.0, &mirrors.no_far.1));
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ray mirror inputs"),
                 layout: &mirrors.layout,
@@ -3315,6 +3353,8 @@ impl ProbeGi {
                         binding: 29,
                         resource: mirrors.counts.counts.as_entire_binding(),
                     },
+                    view(31, far_color),
+                    view(32, far_depth),
                 ],
             });
             mirrors.inputs.push((group, target.size));

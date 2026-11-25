@@ -16,7 +16,14 @@
 // angle a texel spans metres of the plane), as they drop what a drawn view shows under it.
 //
 // Not in the picture: fog and haze on the reflected leg (every pixel's reflection has none
-// either), and what lies past the ray's reach that the screen doesn't show.
+// either), and what lies past the ray's reach that the screen doesn't show, unless the picture
+// has a far view (`trial_cut_more::RAY_MIRROR_FAR`): the mirror's view drawn through the same
+// frustum, smaller, with its near plane a tenth short of where the shortest rays end. Past its
+// own ray's reach a texel takes what the view drew there, laid by its coverage over what the
+// screen shows along the ray or the sky (`mirror_far_view`: only what lies past where its ray
+// begins to give way to the view, so the view adds no fringe round what the rays hit), and a
+// hit in the last tenth of the reach blends into it by distance where it drew the same thing,
+// so a ridge across the reach shows no line.
 
 struct MirrorTrace {
     right: vec4<f32>,    // the mirrored view's right axis (camera-relative); w: its near plane (m)
@@ -25,6 +32,8 @@ struct MirrorTrace {
     eye: vec4<f32>,      // the mirrored eye relative to the camera; w: a texel's angle (tangent span)
     tangents: vec4<f32>, // the picture's left, right, bottom and top edges as tangents (x / -z, y / -z)
     plane: vec4<f32>,    // the plane's unit normal (its reflecting side); w: dot(n, point on it), camera-relative
+    far: vec4<f32>,      // the far view: x its exposure (0: none this frame), y its near plane (m),
+                         // z how far along a texel's ray its hits begin to blend into it (m)
 };
 @group(2) @binding(26) var<uniform> mirror_trace: MirrorTrace;
 // This frame's rays (the picture's history blends them into level 0 of its chain): rgb
@@ -35,6 +44,10 @@ struct MirrorTrace {
 // Counted while `COUNT_REFLECTIONS` is set (cleared before the pass): the texels, those the
 // screen answered, the rays traced, and the rays' hits taken from last frame's picture.
 @group(2) @binding(29) var<storage, read_write> mirror_counts: array<atomic<u32>, 4>;
+// The far view's HDR colour (pre-exposed by `far.x`) and its reverse-Z depth (its near plane
+// over the depth along the mirrored view, 0 where it drew the sky): a stand-in while it has none.
+@group(2) @binding(31) var mirror_far_color: texture_2d<f32>;
+@group(2) @binding(32) var mirror_far_depth: texture_depth_2d;
 
 // How far past the ray's reach the screen is looked along for what lies there, from the plane
 // (the water's own reach for a reflection, water.wgsl `mirror_reflection`).
@@ -100,6 +113,63 @@ fn mirror_far(origin: vec3<f32>, dir: vec3<f32>, noise: f32) -> vec4<f32> {
     return vec4<f32>(mirror_sky(dir), 0.0);
 }
 
+// What the far view drew at the picture's `uv`, bilinear over the four texels around it, with
+// only those counted that drew something (the view's own sky, fogged as its sky pass fogs it,
+// would ring a ridge's outline otherwise) as deep along the mirrored view as `lo` to `hi` (m),
+// each by how far it lies past `lo` toward `full`, smoothly (all alike where `full` is no
+// deeper than `lo`): its colour (cd/m^2), how much of the read it covers (the weight of the
+// texels counted over theirs and the sky's: a ridge's outline is partly covered), and the
+// depth of the nearest of them. A texel's own read keeps to what lies past where its own ray
+// gives way to the view: the view is drawn from one near plane for the whole picture, short of
+// every texel's reach, so it also holds what the rays hit, which a neighbour's read would
+// fringe at a quarter of the picture's size, and what stands under the plane in features that
+// don't cut there per pixel. What such a texel hides is unknown rather than open, so a nearer
+// thing's outline leaves no hole in a ridge behind it either. Nothing covered without a far
+// view.
+struct FarView {
+    rgb: vec3<f32>,
+    cover: f32,
+    depth: f32,
+};
+
+fn mirror_far_view(uv: vec2<f32>, lo: f32, full: f32, hi: f32) -> FarView {
+    var out: FarView;
+    let far = mirror_trace.far;
+    if (far.x <= 0.0) { return out; }
+    let size = vec2<i32>(textureDimensions(mirror_far_depth));
+    let p = uv * vec2<f32>(size) - 0.5;
+    let base = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    var sum = vec3<f32>(0.0);
+    var taken = 0.0;
+    var open = 0.0;
+    var nearest = 0.0;
+    for (var i = 0; i < 4; i++) {
+        let o = vec2<i32>(i & 1, i >> 1u);
+        let at = clamp(base + o, vec2<i32>(0), size - 1);
+        var w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        let z = textureLoad(mirror_far_depth, at, 0);
+        if (z <= 0.0) {
+            open += w;
+            continue;
+        }
+        let deep = far.y / z;
+        if (deep < lo || deep > hi) { continue; }
+        if (full > lo) { w *= smoothstep(lo, full, deep); }
+        if (w <= 0.0) { continue; }
+        sum += textureLoad(mirror_far_color, at, 0).rgb * w;
+        taken += w;
+        nearest = max(nearest, z);
+    }
+    if (taken <= 0.0) { return out; }
+    out.cover = taken / (taken + open);
+    // (Rounding would march the screen for a two-millionth of a whole read.)
+    if (out.cover > 0.9999) { out.cover = 1.0; }
+    out.rgb = min(sum / (taken * far.x), vec3<f32>(60000.0));
+    out.depth = far.y / nearest;
+    return out;
+}
+
 // Texel `id` of a `size` picture, written to `mirror_color` and `mirror_depth_raw`, and what it
 // adds to the counts (the texel, answered by the screen, a ray, a ray's hit from the picture).
 fn mirror_texel(id: vec2<u32>, size: vec2<u32>) -> vec4<u32> {
@@ -146,12 +216,36 @@ fn mirror_texel(id: vec2<u32>, size: vec2<u32>) -> vec4<u32> {
             rgb = mirror_sky(dir);
             depth = 1.0;
         } else if (found.sky || found.out.w <= 0.0) {
-            let far = mirror_far(origin, dir, noise);
-            rgb = far.rgb;
-            depth = select(0.0, near / (u + far.w / len), far.w > 0.0);
+            // Past the rays' reach: what the far view drew there, where the picture has one,
+            // over what the screen shows farther along the ray or the sky, by its coverage (the
+            // screen isn't looked along where the view covers the whole read). Only what lies
+            // past where this texel's own ray begins to give way to the view, fully from where
+            // it ends, as a hit there blends: anything nearer along it was its ray's to hit.
+            let view = mirror_far_view(uv, u + m.far.z / len, u + MIRROR_T_MAX / len, 3.0e38);
+            var beyond = vec4<f32>(0.0);
+            if (view.cover < 1.0) {
+                beyond = mirror_far(origin, dir, noise);
+            }
+            rgb = beyond.rgb;
+            depth = select(0.0, near / (u + beyond.w / len), beyond.w > 0.0);
+            if (view.cover > 0.0) {
+                rgb = mix(rgb, view.rgb, view.cover);
+                depth = max(depth, near / max(view.depth, u));
+            }
         } else {
+            let t = found.out.w;
             rgb = found.out.rgb;
-            depth = near / (u + found.out.w / len);
+            depth = near / (u + t / len);
+            // In the last tenth of the rays' reach the hit gives way by its distance to what
+            // the far view drew there, where that is the same thing (as deep, within a tenth):
+            // a ridge across the reach shows no line where the rays end.
+            if (m.far.x > 0.0 && t > m.far.z) {
+                let at = u + t / len;
+                let view = mirror_far_view(uv, max(0.9 * at, u), 0.0, 1.1 * at);
+                if (view.cover > 0.0) {
+                    rgb = mix(rgb, view.rgb, smoothstep(m.far.z, MIRROR_T_MAX, t) * view.cover);
+                }
+            }
         }
     }
     textureStore(mirror_color, id, vec4<f32>(pre_expose(min(rgb, vec3<f32>(60000.0))), 1.0));

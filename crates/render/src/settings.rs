@@ -572,6 +572,23 @@ pub mod trial_cut_more {
     /// no picture for a frame, so its readers start over (the water's settling frames). Off by
     /// default.
     pub const RAY_MIRROR_PICTURES: u32 = 1024;
+    /// What a traced mirror picture ([`RAY_MIRROR_PICTURES`]) shows past its rays' reach where the
+    /// screen doesn't show it (a ridge above the top edge, seen only in a calm lake): the mirror's
+    /// view is drawn again, at `RenderSettings::ray_mirror_far_scale` of the picture's size each
+    /// way and with its near plane a tenth short of where the trace's shortest rays end, so it
+    /// draws only what lies past them and a little more (far terrain, far levels of detail,
+    /// impostors) and the sky (its own shading and fog, as the drawn mirror's view has them). Past
+    /// its own ray's reach a texel takes what the view drew there, laid by its coverage over what
+    /// the screen shows along the ray or the sky (the view's own sky is left out of its read, and
+    /// so is what lies short of where its ray begins to give way to the view, which the rays hit:
+    /// the view adds no fringe round it); without it such a texel is what the screen shows, else
+    /// the sky. A hit in the reach's last tenth blends into what the view drew there by its
+    /// distance, where that is the same thing, so a ridge across the reach shows no line where the
+    /// rays end. The view is an extra view (`render.extra_views`, `extra_views_gpu_ms`);
+    /// `render.ray.mirror_far` (views drawn for traced pictures this frame), `mirror_far_texels`
+    /// (their texels). `gpu_sweep` rows `ray_mirror_far` and `ray_mirror_far_half` against
+    /// `ray_mirror_pictures`. Main view only. Off by default.
+    pub const RAY_MIRROR_FAR: u32 = 2048;
     /// Every bit of the ray-traced lighting round: [`RAY_WORLD`] and the parts that need it.
     /// A test about one part, or about the frame without the rays, clears these from the
     /// defaults and sets what it is about, so that it means the same when the round's bits
@@ -582,7 +599,8 @@ pub mod trial_cut_more {
         | RAY_REFLECTIONS
         | RAY_GROUND_MAP
         | RAY_WATER
-        | RAY_MIRROR_PICTURES;
+        | RAY_MIRROR_PICTURES
+        | RAY_MIRROR_FAR;
 }
 
 /// What the screen shows.
@@ -787,6 +805,9 @@ pub struct RenderSettings {
     /// draw's cost at a still stop (`gpu_sweep` row `ray_ground_map_every_frame`). The picture
     /// is the same.
     pub ray_ground_every_frame: bool,
+    /// With `trial_cut_more::RAY_MIRROR_FAR`: the far view's size against its traced mirror
+    /// picture's, each way (0.25 by default, a sixteenth of the texels; 0.05..1).
+    pub ray_mirror_far_scale: f32,
     /// How far light spreads under skin, meters at full strength (screen-space subsurface
     /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
     /// 0 = off.
@@ -1093,6 +1114,7 @@ impl Default for RenderSettings {
             ray_sun_reach: 80.0,
             ray_probe_check: false,
             ray_ground_every_frame: false,
+            ray_mirror_far_scale: 0.25,
             subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,

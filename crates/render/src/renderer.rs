@@ -1970,10 +1970,13 @@ impl Renderer {
         // switch alone decides: the probes trace the frame's ray scene from this frame's
         // prepare on whenever it is wanted, so asking them here would draw the views of the
         // frame the scene starts in, and keep their state while they are traced. A frame that
-        // can't trace after all has no picture: `RayMirrors::publish`.)
-        let traced =
-            crate::ray_mirror::RayMirrors::wanted(&crate::settings::effective(world), &self.shared);
-        self.mirrors_placed = crate::planar_reflection::place_reflection_views(world, traced);
+        // can't trace after all has no picture: `RayMirrors::publish`. With
+        // `trial_cut_more::RAY_MIRROR_FAR` each placed view draws its traced picture's far view.)
+        let settings = crate::settings::effective(world);
+        let traced = crate::ray_mirror::RayMirrors::wanted(&settings, &self.shared);
+        let far = (settings.trial_cuts_more & crate::settings::trial_cut_more::RAY_MIRROR_FAR != 0)
+            .then_some(settings.ray_mirror_far_scale);
+        self.mirrors_placed = crate::planar_reflection::place_reflection_views(world, traced, far);
         let mut views: Vec<_> = world
             .query::<(
                 Entity,

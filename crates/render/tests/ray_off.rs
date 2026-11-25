@@ -10,12 +10,13 @@
 //! draw the mirror as before), no ground colour map is made or drawn
 //! (`trial_cut_more::RAY_GROUND_MAP`, with `RenderSettings::ray_ground_every_frame` or not),
 //! no mirror's picture is traced (`trial_cut_more::RAY_MIRROR_PICTURES`: its view is drawn as
-//! before), no feature's own draw is handed the scene's group (`trial_cut_more::RAY_WATER`:
-//! `FrameContext::ray_group` is `None` in every view and phase, so the water draws as before,
-//! which crates/water/tests/ray_water_off.rs shows of the water itself), and the rays walk the
-//! probes' own scene in software, so the picture is the one drawn with the switches off. A test
-//! binary of its own: the variable is the whole process's, read when the device is made. Needs
-//! a GPU or lavapipe; passes with a note when neither is available.
+//! before, not as a far view, `trial_cut_more::RAY_MIRROR_FAR`), no feature's own draw is handed
+//! the scene's group (`trial_cut_more::RAY_WATER`: `FrameContext::ray_group` is `None` in every
+//! view and phase, so the water draws as before, which crates/water/tests/ray_water_off.rs shows
+//! of the water itself), and the rays walk the probes' own scene in software, so the picture is
+//! the one drawn with the switches off. A test binary of its own: the variable is the whole
+//! process's, read when the device is made. Needs a GPU or lavapipe; passes with a note when
+//! neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;

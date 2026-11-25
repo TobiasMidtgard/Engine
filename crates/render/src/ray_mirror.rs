@@ -28,6 +28,16 @@
 //! (readers bind a depth texture, and depth formats can't be written by a compute shader), and
 //! the trace's and the history's uniforms. Their views stay the same from frame to frame, so
 //! readers that cache bind groups by view keep theirs.
+//!
+//! What lies past the rays' reach that the screen doesn't show (a ridge above the top edge, in
+//! the lake) is the sky in the picture, unless `trial_cut_more::RAY_MIRROR_FAR` draws the
+//! mirror's view as the picture's far view: through the picture's frustum, smaller, with its
+//! near plane a tenth short of where the trace's shortest rays end
+//! (`planar_reflection::far_near`, [`MIRROR_FAR_OVERLAP`]). Past its own ray's reach a texel
+//! takes what the view drew there, by its coverage, over what the screen shows or the sky: only
+//! what lies past where its ray begins to give way to the view (drawn from one near plane, the
+//! view also holds what the rays hit, which a neighbouring texel would fringe). A hit in the
+//! reach's last tenth blends into it by distance where the view drew the same thing.
 
 use std::collections::HashMap;
 
@@ -37,6 +47,16 @@ use engine_core::prelude::*;
 use crate::features::GpuShared;
 use crate::frame::ViewData;
 use crate::planar_reflection::{PlanarReflection, PlanarReflectionPicture, TracedPlacement};
+
+/// How far a texel's ray goes on from where it meets the mirror's plane (m): every pixel's
+/// reflection's reach at roughness 0 (ray_mirror.wgsl `MIRROR_T_MAX`).
+pub(crate) const MIRROR_RAY_M: f32 = 384.0;
+
+/// The share of that reach, at its end, over which a texel's hits blend into the picture's far
+/// view by distance (`trial_cut_more::RAY_MIRROR_FAR`), so that a ridge across the reach shows
+/// no line where the rays end: the far view's near plane comes this much short of the shortest
+/// ray's end (`planar_reflection::far_near`).
+pub(crate) const MIRROR_FAR_OVERLAP: f32 = 0.1;
 
 /// `MirrorTrace` in ray_mirror.wgsl: the mirrored view, camera-relative.
 #[repr(C)]
@@ -53,6 +73,10 @@ struct GpuMirrorTrace {
     tangents: [f32; 4],
     /// The plane's unit normal (its reflecting side); w: `n · (point on it - main eye)`.
     plane: [f32; 4],
+    /// The picture's far view (`trial_cut_more::RAY_MIRROR_FAR`): its exposure (0 without
+    /// one this frame), its near plane (m), and how far along a texel's ray its hits begin to
+    /// blend into the view (m, [`MIRROR_FAR_OVERLAP`] short of the reach).
+    far: [f32; 4],
 }
 
 /// `MirrorResolve` in mirror_resolve.wgsl: this frame's mirrored view and last frame's, both
@@ -115,6 +139,8 @@ struct TracedPicture {
     uniform: wgpu::Buffer,
     /// `depth_raw` for the depth copy.
     copy_group: wgpu::BindGroup,
+    /// This frame's far view (`trial_cut_more::RAY_MIRROR_FAR`): its colour, depth and size.
+    far: Option<(wgpu::TextureView, wgpu::TextureView, UVec2)>,
 }
 
 impl TracedPicture {
@@ -248,6 +274,7 @@ impl TracedPicture {
             depth,
             uniform,
             copy_group,
+            far: None,
         }
     }
 
@@ -404,6 +431,8 @@ pub(crate) struct MirrorTarget<'a> {
     pub color: &'a wgpu::TextureView,
     pub depth: &'a wgpu::TextureView,
     pub size: UVec2,
+    /// The picture's far view this frame: its colour and depth.
+    pub far: Option<(&'a wgpu::TextureView, &'a wgpu::TextureView)>,
 }
 
 /// The main view's traced mirror pictures, the renderer's.
@@ -471,6 +500,21 @@ impl RayMirrors {
             let texel = ((t.y - t.x) / size.x as f32).max((t.w - t.z) / size.y as f32);
             let n = p.view.plane_normal.normalize();
             let plane = n.as_dvec3().dot(p.view.plane_point - view.origin) as f32;
+            // Its far view, drawn this frame before the main view (`RAY_MIRROR_FAR`): through
+            // the same frustum from the same eye, so a texel's place in it is the same.
+            let far = world
+                .get_resource::<crate::planar_reflection::MirrorPictures>()
+                .and_then(|pictures| pictures.far.get(&p.mirror))
+                .filter(|far| far.camera == p.camera)
+                .map(|far| {
+                    (
+                        far.color.clone(),
+                        far.depth.clone(),
+                        far.size,
+                        far.exposure,
+                        far.near,
+                    )
+                });
             let trace = GpuMirrorTrace {
                 right: right.extend(p.view.near).to_array(),
                 up: up.extend(0.0).to_array(),
@@ -478,7 +522,12 @@ impl RayMirrors {
                 eye: view.relative(p.at.translation()).extend(texel).to_array(),
                 tangents: t.to_array(),
                 plane: n.extend(plane).to_array(),
+                far: far.as_ref().map_or([0.0; 4], |f| {
+                    let blend = MIRROR_RAY_M * (1.0 - MIRROR_FAR_OVERLAP);
+                    [f.3.max(f32::MIN_POSITIVE), f.4, blend, 0.0]
+                }),
             };
+            picture.far = far.map(|(color, depth, size, ..)| (color, depth, size));
             gpu.queue
                 .write_buffer(&picture.uniform, 0, bytemuck::bytes_of(&trace));
             // The history, from where the view was when level 0 was last written: none after a
@@ -550,6 +599,7 @@ impl RayMirrors {
                 color: &p.raw.view,
                 depth: &p.depth_raw.view,
                 size: p.size,
+                far: p.far.as_ref().map(|(color, depth, _)| (color, depth)),
             })
         })
     }
@@ -609,23 +659,30 @@ impl RayMirrors {
     }
 
     /// `render.ray.mirror_pictures` (traced this frame), `mirror_texels` (their level 0s'),
-    /// `mirror_mb` (what the kept pictures hold on the GPU).
+    /// `mirror_mb` (what the kept pictures hold on the GPU), `mirror_far` (their far views
+    /// this frame, `trial_cut_more::RAY_MIRROR_FAR`) and `mirror_far_texels`.
     pub fn publish_diagnostics(&self, d: &mut Diagnostics) {
-        let texels: u64 = self
-            .due
-            .iter()
-            .filter_map(|m| self.pictures.get(m))
-            .map(|p| p.size.x as u64 * p.size.y as u64)
-            .sum();
+        let due = || self.due.iter().filter_map(|m| self.pictures.get(m));
+        let texels: u64 = due().map(|p| p.size.x as u64 * p.size.y as u64).sum();
+        let far = || due().filter_map(|p| p.far.as_ref().map(|f| f.2));
+        let far_texels: u64 = far().map(|s| s.x as u64 * s.y as u64).sum();
         let bytes: u64 = self.pictures.values().map(TracedPicture::bytes).sum();
         d.set("render.ray.mirror_pictures", self.due.len() as f64);
         d.set("render.ray.mirror_texels", texels as f64);
         d.set("render.ray.mirror_mb", bytes as f64 / (1024.0 * 1024.0));
+        d.set("render.ray.mirror_far", far().count() as f64);
+        d.set("render.ray.mirror_far_texels", far_texels as f64);
     }
 
     /// Once after the frame's ray scene went: its rows read zero.
     pub fn publish_none(d: &mut Diagnostics) {
-        for row in ["mirror_pictures", "mirror_texels", "mirror_mb"] {
+        for row in [
+            "mirror_pictures",
+            "mirror_texels",
+            "mirror_mb",
+            "mirror_far",
+            "mirror_far_texels",
+        ] {
             d.set(&format!("render.ray.{row}"), 0.0);
         }
     }
