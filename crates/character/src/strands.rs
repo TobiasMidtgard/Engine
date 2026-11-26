@@ -106,6 +106,9 @@ pub struct StrandSet {
     /// model-space points each, root first. Handed to the hair simulation as
     /// `engine_world::HairGuides`; empty for hair that holds its shape.
     pub guides: Vec<Vec3>,
+    /// Per guide, the tie it is gathered in with every other guide of the same number (a
+    /// ponytail's leave its tie together), 0 for a guide that grows free. Empty: none is tied.
+    pub tied: Vec<u16>,
     /// Per hair, the guides it moves with. Empty without guides.
     pub follow: Vec<Follow>,
     /// Hairs in the set after [`Self::release_points`] dropped `points` and `attrs` (0
@@ -150,6 +153,7 @@ impl StrandSet {
             points: Vec::new(),
             attrs: Vec::new(),
             guides: Vec::new(),
+            tied: Vec::new(),
             follow: Vec::new(),
             released: 0,
         }
@@ -222,6 +226,12 @@ impl StrandSet {
     /// A strand that stands for a few hairs lying together ([`BUNCHED_RADIUS`]): it thins
     /// all the way down as its hairs end, and feathers out over its last sixth.
     fn push_bunched(&mut self, pts: &[Vec3], root_radius: f32, random: f32) {
+        self.push_bunched_from(pts, root_radius, random, true);
+    }
+
+    /// [`Self::push_bunched`], `rooted` or leaving a tie at its full width (a ponytail's tail:
+    /// thin over their first centimetres, its strands were a comb of dashes above the band).
+    fn push_bunched_from(&mut self, pts: &[Vec3], root_radius: f32, random: f32, rooted: bool) {
         debug_assert_eq!(pts.len(), self.points_per as usize);
         let n = pts.len().max(2) - 1;
         for (i, p) in pts.iter().enumerate() {
@@ -229,10 +239,35 @@ impl StrandSet {
             // (It comes out of the scalp as single hairs that gather: thin over its first
             // centimetres. As wide there as below, the strands along a part and over the
             // crown lay like the teeth of a comb.)
+            let gathered = if rooted {
+                0.4 + 0.6 * smoothstep(0.0, 0.1, t)
+            } else {
+                1.0
+            };
             let r = root_radius
-                * (0.4 + 0.6 * smoothstep(0.0, 0.1, t))
+                * gathered
                 * (1.0 + (BUNCHED_TIP - 1.0) * t.powf(BUNCHED_TAPER))
                 * (1.0 - 0.52 * smoothstep(0.84, 1.0, t));
+            self.points.push([p.x, p.y, p.z, r]);
+            self.attrs.push([1.0, random, t, 0.0]);
+        }
+    }
+
+    /// A strand of gathered hair: thin where it leaves the scalp as a bunched strand is, then
+    /// one width to its end, which is `end` of that (it runs on into a knot or under a band,
+    /// or, a short hair at the hairline, tapers out). `thin_root`: whether it starts at a
+    /// root (a strand wound in a knot doesn't).
+    fn push_sleek(&mut self, pts: &[Vec3], radius: f32, random: f32, end: f32, thin_root: bool) {
+        debug_assert_eq!(pts.len(), self.points_per as usize);
+        let n = pts.len().max(2) - 1;
+        for (i, p) in pts.iter().enumerate() {
+            let t = i as f32 / n as f32;
+            let root = if thin_root {
+                0.4 + 0.6 * smoothstep(0.0, 0.1, t)
+            } else {
+                0.5 + 0.5 * smoothstep(0.0, 0.06, t)
+            };
+            let r = radius * root * (1.0 + (end - 1.0) * smoothstep(0.75, 1.0, t));
             self.points.push([p.x, p.y, p.z, r]);
             self.attrs.push([1.0, random, t, 0.0]);
         }
@@ -432,6 +467,18 @@ impl<'a> SkinCollider<'a> {
         let offset = offset + self.clothes.get(i).copied().unwrap_or(0.0);
         if h < offset { p + n * (offset - h) } else { p }
     }
+
+    /// `p` moved to `height` m above the skin under it, and the skin's normal there: hair
+    /// combed flat lies on the head, where [`Self::push_out`] only keeps it from sinking in.
+    pub fn lay(&self, p: Vec3, height: f32) -> (Vec3, Vec3) {
+        let Some((i, _)) = self.nearest(p) else {
+            return (p, Vec3::Y);
+        };
+        let n = self.skin.normals[i];
+        let h = (p - self.skin.positions[i]).dot(n);
+        let height = height + self.clothes.get(i).copied().unwrap_or(0.0);
+        (p + n * (height - h), n)
+    }
 }
 
 /// Every hair of an appearance on its built skin.
@@ -458,7 +505,9 @@ pub fn grow_all(
     for s in &mut out {
         let points = s.points_per.max(2) as f32 - 1.0;
         let weight = match (s.kind, a.hair_style()) {
-            (StrandKind::Scalp, HairStyle::Long) => 31.0 / points,
+            (StrandKind::Scalp, HairStyle::Long | HairStyle::HalfUp | HairStyle::Ponytail) => {
+                31.0 / points
+            }
             (StrandKind::Scalp, HairStyle::Medium) => 17.0 / points,
             _ => 1.0,
         };
@@ -724,7 +773,51 @@ struct Groom {
     root_radius: f32,
     /// Where a bun sits, from the head's center (m; zero without one).
     bun: Vec3,
+    /// The style the hairs are grown as: a gathered style grows its loose hair as long hair.
+    style: HairStyle,
+    /// Whether the hair is parted on top.
+    parted: bool,
 }
+
+/// Which part of the scalp a pass grows hair from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Region {
+    All,
+    /// The back of the head behind the ears, under the line that hair gathered into a knot on
+    /// top is parted along: what hangs loose in a half-up style.
+    Under,
+    /// The rest of it: the front, the top and the sides, which are gathered.
+    Over,
+}
+
+impl Region {
+    /// How much of the hair rooted at `d` (from the head's center, rest) the region takes.
+    ///
+    /// The line is gta-hair-sim's for its half-up style: level behind the ear, rising round
+    /// the back of the head to just under the knot.
+    fn share(self, d: Vec3) -> f32 {
+        if self == Region::All {
+            return 1.0;
+        }
+        let around = d.x.atan2(d.z).abs();
+        let up = d.normalize_or(Vec3::Y).y;
+        let line = UNDER_LINE + UNDER_RISE * smoothstep(1.55, 2.78, around);
+        let under = smoothstep(UNDER_FROM - 0.06, UNDER_FROM + 0.06, around)
+            * (1.0 - smoothstep(line - 0.03, line + 0.03, up));
+        if self == Region::Under {
+            under
+        } else {
+            1.0 - under
+        }
+    }
+}
+
+/// Where the hair left loose under a half-up style begins, round the head from the front (rad:
+/// behind the ears), and the height of its upper edge there and how much higher it is at the
+/// middle of the back (as the height of the unit direction from the head's center).
+const UNDER_FROM: f32 = 1.92;
+const UNDER_LINE: f32 = 0.12;
+const UNDER_RISE: f32 = 0.54;
 
 /// The hairline, irregular as a real one is: hair-restoration surgeons rebuild a slow wander of
 /// a few millimetres and a finer zigzag, slightly different on each side, because a smooth,
@@ -752,6 +845,19 @@ impl RaggedHairline {
             + 0.0007 * (theta * 37.0 + p[2]).sin()
             + 0.0004 * (theta * 71.0 + p[3]).sin()
     }
+
+    /// How far inside the hairline the scalp at `d` (rest, from the head's center) is, m,
+    /// measured across the line: where the line runs steeply round the head (down the temple,
+    /// behind the ear) the height over it alone is up to twice that, and a band of fine hairs
+    /// so many millimetres high was half as wide there as over the forehead.
+    fn inside(&self, d: Vec3) -> f32 {
+        const D: f32 = 0.03;
+        let theta = d.x.atan2(d.z);
+        let rise = crate::mesh::hairline(theta + D, self.recession)
+            - crate::mesh::hairline(theta - D, self.recession);
+        let slope = rise / (2.0 * D * d.x.hypot(d.z).max(0.03));
+        (d.y - self.at(theta)) / (1.0 + slope * slope).sqrt()
+    }
 }
 
 fn grow_scalp(
@@ -761,8 +867,46 @@ fn grow_scalp(
     lm: &Landmarks,
     rest: &Landmarks,
 ) -> Option<StrandSet> {
+    match a.hair_style() {
+        HairStyle::HalfUp => {
+            let tie = Tie::new(skin, lm, rest, KNOT_TOWARD)?;
+            let loose = grow_scalp_as(a, HairStyle::Long, Region::Under, skin, collider, lm, rest);
+            let mut set =
+                loose.unwrap_or_else(|| StrandSet::new(StrandKind::Scalp, long_points(a)));
+            grow_gathered(&mut set, a, &tie, Region::Over, skin, collider, rest);
+            grow_knot(&mut set, a, &tie, collider);
+            (!set.points.is_empty()).then_some(set)
+        }
+        HairStyle::Ponytail => {
+            let tie = Tie::new(skin, lm, rest, TAIL_TOWARD)?;
+            let mut set = StrandSet::new(StrandKind::Scalp, long_points(a));
+            grow_tail(&mut set, a, &tie, collider);
+            grow_gathered(&mut set, a, &tie, Region::All, skin, collider, rest);
+            grow_band(&mut set, a, &tie, collider);
+            Some(set)
+        }
+        style => grow_scalp_as(a, style, Region::All, skin, collider, lm, rest),
+    }
+}
+
+/// Points along a hair of long hair: wavy hair needs more for its waves.
+fn long_points(a: &Appearance) -> u32 {
+    32 + (24.0 * a.hair.curl.clamp(0.0, 1.0)) as u32
+}
+
+/// Scalp hair of one `style` from one `region` of the scalp.
+fn grow_scalp_as(
+    a: &Appearance,
+    style: HairStyle,
+    region: Region,
+    skin: &SkinMesh,
+    collider: &SkinCollider,
+    lm: &Landmarks,
+    rest: &Landmarks,
+) -> Option<StrandSet> {
     let k = a.hair.length.clamp(0.5, 1.5);
-    let g = match a.hair_style() {
+    let parted = matches!(style, HairStyle::Medium | HairStyle::Long) && region == Region::All;
+    let g = match style {
         HairStyle::Bald => return None,
         HairStyle::Buzz => Groom {
             length: 0.006 * k,
@@ -773,6 +917,8 @@ fn grow_scalp(
             clump: 0.0,
             root_radius: 0.00007,
             bun: Vec3::ZERO,
+            style,
+            parted,
         },
         HairStyle::Short => Groom {
             length: 0.055 * k,
@@ -786,6 +932,8 @@ fn grow_scalp(
             clump: 0.8,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
+            style,
+            parted,
         },
         HairStyle::Medium => Groom {
             length: 0.2 * k,
@@ -797,11 +945,13 @@ fn grow_scalp(
             clump: 0.6,
             root_radius: BUNCHED_RADIUS,
             bun: Vec3::ZERO,
+            style,
+            parted,
         },
-        HairStyle::Long => Groom {
+        // (The gathered styles grow their loose hair as long hair, a region at a time.)
+        HairStyle::Long | HairStyle::HalfUp | HairStyle::Ponytail => Groom {
             length: 0.42 * k,
-            // Wavy hair needs the points for its waves.
-            points: 32 + (24.0 * a.hair.curl.clamp(0.0, 1.0)) as u32,
+            points: long_points(a),
             density: BUNCHED_DENSITY * 190.0,
             gravity: 1.0,
             // (Standing off the scalp as much as a real head of long hair does: at 1.2 cm it
@@ -810,6 +960,8 @@ fn grow_scalp(
             clump: 0.75,
             root_radius: BUNCHED_RADIUS,
             bun: Vec3::ZERO,
+            style,
+            parted,
         },
         HairStyle::Bun => Groom {
             length: 0.3,
@@ -820,16 +972,17 @@ fn grow_scalp(
             clump: 0.6,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
+            style,
+            parted,
         },
     };
     let head = rest.head;
     let mut g = g;
-    if a.hair_style() == HairStyle::Bun {
+    if style == HairStyle::Bun {
         g.bun = bun_seat(skin, head);
     }
     let recession = a.hair.recession.clamp(0.0, 1.0);
     let ragged = RaggedHairline::new(a.seed, recession);
-    let parted = matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long);
     let sampler = Sampler::new(skin, Mask::Scalp, |rest, m| {
         // A receded hairline: thinner front and temples (and the crown at the far end).
         let d = rest - head;
@@ -850,7 +1003,7 @@ fn grow_scalp(
         } else {
             1.0
         };
-        m * m * edge * crown * part
+        m * m * edge * crown * part * region.share(d)
     });
     let total = (sampler.total() * 1e4 * g.density) as usize;
     if total == 0 {
@@ -1343,7 +1496,7 @@ fn grow_scalp(
             if lies {
                 0.0008
             } else {
-                0.0008 + loft * t.min(0.4) / 0.4 * 0.6 * tuck(a, t)
+                0.0008 + loft * t.min(0.4) / 0.4 * 0.6 * tuck(&g, t)
             }
         };
         for (k, p) in pts.iter_mut().enumerate().skip(1) {
@@ -1887,8 +2040,8 @@ fn len_of(pts: &[Vec3]) -> f32 {
 /// is cut, not grown evenly, shorter over the sides and nape (graduated up to the weight at the
 /// back of the head) and longest on top and at the front, as a barber's cut. Other styles are
 /// even.
-fn cut_length(a: &Appearance, d: Vec3) -> f32 {
-    if a.hair_style() != HairStyle::Short {
+fn cut_length(g: &Groom, d: Vec3) -> f32 {
+    if g.style != HairStyle::Short {
         return 1.0;
     }
     let top = smoothstep(-0.03, 0.08, d.y);
@@ -1900,7 +2053,7 @@ fn cut_length(a: &Appearance, d: Vec3) -> f32 {
 /// little over a few centimetres (curly hair has more volume); a constant height everywhere
 /// reads as a helmet or a fur hat. Other styles stand off evenly.
 fn loft_at(a: &Appearance, g: &Groom, d: Vec3) -> f32 {
-    if a.hair_style() != HairStyle::Short {
+    if g.style != HairStyle::Short {
         return g.loft;
     }
     let curl = a.hair.curl.clamp(0.0, 1.0);
@@ -1914,8 +2067,8 @@ fn loft_at(a: &Appearance, g: &Groom, d: Vec3) -> f32 {
 
 /// Short hair's tips tuck in under the hair beyond them, as shingles lie (the hair's surface
 /// is its mid-lengths, not a pile of tips).
-fn tuck(a: &Appearance, t: f32) -> f32 {
-    if a.hair_style() == HairStyle::Short {
+fn tuck(g: &Groom, t: f32) -> f32 {
+    if g.style == HairStyle::Short {
         1.0 - 0.35 * smoothstep(0.7, 1.0, t)
     } else {
         1.0
@@ -1982,7 +2135,7 @@ fn grow_hair(
     let d = sp.rest - rest.head;
     let side = if d.x > PART_X { 1.0 } else { -1.0 };
     let crown = Vec3::new(0.012, 0.085, -0.055);
-    let flow = match a.hair_style() {
+    let flow = match g.style {
         HairStyle::Buzz | HairStyle::Short => {
             // Away from the crown whorl, front hair swept back and toward the part's far side.
             let from_crown = Vec3::new(d.x - crown.x, 0.0, d.z - crown.z);
@@ -2017,9 +2170,9 @@ fn grow_hair(
             // Pulled toward the bun at the back of the head.
             (g.bun - d).normalize_or(Vec3::NEG_Z)
         }
-        HairStyle::Bald => Vec3::NEG_Y,
+        HairStyle::Bald | HairStyle::HalfUp | HairStyle::Ponytail => Vec3::NEG_Y,
     };
-    let len = g.length * length_scale * cut_length(a, d);
+    let len = g.length * length_scale * cut_length(g, d);
     let seg = len / (n - 1) as f32;
     let mut pts = Vec::with_capacity(n);
     pts.push(sp.p);
@@ -2027,7 +2180,7 @@ fn grow_hair(
     // a thin line).
     // Next to the part, hair lifts off the scalp before falling over it, so the part stays
     // narrow instead of opening into a bare strip.
-    let near_part = if matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long) {
+    let near_part = if g.parted {
         (1.0 - ((d.x - PART_X).abs() / 0.025)).clamp(0.0, 1.0)
             * ((d.y - 0.03) / 0.03).clamp(0.0, 1.0)
             // Not at the front hairline, where lifted hair would fall onto the forehead.
@@ -2039,11 +2192,11 @@ fn grow_hair(
     // Long hair lifts off the crown a little before it falls (volume at the roots).
     let mut rise = if g.gravity > 0.5 { 0.26 } else { 0.24 } + 0.4 * near_part;
     let mut along = tangent(flow, sp.n);
-    if matches!(a.hair_style(), HairStyle::Buzz | HairStyle::Short) {
+    if matches!(g.style, HairStyle::Buzz | HairStyle::Short) {
         // Coily hair isn't combed flat: it stands up and points every way. Short hair that is
         // only wavy or curly is still combed and set (each hair pointing its own way made a
         // frizz like fur), lifting more on top, where a set cut has its volume.
-        let coily = if a.hair_style() == HairStyle::Buzz {
+        let coily = if g.style == HairStyle::Buzz {
             curl
         } else {
             smoothstep(0.6, 1.0, curl)
@@ -2065,7 +2218,7 @@ fn grow_hair(
     // (Short hair lies on its set shape: nearly the same height for every hair.)
     // (Hanging hair in a band of heights: from 0.4 the hairs lay at depths a centimetre apart,
     // and seen down the curve of the head the layers crossed each other like straw.)
-    let lift = if a.hair_style() == HairStyle::Short {
+    let lift = if g.style == HairStyle::Short {
         r.range(0.85, 1.0)
     } else if g.gravity > 0.5 {
         // (...and in the order of their roots: hair from the top of the head lies over hair
@@ -2082,7 +2235,7 @@ fn grow_hair(
         let t = k as f32 / (n - 1) as f32;
         let p_prev = pts[k - 1];
         let next_dir;
-        if a.hair_style() == HairStyle::Bun {
+        if g.style == HairStyle::Bun {
             // Along the scalp toward the bun, then wound around it.
             let to_bun = bun_center - p_prev;
             if to_bun.length() < 0.045 {
@@ -2113,13 +2266,520 @@ fn grow_hair(
         if g.gravity > 0.5 {
             p = keep_off_face(p, &mut face_side, jitter, pts[0], lm, FACE_TO_CHEST);
         }
-        let offset = 0.0008 + loft * (t / 0.4).min(1.0) * lift * tuck(a, t);
+        let offset = 0.0008 + loft * (t / 0.4).min(1.0) * lift * tuck(g, t);
         p = collider.push_out(p, offset);
         // Hair that fell past the shoulders hangs straight on.
         dir = (p - p_prev).normalize_or(next_dir);
         pts.push(p);
     }
     pts
+}
+
+/// Where the knot of a half-up style sits, as a direction from the head's center (rest): on
+/// the upper back of the crown, as gta-hair-sim's topknot does.
+const KNOT_TOWARD: Vec3 = Vec3::new(0.0, 0.9, -0.43);
+/// How far along the way to the tie the hairs of the hairline reach at least, and the share
+/// of gathered hairs that are short ones growing back, standing a little off the rest.
+const GATHERED_HAIRLINE: f32 = 0.45;
+const GATHERED_SHORT: f32 = 0.03;
+/// The band along a gathered style's hairline over which the hair comes to its full density
+/// and its hairs to their full length and width (m), and the share of the hairs at its very
+/// edge that are baby hairs: too short to reach the tie, they lie on the skin in curls of
+/// their own. Without them the combed hair draws its hairline across the skin as a ruled
+/// edge, as a wig's.
+const GATHERED_EDGE: f32 = 0.013;
+const GATHERED_BABY: f32 = 0.7;
+
+/// Where gathered hair is tied (model space).
+struct Tie {
+    /// The scalp under the tie.
+    seat: Vec3,
+    /// Out of the head there, across the head, and back along it (orthonormal).
+    up: Vec3,
+    right: Vec3,
+    back: Vec3,
+}
+
+impl Tie {
+    /// The tie on the scalp where `toward` (from the head's center, rest) leaves the head.
+    fn new(skin: &SkinMesh, lm: &Landmarks, rest: &Landmarks, toward: Vec3) -> Option<Self> {
+        let toward = toward.normalize();
+        let scalp = Mask::Scalp as usize;
+        let (i, _) = skin
+            .rest
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| skin.masks[i * MASKS + scalp] > 0.5)
+            .map(|(i, r)| (i, (*r - rest.head).normalize_or(Vec3::NEG_Y).dot(toward)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        let seat = skin.positions[i];
+        // (Between the skin's normal and the way out from the head's center: one vertex's
+        // normal alone tips the whole knot with a bump of the skull.)
+        let up = (skin.normals[i] + (seat - lm.head).normalize_or(Vec3::Y)).normalize_or(Vec3::Y);
+        let right = (Vec3::X - up * up.x).normalize_or(Vec3::X);
+        Some(Self {
+            seat,
+            up,
+            right,
+            back: up.cross(right),
+        })
+    }
+}
+
+/// `n` points evenly along the first `share` of the length of `path`.
+fn resample(path: &[Vec3], share: f32, n: usize) -> Vec<Vec3> {
+    let len = len_of(path) * share.clamp(0.0, 1.0);
+    let mut out = Vec::with_capacity(n);
+    let (mut k, mut walked) = (0, 0.0);
+    for i in 0..n {
+        let want = len * i as f32 / (n - 1).max(1) as f32;
+        while k + 2 < path.len() && walked + (path[k + 1] - path[k]).length() < want {
+            walked += (path[k + 1] - path[k]).length();
+            k += 1;
+        }
+        let seg = (path[k + 1] - path[k]).length().max(1e-6);
+        out.push(path[k].lerp(path[k + 1], ((want - walked) / seg).clamp(0.0, 1.0)));
+    }
+    out
+}
+
+/// A hair combed flat over the head from `root` to the tie: along the scalp toward it, a
+/// little higher off the scalp the nearer it comes (the hair from farther off lies under it),
+/// then up off the scalp and into the tie's middle, `enter` to the side of it.
+fn comb_to(tie: &Tie, root: Vec3, enter: Vec3, collider: &SkinCollider) -> Vec<Vec3> {
+    const STEP: f32 = 0.004;
+    let edge = tie.seat + tie.up * 0.004 + enter;
+    let core = tie.seat + tie.up * 0.021 + enter * 0.55;
+    let from = (edge - root).length().max(STEP);
+    let mut path = vec![root];
+    let (mut p, mut n) = collider.lay(root, 0.0008);
+    for _ in 0..(3.0 * from / STEP) as usize + 8 {
+        let to = edge - p;
+        let dist = to.length();
+        if dist < 2.5 * STEP {
+            break;
+        }
+        let u = 1.0 - dist / from;
+        let loft = 0.0008 + 0.0042 * smoothstep(0.18, 0.92, u).powi(2);
+        (p, n) = collider.lay(p + tangent(to, n) * STEP, loft);
+        path.push(p);
+    }
+    path.push(edge);
+    path.push(core);
+    path
+}
+
+/// A baby hair of `n` points at `root`: a centimetre or two long, it starts the way the hair
+/// is combed (`toward`) or off to a side of it, lies on the skin and curls.
+fn baby_hair(
+    toward: Vec3,
+    root: Vec3,
+    n: usize,
+    collider: &SkinCollider,
+    r: &mut Rng,
+) -> Vec<Vec3> {
+    let step = r.range(0.005, 0.018) / (n - 1) as f32;
+    let lift = r.range(0.0004, 0.003);
+    let (mut p, mut normal) = collider.lay(root, 0.0003);
+    let turned = r.range(-1.0, 1.0) * r.range(0.4, 2.0);
+    let mut dir = Quat::from_axis_angle(normal, turned) * tangent(toward - p, normal);
+    // (Radians a metre: curls 6 to 20 mm across, either way.)
+    let curl = r.range(-1.0, 1.0) / r.range(0.006, 0.02);
+    let mut pts = vec![root];
+    for k in 1..n {
+        dir = Quat::from_axis_angle(normal, curl * step) * dir;
+        let height = 0.0003 + lift * k as f32 / (n - 1) as f32;
+        (p, normal) = collider.lay(p + tangent(dir, normal) * step, height);
+        pts.push(p);
+    }
+    pts
+}
+
+/// Hair gathered sleek to a tie: every hair of `region` combed flat over the scalp from its
+/// root into the tie, as gta-hair-sim lays the crown of its pulled-back styles. It holds its
+/// shape: no guides, and it follows none of the set's.
+fn grow_gathered(
+    set: &mut StrandSet,
+    a: &Appearance,
+    tie: &Tie,
+    region: Region,
+    skin: &SkinMesh,
+    collider: &SkinCollider,
+    rest: &Landmarks,
+) {
+    let head = rest.head;
+    let ragged = RaggedHairline::new(a.seed, a.hair.recession.clamp(0.0, 1.0));
+    let sampler = Sampler::new(skin, Mask::Scalp, |rest, m| {
+        let d = rest - head;
+        let edge = (ragged.inside(d) / GATHERED_EDGE).clamp(0.0, 1.0);
+        m * m * edge * region.share(d)
+    });
+    let total = (sampler.total() * 1e4 * BUNCHED_DENSITY * 190.0) as usize;
+    let n = set.points_per as usize;
+    let follows = !set.follow.is_empty();
+    let mut r = Rng::new(a.seed ^ 0x71ED);
+    for _ in 0..total {
+        let Some(sp) = sampler.sample(&mut r) else {
+            break;
+        };
+        let d = sp.rest - head;
+        let fine = (ragged.inside(d) / GATHERED_EDGE).clamp(0.0, 1.0);
+        if r.f32() < GATHERED_BABY * (1.0 - fine) {
+            let pts = baby_hair(tie.seat, sp.p, n, collider, &mut r);
+            let radius = BUNCHED_RADIUS * HAIR_WIDTH * r.range(0.22, 0.34);
+            set.push_sleek(&pts, radius, r.f32(), 0.2, true);
+            let at = set.attrs.len();
+            for attr in &mut set.attrs[at - n..] {
+                attr[3] = 1.0;
+            }
+            if follows {
+                set.follow.push(Follow::NONE);
+            }
+            continue;
+        }
+        let aside = sp.p - tie.seat;
+        let aside = (aside - tie.up * aside.dot(tie.up)).normalize_or(tie.right);
+        let path = comb_to(tie, sp.p, aside * r.range(0.004, 0.016), collider);
+        // The hairs of the hairline are short and fine and end on the way, and a few
+        // everywhere are short ones growing back, which stand a little off the combed hair.
+        let short = fine >= 1.0 && r.f32() < GATHERED_SHORT;
+        let share = if short {
+            r.range(0.15, 0.5)
+        } else if fine < 1.0 {
+            (GATHERED_HAIRLINE + (1.0 - GATHERED_HAIRLINE) * fine) * r.range(0.8, 1.0)
+        } else {
+            1.0
+        };
+        let mut pts = resample(&path, share, n);
+        let last = n - 1;
+        // No two hairs lie quite alike: each wanders a millimetre off its line.
+        let side = (pts[last] - pts[0]).cross(sp.n).normalize_or(Vec3::X);
+        let (wander, phase) = (r.range(0.0004, 0.0012), r.range(0.0, std::f32::consts::TAU));
+        let lift = if short { r.range(0.002, 0.006) } else { 0.0 };
+        for (k, p) in pts.iter_mut().enumerate().skip(1) {
+            let t = k as f32 / last as f32;
+            *p += side * (wander * (phase + t * 9.0).sin() * (t * 4.0).min(1.0))
+                + sp.n * (lift * t * t);
+        }
+        for _ in 0..SMOOTH_PASSES {
+            let before = pts.clone();
+            for k in 1..last {
+                pts[k] = before[k] * 0.5 + (before[k - 1] + before[k + 1]) * 0.25;
+            }
+        }
+        for p in pts.iter_mut().skip(1) {
+            *p = collider.push_out(*p, 0.0006);
+        }
+        // (Finer at the hairline than hanging hair's: lying back flat from the forehead, hairs
+        // half as wide as the rest stood along it like the bristles of a brush.)
+        let thin = 0.3 + 0.7 * fine;
+        let wide = r.range(1.0 - BUNCHED_VARIES, 1.0 + BUNCHED_VARIES);
+        let end = if share < 1.0 { 0.25 } else { 0.7 };
+        let radius = BUNCHED_RADIUS * HAIR_WIDTH * thin * wide * if short { 0.6 } else { 1.0 };
+        set.push_sleek(&pts, radius, r.f32(), end, true);
+        let at = set.attrs.len();
+        for attr in &mut set.attrs[at - n..] {
+            attr[3] = 1.0 - fine;
+        }
+        if follows {
+            set.follow.push(Follow::NONE);
+        }
+    }
+}
+
+/// The knot gathered hair is wound into, on the tie: a band of hair wrapped round its foot
+/// and ribbons of hair coiled round a rounded dome, in shells from a dense core to the
+/// surface. The measures are gta-hair-sim's topknot (a band of 48 locks, 12 ribbons in 18
+/// shells; about 9 cm wide, 8.5 deep and 5.5 tall).
+fn grow_knot(set: &mut StrandSet, a: &Appearance, tie: &Tie, collider: &SkinCollider) {
+    use std::f32::consts::TAU;
+    const BAND_HAIRS: usize = 20;
+    const RIBBON_HAIRS: usize = 24;
+    let n = set.points_per as usize;
+    let last = (n - 1) as f32;
+    let follows = !set.follow.is_empty();
+    let mut r = Rng::new(a.seed ^ 0xB0A7);
+    let center = tie.seat + tie.up * 0.006;
+    let dome = center + tie.up * 0.011 + tie.right * 0.003 - tie.back * 0.004;
+    // A lock's middle line, the way out of the knot at each point of it, how deep in the knot
+    // it lies (0 core .. 1 surface) and how many hairs it has.
+    let mut locks: Vec<(Vec<Vec3>, Vec<Vec3>, f32, usize)> = Vec::new();
+    for g in 0..48 {
+        let start = g as f32 / 48.0 * TAU + r.range(-0.06, 0.06);
+        let turns = r.range(1.15, 1.45);
+        let h0 = r.range(-0.014, 0.001);
+        let h1 = h0 + r.range(-0.003, 0.005);
+        let (rx, rz) = (r.range(0.036, 0.043), r.range(0.033, 0.040));
+        let mut line = Vec::with_capacity(n);
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let t = k as f32 / last;
+            let around = start + t * turns * TAU;
+            let h = h0 + (h1 - h0) * t + 0.0016 * (around * 2.0).sin();
+            let radial = tie.right * around.cos() + tie.back * around.sin();
+            line.push(
+                center
+                    + tie.up * h
+                    + tie.right * (around.cos() * rx)
+                    + tie.back * (around.sin() * rz),
+            );
+            out.push(radial);
+        }
+        locks.push((line, out, 1.0, BAND_HAIRS));
+    }
+    for g in 0..216 {
+        let rope = g % 12;
+        let shell = ((g / 12) as f32 + 0.5) / 18.0;
+        let scale = 0.52 + 0.52 * shell.powf(0.75);
+        // A knot is hair twisted into a rope and coiled: every ribbon runs round the dome the
+        // same way, climbing a little, the ones higher up in smaller rings, to a swirl on
+        // top. (Each up over the top and back under at its own slant, as the reference lays
+        // them, the hairs at the surface crossed each other like wicker.)
+        let turns = r.range(1.0, 1.35);
+        let from = -0.42 + (rope as f32 + r.range(0.1, 0.9)) / 12.0 * 1.8;
+        let climb = r.range(0.12, 0.3);
+        let start = r.range(0.0, TAU);
+        let twists = r.range(1.2, 2.0);
+        let twist = r.range(0.002, 0.0045) * shell;
+        let phase = r.range(0.0, TAU);
+        let (rx, ry, rz) = (0.047 * scale, 0.032 * scale, 0.043 * scale);
+        let mut line = Vec::with_capacity(n);
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let t = k as f32 / last;
+            let around = start + t * turns * TAU;
+            let lat = (from + climb * (t - 0.5)).min(1.5);
+            let (c, s) = (lat.cos(), lat.sin());
+            let radial =
+                (tie.right * (around.cos() * c) + tie.back * (around.sin() * c) + tie.up * s)
+                    .normalize_or(tie.up);
+            let across = radial.cross(tie.up).normalize_or(tie.right);
+            let wind = t * twists * TAU + phase;
+            line.push(
+                dome + tie.right * (around.cos() * c * rx)
+                    + tie.back * (around.sin() * c * rz)
+                    + tie.up * (s * ry)
+                    + radial * (wind.cos() * twist)
+                    + across.cross(radial) * (wind.sin() * twist),
+            );
+            out.push(radial);
+        }
+        // (Most of the hair is at the surface, where it shows.)
+        locks.push((
+            line,
+            out,
+            shell,
+            6 + (RIBBON_HAIRS as f32 * 1.4 * shell) as usize,
+        ));
+    }
+    for (line, out, shell, hairs) in &locks {
+        for _ in 0..*hairs {
+            // A ribbon of hair: wide along the knot's surface, thin through it.
+            let (deep, aside) = (r.normal() * 0.0012, r.normal() * 0.0035);
+            let (wander, phase) = (r.range(0.0003, 0.001), r.range(0.0, TAU));
+            let mut pts = Vec::with_capacity(n);
+            for k in 0..n {
+                let along =
+                    (line[(k + 1).min(n - 1)] - line[k.saturating_sub(1)]).normalize_or(Vec3::X);
+                let side = along.cross(out[k]).normalize_or(Vec3::X);
+                let t = k as f32 / last;
+                let p = line[k]
+                    + out[k] * (deep + wander * (phase + t * 14.0).sin())
+                    + side * (aside + wander * (phase * 1.7 + t * 11.0).cos());
+                pts.push(collider.push_out(p, 0.002));
+            }
+            let wide = r.range(1.0 - BUNCHED_VARIES, 1.0 + BUNCHED_VARIES);
+            set.push_sleek(
+                &pts,
+                BUNCHED_RADIUS * HAIR_WIDTH * wide,
+                r.f32(),
+                0.5,
+                false,
+            );
+            let at = set.attrs.len();
+            for attr in &mut set.attrs[at - n..] {
+                // (No root to sit in the shadow of; the knot's inside is dark.)
+                attr[0] = 0.55 + 0.45 * shell;
+                attr[3] = 1.0;
+            }
+            if follows {
+                set.follow.push(Follow::NONE);
+            }
+        }
+    }
+}
+
+/// Where a ponytail is tied, as a direction from the head's center (rest): high on the back
+/// of the crown, a little lower than a topknot (gta-hair-sim's high ponytail).
+const TAIL_TOWARD: Vec3 = Vec3::new(0.0, 0.84, -0.54);
+/// Guides of a ponytail's tail (the simulation moves them) and its drawn strands.
+const TAIL_GUIDES: usize = 48;
+const TAIL_STRANDS: f32 = 30_000.0 * BUNCHED_DENSITY;
+
+/// The tail of a ponytail: hair leaving the tie in a round bundle, arching up and back out of
+/// it and falling behind the head, fanning out and waving as it goes (gta-hair-sim's curve:
+/// 5 cm up and 9.5 cm back; two thirds of its fan, which spread the tail as wide as the
+/// back). It moves: its guides are the set's.
+fn grow_tail(set: &mut StrandSet, a: &Appearance, tie: &Tie, collider: &SkinCollider) {
+    use std::f32::consts::{PI, TAU};
+    let n = set.points_per as usize;
+    let last = (n - 1) as f32;
+    let length = 0.42 * a.hair.length.clamp(0.5, 1.5);
+    let curl = a.hair.curl.clamp(0.0, 1.0);
+    let from = tie.seat + tie.up * 0.02;
+    let mut r = Rng::new(a.seed ^ 0x7A11);
+    // A lock of the tail from where it leaves the tie (an angle round it and a distance
+    // from its middle).
+    let lock = |angle: f32, ring: f32, r: &mut Rng| -> Vec<Vec3> {
+        let root = from + tie.right * (angle.cos() * ring) + tie.back * (angle.sin() * ring);
+        let len = length * r.range(0.85, 1.1);
+        let spread = r.range(0.012, 0.04) * ring / 0.018;
+        let wave = (0.004 + 0.02 * curl) * r.range(0.7, 1.3);
+        let phase = angle * 1.7 + r.range(-0.25, 0.25);
+        let raw: Vec<Vec3> = (0..=40)
+            .map(|k| {
+                let t = k as f32 / 40.0;
+                let turn = t * 2.1 * TAU + phase;
+                let swell = smoothstep(0.2, 0.9, t);
+                let p = root
+                    + Vec3::new(
+                        angle.cos() * spread * smoothstep(0.08, 0.85, t)
+                            + turn.sin() * wave * swell,
+                        0.052 * (t * PI * 0.72).sin() - len * t.powf(1.3),
+                        -0.095 * t.powf(0.62) - 0.03 * angle.sin() * smoothstep(0.0, 0.7, t)
+                            + turn.cos() * wave * 0.5 * swell,
+                    );
+                if k == 0 {
+                    p
+                } else {
+                    collider.push_out(p, 0.008)
+                }
+            })
+            .collect();
+        resample(&raw, 1.0, n)
+    };
+    let mut guides: Vec<(SkinPoint, Vec<Vec3>)> = Vec::with_capacity(TAIL_GUIDES);
+    for g in 0..TAIL_GUIDES {
+        let angle = g as f32 * 2.399_963 + r.range(-0.1, 0.1);
+        let ring = 0.017 * ((g as f32 + 0.5) / TAIL_GUIDES as f32).sqrt();
+        let pts = lock(angle, ring, &mut r);
+        let root = SkinPoint {
+            p: pts[0],
+            n: tie.up,
+            rest: pts[0],
+            mask: 1.0,
+        };
+        guides.push((root, pts));
+    }
+    let grid = GuideGrid::new(&guides);
+    for _ in 0..TAIL_STRANDS as usize {
+        let angle = r.range(0.0, TAU);
+        let ring = 0.018 * r.f32().sqrt();
+        let root = from + tie.right * (angle.cos() * ring) + tie.back * (angle.sin() * ring);
+        let follow = grid.follow(root, &guides, |_| true);
+        // The hair lies with the locks it moves with, as far from them as it is rooted and
+        // farther toward its end, where the tail fans out.
+        let loose = r.f32() < STRAYS;
+        let own = r.range(0.75, 1.0);
+        let off = {
+            let mut at = Vec3::ZERO;
+            for (g, w) in follow.guides.iter().zip(follow.weights) {
+                if *g != u32::MAX {
+                    at += guides[*g as usize].1[0] * w;
+                }
+            }
+            root - at
+        };
+        let end =
+            Vec3::new(r.normal(), r.normal() * 0.3, r.normal()) * if loose { 0.016 } else { 0.008 };
+        let across = Vec3::new(r.normal(), 0.0, r.normal()).normalize_or(Vec3::X);
+        let (wave, waves, phase) = (
+            CHILD_WAVE * r.range(0.6, 1.4) * if loose { r.range(1.35, 2.25) } else { 1.0 },
+            2.35 * r.range(0.85, 1.2),
+            r.range(0.0, TAU),
+        );
+        let mut pts = Vec::with_capacity(n);
+        for k in 0..n {
+            let t = k as f32 / last;
+            let mut center = Vec3::ZERO;
+            for (g, w) in follow.guides.iter().zip(follow.weights) {
+                if *g != u32::MAX {
+                    center += along(&guides[*g as usize].1, t * own) * w;
+                }
+            }
+            let p = center
+                + off * (1.0 + 0.8 * smoothstep(0.1, 0.9, t))
+                + end * smoothstep(0.5, 1.0, t)
+                + across * (wave * smoothstep(0.1, 0.45, t) * (phase + t * waves * TAU).sin());
+            pts.push(if k == 0 {
+                p
+            } else {
+                collider.push_out(p, 0.004)
+            });
+        }
+        let wide = if loose {
+            r.range(0.52, 0.78)
+        } else {
+            r.range(1.0 - BUNCHED_VARIES, 1.0 + BUNCHED_VARIES)
+        };
+        set.push_bunched_from(&pts, BUNCHED_RADIUS * HAIR_WIDTH * wide, r.f32(), false);
+        let at = set.attrs.len();
+        for attr in &mut set.attrs[at - n..] {
+            // (No scalp at its start to sit in the shadow of.)
+            attr[3] = 1.0;
+        }
+        set.follow.push(follow);
+    }
+    // (One tie: the simulation keeps its guides together.)
+    set.tied = vec![1; guides.len()];
+    set.guides = guides.into_iter().flat_map(|(_, pts)| pts).collect();
+}
+
+/// The band a ponytail is tied with: hair wrapped round the tail where it leaves the head
+/// (gta-hair-sim's: 48 locks, about 4 cm across).
+fn grow_band(set: &mut StrandSet, a: &Appearance, tie: &Tie, collider: &SkinCollider) {
+    use std::f32::consts::TAU;
+    const HAIRS: usize = 14;
+    let n = set.points_per as usize;
+    let last = (n - 1) as f32;
+    let follows = !set.follow.is_empty();
+    let center = tie.seat + tie.up * 0.014;
+    let mut r = Rng::new(a.seed ^ 0xBA2D);
+    for g in 0..48 {
+        let start = g as f32 / 48.0 * TAU + r.range(-0.06, 0.06);
+        let turns = r.range(1.1, 1.4);
+        let h0 = r.range(-0.008, 0.010);
+        let ring = r.range(0.019, 0.023);
+        for _ in 0..HAIRS {
+            let (out, up) = (r.normal() * 0.001, r.normal() * 0.0025);
+            let pts: Vec<Vec3> = (0..n)
+                .map(|k| {
+                    let t = k as f32 / last;
+                    let around = start + t * turns * TAU;
+                    let radial = tie.right * around.cos() + tie.back * around.sin();
+                    collider.push_out(
+                        center + tie.up * (h0 + 0.004 * t + up) + radial * (ring + out),
+                        0.002,
+                    )
+                })
+                .collect();
+            let wide = r.range(1.0 - BUNCHED_VARIES, 1.0 + BUNCHED_VARIES);
+            set.push_sleek(
+                &pts,
+                BUNCHED_RADIUS * HAIR_WIDTH * wide,
+                r.f32(),
+                0.5,
+                false,
+            );
+            let at = set.attrs.len();
+            for attr in &mut set.attrs[at - n..] {
+                attr[3] = 1.0;
+            }
+            if follows {
+                set.follow.push(Follow::NONE);
+            }
+        }
+    }
 }
 
 /// Where a bun sits (from the head's center, rest space): on the back of the skull, high on

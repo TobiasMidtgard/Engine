@@ -80,12 +80,29 @@ pub fn locks(set: &StrandSet) -> Option<HairLocks> {
     let guided = set.follow.len() == hairs && !set.guides.is_empty();
     let clusters = if guided {
         let mut by_guide: HashMap<u32, Vec<u32>> = HashMap::new();
+        // Hair of a set that moves which itself follows no guide (combed into a tie, wound in
+        // a knot) gathers by its roots, as hair without guides does: as one lock "of no
+        // guide" it was all the gathered hair of a head in a few slabs.
+        let mut held = Vec::new();
         for (h, f) in set.follow.iter().enumerate() {
-            by_guide.entry(f.guides[0]).or_default().push(h as u32);
+            if f.guides[0] == u32::MAX {
+                held.push(h as u32);
+            } else {
+                by_guide.entry(f.guides[0]).or_default().push(h as u32);
+            }
         }
         let mut c: Vec<(u32, Vec<u32>)> = by_guide.into_iter().collect();
         c.sort_by_key(|(g, _)| *g);
-        c.into_iter().map(|(_, m)| m).collect()
+        let mut c: Vec<Vec<u32>> = c.into_iter().map(|(_, m)| m).collect();
+        if !held.is_empty() {
+            let roots: Vec<Vec3> = held.iter().map(|h| at(*h as usize, 0)).collect();
+            c.extend(
+                grid_clusters(&roots)
+                    .into_iter()
+                    .map(|m| m.into_iter().map(|i| held[i as usize]).collect()),
+            );
+        }
+        c
     } else {
         grid_clusters(&(0..hairs).map(|h| at(h, 0)).collect::<Vec<_>>())
     };

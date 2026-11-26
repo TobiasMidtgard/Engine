@@ -98,7 +98,7 @@ pub fn hair_guides(
             points,
             normal: palette[a.0].transform_vector3(n).normalize_or(Vec3::Y),
             thickness: LOCK_THICKNESS,
-            tie: 0,
+            tie: set.tied.get(g).copied().unwrap_or(0),
         });
     }
     Some(HairGuides {

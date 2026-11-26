@@ -65,6 +65,13 @@ pub const READS_FROM: f32 = 0.25;
 const REFINED: usize = 2;
 /// A bone that carries this much of the skin carries it all: no other is asked.
 const CARRIES_ALL: f32 = 0.98;
+/// How far a segment's grown direction follows the turn of the segment before it from how
+/// that was grown (the source's 70%); the rest it holds against the head. The bend this
+/// makes between two segments turns both: the source turns only the lower one, a pull with
+/// no pull back, and a lock hanging clear of the body and of the other hair drew a swing out
+/// of it that never died (one lock at the nape of a half-up style, a centimeter and a half
+/// each way for as long as it was watched).
+const FOLLOWS: f32 = 0.70;
 /// A strand none of whose points moves faster than [`RESTFUL`] (m/s, against the head) for
 /// this long, s, sleeps: it rides its bone until the body or the air moves. The pull to the
 /// grown shape acts on positions and holds no energy, so a lock lying on a shoulder creeps
@@ -109,6 +116,15 @@ pub const SHED_SECS: f32 = 4.0;
 const PIECE_DRAG: f32 = 6.5;
 /// A piece cut off slides on what it lies on less by this times how far it was pressed in.
 const PIECE_RUBS: f32 = 0.6;
+
+/// How far a tied strand's point may come from the middle of its tie's strands at that point,
+/// beyond where it was grown from it: at the root, and that much more by the tip (m).
+const TIED_SLACK: [f32; 2] = [0.006, 0.07];
+/// The share of the way back within that reach a point is brought in a step.
+const TIED_HOLDS: f32 = 0.5;
+/// How much of its tie's velocity a point takes on in 1/60 s, at the root and at the tip: the
+/// hairs of a tail rub on each other.
+const TIED_RUBS: [f32; 2] = [0.25, 0.06];
 
 /// Tuning (the source project's `SimConfig` defaults).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -632,6 +648,10 @@ pub struct Tress {
     still: Vec<f32>,
     /// Every frame against the head, and the head's turn, when the body last moved.
     held_at: Vec<(Vec3, Quat)>,
+    /// The strands of each tie ([`Tress::tie`]).
+    ties: Vec<Vec<u32>>,
+    /// Per particle of a tied strand: how far from the middle of its tie it was grown, m.
+    girth: Vec<f32>,
 }
 
 impl Default for TressStrand {
@@ -1119,6 +1139,150 @@ impl Tress {
         true
     }
 
+    /// Ties hair together: `of` names each strand's tie (0: it grows free), as a ponytail's
+    /// strands leave its tie together; `pos` is the hair as grown (the particles as built).
+    /// Tied hair keeps together ([`Tress::step`]): no strand of it comes far from the others,
+    /// and they rub on each other. Stepped each by itself, one lock of a tail the neck held
+    /// back in a head shake lay round the throat and then whipped out level, a rod beside
+    /// the tail.
+    pub fn tie(&mut self, pos: &[Vec3], of: &[u16]) {
+        self.ties.clear();
+        self.girth.clear();
+        self.girth.resize(self.verts.len(), 0.0);
+        let mut named: Vec<(u16, Vec<u32>)> = Vec::new();
+        for (s, tie) in of.iter().enumerate().take(self.strands.len()) {
+            if *tie == 0 {
+                continue;
+            }
+            match named.iter_mut().find(|(name, _)| name == tie) {
+                Some((_, strands)) => strands.push(s as u32),
+                None => named.push((*tie, vec![s as u32])),
+            }
+        }
+        // (A tie of one or two strands has no middle to keep to.)
+        self.ties.extend(
+            named
+                .into_iter()
+                .map(|(_, strands)| strands)
+                .filter(|t| t.len() >= 3),
+        );
+        for tie in &self.ties {
+            let longest = tie
+                .iter()
+                .map(|s| self.strands[*s as usize].count)
+                .max()
+                .unwrap_or(0);
+            for i in 0..longest {
+                let at = tie
+                    .iter()
+                    .map(|s| self.strands[*s as usize])
+                    .filter(|s| i < s.count)
+                    .map(|s| (s.first + i) as usize);
+                let (sum, among) = at
+                    .clone()
+                    .filter_map(|p| pos.get(p))
+                    .fold((Vec3::ZERO, 0.0), |(sum, n), p| (sum + *p, n + 1.0));
+                for p in at {
+                    if let (Some(girth), Some(grown)) = (self.girth.get_mut(p), pos.get(p)) {
+                        *girth = grown.distance(sum / among);
+                    }
+                }
+            }
+        }
+    }
+
+    /// How many ties the hair has ([`Tress::tie`]).
+    pub fn ties(&self) -> usize {
+        self.ties.len()
+    }
+
+    /// Tied hair keeps together: after a step, each point of a tied strand takes on some of
+    /// the velocity its tie's strands have at that point, and one that has come further from
+    /// their middle than it was grown (and some slack, more by the tip) is brought back.
+    fn keep_tied(&mut self, sim: &mut Sim, dt: f32) {
+        if self.girth.len() != self.verts.len() {
+            return;
+        }
+        let steps = dt * 60.0;
+        let ties = std::mem::take(&mut self.ties);
+        let mut brought = Vec::new();
+        for tie in &ties {
+            // (Of a strand cut through, what is left on the head.)
+            let whole = |s: u32| {
+                let strand = self.strands[s as usize];
+                match self.cuts.get(s as usize) {
+                    Some(cut) if cut.at != 0 => (strand.first, strand.count.min(cut.at as u32)),
+                    _ => (strand.first, strand.count),
+                }
+            };
+            let longest = tie.iter().map(|s| whole(*s).1).max().unwrap_or(0);
+            for i in 1..longest {
+                let at = tie
+                    .iter()
+                    .map(|s| (*s as usize, whole(*s)))
+                    .filter(|(_, (_, count))| i < *count)
+                    .map(|(s, (first, _))| (s, (first + i) as usize));
+                let (mut middle, mut moves, mut among) = (Vec3::ZERO, Vec3::ZERO, 0.0);
+                for (_, p) in at.clone() {
+                    middle += sim.pos[p];
+                    moves += sim.vel[p];
+                    among += 1.0;
+                }
+                if among < 3.0 {
+                    continue;
+                }
+                (middle, moves) = (middle / among, moves / among);
+                for (s, p) in at {
+                    let t = self.verts[p].t;
+                    let off = sim.pos[p] - middle;
+                    let far = off.length();
+                    let reach = self.girth[p] + TIED_SLACK[0] + TIED_SLACK[1] * t;
+                    let asleep = self
+                        .still
+                        .get(s)
+                        .is_some_and(|still| *still >= SLEEPS_AFTER);
+                    if far > reach {
+                        let out = off / far;
+                        sim.pos[p] -=
+                            out * ((far - reach) * (1.0 - (1.0 - TIED_HOLDS).powf(steps)));
+                        let leaving = (sim.vel[p] - moves).dot(out);
+                        if leaving > 0.0 {
+                            sim.vel[p] -= out * leaving;
+                        }
+                        if let Some(still) = self.still.get_mut(s) {
+                            *still = 0.0;
+                        }
+                        if brought.last() != Some(&s) && !brought.contains(&s) {
+                            brought.push(s);
+                        }
+                    } else if asleep {
+                        continue;
+                    }
+                    let rubs = TIED_RUBS[0] + (TIED_RUBS[1] - TIED_RUBS[0]) * t;
+                    let own = sim.vel[p];
+                    sim.vel[p] = own + (moves - own) * (1.0 - (1.0 - rubs).powf(steps));
+                }
+            }
+        }
+        self.ties = ties;
+        // A strand brought back keeps its length: each point as far from the one before as
+        // it was grown, from the root down.
+        for s in brought {
+            let strand = self.strands[s];
+            let count = match self.cuts.get(s) {
+                Some(cut) if cut.at != 0 => strand.count.min(cut.at as u32),
+                _ => strand.count,
+            };
+            for p in strand.first as usize + 1..(strand.first + count) as usize {
+                let along = sim.pos[p] - sim.pos[p - 1];
+                let len = along.length();
+                if len > 1e-6 {
+                    sim.pos[p] = sim.pos[p - 1] + along * (self.verts[p].rest_len / len);
+                }
+            }
+        }
+    }
+
     /// Strand `strand` was moved from outside: it no longer sleeps.
     pub fn wake(&mut self, strand: usize) {
         if let Some(still) = self.still.get_mut(strand) {
@@ -1408,6 +1572,7 @@ impl Tress {
                 }
             }
         }
+        self.keep_tied(sim, dt);
     }
 }
 
@@ -2033,6 +2198,7 @@ impl Step<'_> {
         let seg = (1..n).map(|i| held[i].edge.length()).sum::<f32>() / (n - 1) as f32;
         let inner = cfg.inner_friction.max(0.0) * (1.0 + WET_GATHERS * wet_mean) * h
             / (seg * seg).max(1e-8);
+        let mut fastest = 0.0f32;
         for s in 0..self.substeps {
             let frac = (s + 1) as f32 / self.substeps as f32;
             let (h_pos, h_quat) = frame.pose(frac);
@@ -2099,7 +2265,8 @@ impl Step<'_> {
                 }
             }
             // 4. Every segment turns toward its grown direction relative to the one before
-            //    (70% of the way of the segment before's turn from how it was grown).
+            //    ([`FOLLOWS`] of the way of the segment before's turn from how it was grown),
+            //    and turns the segment before back by the bend between them.
             for i in 1..n {
                 let k = held[i].shape;
                 if k <= 1e-5 {
@@ -2110,7 +2277,19 @@ impl Step<'_> {
                     && held[i - 1].dir != Vec3A::ZERO
                     && let Some(now) = (p[i - 1] - p[i - 2]).try_normalize()
                 {
-                    edge = turned(edge, h_rot * held[i - 1].dir, now, 0.70);
+                    let grown = h_rot * held[i - 1].dir;
+                    // What of that pull is the bend between the two turns the segment before
+                    // back as hard.
+                    let bend = (p[i - 1] + turned(edge, grown, now, 1.0) - p[i])
+                        * (k * FOLLOWS * held[i].edge.length()
+                            / held[i - 1].edge.length().max(1e-6));
+                    if i >= 3 {
+                        p[i - 2] += bend * 0.5;
+                        p[i - 1] -= bend * 0.5;
+                    } else {
+                        p[i - 1] -= bend;
+                    }
+                    edge = turned(edge, grown, now, FOLLOWS);
                 }
                 let diff = (p[i - 1] + edge - p[i]) * k;
                 if i >= 2 {
@@ -2270,18 +2449,23 @@ impl Step<'_> {
             for i in 1..n {
                 let mut w = limit(((p[i] - prev[i]) * inv_h).lerp(before, 0.045));
                 w = u + (w - u) * settle;
-                if (w - u).length_squared() < 0.03 * 0.03 {
-                    w = u + (w - u) * 0.82;
+                // (How far the point went in the substep, not the speed it carries: the snap
+                // to exact lengths moves a point and adds no speed, so a point below one the
+                // body pushes on carries a speed that the snap takes back every substep, as
+                // much as 0.2 m/s where it lies still. Judged by that speed such a lock was
+                // never held, and crept about on the back for as long as it was watched.)
+                let went = (p[i] - was[i] - carried) * inv_h - u;
+                if went.length_squared() < 0.03 * 0.03 {
+                    w -= went * 0.18;
+                }
+                if s + 1 == self.substeps {
+                    fastest = fastest.max(went.length_squared());
                 }
                 prev[i] = p[i] - w * h;
                 before = w;
             }
         }
         let (end_pos, end_rot) = frame.pose(1.0);
-        let mut fastest = 0.0f32;
-        for i in 1..n {
-            fastest = fastest.max(((p[i] - prev[i]) * inv_h - u).length_squared());
-        }
         // A body settling into place under its damping is slow all the way: no rest for it
         // halfway.
         *still = if fastest < RESTFUL * RESTFUL && self.settle <= 0.0 {
@@ -2367,6 +2551,34 @@ mod tests {
 
     /// A head of straight strands hanging from a ring around a sphere, with a neck below.
     fn head(strands: usize, points: usize) -> (Sim, Tress) {
+        let seg = 0.02;
+        grown(strands, points, |s, k| {
+            let angle = s as f32 / strands as f32 * std::f32::consts::TAU;
+            let root = Vec3::new(angle.cos(), 0.25, angle.sin()).normalize() * 0.092;
+            // Out a little, then down.
+            let rest = root + Vec3::new(root.x, 0.0, root.z).normalize() * (0.01 * k.min(2) as f32)
+                - Vec3::Y * (seg * k as f32);
+            if k == 0 { root } else { rest }
+        })
+    }
+
+    /// A ponytail: the strands leave a disc 3 cm across high on the back of the head, up and
+    /// back for a few centimetres, and hang down behind the neck.
+    fn tail(strands: usize, points: usize) -> (Sim, Tress) {
+        let seat = Vec3::new(0.0, 0.84, -0.54).normalize() * 0.092;
+        grown(strands, points, |s, k| {
+            let angle = s as f32 * 2.4;
+            let off = Vec3::new(angle.cos(), 0.0, angle.sin())
+                * (0.015 * (s as f32 / strands as f32).sqrt());
+            seat + off * (1.0 + 0.1 * k as f32)
+                + Vec3::new(0.0, 0.3, -1.0).normalize() * (0.02 * k.min(3) as f32)
+                - Vec3::Y * (0.02 * k.saturating_sub(2) as f32)
+        })
+    }
+
+    /// A sphere for a head with a neck below, and strands grown on it: point `k` of strand `s`
+    /// at `rest(s, k)`.
+    fn grown(strands: usize, points: usize, rest: impl Fn(usize, usize) -> Vec3) -> (Sim, Tress) {
         let mut sim = Sim::new(DVec3::ZERO);
         let frame = sim.add_frame(Vec3::ZERO, Quat::IDENTITY);
         let mut tress = Tress {
@@ -2391,17 +2603,11 @@ mod tests {
             friction: 0.3,
             body: true,
         });
-        let seg = 0.02;
         for s in 0..strands {
-            let angle = s as f32 / strands as f32 * std::f32::consts::TAU;
-            let root = Vec3::new(angle.cos(), 0.25, angle.sin()).normalize() * 0.092;
+            let root = rest(s, 0);
             let first = sim.len() as u32;
             for k in 0..points {
-                // Out a little, then down.
-                let rest = root
-                    + Vec3::new(root.x, 0.0, root.z).normalize() * (0.01 * k.min(2) as f32)
-                    - Vec3::Y * (seg * k as f32);
-                let rest = if k == 0 { root } else { rest };
+                let rest = rest(s, k);
                 sim.add_particle(rest, 0.001);
                 let t = k as f32 / (points - 1) as f32;
                 tress.verts.push(TressVertex {
@@ -2574,6 +2780,71 @@ mod tests {
         }
     }
 
+    /// How far beyond its reach any point of tied hair is from the middle of its tie.
+    fn strayed(sim: &Sim, tress: &Tress) -> f32 {
+        let mut worst = 0.0f32;
+        for tie in &tress.ties {
+            let count = tress.strands[tie[0] as usize].count;
+            for i in 1..count {
+                let at = |s: &u32| (tress.strands[*s as usize].first + i) as usize;
+                let middle = tie.iter().map(|s| sim.pos[at(s)]).sum::<Vec3>() / tie.len() as f32;
+                for s in tie {
+                    let p = at(s);
+                    let reach = tress.girth[p] + TIED_SLACK[0] + TIED_SLACK[1] * tress.verts[p].t;
+                    worst = worst.max(sim.pos[p].distance(middle) - reach);
+                }
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn a_tail_tied_at_the_back_of_the_head_keeps_together_through_a_head_shake() {
+        let (mut sim, mut tress) = tail(48, 24);
+        tress.tie(&sim.pos, &[0; 48]);
+        assert_eq!(tress.ties(), 0, "hair that grows free is not tied");
+        tress.tie(&sim.pos, &[1; 48]);
+        assert_eq!(tress.ties(), 1, "one tail");
+        assert_eq!(tress.ties[0].len(), 48);
+        // The same tail stepped strand by strand, to compare.
+        let (mut loose_sim, mut loose) = tail(48, 24);
+        let dt = 1.0 / 60.0;
+        let (mut worst, mut worst_stretch, mut swung) = (0.0f32, 0.0f32, 0.0f32);
+        let mut loose_worst = 0.0f32;
+        for step in 0..600 {
+            let (pos, rot) = shake(step as f32 * dt);
+            for (sim, tress) in [(&mut sim, &mut tress), (&mut loose_sim, &mut loose)] {
+                sim.set_frame(0, pos, rot);
+                tress.step(sim, dt);
+                sim.params.time += dt;
+                for f in &mut sim.frames {
+                    (f.from_pos, f.from_rot) = (f.to_pos, f.to_rot);
+                }
+                assert!(sim.pos.iter().all(|p| p.is_finite()));
+            }
+            worst = worst.max(strayed(&sim, &tress));
+            worst_stretch = worst_stretch.max(stretch(&sim, &tress));
+            // (Measured as the tied tail is: by its ties and what it was grown as.)
+            (loose.ties, loose.girth) = (tress.ties.clone(), tress.girth.clone());
+            loose_worst = loose_worst.max(strayed(&loose_sim, &loose));
+            loose.ties.clear();
+            for s in &tress.strands {
+                let tip = (s.first + s.count - 1) as usize;
+                swung = swung.max(sim.pos[tip].distance(pos + rot * tress.verts[tip].rest));
+            }
+        }
+        eprintln!(
+            "tied: strayed {worst} m, stretched {worst_stretch}, swung {swung} m; loose: strayed {loose_worst} m"
+        );
+        assert!(worst < 0.03, "a strand came {worst} m out of the tail");
+        assert!(worst_stretch < 0.02, "stretched {worst_stretch}");
+        assert!(swung > 0.05, "the tail swings in a shake: {swung} m");
+        assert!(
+            loose_worst > 0.1,
+            "untied, its strands part: {loose_worst} m"
+        );
+    }
+
     #[test]
     fn hair_keeps_its_length_and_stays_out_of_the_head_through_a_head_shake() {
         let (mut sim, mut tress) = head(48, 20);
@@ -2731,6 +3002,60 @@ mod tests {
         }
         assert!(sim.pos.iter().all(|p| p.is_finite()));
         assert!(sim.pos[first + 6].y < hung[6].y - 0.05);
+    }
+
+    #[test]
+    fn a_lock_held_out_from_how_it_was_grown_comes_to_rest_after_a_gust() {
+        // Locks grown down the back of the neck, and a back that stands further out than
+        // it did when they were grown: they lie over it and hang clear below.
+        let (mut sim, mut tress) = grown(3, 20, |s, k| {
+            let x = 0.012 * (s as f32 - 1.0);
+            let root = Vec3::new(x, -0.05, (0.09f32 * 0.09 - 0.05 * 0.05 - x * x).sqrt());
+            root + Vec3::new(0.0, -0.018, -0.0008) * k as f32
+        });
+        let frame = tress.carrier;
+        tress.capsules.push(TressCapsule {
+            frame,
+            a: Vec3::new(-0.15, -0.2, 0.05),
+            ra: 0.05,
+            b: Vec3::new(0.15, -0.2, 0.05),
+            rb: 0.05,
+            friction: 0.3,
+            body: true,
+        });
+        let dt = 1.0 / 60.0;
+        let run = |sim: &mut Sim, tress: &mut Tress, steps: usize, wind: Vec3| {
+            sim.params.wind = wind;
+            let (mut lo, mut hi) = (sim.pos.clone(), sim.pos.clone());
+            for _ in 0..steps {
+                tress.step(sim, dt);
+                sim.params.time += dt;
+                for ((lo, hi), p) in lo.iter_mut().zip(&mut hi).zip(&sim.pos) {
+                    (*lo, *hi) = (lo.min(*p), hi.max(*p));
+                }
+            }
+            // How far the point that moved most went.
+            lo.iter()
+                .zip(&hi)
+                .fold(0.0f32, |m, (lo, hi)| m.max(hi.distance(*lo)))
+        };
+        run(&mut sim, &mut tress, 300, Vec3::ZERO);
+        let tip = |sim: &Sim, s: usize| sim.pos[(tress_first(s) + 19) as usize];
+        fn tress_first(s: usize) -> u32 {
+            s as u32 * 20
+        }
+        let out = (0..3).map(|s| tip(&sim, s).z).fold(f32::MIN, f32::max);
+        assert!(out > 0.08, "the back holds the locks out: tips at z {out}");
+        // A gust from the side swings them; then the air is still.
+        let swung = run(&mut sim, &mut tress, 45, Vec3::new(4.0, 0.0, 0.0));
+        assert!(swung > 0.03, "the gust swings the locks: {swung} m");
+        run(&mut sim, &mut tress, 420, Vec3::ZERO);
+        let swings = run(&mut sim, &mut tress, 180, Vec3::ZERO);
+        assert!(
+            swings < 0.001,
+            "seven seconds on a lock still swings {swings} m"
+        );
+        assert!(stretch(&sim, &tress) < 0.02);
     }
 
     #[test]

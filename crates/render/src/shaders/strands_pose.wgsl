@@ -345,6 +345,10 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
                 cut_at = cut * f32(per - 1u) / max(f32(f[lock] >> FOLLOW_GUIDE_BITS) / 4094.0, 1e-3);
                 shed = guide_offsets[state + 2u].w;
             }
+        } else if (stated > 0u) {
+            // Hair that follows no guide (combed to a tie, wound in a knot): as wet as the
+            // guides are on average.
+            wet = head.z;
         }
         // Cut: the first point past the cut is the hair's new end, at the cut itself; the
         // points after it are the piece that came off, drawn (but for a gap of one point,

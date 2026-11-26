@@ -2126,7 +2126,15 @@ impl RenderFeature for StrandFeature {
                             || d.states.len() * per == g.guides.len()
                                 && d.states.iter().any(|s| *s != StrandGuideState::default()));
                     let state_points = if stated { g.guides.len() } else { 0 };
-                    offsets.push([d.capsules.len() as f32, state_points as f32, 0.0, 0.0]);
+                    // (And how wet the hair that follows no guide is: as the guides are, on
+                    // average. Hair combed to a tie or wound in a knot is rained on too.)
+                    let held_wet = if d.states.is_empty() {
+                        0.0
+                    } else {
+                        d.states.iter().map(|s| s.wet.clamp(0.0, 1.0)).sum::<f32>()
+                            / d.states.len() as f32
+                    };
+                    offsets.push([d.capsules.len() as f32, state_points as f32, held_wet, 0.0]);
                     let base = offsets.len() as u32;
                     offsets.extend(
                         posed

@@ -26,17 +26,24 @@ pub enum HairStyle {
     Long,
     /// Long hair gathered into a bun at the back.
     Bun,
+    /// The front, top and sides pulled back sleek into a knot on top of the head, the hair of
+    /// the back hanging long under it.
+    HalfUp,
+    /// All of it pulled back sleek and tied high at the back, hanging from the tie as a tail.
+    Ponytail,
 }
 
 impl HairStyle {
     /// Every style, in creator order.
-    pub const ALL: [HairStyle; 6] = [
+    pub const ALL: [HairStyle; 8] = [
         HairStyle::Bald,
         HairStyle::Buzz,
         HairStyle::Short,
         HairStyle::Medium,
         HairStyle::Long,
         HairStyle::Bun,
+        HairStyle::HalfUp,
+        HairStyle::Ponytail,
     ];
 
     /// The style for an id (`Appearance.hair.style`, any case); unknown ids are the default.
@@ -56,6 +63,8 @@ impl HairStyle {
             HairStyle::Medium => "medium",
             HairStyle::Long => "long",
             HairStyle::Bun => "bun",
+            HairStyle::HalfUp => "halfup",
+            HairStyle::Ponytail => "ponytail",
         }
     }
 }

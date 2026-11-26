@@ -378,6 +378,8 @@ pub fn build(
     let scalp = hair_body::root_sphere(guides, pose).filter(|_| !body.is_empty());
     let surface = surface.filter(|s| usable(s, guides, bones));
     let mut tress = Tress::default();
+    // Each strand's tie (0: none).
+    let mut tied: Vec<u16> = Vec::new();
     let mut boxes = Vec::new();
     let mut box_bones = Vec::new();
     for part in surface.iter().flat_map(|s| &s.parts).take(MAX_BOXES) {
@@ -475,6 +477,7 @@ pub fn build(
             });
         }
         sim.pin(first, frame, rest[0]);
+        tied.push(g.tie);
         tress.strands.push(TressStrand {
             first,
             count: n as u32,
@@ -523,6 +526,7 @@ pub fn build(
         .map_or(0, |(f, _)| *f);
     groomed.rest = tress.verts.iter().map(|v| v.rest).collect();
     tress.boxes = boxes;
+    tress.tie(&sim.pos, &tied);
     sim.tress = Some(Box::new(tress));
     let settings = crate::SimSettings {
         // The strand solver has its own damping and follows a dash itself; what is left

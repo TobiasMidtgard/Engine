@@ -102,6 +102,36 @@ fn until_rested(app: &mut App) {
 }
 
 #[test]
+fn guides_gathered_in_a_tie_are_tied_in_the_simulation() {
+    let mut app = app();
+    let colliders = || BoneColliders {
+        capsules: vec![BoneCapsule::sphere("head", 0.1, SKULL.to_array())],
+        friction: 0.3,
+    };
+    // One head whose locks are gathered in a tie (a ponytail's), one whose hair grows free.
+    let mut tail = guides(1, 24);
+    for g in &mut tail.guides {
+        g.tie = 1;
+    }
+    app.world
+        .spawn((Transform::default(), pose(), colliders(), tail));
+    app.world.spawn((
+        Transform::from_xyz(3.0, 0.0, 0.0),
+        pose(),
+        colliders(),
+        guides(1, 24),
+    ));
+    steps(&mut app, 10);
+    let mut q = app.world.query::<&SoftBodySim>();
+    let mut ties: Vec<usize> = q
+        .iter(&app.world)
+        .map(|s| s.sim.tress.as_ref().map_or(0, |t| t.ties()))
+        .collect();
+    ties.sort_unstable();
+    assert_eq!(ties, [0, 1]);
+}
+
+#[test]
 fn guides_from_another_module_are_simulated_and_handed_back_in_model_space() {
     let mut app = app();
     // Far from the origin and turned, so model space and world space differ.
