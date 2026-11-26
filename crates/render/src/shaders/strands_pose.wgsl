@@ -37,6 +37,15 @@ const MAX_BOXES: u32 = 12u;
 const PARTS_WITHIN: f32 = 0.012;
 // No body near.
 const FAR: f32 = 1e9;
+// How far a guide has come from a hair's lock, m, where it starts to count less for the hair
+// and where it no longer counts.
+const PARTED: vec2<f32> = vec2<f32>(0.025, 0.07);
+// How far off the body a lock's guide is, m, where the lock's hairs start to be laid on the
+// body less, and where they are left alone.
+const LAID: vec2<f32> = vec2<f32>(0.008, 0.02);
+// How deep in the body a hair's point is, m, where it starts to be pushed out less, and where
+// it is left.
+const DEEP: vec2<f32> = vec2<f32>(0.008, 0.02);
 
 fn body_cell(i: u32) -> vec2<f32> {
     let c = bodies[i];
@@ -204,6 +213,8 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
         var off = vec3<f32>(0.0);
         var lock_off = vec3<f32>(0.0);
         var lock_rest = p.xyz;
+        var moved: array<vec3<f32>, 3>;
+        var share = vec3<f32>(0.0);
         for (var g = 0u; g < 3u; g++) {
             if (f[g] != NONE && w[g] > 0.0) {
                 // The guide's motion as far along it as this point is along its strand,
@@ -231,7 +242,8 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
                 let base = first_point + k;
                 let its = mix(guide_offsets[base].xyz, guide_offsets[base + 1u].xyz,
                     along - f32(k));
-                off += w[g] * its;
+                moved[g] = its;
+                share[g] = w[g];
                 if (g == lock) {
                     lock_off = its;
                     if (stated > 0u) {
@@ -240,6 +252,17 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
                     }
                 }
             }
+        }
+        // Locks part: a guide gone another way than the hair's own lock (round the other side
+        // of a neck or a shoulder, over a collar the lock hangs under) moves the hair less the
+        // further apart the two have come, and the lock moves it instead. Blended, the hair
+        // is drawn through the body between them.
+        for (var g = 0u; g < 3u; g++) {
+            var by = moved[g];
+            if (g != lock && share[lock] > 0.0) {
+                by = mix(by, lock_off, smoothstep(PARTED.x, PARTED.y, distance(by, lock_off)));
+            }
+            off += share[g] * by;
         }
         if (end) {
             // (The hair's own shape up to the cut.)
@@ -290,12 +313,26 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
                 let layer = 0.6 + 1.4 * fract(f32(s) * 0.618034);
                 let keep = KEPT_OUT * layer * min(f32(j) * 0.5, 1.0);
                 let first_box = first - 1u - BOX_ENTRIES * boxes;
+                // The lock as one first: where its guide lies on the body, its hairs are laid
+                // on the plane the body is there. (Each pushed out its own way from where the
+                // blend left it, centimeters deep under the guide, a hair comes out in zigzags:
+                // deep inside, the way out turns from point to point.)
+                if (stated > 0u && share[lock] > 0.0) {
+                    let guide = lock_rest + lock_off;
+                    let under = body(first_box, boxes, guide);
+                    let height = dot(q - guide, under.xyz) + under.w;
+                    if (height < keep) {
+                        q += under.xyz * ((keep - height) * (1.0 - smoothstep(LAID.x, LAID.y, under.w)));
+                    }
+                }
+                // Then each hair out of what it is still in, less the deeper it is (deep, it
+                // is hidden, and the way out is anyone's guess).
                 for (var again = 0u; again < 2u; again++) {
                     let now = body(first_box, boxes, q);
                     if (now.w >= keep) {
                         break;
                     }
-                    q += now.xyz * (keep - now.w);
+                    q += now.xyz * ((keep - now.w) * (1.0 - smoothstep(DEEP.x, DEEP.y, -now.w)));
                 }
             }
         }

@@ -2119,9 +2119,12 @@ impl RenderFeature for StrandFeature {
                     // (With the shapes' number, the guide points whose state follows the
                     // offsets: none, or all of them.)
                     let per = (g.points_per as usize).max(1);
+                    // (All of them too under a measured body: a lock's hairs are laid on it
+                    // where the lock's guide lies, which takes the guide at rest.)
                     let stated = per >= STATE_POINTS
-                        && d.states.len() * per == g.guides.len()
-                        && d.states.iter().any(|s| *s != StrandGuideState::default());
+                        && (!d.boxes.is_empty()
+                            || d.states.len() * per == g.guides.len()
+                                && d.states.iter().any(|s| *s != StrandGuideState::default()));
                     let state_points = if stated { g.guides.len() } else { 0 };
                     offsets.push([d.capsules.len() as f32, state_points as f32, 0.0, 0.0]);
                     let base = offsets.len() as u32;
@@ -2135,7 +2138,7 @@ impl RenderFeature for StrandFeature {
                     // their state in the first points' last entries: wet, cut, shed.
                     if stated {
                         offsets.extend(g.guides.iter().enumerate().map(|(i, r)| {
-                            let s = d.states[i / per];
+                            let s = d.states.get(i / per).copied().unwrap_or_default();
                             let w = match i % per {
                                 0 => s.wet.clamp(0.0, 1.0),
                                 1 => s.cut.clamp(0.0, 1.0),
