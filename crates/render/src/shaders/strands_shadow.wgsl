@@ -1,5 +1,6 @@
 // Strands into the sun's shadow maps (strands.rs): each strand a ribbon at least a texel wide,
-// keeping the share of its texels its true width covers (hashed per texel and strand), so hair
+// and of strands thinner than that only the share their true width covers
+// (`strand_shadow_threshold`), so hair
 // shades the face and neck under it and itself. Cascades draw a quarter of the strands four
 // times as wide (their texels are centimeters across). A groom far away draws few strands,
 // each many times wider (the same cover on screen, where a pixel is the limit): its ribbons
@@ -75,10 +76,10 @@ fn strand_shadow_vertex(v: u32, g: u32, boost: f32) -> ShadowOut {
     let c = select(ca, cb, end == 1u);
     out.clip = vec4<f32>(c.xy + across * half * side * c.w, c.z, c.w);
     out.keep = r / half;
-    // (Seeded by the strand's place in its groom, which stays: its place in the frame moves
-    // whenever a nearer groom draws one strand more, and its groom's place in the shared
-    // arrays when they are made again.)
-    out.seed = (g - inst.more.x) * 61u + seg;
+    // (The strand's place in its groom, which stays: its place in the frame moves whenever a
+    // nearer groom draws one strand more, and its groom's place in the shared arrays when they
+    // are made again.)
+    out.seed = g - inst.more.x;
     return out;
 }
 
@@ -92,9 +93,20 @@ fn vs_shadow_inset(@builtin(vertex_index) v: u32, @builtin(instance_index) g: u3
     return strand_shadow_vertex(v, g, 1.0);
 }
 
+// How much of itself a ribbon keeps: a strand thinner than a texel is drawn a texel wide down
+// to where its true width's share of the texel falls under the strand's own threshold (a step
+// of the golden ratio each, so any few strands side by side spread theirs evenly), and not past
+// it. Thin hair's shadow is then fewer whole lines, ending one by one toward the hair's thin
+// ends, with the cover of all of them. (Thresholds picked per texel left the thin ends of long
+// hair as single dark texels on the shoulders, dirt and not a shadow, however evenly they were
+// spread: a receiver's filter there is a texel wide, 26 Nov 2026.)
+fn strand_shadow_threshold(strand: u32) -> f32 {
+    return fract(f32(strand % 4096u) * 0.61803399);
+}
+
 @fragment
 fn fs_shadow(in: ShadowOut) {
-    if (hash12(in.clip.xy + vec2<f32>(f32(in.seed % 4093u) * 0.731, f32(in.seed % 3011u) * 0.377)) >= in.keep) {
+    if (strand_shadow_threshold(in.seed) >= in.keep) {
         discard;
     }
 }
