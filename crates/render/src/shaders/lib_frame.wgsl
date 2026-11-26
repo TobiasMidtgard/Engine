@@ -529,7 +529,9 @@ fn inset_visibility(rel: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
         }
         if (blockers < 0.5) { continue; }
         let distance = max(z - blocker_sum / blockers, 0.0) / max(z_per_meter, 1e-9);
-        let radius = clamp(distance * tan_sun / texel_world, 1.0, 10.0);
+        // At least 2.5 texels: hair (0.1-0.6 mm) lands in the map as one-texel ribbons (1-2 mm),
+        // which a one-texel filter showed as hard dark dashes on a sweater under hair ends.
+        let radius = clamp(distance * tan_sun / texel_world, 2.5, 10.0);
         let z_ref = z - radius * texel_world * slope * z_per_meter * 0.5;
         var sum = 0.0;
         for (var k = 0; k < 10; k++) {
