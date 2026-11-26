@@ -54,6 +54,13 @@ const UNDER: vec2<f32> = vec2<f32>(0.015, 0.035);
 // How deep in the body a hair's point is, m, where it starts to be pushed out less, and where
 // it is left.
 const DEEP: vec2<f32> = vec2<f32>(0.008, 0.02);
+// The hairs of a piece a blade cut off come apart as they fall: how far each drifts from the
+// piece (m), how far it turns (radians), how much of the fall the last of them is behind, and
+// the share of the piece's time (see `shed`) in which they come apart and catch up.
+const SHED_DRIFTS: f32 = 0.07;
+const SHED_TURNS: f32 = 1.1;
+const SHED_LAGS: f32 = 0.6;
+const SHED_APART: vec2<f32> = vec2<f32>(0.2, 0.3);
 
 fn body_cell(i: u32) -> vec2<f32> {
     let c = bodies[i];
@@ -349,6 +356,11 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
         var off = vec3<f32>(0.0);
         var lock_off = vec3<f32>(0.0);
         var lock_rest = p.xyz;
+        // Of a piece cut off: its lock's guide where it was cut (the hair's new end), and in
+        // the middle of the piece.
+        var end_off = vec3<f32>(0.0);
+        var mid_off = vec3<f32>(0.0);
+        let mid_j = 0.5 * (cut_at + 1.0 + f32(per - 1u));
         var moved: array<vec3<f32>, 3>;
         var share = vec3<f32>(0.0);
         for (var g = 0u; g < 3u; g++) {
@@ -382,6 +394,14 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
                 share[g] = w[g];
                 if (g == lock) {
                     lock_off = its;
+                    if (off_cut) {
+                        let last = min(u32(cut_at * reach), per - 1u);
+                        end_off = guide_offsets[first_point + last].xyz;
+                        let at_mid = max(mid_j * reach, f32(last) + 1.0);
+                        let km = min(u32(at_mid), per - 2u);
+                        mid_off = mix(guide_offsets[first_point + km].xyz,
+                            guide_offsets[first_point + km + 1u].xyz, at_mid - f32(km));
+                    }
                     if (stated > 0u) {
                         lock_rest = mix(guide_offsets[base + stated].xyz,
                             guide_offsets[base + stated + 1u].xyz, along - f32(k));
@@ -422,6 +442,39 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         p.w = width;
         var q = p.xyz + off;
+        // How much a hair cut off lies on the body.
+        var laid = 0.0;
+        if (off_cut && shed < 1.0) {
+            // A piece cut off is so many single hairs: each falls a little behind the others,
+            // drifts its own way from them and turns as it falls. Where the piece comes to lie
+            // on the body they lie spread out on it. (Moved as one with their lock's guide,
+            // the cut hair of a head fell and lay there as one braid.)
+            let r = fract(f32(s) * vec4<f32>(0.754877, 0.569840, 0.438579, 0.618034)
+                + vec4<f32>(0.31, 0.17, 0.73, 0.0));
+            let apart = smoothstep(0.0, SHED_APART.x, shed);
+            let lag = SHED_LAGS * r.z * (1.0 - smoothstep(0.02, SHED_APART.y, shed));
+            let k = min(u32(mid_j), per - 1u);
+            var mid = rest[inst.first.x + s * per + k].xyz + mix(mid_off, end_off, lag);
+            q = p.xyz + mix(off, end_off, lag);
+            let way = 6.2832 * r.x;
+            var drift = vec3<f32>(cos(way), 0.0, sin(way)) * (SHED_DRIFTS * sqrt(r.w) * apart);
+            var axis = normalize(vec3<f32>(cos(way * 7.0), 2.0 * r.y - 1.0, sin(way * 7.0)));
+            let shapes = u32(head.x);
+            let first = inst.out.y - 1u - 2u * shapes;
+            let boxes = u32(guide_offsets[first - 1u].x);
+            if (boxes > 0u) {
+                let first_box = first - 1u - BOX_ENTRIES * boxes;
+                let under = body(first_box, boxes, body_views(first_box, boxes, mid), mid);
+                let lies = 1.0 - smoothstep(0.015, 0.05, under.w);
+                drift -= under.xyz * (dot(drift, under.xyz) * lies);
+                axis = normalize(mix(axis, under.xyz, lies) + vec3<f32>(1e-4, 0.0, 0.0));
+                laid = lies;
+            }
+            let turn = (2.0 * r.y - 1.0) * SHED_TURNS * apart * (1.0 - 0.5 * laid);
+            let v = q - mid;
+            q = mid + drift + v * cos(turn) + cross(axis, v) * sin(turn)
+                + axis * (dot(axis, v) * (1.0 - cos(turn)));
+        }
         // Kept out of the shapes the guides are kept out of (they lie ahead of the
         // instance's guide offsets, their number last): between guides that part around a
         // head or a neck the blend alone cuts through it. A point that lies in a shape at
@@ -476,6 +529,10 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
                 for (var again = 0u; again < 2u; again++) {
                     let now = body(first_box, boxes, views, q);
                     if (now.w >= keep) {
+                        // (A hair cut off that lies on the body lies on it all along: turned
+                        // on a shoulder as a straight stick, its ends stood off it.)
+                        q -= now.xyz * ((now.w - keep) * laid
+                            * (1.0 - smoothstep(0.03, 0.06, now.w)));
                         break;
                     }
                     q += now.xyz * ((keep - now.w) * (1.0 - smoothstep(DEEP.x, DEEP.y, -now.w)));

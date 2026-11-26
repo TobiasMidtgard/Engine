@@ -107,6 +107,8 @@ pub const SHED_SECS: f32 = 4.0;
 /// A falling piece's drag, 1/s: clippings sink through still air at about a meter and a half
 /// a second.
 const PIECE_DRAG: f32 = 6.5;
+/// A piece cut off slides on what it lies on less by this times how far it was pressed in.
+const PIECE_RUBS: f32 = 0.6;
 
 /// Tuning (the source project's `SimConfig` defaults).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1777,7 +1779,8 @@ impl Step<'_> {
                 let w = air + (vel[first + i] - air) * drag + self.gravity * h;
                 pos[first + i] += w * h;
             }
-            let mut rubs = [false; MAX_VERTS];
+            // How far each point was pushed out of what it lies on, and which way.
+            let mut pressed = [(0.0f32, Vec3A::ZERO); MAX_VERTS];
             for _ in 0..2 {
                 for i in at + 1..end {
                     let (a, b) = (pos[first + i - 1], pos[first + i]);
@@ -1795,7 +1798,7 @@ impl Step<'_> {
                         let (out, d) = c.cone.at(p);
                         if d < 0.002 {
                             p += out * (0.002 - d);
-                            rubs[i] = true;
+                            pressed[i] = (pressed[i].0 + 0.002 - d, out);
                         }
                     }
                     if !self.boxes.is_empty()
@@ -1804,17 +1807,29 @@ impl Step<'_> {
                         && d < 0.002
                     {
                         p += out * (0.002 - d);
-                        rubs[i] = true;
+                        pressed[i] = (pressed[i].0 + 0.002 - d, out);
                     }
                     let on = self.above_ground(strand.first as usize + i, p);
-                    rubs[i] |= on != p;
+                    if on != p {
+                        pressed[i] = (pressed[i].0 + on.distance(p), Vec3A::Y);
+                    }
                     pos[first + i] = on.into();
                 }
             }
             for i in at..end {
-                // (What it lies on holds it: it slides off a shoulder slowly.)
-                let hold = if rubs[i] { 0.5 } else { 1.0 };
-                vel[first + i] = (pos[first + i] - before[i]) * (hold / h);
+                // What it lies on holds it as hard as it is pressed on (Coulomb's friction):
+                // it stays on a shoulder and slides off a chest. (Held by half its speed
+                // wherever it touched, it lay on the chest and crept down it.)
+                let moved = Vec3A::from(pos[first + i] - before[i]);
+                let (depth, out) = pressed[i];
+                let along = moved - out * moved.dot(out);
+                let far = along.length();
+                let held = if far > 1e-9 {
+                    along * ((PIECE_RUBS * depth).min(far) / far)
+                } else {
+                    Vec3A::ZERO
+                };
+                vel[first + i] = Vec3::from(moved - held) / h;
             }
         }
     }
