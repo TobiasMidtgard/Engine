@@ -33,8 +33,13 @@ const WET_ROPE: f32 = 0.12;
 const BODY_UNIT: f32 = 1e-5;
 const BOX_ENTRIES: u32 = 6u;
 const MAX_BOXES: u32 = 12u;
-// (softbody, tress.rs, `PARTS_WITHIN`.)
-const PARTS_WITHIN: f32 = 0.012;
+// (softbody, tress.rs: `READS_FROM`, `REFINED`, `CARRIES_ALL`, `SAME`.)
+const READS_FROM: f32 = 0.25;
+const REFINED: u32 = 2u;
+const CARRIES_ALL: f32 = 0.98;
+const SAME: f32 = 0.0005;
+// How far a hair's point is moved, m, before the body's boxes are asked how they see it again.
+const VIEWED_ANEW: f32 = 0.004;
 // No body near.
 const FAR: f32 = 1e9;
 // How far a guide has come from a hair's lock, m, where it starts to count less for the hair
@@ -43,6 +48,9 @@ const PARTED: vec2<f32> = vec2<f32>(0.025, 0.07);
 // How far off the body a lock's guide is, m, where the lock's hairs start to be laid on the
 // body less, and where they are left alone.
 const LAID: vec2<f32> = vec2<f32>(0.008, 0.02);
+// How deep under the plane the body is at its lock's guide a hair's point is, m, where it
+// starts to be brought onto it less, and where it is left (it is elsewhere).
+const UNDER: vec2<f32> = vec2<f32>(0.015, 0.035);
 // How deep in the body a hair's point is, m, where it starts to be pushed out less, and where
 // it is left.
 const DEEP: vec2<f32> = vec2<f32>(0.008, 0.02);
@@ -52,75 +60,203 @@ fn body_cell(i: u32) -> vec2<f32> {
     return vec2<f32>(f32(i32(c << 16u) >> 16u), f32((c >> 16u) & 0xffu));
 }
 
-// The way out of the measured body whose `boxes` boxes start at entry `first`, and the signed
-// distance to it, at `q` (the instance's model space). Each box holds the distance to the
-// skin its own bone carries and is sampled where its matrix carries `q` (softbody, tress.rs,
-// `felt`). (0, FAR) outside every box.
-fn body(first: u32, boxes: u32, q: vec3<f32>) -> vec4<f32> {
-    var ds: array<f32, MAX_BOXES>;
-    var gs: array<vec3<f32>, MAX_BOXES>;
-    var ws: array<f32, MAX_BOXES>;
-    var n = 0u;
-    var nearest = FAR;
-    for (var k = 0u; k < min(boxes, MAX_BOXES); k++) {
-        let o = first + BOX_ENTRIES * k;
-        let r0 = guide_offsets[o];
-        let r1 = guide_offsets[o + 1u];
-        let r2 = guide_offsets[o + 2u];
-        let lattice = guide_offsets[o + 3u];
-        let local = vec3<f32>(dot(r0.xyz, q) + r0.w, dot(r1.xyz, q) + r1.w, dot(r2.xyz, q) + r2.w);
-        let c = (local - lattice.xyz) * lattice.w;
-        let size = vec3<u32>(guide_offsets[o + 4u].xyz);
-        if (any(c < vec3<f32>(0.0)) || any(c >= vec3<f32>(size) - 1.0)) {
-            continue;
-        }
-        let at = guide_offsets[o + 5u];
-        let cell = vec3<u32>(c);
-        let f = c - vec3<f32>(cell);
-        let row = size.x * size.y;
-        let i = u32(at.x) + (u32(at.y) << 16u) + cell.x + size.x * cell.y + row * cell.z;
-        let c000 = body_cell(i);
-        let c100 = body_cell(i + 1u);
-        let c010 = body_cell(i + size.x);
-        let c110 = body_cell(i + size.x + 1u);
-        let c001 = body_cell(i + row);
-        let c101 = body_cell(i + row + 1u);
-        let c011 = body_cell(i + row + size.x);
-        let c111 = body_cell(i + row + size.x + 1u);
-        let x00 = mix(c000, c100, f.x);
-        let x10 = mix(c010, c110, f.x);
-        let x01 = mix(c001, c101, f.x);
-        let x11 = mix(c011, c111, f.x);
-        let y0 = mix(x00, x10, f.y);
-        let y1 = mix(x01, x11, f.y);
-        let here = mix(y0, y1, f.z);
-        let grad = vec3<f32>(
-            mix(mix(c100.x - c000.x, c110.x - c010.x, f.y), mix(c101.x - c001.x, c111.x - c011.x, f.y), f.z),
-            mix(x10.x - x00.x, x11.x - x01.x, f.z),
-            y1.x - y0.x);
-        // (The gradient back to the instance's space: by the matrix's rows.)
-        gs[n] = (r0.xyz * grad.x + r1.xyz * grad.y + r2.xyz * grad.z) * (BODY_UNIT * lattice.w);
-        ds[n] = here.x * BODY_UNIT;
-        ws[n] = max(here.y / 255.0, 1e-3);
-        nearest = min(nearest, abs(ds[n]));
-        n += 1u;
+// Box `o`'s first sample's index and place in cells for `at` on the body as grown (w: 0
+// outside the box).
+fn body_place(o: u32, at: vec3<f32>) -> vec4<f32> {
+    let lattice = guide_offsets[o + 3u];
+    let c = (at - lattice.xyz) * lattice.w;
+    let size = guide_offsets[o + 4u].xyz;
+    return vec4<f32>(c, f32(all(c >= vec3<f32>(0.0)) && all(c < size - 1.0)));
+}
+
+// How much of the skin nearest `at` on the body as grown box `o`'s bone carries (0..1; -1
+// outside the box).
+fn body_share(o: u32, at: vec3<f32>) -> f32 {
+    let c = body_place(o, at);
+    if (c.w == 0.0) {
+        return -1.0;
     }
-    if (n == 0u) {
+    let size = vec3<u32>(guide_offsets[o + 4u].xyz);
+    let start = guide_offsets[o + 5u];
+    let cell = vec3<u32>(c.xyz);
+    let f = c.xyz - vec3<f32>(cell);
+    let row = size.x * size.y;
+    let i = u32(start.x) + (u32(start.y) << 16u) + cell.x + size.x * cell.y + row * cell.z;
+    let x00 = mix(body_cell(i).y, body_cell(i + 1u).y, f.x);
+    let x10 = mix(body_cell(i + size.x).y, body_cell(i + size.x + 1u).y, f.x);
+    let x01 = mix(body_cell(i + row).y, body_cell(i + row + 1u).y, f.x);
+    let x11 = mix(body_cell(i + row + size.x).y, body_cell(i + row + size.x + 1u).y, f.x);
+    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z) / 255.0;
+}
+
+// The body as grown at `at`, from box `o`: the signed distance and its gradient there
+// ((0, FAR) outside the box).
+fn body_sample(o: u32, at: vec3<f32>) -> vec4<f32> {
+    let c = body_place(o, at);
+    if (c.w == 0.0) {
         return vec4<f32>(0.0, 0.0, 0.0, FAR);
     }
-    // The nearest box's skin is the body; boxes whose skin is about as near (a joint's, which
-    // two bones share) count with it by their weights.
-    var sum = 0.0;
-    var way = vec3<f32>(0.0);
-    var total = 0.0;
-    for (var k = 0u; k < n; k++) {
-        let u = ws[k] * max(1.0 - (abs(ds[k]) - nearest) / PARTS_WITHIN, 0.0);
-        sum += ds[k] * u;
-        way += gs[k] * u;
-        total += u;
+    let size = vec3<u32>(guide_offsets[o + 4u].xyz);
+    let start = guide_offsets[o + 5u];
+    let cell = vec3<u32>(c.xyz);
+    let f = c.xyz - vec3<f32>(cell);
+    let row = size.x * size.y;
+    let i = u32(start.x) + (u32(start.y) << 16u) + cell.x + size.x * cell.y + row * cell.z;
+    let c000 = body_cell(i).x;
+    let c100 = body_cell(i + 1u).x;
+    let c010 = body_cell(i + size.x).x;
+    let c110 = body_cell(i + size.x + 1u).x;
+    let c001 = body_cell(i + row).x;
+    let c101 = body_cell(i + row + 1u).x;
+    let c011 = body_cell(i + row + size.x).x;
+    let c111 = body_cell(i + row + size.x + 1u).x;
+    let x00 = mix(c000, c100, f.x);
+    let x10 = mix(c010, c110, f.x);
+    let x01 = mix(c001, c101, f.x);
+    let x11 = mix(c011, c111, f.x);
+    let y0 = mix(x00, x10, f.y);
+    let y1 = mix(x01, x11, f.y);
+    return vec4<f32>(
+        mix(mix(c100 - c000, c110 - c010, f.y), mix(c101 - c001, c111 - c011, f.y), f.z),
+        mix(x10 - x00, x11 - x01, f.z),
+        y1 - y0,
+        mix(y0, y1, f.z) * BODY_UNIT);
+}
+
+// Where box `o`'s bone alone would have brought `q` (the instance's model space) from on the
+// body as grown.
+fn body_was(o: u32, q: vec3<f32>) -> vec3<f32> {
+    let r0 = guide_offsets[o];
+    let r1 = guide_offsets[o + 1u];
+    let r2 = guide_offsets[o + 2u];
+    return vec3<f32>(dot(r0.xyz, q) + r0.w, dot(r1.xyz, q) + r1.w, dot(r2.xyz, q) + r2.w);
+}
+
+fn inverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+    let r0 = cross(m[1], m[2]);
+    let r1 = cross(m[2], m[0]);
+    let r2 = cross(m[0], m[1]);
+    let det = dot(m[0], r0);
+    return transpose(mat3x3<f32>(r0, r1, r2)) * (1.0 / select(det, 1.0, abs(det) < 1e-9));
+}
+
+// How a measured body's boxes see a point: for the (at most two) boxes whose bones carry most
+// of the skin there, where the point at `taken` was on the body as the hair was grown on it,
+// and what brings a small move of the point back there (softbody, tress.rs, `views`).
+struct BodyViews {
+    n: u32,
+    taken: vec3<f32>,
+    part: array<u32, 2>,
+    was: array<vec3<f32>, 2>,
+    back: array<mat3x3<f32>, 2>,
+}
+
+// The views of `q` (the instance's model space) of the measured body whose `boxes` boxes
+// start at entry `first`. Every box holds the whole body as the hair was grown on it and how
+// much its bone carries of the skin nearest each sample; its matrix carries `q` back as its
+// bone alone would. Where bones share the skin, it has moved as their blend by their shares,
+// as it is skinned: that blend undone gives where `q` was.
+fn body_views(first: u32, boxes: u32, q: vec3<f32>) -> BodyViews {
+    var v: BodyViews;
+    v.n = 0u;
+    v.taken = q;
+    let count = min(boxes, MAX_BOXES);
+    var most = vec2<f32>(0.0);
+    var which = vec2<u32>(NONE);
+    for (var k = 0u; k < count; k++) {
+        let o = first + BOX_ENTRIES * k;
+        let share = body_share(o, body_was(o, q));
+        if (share > most.x) {
+            most = vec2<f32>(share, most.x);
+            which = vec2<u32>(o, which.x);
+        } else if (share > most.y) {
+            most.y = share;
+            which.y = o;
+        }
     }
-    let len = length(way);
-    return vec4<f32>(select(vec3<f32>(0.0, 1.0, 0.0), way / len, len > 1e-9), sum / total);
+    var start = vec3<f32>(FAR);
+    for (var e = 0u; e < 2u; e++) {
+        let o = which[e];
+        if (o == NONE || most[e] <= 0.0 || most[e] < READS_FROM * most.x) {
+            break;
+        }
+        var was = body_was(o, q);
+        // (Bones that have moved alike see the point alike.)
+        if (distance(was, start) < SAME) {
+            break;
+        }
+        start = was;
+        var back = transpose(mat3x3<f32>(guide_offsets[o].xyz, guide_offsets[o + 1u].xyz, guide_offsets[o + 2u].xyz));
+        if (most[e] < CARRIES_ALL) {
+            // (No blend to undo where every box that reaches there has moved as this one.)
+            var alike = true;
+            for (var j = 0u; j < count; j++) {
+                let oj = first + BOX_ENTRIES * j;
+                if (body_place(oj, was).w > 0.0 && distance(body_was(oj, q), was) >= SAME) {
+                    alike = false;
+                    break;
+                }
+            }
+            for (var it = 0u; it < REFINED && !alike; it++) {
+                var sum = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+                var origin = vec3<f32>(0.0);
+                var total = 0.0;
+                for (var j = 0u; j < count; j++) {
+                    let oj = first + BOX_ENTRIES * j;
+                    let share = body_share(oj, was);
+                    if (share > 0.0) {
+                        // (The bone's own motion: its matrix back the other way.)
+                        let r0 = guide_offsets[oj];
+                        let r1 = guide_offsets[oj + 1u];
+                        let r2 = guide_offsets[oj + 2u];
+                        let moved = mat3x3<f32>(r0.xyz, r1.xyz, r2.xyz);
+                        sum += moved * share;
+                        origin -= (moved * vec3<f32>(r0.w, r1.w, r2.w)) * share;
+                        total += share;
+                    }
+                }
+                if (total <= 0.0) {
+                    break;
+                }
+                back = inverse3(sum * (1.0 / total));
+                let next = back * (q - origin / total);
+                let moved = distance(next, was);
+                was = next;
+                if (moved < SAME) {
+                    break;
+                }
+            }
+        }
+        // (Two that find it at the same place read the same there.)
+        if (e == 1u && distance(was, v.was[0]) < SAME) {
+            break;
+        }
+        v.part[v.n] = o;
+        v.was[v.n] = was;
+        v.back[v.n] = back;
+        v.n += 1u;
+    }
+    return v;
+}
+
+// The way out of the measured body and the signed distance to it at `q`, near where its
+// boxes' `views` were taken (they move with it). Of the boxes that count, the one that finds
+// `q` deepest is right. (0, FAR) outside every box.
+fn body(first: u32, boxes: u32, views: BodyViews, q: vec3<f32>) -> vec4<f32> {
+    var found = vec4<f32>(0.0, 0.0, 0.0, FAR);
+    for (var e = 0u; e < views.n; e++) {
+        let back = views.back[e];
+        let at = views.was[e] + back * (q - views.taken);
+        var here = body_sample(views.part[e], at);
+        for (var k = 0u; k < min(boxes, MAX_BOXES) && here.w >= FAR; k++) {
+            here = body_sample(first + BOX_ENTRIES * k, at);
+        }
+        if (here.w < found.w) {
+            found = vec4<f32>(here.xyz * back, here.w);
+        }
+    }
+    let len = length(found.xyz);
+    return vec4<f32>(select(vec3<f32>(0.0, 1.0, 0.0), found.xyz / len, len > 1e-9), found.w);
 }
 
 // The way out of a tapered capsule (spheres of radius ra at a and rb at b and the cone between
@@ -317,18 +453,28 @@ fn cs_pose(@builtin(global_invocation_id) id: vec3<u32>) {
                 // on the plane the body is there. (Each pushed out its own way from where the
                 // blend left it, centimeters deep under the guide, a hair comes out in zigzags:
                 // deep inside, the way out turns from point to point.)
+                var views = body_views(first_box, boxes, q);
                 if (stated > 0u && share[lock] > 0.0) {
                     let guide = lock_rest + lock_off;
-                    let under = body(first_box, boxes, guide);
-                    let height = dot(q - guide, under.xyz) + under.w;
-                    if (height < keep) {
-                        q += under.xyz * ((keep - height) * (1.0 - smoothstep(LAID.x, LAID.y, under.w)));
+                    let under = body(first_box, boxes, views, guide);
+                    // (Only the hairs that are with the guide there: one that has its own
+                    // way, round the other side of a neck, is not under this plane at all,
+                    // and brought onto it would stand out from the head in a fan.)
+                    let depth = keep - dot(q - guide, under.xyz) - under.w;
+                    if (depth > 0.0) {
+                        q += under.xyz * (depth
+                            * (1.0 - smoothstep(LAID.x, LAID.y, under.w))
+                            * (1.0 - smoothstep(UNDER.x, UNDER.y, depth))
+                            * (1.0 - smoothstep(UNDER.y, 2.0 * UNDER.y, distance(q, guide))));
+                    }
+                    if (distance(q, views.taken) > VIEWED_ANEW) {
+                        views = body_views(first_box, boxes, q);
                     }
                 }
                 // Then each hair out of what it is still in, less the deeper it is (deep, it
                 // is hidden, and the way out is anyone's guess).
                 for (var again = 0u; again < 2u; again++) {
-                    let now = body(first_box, boxes, q);
+                    let now = body(first_box, boxes, views, q);
                     if (now.w >= keep) {
                         break;
                     }

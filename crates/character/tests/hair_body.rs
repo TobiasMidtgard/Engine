@@ -1,6 +1,7 @@
 //! The body a person's hair is held out of (`hair_body`) against the skin it was measured
-//! from: at rest and with the head turned, on the skin and under it. Needs the fetched human
-//! pack (`cargo run -p fetch-assets`); passes with a note without it.
+//! from: at rest, with the head turned and with the arms lowered, on the skin, over it and
+//! under it. Needs the fetched human pack (`cargo run -p fetch-assets`); passes with a note
+//! without it.
 
 use std::path::Path;
 
@@ -27,7 +28,7 @@ fn at_share(values: &mut [f32], share: f32) -> f32 {
 }
 
 #[test]
-fn the_hair_body_is_the_dressed_skin_at_rest_and_under_a_turned_head() {
+fn the_hair_body_is_the_dressed_skin_at_rest_under_a_turned_head_and_with_the_arms_down() {
     let Some(bytes) = pack() else {
         return;
     };
@@ -68,7 +69,30 @@ fn the_hair_body_is_the_dressed_skin_at_rest_and_under_a_turned_head() {
         .fold(f32::MAX, f32::min);
     // The head and neck as a film turns them (neck 35%, head the rest), the skin carried by
     // its bones' weights.
-    for (name, yaw, pitch, roll) in [("rest", 0.0, 0.0, 0.0), ("turned", 0.78f32, 0.14, 0.24)] {
+    // (And the arms as someone standing holds them, 24 degrees down from how the hair was
+    // grown: the skin of the shoulders is shared between the arms and the trunk.)
+    let arm = |side: &str| {
+        let joint = pose.index_of(&format!("upper_arm_{side}")).unwrap();
+        let limb: Vec<bool> = (0..pose.bones.len())
+            .map(|b| {
+                under(b, joint) || (pose.names[b].contains("arm") && pose.names[b].ends_with(side))
+            })
+            .collect();
+        (pose.bones[joint].translation, limb)
+    };
+    let (arm_l, arm_r) = (arm("l"), arm("r"));
+    for (name, yaw, pitch, roll, arms) in [
+        ("rest", 0.0, 0.0, 0.0, 0.0),
+        ("turned", 0.78f32, 0.14, 0.24, 0.0),
+        ("arms down", 0.0, 0.0, 0.0, 0.42f32),
+        ("turned, arms down", 0.78, 0.14, 0.24, 0.42),
+    ] {
+        let lowered = |(joint, _): &(Vec3, Vec<bool>)| {
+            // (Toward the body: the way the joint's side of the trunk is on.)
+            let turn = Quat::from_rotation_z(-arms * joint.x.signum());
+            Mat4::from_translation(*joint) * Mat4::from_quat(turn) * Mat4::from_translation(-*joint)
+        };
+        let (t_arm_l, t_arm_r) = (lowered(&arm_l), lowered(&arm_r));
         let whole = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
         let (qn, qh) = (
             Quat::IDENTITY.slerp(whole, 0.35),
@@ -80,7 +104,11 @@ fn the_hair_body_is_the_dressed_skin_at_rest_and_under_a_turned_head() {
             * Mat4::from_quat(qh * qn)
             * Mat4::from_translation(-ph);
         let moved = |b: u16| {
-            if under(usize::from(b), head) {
+            if arm_l.1[usize::from(b)] {
+                t_arm_l
+            } else if arm_r.1[usize::from(b)] {
+                t_arm_r
+            } else if under(usize::from(b), head) {
                 t_head
             } else if under(usize::from(b), neck) {
                 t_neck
@@ -103,18 +131,42 @@ fn the_hair_body_is_the_dressed_skin_at_rest_and_under_a_turned_head() {
         };
         // On the skin the hair lies on (head, neck, shoulders): the distance is zero there,
         // within the lattice's 8 mm samples.
+        // (With the arms down, above the armpits: there the arm's skin is skinned into the
+        // side's.)
+        let from = if arms > 0.0 {
+            arm_l.0.y - 0.03
+        } else {
+            top - 0.4
+        };
         let mut on: Vec<f32> = drawn
             .iter()
-            .filter(|d| d.at.y > top - 0.4)
+            .filter(|d| d.at.y > from)
             .filter_map(posed)
             .filter_map(|(p, _)| hair_body::at(&body, moved, p))
             .map(|(d, _)| d * 1000.0)
             .collect();
         assert!(on.len() > 1000, "{name}: {} points", on.len());
         let (low, high) = (at_share(&mut on, 0.01), at_share(&mut on, 0.99));
+        eprintln!("{name}: on the skin {low:.1} to {high:.1} mm (1% to 99%)");
         assert!(
             low > -4.0 && high < 4.0,
             "{name}: on the skin {low} to {high} mm"
+        );
+        // Over the shoulders and the neck, where the hair hangs, it is outside (with the arms
+        // down a part that carried its own skin alone swung a piece of shoulder up there).
+        let mut over: Vec<f32> = drawn
+            .iter()
+            .filter(|d| d.at.y > arm_l.0.y - 0.03 && d.at.y < arm_l.0.y + 0.12)
+            .filter_map(posed)
+            .filter_map(|(p, n)| hair_body::at(&body, moved, p + n * 0.02))
+            .map(|(d, _)| d * 1000.0)
+            .collect();
+        assert!(over.len() > 300, "{name}: {} shoulder points", over.len());
+        let (few, half) = (at_share(&mut over, 0.02), at_share(&mut over, 0.5));
+        eprintln!("{name}: 20 mm over the shoulders reads {few:.1} (2%) and {half:.1} (half) mm");
+        assert!(
+            few > 10.0 && half > 15.0,
+            "{name}: 20 mm over the shoulders reads {few} (2%) and {half} (half) mm"
         );
         // Under the chest's skin and clothes it is inside, and over them outside (a pocket
         // behind the sweater once read as outside, and locks lay in it).
@@ -122,7 +174,9 @@ fn the_hair_body_is_the_dressed_skin_at_rest_and_under_a_turned_head() {
             let mut off: Vec<f32> = drawn
                 .iter()
                 .filter(|d| {
+                    // (Not the chest's sides under lowered arms: over them is the arm.)
                     d.at.y > top - 0.4
+                        && (arms == 0.0 || d.at.x.abs() < 0.1)
                         && (0..4).any(|k| usize::from(d.bones[k]) == chest && d.weights[k] >= 200)
                 })
                 .filter_map(posed)

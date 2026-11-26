@@ -25,6 +25,7 @@
 //! followed; the wind is the weather's, in m/s; a strand that lies still sleeps; and a lock
 //! has friction inside it, where that project's swings like a bare chain.
 
+use engine_core::glam::Mat3A;
 use engine_core::prelude::*;
 
 use crate::solver::{Sim, leaf_pool};
@@ -56,10 +57,14 @@ const FILLET: f32 = 0.005;
 /// Furthest the constraint passes of one substep move a point, m: capsules further off than
 /// this when they begin aren't looked at again in them.
 const REACHED: f32 = 0.03;
-/// Boxes whose skin is within this of the nearest box's count with it, by their weights (the
-/// skin two bones share at a joint), m ([`Step::felt`]; as the character module bakes them
-/// and the strand renderer reads them).
-pub const PARTS_WITHIN: f32 = 0.012;
+/// A box reads the body at a point only where its bone carries at least this much of the
+/// share the box that carries most there does, and the bones are blended this many times for
+/// where the point was ([`body_at`]; as the character module's reader and the strand
+/// renderer's do).
+pub const READS_FROM: f32 = 0.25;
+const REFINED: usize = 2;
+/// A bone that carries this much of the skin carries it all: no other is asked.
+const CARRIES_ALL: f32 = 0.98;
 /// A strand none of whose points moves faster than [`RESTFUL`] (m/s, against the head) for
 /// this long, s, sleeps: it rides its bone until the body or the air moves. The pull to the
 /// grown shape acts on positions and holds no energy, so a lock lying on a shoulder creeps
@@ -273,7 +278,43 @@ impl TressBox {
         self.at(p.into()).map(|(d, _, w)| (d, w))
     }
 
-    /// At `p` in the box's frame: distance (m), its gradient, and the bone's weight (0..1).
+    /// At `p` in the box's frame: how much of the skin nearest there its bone carries (0..1).
+    #[inline]
+    fn share_at(&self, p: Vec3A) -> Option<f32> {
+        let c = (p - Vec3A::from(self.min)) / self.cell;
+        let [sx, sy, sz] = self.size.map(|s| s as usize);
+        if c.cmplt(Vec3A::ZERO).any()
+            || c.x >= (sx - 1) as f32
+            || c.y >= (sy - 1) as f32
+            || c.z >= (sz - 1) as f32
+        {
+            return None;
+        }
+        let (x, y, z) = (c.x as usize, c.y as usize, c.z as usize);
+        let f = c - Vec3A::new(x as f32, y as f32, z as f32);
+        let k = x + sx * (y + sy * z);
+        let row = sx * sy;
+        let w = |i: usize| self.cells[i][1] as f32;
+        let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        Some(
+            mix(
+                mix(
+                    mix(w(k), w(k + 1), f.x),
+                    mix(w(k + sx), w(k + sx + 1), f.x),
+                    f.y,
+                ),
+                mix(
+                    mix(w(k + row), w(k + row + 1), f.x),
+                    mix(w(k + row + sx), w(k + row + sx + 1), f.x),
+                    f.y,
+                ),
+                f.z,
+            ) / 255.0,
+        )
+    }
+
+    /// At `p` in the box's frame: distance (m), its gradient, and how much of the skin nearest
+    /// there its bone carries (0..1).
     #[inline]
     fn at(&self, p: Vec3A) -> Option<(f32, Vec3A, f32)> {
         let c = (p - Vec3A::from(self.min)) / self.cell;
@@ -329,12 +370,213 @@ impl TressBox {
 }
 
 /// A box where it is in one substep.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct PosedBox {
     pos: Vec3A,
-    rot: engine_core::glam::Mat3A,
+    rot: Mat3A,
     center: Vec3A,
     reach: f32,
+}
+
+/// The measured body at a point: the way out, the signed distance, the box that read it, and
+/// how much of the skin there one chosen box's bone carries.
+#[derive(Debug, Clone, Copy)]
+struct BodyAt {
+    out: Vec3A,
+    distance: f32,
+    part: u8,
+    carried: f32,
+}
+
+/// How one box sees a point: where the point was on the body as the hair was grown on it,
+/// and what brings a small move of the point back there (the bones that carry the skin there,
+/// blended by their shares, undone). `carried`: one chosen box's share of that skin.
+#[derive(Debug, Clone, Copy, Default)]
+struct View {
+    part: u8,
+    carried: f32,
+    was: Vec3A,
+    back: Mat3A,
+}
+
+/// The boxes that count at a point ([`views`]), each with its [`View`]: at most [`VIEWS`],
+/// those whose bones carry most of the skin there.
+#[derive(Debug, Clone, Copy, Default)]
+struct Views {
+    n: u8,
+    of: [View; VIEWS],
+}
+
+/// How many boxes can count at one point (head, neck, chest and a shoulder meet at a collar).
+const VIEWS: usize = 4;
+/// Places on the body as grown this near are one place to a reader (a sixteenth of a
+/// sample's cell), m.
+const SAME: f32 = 0.0005;
+
+/// How the `boxes` in `among`, each where it is `posed`, see `p`, and which of them `p` is in
+/// or within `pad` of. `of`: the box whose share of the skin there is wanted (any other
+/// number: none).
+///
+/// Every box holds the whole body as the hair was grown on it, so the question is where `p`
+/// was then. Each box answers as its own bone would have brought it, and counts as much as
+/// its bone carries of the skin nearest there. Where bones share that skin (a shoulder,
+/// between arm and trunk) the skin has moved as their blend by their shares, as it is
+/// skinned: that blend undone gives where `p` was, and the body is read there ([`read`]).
+/// (Each box holding its own bone's skin alone, the nearest of them the body, threw the hair
+/// off a shoulder that was not there: an arm lowered from how the hair was grown swings its
+/// box's side of the shoulder up beside the neck.)
+#[inline]
+fn views(
+    boxes: &[TressBox],
+    posed: &[PosedBox],
+    among: u16,
+    p: Vec3A,
+    pad: f32,
+    of: usize,
+) -> (u16, Views) {
+    let mut seen = [(0usize, Vec3A::ZERO, 0.0f32); MAX_BOXES];
+    let mut n = 0;
+    let mut most = 0.0f32;
+    let mut within = 0u16;
+    let mut left = among;
+    while left != 0 {
+        let k = left.trailing_zeros() as usize;
+        left &= left - 1;
+        if k >= boxes.len() {
+            break;
+        }
+        let was = posed[k].rot.transpose() * (p - posed[k].pos);
+        if !boxes[k].holds(was, pad) {
+            continue;
+        }
+        within |= 1 << k;
+        let Some(share) = boxes[k].share_at(was) else {
+            continue;
+        };
+        seen[n] = (k, was, share);
+        n += 1;
+        most = most.max(share);
+    }
+    let mut views = Views::default();
+    if most <= 0.0 {
+        return (within, views);
+    }
+    let mut shares = [0.0f32; VIEWS];
+    let mut starts = [Vec3A::ZERO; VIEWS];
+    for &(k, was, share) in &seen[..n] {
+        if share < READS_FROM * most {
+            continue;
+        }
+        // Boxes whose bones have moved alike see the point alike: one of them says it.
+        if (0..views.n as usize).any(|v| starts[v].distance_squared(was) < SAME * SAME) {
+            continue;
+        }
+        // Among too many, those whose bones carry most.
+        let slot = if (views.n as usize) < VIEWS {
+            views.n += 1;
+            views.n as usize - 1
+        } else {
+            let least = (0..VIEWS)
+                .min_by(|a, b| shares[*a].total_cmp(&shares[*b]))
+                .unwrap_or(0);
+            if shares[least] >= share {
+                continue;
+            }
+            least
+        };
+        shares[slot] = share;
+        starts[slot] = was;
+        let mut view = View {
+            part: k as u8,
+            carried: if k == of { 1.0 } else { 0.0 },
+            was,
+            back: posed[k].rot.transpose(),
+        };
+        if share < CARRIES_ALL {
+            // The bones that carry the skin there, by their shares (and once more where
+            // that puts the point: the shares are those of where it really was).
+            for _ in 0..REFINED {
+                let (mut rot, mut pos, mut total, mut its) = (Mat3A::ZERO, Vec3A::ZERO, 0.0, 0.0);
+                for (j, b) in boxes.iter().enumerate() {
+                    if let Some(share) = b.share_at(view.was)
+                        && share > 0.0
+                    {
+                        rot += posed[j].rot * share;
+                        pos += posed[j].pos * share;
+                        total += share;
+                        if j == of {
+                            its = share;
+                        }
+                    }
+                }
+                if total <= 0.0 {
+                    break;
+                }
+                view.back = (rot * (1.0 / total)).inverse();
+                view.carried = its / total;
+                let was = view.back * (p - pos / total);
+                let moved = was.distance_squared(view.was);
+                view.was = was;
+                if moved < SAME * SAME {
+                    break;
+                }
+            }
+        }
+        // Two that find it at the same place read the same there.
+        if (0..views.n as usize)
+            .any(|v| v != slot && views.of[v].was.distance_squared(view.was) < SAME * SAME)
+            && slot + 1 == views.n as usize
+        {
+            views.n -= 1;
+            continue;
+        }
+        views.of[slot] = view;
+    }
+    (within, views)
+}
+
+/// The measured body at `p`, which was at `from` when the boxes' `views` of it were taken
+/// (a few millimeters off at most: the views move with it). Of the boxes that count, the
+/// one that finds `p` deepest is right (a chin on a chest is two places).
+#[inline]
+fn read(boxes: &[TressBox], views: &Views, from: Vec3A, p: Vec3A) -> Option<BodyAt> {
+    let mut found: Option<BodyAt> = None;
+    for view in &views.of[..views.n as usize] {
+        let at = view.was + view.back * (p - from);
+        let Some((d, g, _)) = boxes[view.part as usize]
+            .at(at)
+            .or_else(|| boxes.iter().find_map(|b| b.at(at)))
+        else {
+            continue;
+        };
+        if found.is_none_or(|f| d < f.distance) {
+            found = Some(BodyAt {
+                out: view.back.transpose() * g,
+                distance: d,
+                part: view.part,
+                carried: view.carried,
+            });
+        }
+    }
+    found.map(|at| BodyAt {
+        out: at.out.try_normalize().unwrap_or(Vec3A::Y),
+        ..at
+    })
+}
+
+/// The measured body at `p` ([`views`], [`read`]), and which of the boxes in `among` `p` is
+/// in or within `pad` of.
+#[inline]
+fn body_at(
+    boxes: &[TressBox],
+    posed: &[PosedBox],
+    among: u16,
+    p: Vec3A,
+    pad: f32,
+    of: usize,
+) -> (u16, Option<BodyAt>) {
+    let (within, views) = views(boxes, posed, among, p, pad, of);
+    (within, read(boxes, &views, p, p))
 }
 
 /// A capsule where it is in one substep.
@@ -822,35 +1064,23 @@ impl Tress {
     /// signed distance, and the share of it the frame the hair rides (the head) carries.
     /// `None` outside every box.
     pub fn surface_at(&self, frames: &[crate::solver::Frame], p: Vec3) -> Option<(Vec3, f32, f32)> {
-        let mut found = [(0.0f32, Vec3A::ZERO, 0.0f32, 0.0f32); MAX_BOXES];
-        let mut n = 0;
-        for b in self.boxes.iter().take(MAX_BOXES) {
+        let boxes = &self.boxes[..self.boxes.len().min(MAX_BOXES)];
+        let mut posed = [PosedBox::default(); MAX_BOXES];
+        for (at, b) in posed.iter_mut().zip(boxes) {
             let f = frames.get(b.frame as usize)?;
-            let local = f.to_rot.conjugate() * (p - f.to_pos);
-            let Some((d, g, w)) = b.at(local.into()) else {
-                continue;
-            };
-            let of_head = if b.frame == self.carrier { 1.0 } else { 0.0 };
-            found[n] = (d, Vec3A::from(f.to_rot * Vec3::from(g)), w, of_head);
-            n += 1;
+            (at.pos, at.rot) = (f.to_pos.into(), Mat3A::from_quat(f.to_rot));
         }
-        let found = &found[..n];
-        let nearest = found.iter().map(|f| f.0.abs()).fold(f32::MAX, f32::min);
-        let (mut sum, mut way, mut total, mut head) = (0.0, Vec3A::ZERO, 0.0, 0.0);
-        for (d, g, w, of_head) in found {
-            let u = w.max(1e-3) * (1.0 - (d.abs() - nearest) / PARTS_WITHIN).max(0.0);
-            sum += d * u;
-            way += *g * u;
-            total += u;
-            head += u * of_head;
-        }
-        (total > 0.0).then(|| {
-            (
-                Vec3::from(way).normalize_or(Vec3::Y),
-                sum / total,
-                head / total,
-            )
-        })
+        let head = boxes.iter().position(|b| b.frame == self.carrier);
+        body_at(
+            boxes,
+            &posed,
+            u16::MAX,
+            p.into(),
+            0.0,
+            head.unwrap_or(usize::MAX),
+        )
+        .1
+        .map(|at| (at.out.into(), at.distance, at.carried))
     }
 
     /// Cut strand `strand` in the segment into its particle `at`, `part` of the way along it:
@@ -1065,7 +1295,7 @@ impl Tress {
                 ) * (b.cell * 0.5);
                 let posed = PosedBox {
                     pos: pos.into(),
-                    rot: engine_core::glam::Mat3A::from_quat(rot),
+                    rot: Mat3A::from_quat(rot),
                     center: (pos + rot * (b.min + half)).into(),
                     reach: half.length(),
                 };
@@ -1191,70 +1421,14 @@ impl Step<'_> {
         near
     }
 
-    /// The body's measured surface at `p` in substep `s`, from the boxes in `among`: the way
-    /// out and the signed distance, the boxes' blended by how much each one's bone carries
-    /// the skin there. `None` outside them all.
+    /// The body's measured surface at `p` in substep `s`, from the boxes in `among`
+    /// ([`body_at`]): the way out and the signed distance. `None` outside them all.
     #[inline]
     fn surface(&self, s: usize, among: u16, p: Vec3A) -> Option<(Vec3A, f32)> {
-        self.felt(s, among, p, 0.0).1.map(|(n, d, _)| (n, d))
-    }
-
-    /// [`Self::surface`] with the box whose skin is the nearest, and which of the boxes in
-    /// `among` `p` is in or within `pad` of.
-    #[inline]
-    fn felt(&self, s: usize, among: u16, p: Vec3A, pad: f32) -> (u16, Option<(Vec3A, f32, u8)>) {
-        let posed = &self.posed_boxes[s * self.boxes.len()..];
-        let mut found = [(0.0f32, Vec3A::ZERO, 0.0f32); MAX_BOXES];
-        let mut n = 0;
-        let mut nearest = f32::MAX;
-        let mut left = among;
-        let mut within = 0u16;
-        let mut part = 0u8;
-        while left != 0 {
-            let k = left.trailing_zeros() as usize;
-            left &= left - 1;
-            let at = &posed[k];
-            let b = &self.boxes[k];
-            let local = at.rot.transpose() * (p - at.pos);
-            if !b.holds(local, pad) {
-                continue;
-            }
-            within |= 1 << k;
-            let Some((d, g, w)) = b.at(local) else {
-                continue;
-            };
-            found[n] = (d, at.rot * g, w);
-            n += 1;
-            if d.abs() < nearest {
-                (nearest, part) = (d.abs(), k as u8);
-            }
-        }
-        match n {
-            0 => return (within, None),
-            1 => {
-                let (d, g, _) = found[0];
-                return (
-                    within,
-                    Some((g.try_normalize().unwrap_or(Vec3A::Y), d, part)),
-                );
-            }
-            _ => {}
-        }
-        // Each box holds the distance to the skin its own bone carries, seen where that bone
-        // carries the point back. The body is the nearest of them; where two bones share the
-        // skin of a joint both are about as near, and count by their weights on it (the
-        // skin lies between where each alone would put it).
-        let (mut sum, mut way, mut total) = (0.0, Vec3A::ZERO, 0.0);
-        for (d, g, w) in &found[..n] {
-            let u = w.max(1e-3) * (1.0 - (d.abs() - nearest) / PARTS_WITHIN).max(0.0);
-            sum += d * u;
-            way += *g * u;
-            total += u;
-        }
-        (
-            within,
-            Some((way.try_normalize().unwrap_or(Vec3A::Y), sum / total, part)),
-        )
+        let posed = &self.posed_boxes[s * self.boxes.len()..(s + 1) * self.boxes.len()];
+        body_at(self.boxes, posed, among, p, 0.0, usize::MAX)
+            .1
+            .map(|at| (at.out, at.distance))
     }
 
     /// The boxes `p` could be in within the step.
@@ -1385,7 +1559,12 @@ impl Step<'_> {
         // The body's measured surface, last: it is what shows.
         let margin = Self::margin(base, sunk, true);
         if close.surface - p.distance(close.at) <= margin
-            && let (_, Some((n, sd, part))) = self.felt(close.substep as usize, close.boxes, p, 0.0)
+            && let Some(BodyAt {
+                out: n,
+                distance: sd,
+                part,
+                ..
+            }) = read(self.boxes, &close.views, close.at, p)
             && sd < margin
         {
             let fric = (self.cfg.friction + cling).clamp(0.0, 0.94);
@@ -1463,7 +1642,8 @@ impl Step<'_> {
             if close.surface - p.distance(close.at) > on_body {
                 return None;
             }
-            self.surface(close.substep as usize, close.boxes, p)
+            read(self.boxes, &close.views, close.at, p)
+                .map(|at| (at.out, at.distance))
                 .filter(|(_, sd)| *sd < on_body)
         };
         for pass in 0..5 {
@@ -1813,7 +1993,7 @@ impl Step<'_> {
         for s in 0..self.substeps {
             let frac = (s + 1) as f32 / self.substeps as f32;
             let (h_pos, h_quat) = frame.pose(frac);
-            let h_rot = engine_core::glam::Mat3A::from_quat(h_quat);
+            let h_rot = Mat3A::from_quat(h_quat);
             let caps = &self.posed[s as usize * self.caps..(s as usize + 1) * self.caps];
             // 1. The root rides the frame.
             let h_pos = Vec3A::from(h_pos);
@@ -1907,12 +2087,15 @@ impl Step<'_> {
                 } else {
                     self.close(caps, held[i].near, p[i], held[i].margin[0], v[i].sunk)
                 };
-                close[i].substep = s as u16;
-                (close[i].boxes, close[i].surface) = if held[i].boxes == 0 {
-                    (0, f32::MAX)
+                (close[i].views, close[i].surface) = if held[i].boxes == 0 {
+                    (Views::default(), f32::MAX)
                 } else {
-                    let (within, at) = self.felt(s as usize, held[i].boxes, p[i], REACHED);
-                    (within, at.map_or(f32::MAX, |(_, sd, _)| sd))
+                    let posed = &self.posed_boxes
+                        [s as usize * self.boxes.len()..(s as usize + 1) * self.boxes.len()];
+                    let views =
+                        views(self.boxes, posed, held[i].boxes, p[i], REACHED, usize::MAX).1;
+                    let at = read(self.boxes, &views, p[i], p[i]);
+                    (views, at.map_or(f32::MAX, |at| at.distance))
                 };
             }
             // 5. Bends, lengths and the body.
@@ -2086,10 +2269,9 @@ struct Close {
     n: u8,
     cap: [u8; 6],
     sd: [f32; 6],
-    /// The substep, the body's boxes the point can reach in it, and how far off the measured
+    /// How the body's boxes see the point in the substep, and how far off the measured
     /// surface was (`f32::MAX` out of reach).
-    substep: u16,
-    boxes: u16,
+    views: Views,
     surface: f32,
 }
 
@@ -2262,7 +2444,7 @@ mod tests {
 
     /// [`head`] with its head and neck measured instead of fitted with capsules, and under
     /// them a pair of shoulders on a frame of their own that stays where it is: each box
-    /// holds the distance to what its own frame carries.
+    /// holds the distance to the whole of it and how much of the nearest is its own frame's.
     fn measured_head(strands: usize, points: usize) -> (Sim, Tress, Vec<TressCapsule>) {
         let (mut sim, mut tress) = head(strands, points);
         let chest = sim.add_frame(Vec3::ZERO, Quat::IDENTITY);
@@ -2276,16 +2458,21 @@ mod tests {
             friction: 0.3,
             body: true,
         });
-        // (Each box: the distance to what its own frame carries.)
+        // (Each box: the distance to the whole body as it stands here, and how much of the
+        // nearest of it is its own frame's: all of it but where the two meet.)
         let own = |of: u16| {
             let shapes = shapes.clone();
             move |p: Vec3| {
-                let d = shapes
-                    .iter()
-                    .filter(|c| c.frame == of)
-                    .map(|c| tapered_capsule(p, c.a, c.b, c.ra, c.rb).1)
-                    .fold(f32::MAX, f32::min);
-                (d, 255)
+                let to = |own: bool| {
+                    shapes
+                        .iter()
+                        .filter(|c| (c.frame == of) == own)
+                        .map(|c| tapered_capsule(p, c.a, c.b, c.ra, c.rb).1)
+                        .fold(f32::MAX, f32::min)
+                };
+                let (own, other) = (to(true), to(false));
+                let share = (0.5 + (other - own) / 0.1).clamp(0.0, 1.0);
+                (own.min(other), (share * 255.0) as u8)
             }
         };
         tress.boxes.push(measured(
@@ -2400,8 +2587,18 @@ mod tests {
                     let f = sim.frames[c.frame as usize];
                     let (a, b) = (f.to_pos + f.to_rot * c.a, f.to_pos + f.to_rot * c.b);
                     let d = tapered_capsule(*p, a, b, c.ra, c.rb).1;
-                    deepest_in = deepest_in.min(d);
                     on_shoulders += (c.frame != 0 && d < 0.006) as usize;
+                    // (Where the frame carries all of the body nearest: where the two
+                    // share it, it has gone between them, as skin does.)
+                    let was = f.to_rot.inverse() * (*p - f.to_pos);
+                    let others = shapes
+                        .iter()
+                        .filter(|o| o.frame != c.frame)
+                        .map(|o| tapered_capsule(was, o.a, o.b, o.ra, o.rb).1)
+                        .fold(f32::MAX, f32::min);
+                    if others - d >= 0.05 {
+                        deepest_in = deepest_in.min(d);
+                    }
                 }
             }
         }

@@ -8,15 +8,18 @@
 //! hidden under it left out), carried to the model space the hair's guides are in, and the
 //! bones that carry them noted. Each bone that moves a fair share of the surface the hair can
 //! reach gets a box around what it moves, and in it, sampled on a lattice, the distance to
-//! that skin alone and the bone's weight on it (none inside the body where another bone's
-//! skin is the nearer: that is the other's to say): the readers carry each box with its bone,
-//! and the body is the nearest of them, blended by those weights where two bones share the
-//! skin of a joint.
+//! the whole body as it stood when the hair was grown, and how much of the skin nearest each
+//! sample the bone carries. The readers ([`at`]) ask where a point was when the hair was
+//! grown: as the bones that carry the skin near it have moved since, blended by their shares
+//! as the skin itself is skinned, undone. There the body is read.
 //!
-//! (A box used to hold the distance to the whole body as it stood when the hair was grown,
-//! and the readers blended the boxes. Under a turned head that failed where it mattered:
-//! the head's box, carried round, found a lock on the shoulder clear of the neck, the
-//! shoulder's box found it inside the shoulder, and their mean let it sink in.)
+//! (Two readings before this one failed where it mattered. Boxes that held the whole body and
+//! were blended by distance: under a turned head the head's box, carried round, found a lock
+//! on the shoulder clear of the neck, the shoulder's box found it inside the shoulder, and
+//! their mean let it sink in. Boxes that each held only the skin their own bone carries,
+//! the nearest of them the body: with the arms lowered from how the hair was grown, an arm's
+//! box swung its side of the shoulder up beside the neck, and the hair was thrown off a
+//! shoulder that was not there.)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -474,47 +477,28 @@ fn inside(
     side
 }
 
-/// A part's skin: the vertices `bone` carries at least [`CARRIES`] of. Those no part's bone
-/// carries (a hand, where only the forearm has a box) go to the part of the nearest bone
-/// above theirs that has one, whole.
-fn owned(
-    s: &Surface,
-    within: &[usize],
-    pose: &SkeletonPose,
-    parts: &[u16],
-) -> Vec<Vec<(usize, u8)>> {
-    let mut own: Vec<Vec<(usize, u8)>> = vec![Vec::new(); parts.len()];
-    for &v in within {
-        let mut any = false;
-        for (k, bone) in parts.iter().enumerate() {
-            let w = weight_of(s, v, *bone);
-            if w >= CARRIES {
-                own[k].push((v, w));
-                any = true;
+/// How much of each vertex in `within` each part's bone carries (of 255). What a bone without
+/// a part carries (a hand, where only the forearm has a box) counts for the nearest bone above
+/// it that has one.
+fn shares(s: &Surface, within: &[usize], pose: &SkeletonPose, parts: &[u16]) -> Vec<Vec<u8>> {
+    within
+        .iter()
+        .map(|&v| {
+            let mut share = vec![0u32; parts.len()];
+            for k in 0..4 {
+                let w = s.weights[v][k] as u32;
+                let mut bone = (w > 0).then_some(s.bones[v][k] as usize);
+                while let Some(b) = bone {
+                    if let Some(part) = parts.iter().position(|p| *p as usize == b) {
+                        share[part] += w;
+                        break;
+                    }
+                    bone = pose.parents.get(b).copied().flatten().map(usize::from);
+                }
             }
-        }
-        if any {
-            continue;
-        }
-        let heaviest = (0..4).max_by_key(|k| s.weights[v][*k]).unwrap_or(0);
-        let mut bone = Some(s.bones[v][heaviest] as usize);
-        while let Some(b) = bone {
-            if let Some(k) = parts.iter().position(|p| *p as usize == b) {
-                own[k].push((v, 255));
-                break;
-            }
-            bone = pose.parents.get(b).copied().flatten().map(usize::from);
-        }
-    }
-    own
-}
-
-fn weight_of(s: &Surface, v: usize, bone: u16) -> u8 {
-    (0..4)
-        .filter(|k| s.bones[v][*k] == bone)
-        .map(|k| s.weights[v][k] as u32)
-        .sum::<u32>()
-        .min(255) as u8
+            share.into_iter().map(|w| w.min(255) as u8).collect()
+        })
+        .collect()
 }
 
 /// The [`HairBody`] of a built person for its `pose` skeleton and `guides` (`None` without a
@@ -564,8 +548,8 @@ pub fn hair_body(
         size.y as usize + 1,
         size.z as usize + 1,
     ];
-    // The whole surface's lattice: which side of the body a sample far from a part's own skin
-    // is on.
+    // The whole surface's lattice: the nearest vertex to every sample, and which side of the
+    // body it is on.
     let whole = Lattice::new(min, size, &points);
     let inner = inside(&whole, &points, |near| s.out[within[near]], &s.faces);
 
@@ -582,21 +566,20 @@ pub fn hair_body(
     bones.sort_by_key(|(b, n)| (std::cmp::Reverse(*n), *b));
     bones.truncate(MOST_PARTS);
     let bones: Vec<u16> = bones.into_iter().map(|(b, _)| b).collect();
-    let own = owned(&s, &within, pose, &bones);
-    // (Which part each surface point's vertex is in, to ask of the whole lattice's nearest.)
+    let shares = shares(&s, &within, pose, &bones);
     let mut parts = Vec::with_capacity(bones.len());
     for (k, bone) in bones.iter().enumerate() {
-        let own = &own[k];
-        if own.is_empty() {
+        // Its box: around the skin it carries a fair share of, on the whole lattice's samples.
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for (i, share) in shares.iter().enumerate() {
+            if share[k] >= CARRIES {
+                lo = lo.min(points[i]);
+                hi = hi.max(points[i]);
+            }
+        }
+        if lo.x > hi.x {
             continue;
         }
-        let mine: std::collections::HashSet<usize> = own.iter().map(|(v, _)| *v).collect();
-        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for (v, _) in own {
-            lo = lo.min(s.at[*v]);
-            hi = hi.max(s.at[*v]);
-        }
-        // Its box, on the whole lattice's samples.
         let first = ((lo - Vec3::splat(BAND) - min) / CELL)
             .floor()
             .max(Vec3::ZERO);
@@ -613,55 +596,39 @@ pub fn hair_body(
             last[2] - first[2] + 1,
         ];
         let corner = whole.at(first[0], first[1], first[2]);
-        let own_points: Vec<Vec3> = own.iter().map(|(v, _)| s.at[*v]).collect();
-        let lattice = Lattice::new(corner, dims, &own_points);
         let mut d = Vec::with_capacity(dims[0] * dims[1] * dims[2]);
         let mut w = Vec::with_capacity(d.capacity());
         for z in 0..dims[2] {
             for y in 0..dims[1] {
                 for x in 0..dims[0] {
-                    let near = lattice.near[lattice.index(x, y, z)];
+                    let at = whole.index(first[0] + x, first[1] + y, first[2] + z);
+                    let near = whole.near[at];
                     if near == u32::MAX {
                         d.push(i16::MAX);
                         w.push(0);
                         continue;
                     }
-                    let (v, weight) = own[near as usize];
-                    let p = lattice.at(x, y, z);
+                    let v = within[near as usize];
+                    let p = whole.at(first[0] + x, first[1] + y, first[2] + z);
                     let off = p - s.at[v];
                     let len = off.length();
                     let plane = off.dot(s.out[v]);
-                    let at = whole.index(first[0] + x, first[1] + y, first[2] + z);
-                    let (m, weight) = if inner[at] == Side::Skin && len <= 2.0 * ON_PLANE {
-                        // At its skin: off the tangent plane (the surface between
-                        // vertices), by degrees straight to the vertex.
+                    let m = if inner[at] == Side::Skin && len <= 2.0 * ON_PLANE {
+                        // At the skin: off the tangent plane (the surface between vertices),
+                        // by degrees straight to the vertex.
                         let straight = len.copysign(plane);
-                        let m =
-                            plane + (straight - plane) * smoothstep(ON_PLANE, 2.0 * ON_PLANE, len);
-                        (m, weight)
+                        plane + (straight - plane) * smoothstep(ON_PLANE, 2.0 * ON_PLANE, len)
                     } else {
-                        // Off it: inside where the sample is inside the body. Where the
-                        // body's nearest skin there is another part's (a part's skin is an
-                        // open patch, and how deep it is behind its rim is not its own to
-                        // say), it has no say: no weight.
-                        let near = whole.near[at];
+                        // Off it: inside where the sample is inside the body.
                         let inside = match inner[at] {
                             Side::In => true,
                             Side::Out => false,
-                            Side::Skin => {
-                                let u = within[near as usize];
-                                (p - s.at[u]).dot(s.out[u]) < 0.0
-                            }
+                            Side::Skin => plane < 0.0,
                         };
-                        let own = near != u32::MAX && mine.contains(&within[near as usize]);
-                        match (inside, own) {
-                            (true, true) => (-len, weight),
-                            (true, false) => (-len, 0),
-                            (false, _) => (len, weight),
-                        }
+                        if inside { -len } else { len }
                     };
                     d.push((m / HairBody::UNIT).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
-                    w.push(weight);
+                    w.push(shares[near as usize][k]);
                 }
             }
         }
@@ -680,10 +647,13 @@ pub fn hair_body(
     })
 }
 
-/// Parts whose skin is within this of the nearest part's count with it, by their weights (the
-/// skin two bones share at a joint), m. The hair simulation and the strand renderer read a
-/// body the same way (softbody `tress.rs`, render `strands_pose.wgsl`).
-pub const PARTS_WITHIN: f32 = 0.012;
+/// A part reads the body at a point only where its bone carries at least this much of the
+/// share the part that carries most there does (each of the skin nearest the point as the
+/// part's own bone would have brought it there). The hair simulation and the strand renderer
+/// read a body the same way (softbody `tress.rs`, render `strands_pose.wgsl`).
+pub const READS_FROM: f32 = 0.25;
+/// How many times a reader blends the bones for where a point was.
+pub const REFINED: usize = 2;
 
 /// The distance from `p` (model space where the hair was grown, nobody moved) to the body, m,
 /// and the way out of it; `None` outside every box.
@@ -693,30 +663,68 @@ pub fn at_rest(body: &HairBody, p: Vec3) -> Option<(f32, Vec3)> {
 
 /// The distance from `p` to the body with its bones moved, m, and the way out of it: `moved`
 /// gives how each part's bone has carried what it carries since the hair was grown (model
-/// space to model space). `None` outside every box.
+/// space to model space). `None` where no part's bone carries the skin near `p`.
+///
+/// Every box holds the whole body as it was grown, so the question is where `p` was then.
+/// Each part answers as its own bone would have brought it (`moved` undone), and counts as
+/// much as its bone carries of the skin nearest there. Where bones share that skin (a
+/// shoulder between arm and trunk), the skin has moved as the blend of them by their shares,
+/// as it is skinned: that blend undone gives where `p` was, and the body is read there. Of
+/// the parts that count, the one that finds `p` deepest is right (skin on skin, as a chin on
+/// a chest, is two places).
 pub fn at(body: &HairBody, moved: impl Fn(u16) -> Mat4, p: Vec3) -> Option<(f32, Vec3)> {
-    let found: Vec<(f32, Vec3, f32)> = body
+    let moved: Vec<Mat4> = body.parts.iter().map(|part| moved(part.bone)).collect();
+    let seen: Vec<(usize, Vec3, f32)> = body
         .parts
         .iter()
-        .filter_map(|part| {
-            let m = moved(part.bone);
-            let (d, g, w) = sample(part, m.inverse().transform_point3(p))?;
-            Some((d, m.transform_vector3(g), w))
+        .enumerate()
+        .filter_map(|(k, part)| {
+            let was = moved[k].inverse().transform_point3(p);
+            sample(part, was).map(|(.., w)| (k, was, w))
         })
         .collect();
-    let nearest = found.iter().map(|(d, ..)| d.abs()).fold(f32::MAX, f32::min);
-    let (mut sum, mut way, mut total) = (0.0, Vec3::ZERO, 0.0);
-    for (d, g, w) in &found {
-        let u = w.max(1e-3) * (1.0 - (d.abs() - nearest) / PARTS_WITHIN).max(0.0);
-        sum += d * u;
-        way += *g * u;
-        total += u;
+    let most = seen.iter().map(|(.., w)| *w).fold(0.0, f32::max);
+    if most <= 0.0 {
+        return None;
     }
-    (total > 0.0).then(|| (sum / total, (way / total).normalize_or(Vec3::Y)))
+    let mut found: Option<(f32, Vec3)> = None;
+    for &(k, was, w) in &seen {
+        if w < READS_FROM * most {
+            continue;
+        }
+        // The bones that carry the skin there, by their shares (and once more where that
+        // puts the point: the shares are those of where it really was).
+        let (mut blend, mut at) = (moved[k], was);
+        for _ in 0..REFINED {
+            let (mut sum, mut total) = (Mat4::ZERO, 0.0);
+            for (j, part) in body.parts.iter().enumerate() {
+                if let Some((.., share)) = sample(part, at)
+                    && share > 0.0
+                {
+                    sum += moved[j] * share;
+                    total += share;
+                }
+            }
+            if total <= 0.0 {
+                break;
+            }
+            blend = sum * (1.0 / total);
+            at = blend.inverse().transform_point3(p);
+        }
+        let Some((d, g, _)) = sample(&body.parts[k], at)
+            .or_else(|| body.parts.iter().find_map(|part| sample(part, at)))
+        else {
+            continue;
+        };
+        if found.is_none_or(|(least, _)| d < least) {
+            found = Some((d, blend.transform_vector3(g).normalize_or(Vec3::Y)));
+        }
+    }
+    found
 }
 
-/// One box at `p` in its own space: the distance to its bone's skin (m), its gradient, and the
-/// bone's weight on that skin (0..1).
+/// One box at `p` where the hair was grown: the distance to the body (m), its gradient, and
+/// how much of the skin nearest there the box's bone carries (0..1).
 pub fn sample(part: &HairBodyPart, p: Vec3) -> Option<(f32, Vec3, f32)> {
     let c = (p - part.min) / part.cell;
     let [sx, sy, sz] = part.size.map(|s| s as usize);
