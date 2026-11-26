@@ -136,6 +136,8 @@ pub struct SoftBodySim {
     pub carried: bool,
     /// How wet each particle is, 0 (dry) .. 1 (soaked through).
     pub wet: Vec<f32>,
+    /// It is never drier than this (hair: as wet as its person, `Appearance::wear.wet`).
+    pub wet_floor: f32,
     /// Simulated here but drawn by another module (hair from `HairGuides`).
     pub drawn_elsewhere: bool,
     pub(crate) scratch_colliders: Vec<LocalCollider>,
@@ -265,6 +267,7 @@ impl SoftBodySim {
             lod_wait: 0,
             carried: false,
             wet: Vec::new(),
+            wet_floor: 0.0,
             drawn_elsewhere: false,
             scratch_colliders: Vec::new(),
             held: (None, false),

@@ -198,6 +198,76 @@ impl std::fmt::Debug for StrandKeptOutWhenDrawn {
     }
 }
 
+/// A box of a measured body that drawn hair is kept out of: the signed distance to its
+/// surface at `size` samples `cell` meters apart from `min` (x fastest, then y, then z), in
+/// [`engine_world::HairBody::UNIT`]s, negative inside, and per sample how much of the surface
+/// nearest it this box carries (0..=255). `to_box` takes a point of the instance's model space
+/// to the box's own space now. Where boxes overlap, the distance is theirs blended by those
+/// weights (as [`engine_world::HairBody`] says, whose parts these are).
+///
+/// The sample arrays are sent to the GPU once and found again by their address, so hand in
+/// clones of the same `Arc`s every frame.
+#[derive(Debug, Clone)]
+pub struct StrandBox {
+    pub to_box: Mat4,
+    pub min: Vec3,
+    pub cell: f32,
+    pub size: [u16; 3],
+    pub distance: std::sync::Arc<[i16]>,
+    pub weight: std::sync::Arc<[u8]>,
+}
+
+/// The measured body an instance's strands are kept out of when the renderer draws it: skin
+/// and clothes as they are drawn, where [`StrandKeptOutWhenDrawn`]'s capsules only stand in
+/// for a body. Every drawn point but a strand's root is moved out to a hair's breadth above
+/// the surface.
+///
+/// Asked like [`StrandKeptOutWhenDrawn`] and with it; the function fills `out` (the renderer
+/// takes the first 12 boxes).
+#[derive(Component, Clone, Copy)]
+pub struct StrandBodyWhenDrawn(pub fn(&World, Entity, &mut Vec<StrandBox>));
+
+impl std::fmt::Debug for StrandBodyWhenDrawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StrandBodyWhenDrawn")
+    }
+}
+
+/// How a guide's hair is now, for the strands that follow it: `wet` from 0 (dry) to 1 (soaked:
+/// its hairs gather into a rope around the guide, darker and glossier), `cut` the share of its
+/// length left after a cut (1: whole), and `shed` how far gone the cut-off piece is (0: it has
+/// just come off and is drawn where the guide's points past the cut are, falling; 1: gone).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrandGuideState {
+    pub wet: f32,
+    pub cut: f32,
+    pub shed: f32,
+}
+
+impl Default for StrandGuideState {
+    fn default() -> Self {
+        Self {
+            wet: 0.0,
+            cut: 1.0,
+            shed: 1.0,
+        }
+    }
+}
+
+/// The state of an instance's guides when the renderer draws it ([`StrandGuideState`], one a
+/// guide in [`StrandGroom::guides`] order; none, or another number: dry and whole).
+///
+/// Asked like [`StrandKeptOutWhenDrawn`] and with it. An instance drawn from its own
+/// `engine_world::HairGuidesPosed` takes its `wet`, `cut` and `shed` instead.
+#[derive(Component, Clone, Copy)]
+pub struct StrandStateWhenDrawn(pub fn(&World, Entity, &mut Vec<StrandGuideState>));
+
+impl std::fmt::Debug for StrandStateWhenDrawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StrandStateWhenDrawn")
+    }
+}
+
 impl StrandInstance {
     /// `groom` as groomed, its level of detail picked by distance.
     pub fn new(groom: Handle<StrandGroom>) -> Self {

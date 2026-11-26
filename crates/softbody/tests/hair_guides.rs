@@ -10,7 +10,7 @@ use engine_core::time::{FixedTime, TimeSource};
 use engine_softbody::guides::{GroomedRest, GuideHair};
 use engine_softbody::{BoneCapsule, BoneColliders, SoftBodyPlugin, SoftBodySim};
 use engine_world::animation::{BonePose, SkeletonPose};
-use engine_world::{HairGuide, HairGuides, HairGuidesPosed, WeatherState};
+use engine_world::{HairBody, HairBodyPart, HairGuide, HairGuides, HairGuidesPosed, WeatherState};
 
 const HEAD: Vec3 = Vec3::new(0.0, 1.6, 0.0);
 const SKULL: Vec3 = Vec3::new(0.0, 0.1, 0.0);
@@ -604,4 +604,303 @@ fn still_hair_is_handed_back_as_grown_and_its_motion_on_top() {
     steps(&mut app, 120);
     let tipped = worst(&app);
     assert!(tipped > 0.05, "tipped hair moved only {tipped} m");
+}
+
+/// The skull and a neck under it as a look module would measure them: one box on the head
+/// bone, 8 mm samples of the distance to a 10 cm ball and a 5 cm column under it.
+fn measured(version: u32) -> HairBody {
+    let center = HEAD + SKULL;
+    let (lo, cell) = (center - Vec3::new(0.16, 0.3, 0.16), 0.008);
+    let size = [41u16, 58, 41];
+    let mut distance = Vec::new();
+    for z in 0..size[2] {
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                let p = lo + Vec3::new(x as f32, y as f32, z as f32) * cell - center;
+                let ball = p.length() - 0.1;
+                let column = Vec2::new(p.x, p.z).length() - 0.05;
+                let d = if p.y < 0.0 { ball.min(column) } else { ball };
+                distance.push((d / HairBody::UNIT) as i16);
+            }
+        }
+    }
+    HairBody {
+        version,
+        parts: vec![HairBodyPart {
+            bone: 1,
+            min: lo,
+            cell,
+            size,
+            weight: vec![255u8; distance.len()].into(),
+            distance: distance.into(),
+        }],
+    }
+}
+
+#[test]
+fn hair_is_held_out_of_the_measured_body_and_its_bones_are_handed_on() {
+    let mut app = app();
+    let grown = guides(1, 24);
+    let person = app
+        .world
+        .spawn((Transform::default(), pose(), grown.clone(), measured(1)))
+        .id();
+    steps(&mut app, 60);
+    until_rested(&mut app);
+    let hair = {
+        let mut q = app.world.query::<&GuideHair>();
+        *q.single(&app.world).unwrap()
+    };
+    assert_eq!(hair.surface, Some(1), "built on the measured body");
+    {
+        let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
+        let (_, body) = q.single(&app.world).unwrap();
+        let tress = body.sim.tress.as_ref().unwrap();
+        assert_eq!((tress.boxes.len(), tress.capsules.len()), (1, 0));
+    }
+    // The head nods and turns; the hair stays out of ball and column wherever they go (where
+    // a lock was grown through the ball, no deeper in it than it was grown).
+    let center = HEAD + SKULL;
+    let depth = |q: Vec3| {
+        let ball = q.length() - 0.1;
+        let column = Vec2::new(q.x, q.z).length() - 0.05;
+        if q.y < 0.0 { ball.min(column) } else { ball }
+    };
+    let mut deepest = f32::MAX;
+    for step in 0..180 {
+        let t = step as f32 / 60.0;
+        let turn = Quat::from_euler(
+            EulerRot::YXZ,
+            0.7 * (3.0 * t).sin(),
+            0.4 * (2.0 * t).sin(),
+            0.0,
+        );
+        let mut now = pose();
+        now.bones[1].rotation = turn;
+        *app.world.get_mut::<SkeletonPose>(person).unwrap() = now;
+        steps(&mut app, 1);
+        let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
+        assert_eq!(posed.body.len(), 1);
+        // The bone as the step posed it carries the box.
+        let bone = posed.body[0];
+        let to_grown = |p: Vec3| HEAD + bone.rotation.conjugate() * (p - bone.translation);
+        for g in 0..grown.guides.len() {
+            let now = posed.guide(&grown, g).unwrap();
+            for (p, was) in now.iter().zip(&grown.guides[g].points).skip(2) {
+                let sunk = depth(*was - center).min(0.0);
+                deepest = deepest.min(depth(to_grown(*p) - center) - sunk);
+            }
+        }
+    }
+    assert!(deepest > -0.002, "{deepest} m inside the measured body");
+    // A body measured for other guides is left aside: capsules again.
+    app.world.entity_mut(person).insert(measured(7));
+    steps(&mut app, 3);
+    let mut q = app.world.query::<&GuideHair>();
+    assert_eq!(q.single(&app.world).unwrap().surface, None);
+}
+
+/// A blade 60 cm long lying along z at `y`, its edge facing -x, with the motion it is given
+/// each step by hand.
+fn blade(app: &mut App, sharpness: f32, at: Vec3) -> Entity {
+    app.world
+        .spawn((
+            Transform::from_translation(at.as_dvec3()),
+            engine_world::CuttingEdge {
+                heel: Vec3::new(0.0, 0.0, -0.3),
+                tip: Vec3::new(0.0, 0.0, 0.3),
+                facing: Vec3::NEG_X,
+                double: false,
+                sharpness,
+            },
+        ))
+        .id()
+}
+
+/// Sweeps `blade` level through the hair from x = 0.4 to -0.4 at 8 m/s, then lets `after`
+/// steps pass. Returns the farthest any guide point was carried toward -x of where it hung.
+fn swing(app: &mut App, person: Entity, blade: Entity, after: usize) -> f32 {
+    let hung = app
+        .world
+        .get::<HairGuidesPosed>(person)
+        .unwrap()
+        .points
+        .clone();
+    let mut carried = 0.0f32;
+    for step in 0..6 + after {
+        let x = (0.4 - 8.0 / 60.0 * (step + 1) as f32).max(-0.4);
+        app.world.get_mut::<Transform>(blade).unwrap().translation.x = f64::from(x);
+        steps(app, 1);
+        let now = &app.world.get::<HairGuidesPosed>(person).unwrap().points;
+        for (a, b) in hung.iter().zip(now) {
+            carried = carried.max(a.x - b.x);
+        }
+    }
+    carried
+}
+
+#[test]
+fn a_sharp_blade_cuts_the_hair_and_a_blunt_one_sweeps_it_aside() {
+    // A honed sword, swung level through the locks 13 cm and more below their roots.
+    let mut app = app();
+    let grown = guides(1, 24);
+    let person = app
+        .world
+        .spawn((Transform::default(), pose(), grown.clone()))
+        .id();
+    steps(&mut app, 60);
+    until_rested(&mut app);
+    let sword = blade(&mut app, 0.8, Vec3::new(0.4, 1.6, 0.0));
+    steps(&mut app, 2);
+    assert!(
+        app.world
+            .get::<HairGuidesPosed>(person)
+            .unwrap()
+            .cut
+            .is_empty()
+    );
+    swing(&mut app, person, sword, 20);
+    let posed = app.world.get::<HairGuidesPosed>(person).unwrap().clone();
+    assert_eq!((posed.cut.len(), posed.shed.len()), (24, 24));
+    for g in 0..24 {
+        let (left, shed) = (posed.cut[g], posed.shed[g]);
+        assert!((0.2..0.8).contains(&left), "lock {g}: {left} of it left");
+        assert!(shed > 0.05 && shed < 0.2, "lock {g}: piece {shed} gone");
+        let points = posed.guide(&grown, g).unwrap();
+        // What is left hangs from the head down to the blade's height; the piece has come
+        // away from it and is falling.
+        let end = ((points.len() - 1) as f32 * left) as usize;
+        assert!(
+            points[end].y > 1.6 - 0.03,
+            "lock {g} ends at {}",
+            points[end].y
+        );
+        assert!(
+            points[end + 1].y < points[end].y - 0.05,
+            "lock {g}: its piece is at {} under an end at {}",
+            points[end + 1].y,
+            points[end].y
+        );
+    }
+    // Four seconds on the pieces are gone, and the hair is as short as it was cut.
+    steps(&mut app, 240);
+    let later = app.world.get::<HairGuidesPosed>(person).unwrap();
+    assert!(later.shed.iter().all(|s| *s >= 1.0));
+    assert_eq!(later.cut, posed.cut);
+
+    // A blunt training blade through the same hair at the same speed: nothing is cut, and
+    // the locks it met were carried along with it.
+    let mut app = self::app();
+    let person = app
+        .world
+        .spawn((Transform::default(), pose(), grown.clone()))
+        .id();
+    steps(&mut app, 60);
+    until_rested(&mut app);
+    let blunt = blade(&mut app, 0.0, Vec3::new(0.4, 1.6, 0.0));
+    steps(&mut app, 2);
+    let carried = swing(&mut app, person, blunt, 4);
+    let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
+    assert!(posed.cut.is_empty(), "{:?}", posed.cut);
+    assert!(carried > 0.04, "carried {carried} m");
+    // And it hangs whole again once the blade is through.
+    until_rested(&mut app);
+    steps(&mut app, 120);
+    let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
+    for g in 0..24 {
+        let points = posed.guide(&grown, g).unwrap();
+        let len: f32 = points.windows(2).map(|w| w[0].distance(w[1])).sum();
+        let was: f32 = grown.guides[g]
+            .points
+            .windows(2)
+            .map(|w| w[0].distance(w[1]))
+            .sum();
+        assert!((len / was - 1.0).abs() < 0.08, "lock {g}: {len} m of {was}");
+    }
+}
+
+#[test]
+fn hair_is_as_wet_as_its_person_and_wetter_in_the_rain() {
+    let mut app = app();
+    let grown = guides(1, 24);
+    let person = app
+        .world
+        .spawn((
+            Transform::default(),
+            pose(),
+            grown.clone(),
+            engine_world::character::Appearance::default(),
+        ))
+        .id();
+    steps(&mut app, 60);
+    until_rested(&mut app);
+    steps(&mut app, 5);
+    assert!(
+        app.world
+            .get::<HairGuidesPosed>(person)
+            .unwrap()
+            .wet
+            .is_empty()
+    );
+    // Out of the water: soaked at once, every lock.
+    app.world
+        .get_mut::<engine_world::character::Appearance>(person)
+        .unwrap()
+        .wear
+        .wet = 1.0;
+    steps(&mut app, 120);
+    let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
+    assert_eq!(posed.wet.len(), 24);
+    assert!(posed.wet.iter().all(|w| *w > 0.99), "{:?}", posed.wet);
+    // Dry skin again: the hair dries by itself, slowly; rain wets it again.
+    app.world
+        .get_mut::<engine_world::character::Appearance>(person)
+        .unwrap()
+        .wear
+        .wet = 0.0;
+    steps(&mut app, 120);
+    let drying = app.world.get::<HairGuidesPosed>(person).unwrap().wet[0];
+    assert!((0.5..1.0).contains(&drying), "{drying}");
+    {
+        let mut weather = app.world.resource_mut::<WeatherState>();
+        weather.precipitation_mm_h = 40.0;
+        weather.precipitation_kind = engine_world::PrecipitationKind::Rain;
+    }
+    steps(&mut app, 120);
+    let rained = app.world.get::<HairGuidesPosed>(person).unwrap().wet[0];
+    assert!(rained > drying, "{rained} after rain, {drying} before");
+
+    // Wet hair is heavy: a wind that lifts dry locks moves soaked ones much less.
+    let blown = |wet: f32| {
+        let mut app = self::app();
+        let mut look = engine_world::character::Appearance::default();
+        look.wear.wet = wet;
+        let person = app
+            .world
+            .spawn((Transform::default(), pose(), grown.clone(), look))
+            .id();
+        steps(&mut app, 60);
+        until_rested(&mut app);
+        steps(&mut app, 120);
+        let tips = |app: &App| -> Vec<Vec3> {
+            let posed = app.world.get::<HairGuidesPosed>(person).unwrap();
+            (0..24)
+                .map(|g| *posed.guide(&grown, g).unwrap().last().unwrap())
+                .collect()
+        };
+        let hung = tips(&app);
+        app.world.resource_mut::<WeatherState>().wind = Vec3::new(8.0, 0.0, 0.0);
+        steps(&mut app, 90);
+        let moved: f32 = hung
+            .iter()
+            .zip(tips(&app))
+            .map(|(a, b)| a.distance(b))
+            .sum();
+        moved / 24.0
+    };
+    let (dry, soaked) = (blown(0.0), blown(1.0));
+    assert!(
+        dry > 0.01 && soaked < 0.7 * dry,
+        "an 8 m/s wind moves dry tips {dry} m and soaked ones {soaked} m"
+    );
 }

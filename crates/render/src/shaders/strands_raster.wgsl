@@ -227,19 +227,34 @@ fn strand_capsule_light(rel: vec3<f32>, l: vec3<f32>, dist: f32) -> f32 {
     return vis;
 }
 
-fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, base: vec3<f32>, random: f32, rough_in: f32, along: f32, bend: f32) -> vec3<f32> {
+// Soaked hair: how much its color deepens (an exponent on it) and darkens, how much brighter
+// and narrower its highlight is, how much less light scatters among its fibres, and how much
+// more of the sky it mirrors.
+const WET_DEEPENS: f32 = 0.5;
+const WET_DARKENS: f32 = 0.3;
+const WET_SHINES: f32 = 1.2;
+const WET_SMOOTHS: f32 = 0.35;
+const WET_DULLS: f32 = 0.45;
+const WET_MIRRORS: f32 = 2.5;
+
+fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, base_in: vec3<f32>, random: f32, rough_in: f32, along: f32, bend: f32, wet: f32) -> vec3<f32> {
     let fur = inst.more.y == 1u;
     let v = normalize(-rel);
     let nc = normalize(v - t * dot(v, t) + vec3<f32>(0.0, 1e-5, 0.0));
     // (Combed head hair shines; coarser beard and brow hair, rougher, much less.)
-    let shine = mix(HUMAN_SHINE, 0.8, smoothstep(0.35, 0.42, rough_in));
-    let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(shine, 1.0, fur));
+    // Wet hair: water fills the gaps between the fibres of a rope and smooths their scales.
+    // Light that enters is absorbed over a longer way and less of it scatters back out (the
+    // color deepens: a pale hair darkens by half, a dark one more), and the film mirrors the
+    // light in a narrow, bright highlight.
+    let base = pow(base_in, vec3<f32>(1.0 + WET_DEEPENS * wet)) * (1.0 - WET_DARKENS * wet);
+    let shine = mix(HUMAN_SHINE, 0.8, smoothstep(0.35, 0.42, rough_in)) * (1.0 + WET_SHINES * wet);
+    let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(shine, 1.0 + WET_SHINES * wet, fur));
     // The light is worked out at the points only, and the segments blend it: a highlight
     // narrower than the turn of the hair from one point to the next (`bend`, rad) caught one
     // point of a hair and missed the next, and over the crown, where the hair curves round the
     // head, it glittered in dashes. So the lobes widen to the turn they stand for (their
     // width squared, Karis's beta, summed in quadrature with half the turn).
-    let rough0 = rough_in * (0.85 + 0.3 * fract(random * 37.3));
+    let rough0 = rough_in * (0.85 + 0.3 * fract(random * 37.3)) * (1.0 - WET_SMOOTHS * wet);
     let rough = sqrt(sqrt(sq(rough0 * rough0) + sq(0.5 * bend)));
     // No fibre runs quite straight: each leans its own way, and its highlight with it.
     let b = normalize(cross(t, nc));
@@ -251,7 +266,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let ts = normalize(t + nc * (0.1 * lean.x + 0.08 * w1) + b * (0.06 * lean.y + 0.05 * w2));
     // A thin layer (brows, lashes) has next to no hair behind it to scatter light back.
     let scatter = mix(0.8, 1.15, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5))
-        * select(1.0, 1.1, fur) * select(1.0, 0.4, inst.more.w == 1u);
+        * select(1.0, 1.1, fur) * select(1.0, 0.4, inst.more.w == 1u) * (1.0 - WET_DULLS * wet);
     // How deep in the hair the point sits, toward the sky above the side facing the eye and
     // straight out of that side: its sky light and the gaps between locks. (Not straight up:
     // hanging hair has the whole length of its own sheet above it, and measured that way all of
@@ -297,7 +312,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     color += base * sky * ao * sky_tint * (0.4 + 0.5 * scatter);
     // The sky's sheen along the fibres.
     let env = sample_env_rough(reflect(-v, nc), 0.35) * sky_vis + fill;
-    color += env * 0.04 * ao;
+    color += env * 0.04 * ao * (1.0 + WET_MIRRORS * wet);
     return apply_fog(pre_expose(color), rel);
 }
 
@@ -391,7 +406,7 @@ fn cs_shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let base = max(mix(root.rgb, tip.rgb, along) * inst.tint.rgb, vec3<f32>(1e-4));
     var color = pre_expose(base * frame.ambient.rgb);
     if (!shade_skip(SKIP_STRAND_LIGHT)) {
-        color = strand_shade(inst, m, rel, t, base, root.w, tip.w, along, bend);
+        color = strand_shade(inst, m, rel, t, base, root.w, tip.w, along, bend, strand_wet(inst, posed[slot].w));
     }
     let opacity = select(params.screen.z, params.screen.w, inst.more.y == 1u);
     lit[slot].shade.x = pack2x16float(color.rg);

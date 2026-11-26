@@ -48,8 +48,8 @@ use crate::features::{FeatureStats, FrameContext, GpuShared, RenderFeature, Rend
 use crate::frame::ViewData;
 use crate::settings::{RenderSettings, shade_skip};
 use crate::strands::{
-    StrandCapsule, StrandFiber, StrandGroom, StrandGuidesWhenDrawn, StrandInstance,
-    StrandKeptOutWhenDrawn, StrandLod,
+    StrandBodyWhenDrawn, StrandBox, StrandCapsule, StrandFiber, StrandGroom, StrandGuideState,
+    StrandGuidesWhenDrawn, StrandInstance, StrandKeptOutWhenDrawn, StrandLod, StrandStateWhenDrawn,
 };
 
 const COMMON: &str = include_str!("shaders/strands_common.wgsl");
@@ -62,6 +62,14 @@ const SHADOW: &str = include_str!("shaders/strands_shadow.wgsl");
 pub(crate) const MAX_INSTANCES: usize = 32;
 /// Shapes one instance's strands are kept out of ([`StrandKeptOutWhenDrawn`]).
 const MAX_CAPSULES: usize = 32;
+/// Boxes of a measured body one instance's strands are kept out of ([`StrandBodyWhenDrawn`]),
+/// and the entries each takes ahead of the instance's guide offsets (`strands_pose.wgsl`).
+const MAX_BOXES: usize = 12;
+const BOX_ENTRIES: usize = 6;
+/// A guide's first points whose last entries carry its state (`strands_pose.wgsl`).
+const STATE_POINTS: usize = 3;
+/// A body's samples nobody drew for this many frames leave the GPU.
+const BODY_KEPT_FRAMES: u64 = 600;
 /// Cells along each side of an instance's density volume.
 pub(crate) const VOXELS: u32 = 64;
 /// Points drawn in a frame; past it every instance draws a smaller share.
@@ -425,6 +433,24 @@ struct Draw {
     /// guides.
     kept_out: Option<StrandKeptOutWhenDrawn>,
     capsules: Vec<StrandCapsule>,
+    /// The measured body they are kept out of ([`StrandBodyWhenDrawn`]), asked with them.
+    body: Option<StrandBodyWhenDrawn>,
+    boxes: Vec<StrandBox>,
+    /// Its guides' state ([`StrandStateWhenDrawn`]), asked with them: one a guide, or none.
+    state: Option<StrandStateWhenDrawn>,
+    states: Vec<StrandGuideState>,
+}
+
+/// A box's samples on the GPU (`buffers.bodies`): where, how many, the frame they were last
+/// drawn with, whether they are sent, and the arrays themselves (held, so their address
+/// stays theirs).
+struct BodySlot {
+    start: u32,
+    len: u32,
+    seen: u64,
+    sent: bool,
+    distance: std::sync::Arc<[i16]>,
+    weight: std::sync::Arc<[u8]>,
 }
 
 /// What the frame draws, as `prepare_frame` laid it out.
@@ -536,6 +562,8 @@ struct Buffers {
     info: Option<wgpu::Buffer>,
     guide_offsets: Option<wgpu::Buffer>,
     guide_capacity: u64,
+    bodies: Option<wgpu::Buffer>,
+    body_capacity: u64,
     posed: Option<wgpu::Buffer>,
     history: Option<wgpu::Buffer>,
     lit: Option<wgpu::Buffer>,
@@ -591,6 +619,10 @@ pub(crate) struct StrandFeature {
     groom_evictions: u64,
     groom_repacks: u64,
     draws: Option<Vec<Draw>>,
+    /// Measured bodies' samples on the GPU, by the address of their distances, and how many
+    /// samples `buffers.bodies` holds.
+    bodies: HashMap<usize, BodySlot>,
+    body_used: u32,
     /// Last frame's layout (entity, groom, point slots): history is valid while it holds.
     layout: Vec<(Entity, u32, u32)>,
     /// Strand slots each instance had last frame ([`strand_slots`]).
@@ -1174,6 +1206,7 @@ impl Pipelines {
                 storage_entry(4, c, true),
                 storage_entry(5, c, false),
                 storage_entry(6, c, false),
+                storage_entry(7, c, true),
             ],
         });
         let raster_layout = gpu.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1579,6 +1612,8 @@ impl RenderFeature for StrandFeature {
             Option<&HairGuidesPosed>,
             Option<&StrandGuidesWhenDrawn>,
             Option<&StrandKeptOutWhenDrawn>,
+            Option<&StrandBodyWhenDrawn>,
+            Option<&StrandStateWhenDrawn>,
         )>();
         let Some(assets) = world.get_resource::<Assets<StrandGroom>>() else {
             return;
@@ -1588,7 +1623,7 @@ impl RenderFeature for StrandFeature {
         let mut worn: HashMap<u32, &StrandGroom> = HashMap::new();
         let origin = view.origin;
         let px_per_m = view.proj.y_axis.y * view.height as f32 * 0.5;
-        for (entity, inst, gt, posed, when_drawn, kept_out) in q.iter(world) {
+        for (entity, inst, gt, posed, when_drawn, kept_out, body, state) in q.iter(world) {
             if !inst.visible || inst.lod == Some(StrandLod::Hidden) {
                 continue;
             }
@@ -1680,6 +1715,25 @@ impl RenderFeature for StrandFeature {
                                 ra: c.ra,
                                 b: c.b,
                                 rb: c.rb,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                body: body.copied(),
+                boxes: Vec::new(),
+                state: state.copied(),
+                // (Its own posed guides bring their state.)
+                states: posed
+                    .filter(|p| {
+                        guides_from_entity
+                            && !(p.wet.is_empty() && p.cut.is_empty() && p.shed.is_empty())
+                    })
+                    .map(|p| {
+                        (0..groom.guide_count())
+                            .map(|g| StrandGuideState {
+                                wet: p.wet.get(g).copied().unwrap_or(0.0),
+                                cut: p.cut.get(g).copied().unwrap_or(1.0),
+                                shed: p.shed.get(g).copied().unwrap_or(1.0),
                             })
                             .collect()
                     })
@@ -1844,6 +1898,20 @@ impl RenderFeature for StrandFeature {
                         (kept_out.0)(world, d.entity, &mut d.capsules);
                         d.capsules.truncate(MAX_CAPSULES);
                     }
+                    if let Some(body) = d.body {
+                        (body.0)(world, d.entity, &mut d.boxes);
+                        d.boxes.truncate(MAX_BOXES);
+                        d.boxes.retain(|b| {
+                            let n = b.size.iter().map(|s| *s as usize).product::<usize>();
+                            b.size.iter().all(|s| *s >= 2)
+                                && b.cell > 0.0
+                                && b.distance.len() == n
+                                && b.weight.len() == n
+                        });
+                    }
+                    if let Some(state) = d.state {
+                        (state.0)(world, d.entity, &mut d.states);
+                    }
                 }
             }
         }));
@@ -1952,6 +2020,40 @@ impl RenderFeature for StrandFeature {
         let mut layout = Vec::with_capacity(draws.len());
         let mut slots_now = HashMap::with_capacity(draws.len());
         let mut offsets: Vec<[f32; 4]> = Vec::new();
+        // Room on the GPU for the measured bodies this frame's draws are kept out of; what
+        // nobody drew for a while goes, and the rest moves up.
+        let frames = self.frames;
+        let before = self.bodies.len();
+        self.bodies
+            .retain(|_, s| frames.saturating_sub(s.seen) < BODY_KEPT_FRAMES);
+        if self.bodies.len() != before {
+            self.body_used = 0;
+            let mut left: Vec<&mut BodySlot> = self.bodies.values_mut().collect();
+            left.sort_by_key(|s| s.start);
+            for slot in left {
+                slot.start = self.body_used;
+                slot.sent = false;
+                self.body_used += slot.len;
+            }
+        }
+        for b in draws.iter().flat_map(|d| &d.boxes) {
+            let slot = self
+                .bodies
+                .entry(b.distance.as_ptr() as usize)
+                .or_insert_with(|| {
+                    let start = self.body_used;
+                    self.body_used += b.distance.len() as u32;
+                    BodySlot {
+                        start,
+                        len: b.distance.len() as u32,
+                        seen: frames,
+                        sent: false,
+                        distance: b.distance.clone(),
+                        weight: b.weight.clone(),
+                    }
+                });
+            slot.seen = frames;
+        }
         let mut out = 0u32;
         let mut strand_base = 0u32;
         let (mut widest, mut widest_pose) = (0u32, 0u32);
@@ -1996,13 +2098,32 @@ impl RenderFeature for StrandFeature {
             slots_now.insert(d.entity, slots);
             let guide_base = match &d.guides {
                 Some(posed) if posed.len() == g.guides.len() => {
-                    // Ahead of its offsets, the shapes its strands are kept out of (two
-                    // entries each) and how many there are (`strands_pose.wgsl`).
+                    // Ahead of its offsets, the measured body's boxes its strands are kept out
+                    // of ([`BOX_ENTRIES`] each) and how many, then the shapes (two entries
+                    // each) and how many there are (`strands_pose.wgsl`).
+                    for b in &d.boxes {
+                        let start = self.bodies[&(b.distance.as_ptr() as usize)].start;
+                        let entries = offsets.len();
+                        let m = b.to_box.transpose().to_cols_array_2d();
+                        offsets.extend_from_slice(&m[..3]);
+                        offsets.push([b.min.x, b.min.y, b.min.z, 1.0 / b.cell]);
+                        offsets.push([b.size[0] as f32, b.size[1] as f32, b.size[2] as f32, 0.0]);
+                        offsets.push([(start & 0xffff) as f32, (start >> 16) as f32, 0.0, 0.0]);
+                        debug_assert_eq!(offsets.len() - entries, BOX_ENTRIES);
+                    }
+                    offsets.push([d.boxes.len() as f32, 0.0, 0.0, 0.0]);
                     for c in &d.capsules {
                         offsets.push([c.a.x, c.a.y, c.a.z, c.ra]);
                         offsets.push([c.b.x, c.b.y, c.b.z, c.rb]);
                     }
-                    offsets.push([d.capsules.len() as f32, 0.0, 0.0, 0.0]);
+                    // (With the shapes' number, the guide points whose state follows the
+                    // offsets: none, or all of them.)
+                    let per = (g.points_per as usize).max(1);
+                    let stated = per >= STATE_POINTS
+                        && d.states.len() * per == g.guides.len()
+                        && d.states.iter().any(|s| *s != StrandGuideState::default());
+                    let state_points = if stated { g.guides.len() } else { 0 };
+                    offsets.push([d.capsules.len() as f32, state_points as f32, 0.0, 0.0]);
                     let base = offsets.len() as u32;
                     offsets.extend(
                         posed
@@ -2010,6 +2131,20 @@ impl RenderFeature for StrandFeature {
                             .zip(&g.guides)
                             .map(|(p, r)| [p.x - r.x, p.y - r.y, p.z - r.z, 0.0]),
                     );
+                    // The guides at rest (a wet hair gathers to its guide: where that is),
+                    // their state in the first points' last entries: wet, cut, shed.
+                    if stated {
+                        offsets.extend(g.guides.iter().enumerate().map(|(i, r)| {
+                            let s = d.states[i / per];
+                            let w = match i % per {
+                                0 => s.wet.clamp(0.0, 1.0),
+                                1 => s.cut.clamp(0.0, 1.0),
+                                2 => s.shed.clamp(0.0, 1.0),
+                                _ => 0.0,
+                            };
+                            [r.x, r.y, r.z, w]
+                        }));
+                    }
                     base
                 }
                 _ => u32::MAX,
@@ -2139,6 +2274,34 @@ impl RenderFeature for StrandFeature {
             b.ref_capacity = cap;
             grown = true;
         }
+        // The measured bodies' samples: sent once each, again when the buffer is made anew.
+        if ensure(
+            gpu,
+            &mut b.bodies,
+            &mut b.body_capacity,
+            (self.body_used.max(1) as u64) * 4,
+            "strand bodies",
+            storage,
+        ) {
+            grown = true;
+            for slot in self.bodies.values_mut() {
+                slot.sent = false;
+            }
+        }
+        for slot in self.bodies.values_mut().filter(|s| !s.sent) {
+            let cells: Vec<u32> = slot
+                .distance
+                .iter()
+                .zip(slot.weight.iter())
+                .map(|(d, w)| (*d as u16 as u32) | ((*w as u32) << 16))
+                .collect();
+            gpu.queue.write_buffer(
+                b.bodies.as_ref().expect("made"),
+                slot.start as u64 * 4,
+                bytemuck::cast_slice(&cells),
+            );
+            slot.sent = true;
+        }
         let guide_bytes = (offsets.len().max(1) * 16) as u64;
         grown |= ensure(
             gpu,
@@ -2245,6 +2408,7 @@ impl RenderFeature for StrandFeature {
                     entry(4, buf(&b.guide_offsets)),
                     entry(5, buf(&b.posed)),
                     entry(6, buf(&b.voxels)),
+                    entry(7, buf(&b.bodies)),
                 ],
             });
             let color = &b.color.as_ref().expect("made").1;

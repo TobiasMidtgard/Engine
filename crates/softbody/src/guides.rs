@@ -23,9 +23,9 @@ use std::collections::HashMap;
 
 use engine_core::off_frame::OffFrameCommands;
 use engine_core::prelude::*;
-use engine_world::animation::SkeletonPose;
+use engine_world::animation::{BonePose, SkeletonPose};
 use engine_world::character::Appearance;
-use engine_world::{HairCapsule, HairGuides, HairGuidesPosed};
+use engine_world::{HairBody, HairCapsule, HairGuides, HairGuidesPosed};
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
 use crate::character::{BoneCapsule, BoneColliders};
@@ -34,13 +34,15 @@ use crate::hair_body;
 use crate::settings::SoftMaterial;
 use crate::solver::Sim;
 use crate::systems::{SETTLE_DAMPING, SoftBodyFailed};
-use crate::tress::{MAX_VERTS, Tress, TressCapsule, TressStrand, TressVertex};
+use crate::tress::{MAX_BOXES, MAX_VERTS, Tress, TressBox, TressCapsule, TressStrand, TressVertex};
 
 /// On the child entity that simulates `person`'s [`HairGuides`] of `version`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuideHair {
     pub person: Entity,
     pub version: u32,
+    /// The [`HairBody`] version the hair is held out of (`None`: fitted capsules).
+    pub surface: Option<u32>,
 }
 
 /// On the hair body: the grown shape it is handed on in at rest, and where each grown point
@@ -66,6 +68,8 @@ pub struct GroomedRest {
     /// Per guide, 0..1: how much of what it was grown off its strand's rest goes along
     /// ([`GROWN_OFF`]); empty until worked out for this `rest`.
     kept: Vec<f32>,
+    /// Per box of the measured body ([`Tress::boxes`]): its bone as the hair was grown on it.
+    box_bones: Vec<BonePose>,
     /// `rest` is solved; the hair is handed on as grown, riding its bones, until then.
     solved: bool,
     /// 0..1: how much of the simulation's motion is handed on. It comes in over
@@ -120,9 +124,10 @@ fn rest_shape(
     person: Entity,
     grown: &SkeletonPose,
     male: f32,
+    surface: Option<&HairBody>,
 ) -> Option<Vec<Vec3>> {
     let stand = GlobalTransform::IDENTITY;
-    let (mut body, _) = build(guides, person, &stand, grown, male).ok()?;
+    let (mut body, _) = build(guides, person, &stand, grown, male, surface).ok()?;
     let sim = &mut body.sim;
     // Damped as a body settling in view is: it sags into place instead of swinging there.
     sim.params.damping = sim.params.damping.max(SETTLE_DAMPING);
@@ -302,15 +307,31 @@ fn resample(points: &[Vec3], n: usize) -> (Vec<Vec3>, Vec<(u32, f32)>) {
     (out, at)
 }
 
+/// Whether `surface` can hold the hair of `guides` on a skeleton of `bones` bones out.
+pub fn usable(surface: &HairBody, guides: &HairGuides, bones: usize) -> bool {
+    surface.version == guides.version
+        && !surface.parts.is_empty()
+        && surface.parts.iter().all(|p| {
+            let n = p.size.iter().map(|s| *s as usize).product::<usize>();
+            (p.bone as usize) < bones
+                && p.cell > 0.0
+                && p.size.iter().all(|s| *s >= 2)
+                && p.distance.len() == n
+                && p.weight.len() == n
+        })
+}
+
 /// The hair body for `guides` on `person` (at `person_t`, posed as `pose`; `male`: 0 a woman's
 /// build .. 1 a man's, for the body the hair slides off), and how its particles are handed
-/// back as the guides' points.
+/// back as the guides' points. With the person's measured `surface` the hair is held out of
+/// that, skin and clothes as they are drawn; without, out of capsules fitted to the skeleton.
 pub fn build(
     guides: &HairGuides,
     person: Entity,
     person_t: &GlobalTransform,
     pose: &SkeletonPose,
     male: f32,
+    surface: Option<&HairBody>,
 ) -> Result<(SoftBodySim, GroomedRest), String> {
     let bones = pose.bones.len();
     if guides.grown_on.len() != bones {
@@ -355,9 +376,46 @@ pub fn build(
     };
     let body = hair_body::capsules(guides, pose, male);
     let scalp = hair_body::root_sphere(guides, pose).filter(|_| !body.is_empty());
+    let surface = surface.filter(|s| usable(s, guides, bones));
     let mut tress = Tress::default();
+    let mut boxes = Vec::new();
+    let mut box_bones = Vec::new();
+    for part in surface.iter().flat_map(|s| &s.parts).take(MAX_BOXES) {
+        let Some((frame, _)) = frame_for(&mut sim, part.bone, part.bone, 0.0) else {
+            continue;
+        };
+        let Some(held) = TressBox::new(frame, part) else {
+            continue;
+        };
+        box_bones.push(guides.grown_on[part.bone as usize]);
+        boxes.push(held);
+    }
+    // Out of the measured surface the hair may only sit as deep as it was grown where the
+    // groom knows the skin: by its roots, and lying on the head. Lower down it was grown
+    // without the clothes, and is held out of them.
+    let measured = |q: Vec3, t: f32| {
+        let (mut sum, mut total) = (0.0, 0.0);
+        for b in &boxes {
+            if let Some((d, w)) = b.distance_at(q) {
+                sum += d * w.max(1e-3);
+                total += w.max(1e-3);
+            }
+        }
+        if total <= 0.0 {
+            return 0.0;
+        }
+        let on_head = scalp.map_or(0.0, |(center, radius)| {
+            smoothstep(-0.75, -0.45, (q.y - center.y) / radius)
+        });
+        (GROWN_CLEAR - sum / total).clamp(0.0, SUNK_MAX)
+            * on_head.max(1.0 - smoothstep(0.08, 0.2, t))
+    };
+    let has_boxes = !boxes.is_empty();
     tress.config.stiffness = (guides.stiffness / LONG_HAIR).clamp(0.5, 4.0);
-    let mut groomed = GroomedRest::default();
+    let mut groomed = GroomedRest {
+        box_bones,
+        ..GroomedRest::default()
+    };
     for (index, g) in guides.guides.iter().enumerate() {
         if g.points.len() < 2 {
             continue;
@@ -395,6 +453,9 @@ pub fn build(
             sim.add_particle(placed.0 + placed.1 * *q, mass);
             let t = k as f32 / (n - 1) as f32;
             let sunk = |kind: bool| {
+                if has_boxes {
+                    return measured(*q, t);
+                }
                 let d = hair_body::distance(&body, *q, kind);
                 (GROWN_CLEAR - d).clamp(0.0, SUNK_MAX)
             };
@@ -440,7 +501,8 @@ pub fn build(
     if out.is_empty() {
         return Err("HairGuides has no guide with two or more points.".into());
     }
-    for c in &body {
+    // (The fitted capsules stand in for a body nobody measured.)
+    for c in body.iter().filter(|_| !has_boxes) {
         let Some((frame, _)) = frame_for(&mut sim, c.bone, c.bone, 0.0) else {
             continue;
         };
@@ -460,6 +522,7 @@ pub fn build(
         .max_by_key(|(f, n)| (**n, std::cmp::Reverse(**f)))
         .map_or(0, |(f, _)| *f);
     groomed.rest = tress.verts.iter().map(|v| v.rest).collect();
+    tress.boxes = boxes;
     sim.tress = Some(Box::new(tress));
     let settings = crate::SimSettings {
         // The strand solver has its own damping and follows a dash itself; what is left
@@ -509,17 +572,20 @@ pub fn build_guide_hair(
         Option<&BoneColliders>,
         Has<CollidersFittedToHair>,
         Option<&Appearance>,
+        Option<&HairBody>,
     )>,
     sims: Query<(Entity, &GuideHair)>,
 ) {
-    let mut built: HashMap<Entity, (Entity, u32)> = sims
+    let mut built: HashMap<Entity, (Entity, u32, Option<u32>)> = sims
         .iter()
-        .map(|(e, g)| (g.person, (e, g.version)))
+        .map(|(e, g)| (g.person, (e, g.version, g.surface)))
         .collect();
-    for (person, guides, t, pose, own_colliders, fitted, look) in &people {
+    for (person, guides, t, pose, own_colliders, fitted, look, surface) in &people {
+        let surface = surface.filter(|s| usable(s, guides, pose.bones.len()));
+        let measured = surface.map(|s| s.version);
         match built.remove(&person) {
-            Some((_, version)) if version == guides.version => continue,
-            Some((stale, _)) => commands.entity(stale).despawn(),
+            Some((_, version, was)) if version == guides.version && was == measured => continue,
+            Some((stale, _, _)) => commands.entity(stale).despawn(),
             None => {}
         }
         if pose.bones.is_empty() {
@@ -538,17 +604,19 @@ pub fn build_guide_hair(
             GuideHair {
                 person,
                 version: guides.version,
+                surface: measured,
             },
             ChildOf(person),
         ));
         // Without a look, shapes midway between a woman's and a man's.
         let male = look.map_or(0.5, |a| a.sex);
-        match build(guides, person, t, pose, male) {
+        match build(guides, person, t, pose, male, surface) {
             Ok((body, groomed)) => {
                 child.insert((body, groomed));
                 let hair = child.id();
                 let version = guides.version;
                 let guides = guides.clone();
+                let surface = surface.cloned();
                 let stand = SkeletonPose {
                     names: pose.names.clone(),
                     parents: pose.parents.clone(),
@@ -556,7 +624,7 @@ pub fn build_guide_hair(
                 };
                 commands.off_frame(
                     "softbody hair at rest",
-                    move || rest_shape(&guides, person, &stand, male),
+                    move || rest_shape(&guides, person, &stand, male, surface.as_ref()),
                     move |world: &mut World, rest: Option<Vec<Vec3>>| {
                         rests_at(world, hair, version, rest);
                     },
@@ -571,8 +639,26 @@ pub fn build_guide_hair(
             }
         }
     }
-    for (stale, _) in built.into_values() {
+    for (stale, _, _) in built.into_values() {
         commands.entity(stale).despawn();
+    }
+}
+
+/// Hair is as wet as its person at least (`Appearance::wear.wet`: someone who climbed out of
+/// the water, whatever the weather where the hair hangs).
+pub fn wet_with_the_person(
+    mut sims: Query<(&GuideHair, &mut SoftBodySim)>,
+    people: Query<&Appearance>,
+) {
+    for (hair, mut body) in &mut sims {
+        let wet = people
+            .get(hair.person)
+            .map_or(0.0, |a| a.wear.wet.clamp(0.0, 1.0));
+        // (Not marked written: a step in flight would be dropped for it, every frame that
+        // someone dries, and the step doesn't carry this.)
+        if body.wet_floor != wet {
+            body.bypass_change_detection().wet_floor = wet;
+        }
     }
 }
 
@@ -641,6 +727,55 @@ fn on_strand(points: &[Vec3], (lo, hi): (usize, usize), k: usize, t: f32) -> (Ve
     (at, along)
 }
 
+/// [`on_strand`]'s point on a strand a blade cut (`cut`, of the strand whose particles are
+/// `lo..=hi`; `len` the length of the segment the cut is in): what is left of it is one curve
+/// and the piece that came off another, each ending at the cut. Past a piece that is gone:
+/// the strand's new end.
+fn on_cut_strand(
+    points: &[Vec3],
+    (lo, hi): (usize, usize),
+    cut: crate::tress::TressCut,
+    len: f32,
+    k: usize,
+    t: f32,
+) -> Vec3 {
+    if cut.at == 0 {
+        return on_strand(points, (lo, hi), k, t).0;
+    }
+    let (c, e) = (
+        (lo + cut.at as usize).min(hi),
+        (lo + cut.end as usize).min(hi + 1),
+    );
+    let gone = cut.shed >= 1.0 || e <= c;
+    if k + 1 < c {
+        return on_strand(points, (lo, c - 1), k, t).0;
+    }
+    let onward = |from: usize, to: usize| (points[to] - points[from]).normalize_or(Vec3::NEG_Y);
+    if k + 1 == c {
+        // The segment the blade crossed: each side runs straight on to the cut.
+        let kept = points[c - 1] + onward(c.saturating_sub(2).max(lo), c - 1) * (len * cut.part);
+        return if t <= cut.part || gone {
+            if c - 1 > lo {
+                points[c - 1] + onward(c - 2, c - 1) * (len * t.min(cut.part))
+            } else {
+                kept
+            }
+        } else if c + 1 < e {
+            points[c] - onward(c, c + 1) * (len * (1.0 - t))
+        } else {
+            points[c]
+        };
+    }
+    if gone {
+        return points[c - 1];
+    }
+    if k + 1 < e {
+        on_strand(points, (c, e - 1), k, t).0
+    } else {
+        points[e - 1]
+    }
+}
+
 /// Hand the simulated points back to the people, in their model space: every grown point on
 /// its simulated strand, carrying what it was grown off the strand at rest ([`GroomedRest`]).
 pub fn write_posed_guides(
@@ -700,7 +835,11 @@ pub fn write_posed_guides(
                             let at = f.to_pos + f.to_rot * rest;
                             on_body |= body.iter().any(|&(a, b, ra, rb)| {
                                 crate::tress::tapered_capsule(at, a, b, ra, rb).1 < ON_BODY
-                            });
+                            }) || sim
+                                .tress
+                                .as_ref()
+                                .and_then(|t| t.surface_at(&sim.frames, at))
+                                .is_some_and(|(_, d, head)| d < ON_BODY && head < 0.5);
                             groomed.grown[i].distance(rest)
                         })
                         .fold(0.0f32, f32::max);
@@ -718,32 +857,38 @@ pub fn write_posed_guides(
         let to_model = t.rotation().conjugate();
         let scale = t.scale().max(Vec3::splat(1e-6));
         let mut first_point = 0usize;
+        let cuts = sim.tress.as_ref().map_or(&[][..], |t| &t.cuts[..]);
+        let verts = sim.tress.as_ref().map_or(&[][..], |t| &t.verts[..]);
         let points = strands
             .guides
             .iter()
+            .enumerate()
             .zip(groomed.counts.iter().zip(&groomed.kept))
-            .flat_map(|(g, (count, kept))| {
+            .flat_map(|((strand, g), (count, kept))| {
                 let start = first_point;
                 first_point += *count as usize;
                 let frame = sim.frames.get(g.frame as usize).copied();
                 let run = (g.first as usize, (g.first + g.count) as usize - 1);
+                let cut = cuts.get(strand).copied().unwrap_or_default();
+                let cut_len = verts
+                    .get(g.first as usize + cut.at as usize)
+                    .map_or(0.0, |v| v.rest_len);
                 (start..start + *count as usize).map(move |i| {
                     let Some(f) = frame else {
                         return Vec3::ZERO;
                     };
                     let grown = groomed.grown[i];
                     let carried = f.to_pos + f.to_rot * grown;
-                    if w <= 0.0 {
-                        return carried;
-                    }
                     let (k, along) = groomed.at[i];
                     let k = (k as usize).clamp(run.0, run.1.saturating_sub(1));
-                    let (now, _) = on_strand(&sim.pos, run, k, along);
+                    let now = on_cut_strand(&sim.pos, run, cut, cut_len, k, along);
                     let (rest, _) = on_strand(&groomed.rest, run, k, along);
                     // What the point was grown off where the strand rests goes along as it
                     // is, with the bone: turned as the strand bends there, the centimeters
                     // between the two by the tips swung about with every kink of a lock (a
                     // comb of hairs stood out sideways from a turning head).
+                    // (Where that leaves a guide inside the measured body, grown without its
+                    // clothes, the drawing side holds every hair out of it.)
                     carried.lerp(now + f.to_rot * (grown - rest) * *kept, w)
                 })
             })
@@ -766,20 +911,95 @@ pub fn write_posed_guides(
                 rb: c.rb / size,
             })
         });
+        // The measured body's bones as this step posed them.
+        let bones = sim
+            .tress
+            .iter()
+            .flat_map(|t| t.boxes.iter().zip(&groomed.box_bones))
+            .filter_map(|(b, grown)| {
+                let f = sim.frames.get(b.frame as usize)?;
+                let turn = to_model * f.to_rot;
+                let moved =
+                    to_model * ((sim.origin - t.translation()).as_vec3() + f.to_pos) / scale;
+                Some(BonePose {
+                    translation: moved + turn * grown.translation,
+                    rotation: turn * grown.rotation,
+                    scale: grown.scale,
+                })
+            });
+        // How wet each lock is: its particles' mean.
+        let wet = strands.guides.iter().map(|g| {
+            let run = g.first as usize..(g.first + g.count) as usize;
+            body.wet
+                .get(run)
+                .map_or(0.0, |w| w.iter().sum::<f32>() / w.len().max(1) as f32)
+        });
+        let any_wet = body.wet.iter().any(|w| *w > 0.0);
+        // Where a blade cut each lock: the share of its grown points left (the cut's place
+        // on the strand among theirs), and how far gone the piece is.
+        let any_cut = cuts.iter().any(|c| c.at != 0);
+        let mut first_point = 0usize;
+        let cut_at =
+            strands
+                .guides
+                .iter()
+                .enumerate()
+                .zip(&groomed.counts)
+                .map(|((strand, g), count)| {
+                    let start = first_point;
+                    first_point += *count as usize;
+                    let cut = cuts.get(strand).copied().unwrap_or_default();
+                    if cut.at == 0 || *count < 2 {
+                        return (1.0, 1.0);
+                    }
+                    let lo = g.first as usize;
+                    let run = (lo, (g.first + g.count) as usize - 1);
+                    let place = |i: usize| {
+                        let (k, along) = groomed.at[i];
+                        ((k as usize).clamp(run.0, run.1.saturating_sub(1)) - lo) as f32 + along
+                    };
+                    let cut_place = cut.at as f32 - 1.0 + cut.part;
+                    let last = *count as usize - 1;
+                    let mut share = 1.0;
+                    for j in 0..last {
+                        let (a, b) = (place(start + j), place(start + j + 1));
+                        if cut_place < b || j + 1 == last {
+                            let part = ((cut_place - a) / (b - a).max(1e-6)).clamp(0.0, 1.0);
+                            share = (j as f32 + part) / last as f32;
+                            break;
+                        }
+                    }
+                    (share, cut.shed)
+                });
+        let (cut, shed): (Vec<f32>, Vec<f32>) = if any_cut {
+            cut_at.unzip()
+        } else {
+            Default::default()
+        };
         match posed {
             Some(mut posed) => {
+                posed.wet.clear();
+                if any_wet {
+                    posed.wet.extend(wet);
+                }
+                (posed.cut, posed.shed) = (cut, shed);
                 posed.version = hair.version;
                 posed.points.clear();
                 posed.points.extend(points);
                 posed.capsules.clear();
                 posed.capsules.extend(capsules);
+                posed.body.clear();
+                posed.body.extend(bones);
             }
             None => {
                 commands.entity(hair.person).insert(HairGuidesPosed {
                     version: hair.version,
                     points: points.collect(),
                     capsules: capsules.collect(),
-                    ..Default::default()
+                    body: bones.collect(),
+                    wet: if any_wet { wet.collect() } else { Vec::new() },
+                    cut,
+                    shed,
                 });
             }
         }

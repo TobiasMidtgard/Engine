@@ -22,12 +22,13 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{Mat4, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{
-    Camera, StrandCapsule, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance,
-    StrandKeptOutWhenDrawn,
+    Camera, StrandBodyWhenDrawn, StrandBox, StrandCapsule, StrandFollow, StrandGroom,
+    StrandGuideState, StrandGuidesWhenDrawn, StrandInstance, StrandKeptOutWhenDrawn,
+    StrandStateWhenDrawn,
 };
 use engine_world::animation::SkeletonPose;
 use engine_world::character::{Appearance, FaceControls};
-use engine_world::{HairGuides, HairGuidesPosed};
+use engine_world::{HairBody, HairGuides, HairGuidesPosed};
 
 use crate::BuiltCharacter;
 use crate::build::CharacterMeshes;
@@ -626,6 +627,8 @@ pub(crate) fn draw_hair(
                 child.insert((
                     StrandGuidesWhenDrawn(guides_now),
                     StrandKeptOutWhenDrawn(kept_out_now),
+                    StrandBodyWhenDrawn(body_now),
+                    StrandStateWhenDrawn(state_now),
                 ));
             }
         }
@@ -686,7 +689,11 @@ fn make_grooms(m: &CharacterMeshes, uniform: &GpuCharacter, wet: u8) -> Vec<Made
             StrandKind::Beard => WET_BEARD_CELL,
             _ => 0.0,
         };
-        wet_groom(&mut g, wet, cell);
+        // (Hair the simulation moves is wetted lock by lock as it is drawn, by how wet the
+        // simulation has each: it takes the person's wetness for the least of it.)
+        if set.guide_count() == 0 {
+            wet_groom(&mut g, wet, cell);
+        }
         // A thin layer, with next to no hair behind it to scatter light back.
         g.thin = set.kind == StrandKind::Brows;
         // Hair the simulation doesn't move follows the face (brows, beards).
@@ -754,8 +761,69 @@ fn kept_out_now(world: &World, entity: Entity, out: &mut Vec<StrandCapsule>) {
     }));
 }
 
+/// The person's measured body ([`HairBody`]: skin and clothes as drawn) where the hair
+/// simulation posed its bones, in the head's frame as [`guides_now`] gives the guides: every
+/// drawn hair is kept out of it.
+fn body_now(world: &World, entity: Entity, out: &mut Vec<StrandBox>) {
+    out.clear();
+    let Some(hair) = world.get::<DrawnHair>(entity) else {
+        return;
+    };
+    if hair.face.is_some() {
+        return;
+    }
+    let Some((posed, to_head)) = simulated(world, hair, entity) else {
+        return;
+    };
+    let (Some(body), Some(guides)) = (
+        world.get::<HairBody>(hair.person),
+        world.get::<HairGuides>(hair.person),
+    ) else {
+        return;
+    };
+    if body.version != posed.version || posed.body.len() != body.parts.len() {
+        return;
+    }
+    let from_head = to_head.inverse();
+    for (part, now) in body.parts.iter().zip(&posed.body) {
+        let Some(grown) = guides.grown_on.get(part.bone as usize) else {
+            continue;
+        };
+        // The box rides its bone from where the hair was grown to where the step left it.
+        let back = grown.rotation * now.rotation.conjugate();
+        let to_grown =
+            Mat4::from_rotation_translation(back, grown.translation - back * now.translation);
+        out.push(StrandBox {
+            to_box: to_grown * from_head,
+            min: part.min,
+            cell: part.cell,
+            size: part.size,
+            distance: part.distance.clone(),
+            weight: part.weight.clone(),
+        });
+    }
+}
+
 /// What the hair simulation left for a person's drawn hair, when it is of this build, and the
 /// way from the person's model space to the head's frame (the instance's model space).
+/// A drawn head of hair's guides as the simulation has them now: how wet each lock is, how
+/// much of it a blade left, and how far gone the piece it cut off is.
+fn state_now(world: &World, entity: Entity, out: &mut Vec<StrandGuideState>) {
+    out.clear();
+    let Some(hair) = world.get::<DrawnHair>(entity) else {
+        return;
+    };
+    let Some((posed, _)) = simulated(world, hair, entity) else {
+        return;
+    };
+    let guides = posed.wet.len().max(posed.cut.len());
+    out.extend((0..guides).map(|g| StrandGuideState {
+        wet: posed.wet.get(g).copied().unwrap_or(0.0),
+        cut: posed.cut.get(g).copied().unwrap_or(1.0),
+        shed: posed.shed.get(g).copied().unwrap_or(1.0),
+    }));
+}
+
 fn simulated<'w>(
     world: &'w World,
     hair: &DrawnHair,

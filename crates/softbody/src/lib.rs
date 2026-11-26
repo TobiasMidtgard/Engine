@@ -6,6 +6,7 @@ pub mod character;
 pub mod cloth;
 pub mod coat;
 pub mod collide;
+pub mod cut;
 pub mod demo;
 pub mod field;
 pub mod gpu_cloth;
@@ -122,7 +123,12 @@ impl Plugin for SoftBodyPlugin {
             .add_systems(PreUpdate, systems::follow_scalability)
             .add_systems(
                 FixedPreUpdate,
-                (systems::join_heavy_bodies, systems::follow_surface_anchors).chain(),
+                (
+                    systems::join_heavy_bodies,
+                    systems::follow_surface_anchors,
+                    cut::cut_hair,
+                )
+                    .chain(),
             )
             .add_systems(FixedPostUpdate, systems::kick_heavy_bodies)
             .add_systems(Update, (grab::grab_and_release, grab::slip).chain())
@@ -138,6 +144,7 @@ impl Plugin for SoftBodyPlugin {
                     systems::rebuild_changed,
                     systems::build_bodies,
                     guides::build_guide_hair,
+                    guides::wet_with_the_person,
                     grab::offer_handholds,
                 )
                     .chain()

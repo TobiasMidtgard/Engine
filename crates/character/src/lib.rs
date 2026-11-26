@@ -10,6 +10,7 @@ pub mod demo;
 pub mod eyes;
 pub mod face;
 pub mod feature;
+pub mod hair_body;
 pub mod hair_draw;
 pub mod hair_motion;
 pub mod hands;

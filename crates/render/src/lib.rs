@@ -186,8 +186,9 @@ pub use sprites::{
     TILE_FLIP_Y, TILE_FRAME_MASK, TileMap,
 };
 pub use strands::{
-    StrandCapsule, StrandFiber, StrandFollow, StrandGroom, StrandGuidesWhenDrawn, StrandInstance,
-    StrandKeptOutWhenDrawn, StrandLod,
+    StrandBodyWhenDrawn, StrandBox, StrandCapsule, StrandFiber, StrandFollow, StrandGroom,
+    StrandGuideState, StrandGuidesWhenDrawn, StrandInstance, StrandKeptOutWhenDrawn, StrandLod,
+    StrandStateWhenDrawn,
 };
 pub use surface_weather::{SURFACE_PUDDLE_SCALE_M, SURFACE_SNOW_SCALE_M};
 pub use texture::{Image, ImageLoader, PixelFormat};

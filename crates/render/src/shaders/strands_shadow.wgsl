@@ -56,6 +56,10 @@ fn strand_shadow_vertex(v: u32, g: u32, boost: f32) -> ShadowOut {
     let slot = inst.out.x + (g - inst.more.x) * per + seg;
     let pa = posed[slot];
     let pb = posed[slot + 1u];
+    // (A point of no width: a cut hair's missing part.)
+    if (pa.w < 0.0 || pb.w < 0.0) {
+        return out;
+    }
     let ca = shadow_view.view_proj * vec4<f32>(strand_model_point(inst, pa.xyz), 1.0);
     let cb = shadow_view.view_proj * vec4<f32>(strand_model_point(inst, pb.xyz), 1.0);
     let dir = cb.xy - ca.xy;

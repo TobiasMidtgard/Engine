@@ -2653,6 +2653,7 @@ fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
     }
     let wind = b.wind.length();
     let r = b.sim.params.radius.max(0.005);
+    let floor = b.wet_floor.clamp(0.0, 1.0);
     for i in 0..n {
         // As far as it is in the water (across its thickness, as the solver's lift).
         let under = b.sim.water.map_or(0.0, |w| {
@@ -2663,7 +2664,8 @@ fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
             (*w + dt * under / SOAK_SECS).clamp(0.0, 1.0)
         } else {
             in_the_open(*w, dt, rain_mm_h, wind, warmth)
-        };
+        }
+        .max(floor);
     }
     if b.wet.iter().any(|&w| w > 0.0) {
         let up = -b.sim.params.gravity.normalize_or(Vec3::NEG_Y);
@@ -2683,6 +2685,38 @@ fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
                 };
             b.wet[a] -= flow;
             b.wet[c] += flow;
+        }
+    }
+    // A head of hair: along every strand, as along a rope, and handed to its solver.
+    if let Some(tress) = b.sim.tress.as_mut() {
+        if b.wet.iter().any(|&w| w > 0.0) {
+            let up = -b.sim.params.gravity.normalize_or(Vec3::NEG_Y);
+            for strand in &tress.strands {
+                let run = strand.first as usize..(strand.first + strand.count) as usize;
+                if run.end > n {
+                    continue;
+                }
+                for c in run.start + 1..run.end {
+                    let a = c - 1;
+                    let rest = tress.verts[c].rest_len.max(1e-3);
+                    let mut flow = (b.wet[a] - b.wet[c]) * (WICK * dt / (rest * rest)).min(0.1);
+                    let slope = ((b.sim.pos[a] - b.sim.pos[c]).dot(up) / rest).clamp(-1.0, 1.0);
+                    flow += DRAIN
+                        * dt
+                        * slope
+                        * if slope > 0.0 {
+                            b.wet[a] * (1.0 - b.wet[c])
+                        } else {
+                            b.wet[c] * (1.0 - b.wet[a])
+                        };
+                    b.wet[a] -= flow;
+                    b.wet[c] += flow;
+                }
+            }
+            tress.wet.clear();
+            tress.wet.extend_from_slice(&b.wet);
+        } else {
+            tress.wet.clear();
         }
     }
     let wet = &b.wet;

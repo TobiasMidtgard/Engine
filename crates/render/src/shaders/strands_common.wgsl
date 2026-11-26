@@ -46,6 +46,9 @@ const STRAND_ROOT: u32 = 2u;
 // Density volumes hold the fibres' projected area (diameter times length, m^2) in units of
 // 1e-10 m^2.
 const STRAND_AREA_UNIT: f32 = 1e10;
+// A posed point's width (m) is whole steps of this fraction of a meter where its strand follows
+// guides; the part below a step carries how wet the hair is there (`strands_pose.wgsl`).
+const STRAND_WET_STEPS: f32 = 1e7;
 // Pixels per tile side.
 const STRAND_TILE: u32 = 8u;
 
@@ -67,4 +70,12 @@ fn strand_model_dir(inst: StrandInst, d: vec3<f32>) -> vec3<f32> {
 
 fn strand_to_model_dir(inst: StrandInst, d: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(dot(inst.inv[0].xyz, d), dot(inst.inv[1].xyz, d), dot(inst.inv[2].xyz, d));
+}
+
+// How wet (0 dry .. 1 soaked) the instance's posed point of width `width` is.
+fn strand_wet(inst: StrandInst, width: f32) -> f32 {
+    if (inst.out.y == 0xffffffffu) {
+        return 0.0;
+    }
+    return saturate((fract(abs(width) * STRAND_WET_STEPS) - 0.01) / 0.97);
 }

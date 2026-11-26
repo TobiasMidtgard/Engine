@@ -9,9 +9,10 @@
 //! the pose alone would carry it ([`guide_motion`]), so the hair keeps its own groom and only
 //! the motion comes from the simulation. Without a simulation the hair rides the head as before.
 
+use engine_core::off_frame::OffFrameCommands;
 use engine_core::prelude::*;
 use engine_world::animation::{BonePose, SkeletonPose};
-use engine_world::{HairGuide, HairGuides, HairGuidesPosed};
+use engine_world::{HairBody, HairGuide, HairGuides, HairGuidesPosed};
 
 use crate::BuiltCharacter;
 use crate::build::CharacterMeshes;
@@ -107,35 +108,77 @@ pub fn hair_guides(
     })
 }
 
+/// On a person whose body is being measured for its hair ([`crate::hair_body`]) off the frame:
+/// the build's version it is measured for.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HairBodyMeasured(pub u32);
+
+/// A built person, its pose, and what of its moving hair is published.
+type Haired<'a> = (
+    Entity,
+    &'a BuiltCharacter,
+    Option<&'a SkeletonPose>,
+    Option<&'a HairGuides>,
+    Option<&'a HairBodyMeasured>,
+);
+
 /// Gives every built person with a pose and hair that moves its [`HairGuides`] (again after a
-/// rebuild or a different skeleton), and takes them away when the hair no longer moves.
-pub fn publish_hair_guides(
-    mut commands: Commands,
-    q: Query<(
-        Entity,
-        &BuiltCharacter,
-        Option<&SkeletonPose>,
-        Option<&HairGuides>,
-    )>,
-) {
-    for (entity, built, pose, guides) in &q {
+/// rebuild or a different skeleton) and, measured off the frame, the [`HairBody`] the hair is
+/// held out of: the two arrive together, so the simulation is built once, on the measured
+/// body. Takes them away when the hair no longer moves.
+pub fn publish_hair_guides(mut commands: Commands, q: Query<Haired>) {
+    for (entity, built, pose, guides, measured) in &q {
         let version = built.version as u32;
         let moves = built.meshes.strands.iter().any(|s| s.guide_count() > 0);
         let Some(pose) = pose.filter(|_| moves) else {
             if guides.is_some() && !moves {
-                commands.entity(entity).remove::<HairGuides>();
+                commands
+                    .entity(entity)
+                    .remove::<(HairGuides, HairBody, HairBodyMeasured)>();
             }
             continue;
         };
-        if guides.is_some_and(|g| g.version == version && g.grown_on.len() == pose.bones.len()) {
+        if guides.is_some_and(|g| g.version == version && g.grown_on.len() == pose.bones.len())
+            || measured.is_some_and(|m| m.0 == version)
+        {
             continue;
         }
         match hair_guides(&built.meshes, pose, version) {
             Some(g) => {
-                commands.entity(entity).insert(g);
+                commands.entity(entity).insert(HairBodyMeasured(version));
+                let meshes = built.meshes.clone();
+                let look = built.appearance.clone();
+                let pose = pose.clone();
+                commands.off_frame(
+                    "character hair body",
+                    move || {
+                        let body = crate::hair_body::hair_body(&meshes, &look, &pose, &g);
+                        (g, body)
+                    },
+                    move |world: &mut World, (g, body): (HairGuides, Option<HairBody>)| {
+                        let Ok(mut person) = world.get_entity_mut(entity) else {
+                            return;
+                        };
+                        // Rebuilt meanwhile: that build measures its own.
+                        if person.get::<HairBodyMeasured>() != Some(&HairBodyMeasured(version))
+                            || person
+                                .get::<BuiltCharacter>()
+                                .is_none_or(|b| b.version as u32 != version)
+                        {
+                            return;
+                        }
+                        person.remove::<HairBodyMeasured>();
+                        match body {
+                            Some(body) => person.insert((g, body)),
+                            None => person.remove::<HairBody>().insert(g),
+                        };
+                    },
+                );
             }
             None if guides.is_some() => {
-                commands.entity(entity).remove::<HairGuides>();
+                commands
+                    .entity(entity)
+                    .remove::<(HairGuides, HairBody, HairBodyMeasured)>();
             }
             None => {}
         }
@@ -230,7 +273,6 @@ mod tests {
         let mut posed = HairGuidesPosed {
             version: 3,
             points: g.guides[0].points.iter().map(|p| carry(*p)).collect(),
-            capsules: Vec::new(),
             ..Default::default()
         };
         let mut out = Vec::new();
