@@ -44,6 +44,10 @@ const MAX_SEGMENT_TILES: u32 = 256u;
 const RASTER_ROW: u32 = 32768u;
 // Nearest fibres each pixel keeps apart; the rest blend as one.
 const LAYERS: u32 = 4u;
+// Across a fibre wider than a pixel: its light at the edge, and how much more along the
+// middle (`cs_raster`; the two average to one across a round fibre).
+const ROUND_EDGE: f32 = 0.45;
+const ROUND_MIDDLE: f32 = 0.7;
 
 fn active_count_index() -> u32 {
     return params.tiles.w + params.misc.x;
@@ -131,8 +135,9 @@ fn hair_gauss(b: f32, x: f32) -> f32 {
 // light from `l` scattered toward `v` by a fibre along `t` of color `base`. The R highlight off
 // the cuticle, TT through the fibre when backlit, TRT off its back wall (colored, with glints).
 // `glint.x` scales TRT, `glint.y` the tilt of the cuticle scales, `glint.z` R (the cuticle's
-// shine: combed, conditioned head hair shines brighter than an animal's coat).
-fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec3<f32>) -> vec3<f32> {
+// shine: combed, conditioned head hair shines brighter than an animal's coat). `sheen`: R's
+// color, and in w how soon it stops growing with the light (`hair_sheen`).
+fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec3<f32>, sheen: vec4<f32>) -> vec3<f32> {
     let sin_v = clamp(dot(t, v), -1.0, 1.0);
     let sin_l = clamp(dot(t, l), -1.0, 1.0);
     let cos_theta_d = max(cos(0.5 * abs(asin(sin_v) - asin(sin_l))), 0.05);
@@ -147,7 +152,8 @@ fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f
     let vol = dot(v, l);
     var out = vec3<f32>(0.0);
     let mr = hair_gauss(b * 1.4142 * cos_theta_d, s + shift * 2.0);
-    out += vec3<f32>(mr * 0.4 * glint.z * cos_half_phi * hair_fresnel(sqrt(saturate(0.5 + 0.5 * vol))));
+    let r = mr * 0.4 * glint.z;
+    out += sheen.rgb * (r / (1.0 + sheen.w * r) * cos_half_phi * hair_fresnel(sqrt(saturate(0.5 + 0.5 * vol))));
     let mtt = hair_gauss(b * 0.5, s - shift);
     let a = 1.0 / n_prime;
     let h = cos_half_phi * (1.0 + a * (0.6 - 0.8 * cos_phi));
@@ -176,15 +182,52 @@ fn hair_multiple(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, shad
 // One light through `depth` of hair, with the shadow maps' `shadow`. Dual scattering (Zinke et
 // al. 2008), roughly: the hair in the way stops light singly scattered toward the eye, but light
 // scattered between fibres goes around them, deeper the fairer they are, and takes their color.
-fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec3<f32>, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
+fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec3<f32>, sheen: vec4<f32>, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
     let fair = saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.0);
     let tau = depth * mix(1.0, 0.45, fair);
     // The shadow maps hold the hair too: the darker of the two counts, not both.
     let single = min(shadow, exp(-depth));
     let tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(0.12 * tau));
     let through = min(shadow, exp(-0.3 * tau)) * tint;
-    return hair_bsdf(t, v, l, base, rough, glint) * single
+    return hair_bsdf(t, v, l, base, rough, glint, sheen) * single
         + hair_multiple(t, v, l, base, single, scatter) * through;
+}
+
+// Head hair's highlight off the cuticle, as Tobias's gta-hair-sim draws it: warm, a fifth of
+// the way from white to the hair's own hue (white on dark brown hair it read as grey dashes,
+// the sheen of nylon), and with a shoulder: it grows more slowly the brighter it gets, so its
+// middle spreads out as satin instead of peaking in a white line. Fur's stays as it was.
+const SHEEN_WARM: f32 = 0.22;
+const SHEEN_SOFT: f32 = 0.68;
+
+fn hair_sheen(base: vec3<f32>, fur: bool) -> vec4<f32> {
+    let hue = base / max(max(base.r, base.g), max(base.b, 1e-4));
+    return select(vec4<f32>(mix(vec3<f32>(1.0, 0.94, 0.86), hue, SHEEN_WARM), SHEEN_SOFT), vec4<f32>(1.0, 1.0, 1.0, 0.0), fur);
+}
+
+// The surroundings mirrored off a fibre along `t` toward `v`. A fibre mirrors toward the eye
+// the light from a whole cone of directions about itself (those as steep to it as the eye is,
+// on its other side), not from one: five of them, weighted as the R lobe weights them round
+// the fibre and by the cuticle's Fresnel. Hair lying across the view under an open sky
+// mirrors the zenith and shines, hair hanging straight down mirrors the horizon all round,
+// and hair tipped toward the ground the ground: what gives hair its shape in the shade, where
+// no sun draws a highlight on it. (One lookup, straight back off the side facing the eye, lit
+// every hair of a shaded head alike.)
+fn hair_mirror(t: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    let sin_v = clamp(dot(t, v), -1.0, 1.0);
+    let cos_v = sqrt(max(1.0 - sin_v * sin_v, 0.0));
+    let n = normalize(v - t * sin_v + vec3<f32>(0.0, 1e-5, 0.0));
+    let b = cross(t, n);
+    var sum = vec3<f32>(0.0);
+    var weights = 0.0;
+    for (var k = -2; k <= 2; k++) {
+        let phi = f32(k) * 1.0472;
+        let l = cos_v * (cos(phi) * n + sin(phi) * b) - sin_v * t;
+        let w = cos(0.5 * phi);
+        sum += sample_env_rough(l, 0.4) * (w * hair_fresnel(sqrt(saturate(0.5 + 0.5 * dot(v, l)))));
+        weights += w;
+    }
+    return sum / weights;
 }
 
 // How much of a light at `dist` along `l` the people's capsules (capsules.rs) let through to
@@ -250,7 +293,10 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     // light in a narrow, bright highlight.
     let base = pow(base_in, vec3<f32>(1.0 + WET_DEEPENS * wet)) * (1.0 - WET_DARKENS * wet);
     let shine = mix(HUMAN_SHINE, 0.8, smoothstep(0.35, 0.42, rough_in)) * (1.0 + WET_SHINES * wet);
-    let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(shine, 1.0 + WET_SHINES * wet, fur));
+    // (Head hairs differ in how much they shine, a third either way: side by side, a lock's
+    // highlight is streaked along its hairs.)
+    let glint = vec3<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1), select(shine * (0.66 + 0.68 * fract(random * 17.9)), 1.0 + WET_SHINES * wet, fur));
+    let sheen = hair_sheen(base, fur);
     // The light is worked out at the points only, and the segments blend it: a highlight
     // narrower than the turn of the hair from one point to the next (`bend`, rad) caught one
     // point of a hair and missed the next, and over the crown, where the hair curves round the
@@ -260,12 +306,15 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let rough = sqrt(sqrt(sq(rough0 * rough0) + sq(0.5 * bend)));
     // No fibre runs quite straight: each leans its own way, and its highlight with it.
     let b = normalize(cross(t, nc));
-    // ...and wavers a few degrees along its length, so a lock's highlight breaks into streaks
-    // instead of one smooth band (the sheen of a wig).
+    // ...and wavers a degree or two along its length, so a lock's highlight breaks into
+    // streaks instead of one smooth band (the sheen of a wig). (Fur wavers more. Head hair
+    // wavering five degrees six times down its length lit up and went out again that often:
+    // the highlight over a combed crown was a field of dashes, not streaks along the hairs.)
     let lean = vec2<f32>(fract(random * 23.7), fract(random * 71.3)) - 0.5;
     let w1 = sin(along * 37.0 + random * 61.0);
     let w2 = sin(along * 23.0 + random * 43.0);
-    let ts = normalize(t + nc * (0.1 * lean.x + 0.08 * w1) + b * (0.06 * lean.y + 0.05 * w2));
+    let wavers = select(0.35, 1.0, fur);
+    let ts = normalize(t + nc * (0.1 * lean.x + 0.08 * wavers * w1) + b * (0.06 * lean.y + 0.05 * wavers * w2));
     // A thin layer (brows, lashes) has next to no hair behind it to scatter light back.
     let scatter = mix(0.8, 1.15, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5))
         * select(1.0, 1.1, fur) * select(1.0, 0.4, inst.more.w == 1u) * (1.0 - WET_DULLS * wet);
@@ -289,7 +338,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     if (dot(sun, sun) > 0.0) {
         let shadow = min(shadow_factor(rel, nc), caps.x);
         let depth = strand_depth(inst, m, normalize(strand_to_model_dir(inst, l)), 48u, jitter);
-        color += hair_light(ts, v, l, base, rough, glint, shadow, depth, scatter) * sun * lit;
+        color += hair_light(ts, v, l, base, rough, glint, sheen, shadow, depth, scatter) * sun * lit;
     }
     let count = frame.counts.x;
     for (var i = 0u; i < count; i++) {
@@ -302,7 +351,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
         let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
         let depth = strand_depth(inst, m, normalize(strand_to_model_dir(inst, pl)), 24u, jitter);
         let body = strand_capsule_light(rel, pl, sqrt(dist2));
-        color += hair_light(ts, v, pl, base, rough, glint, body, depth, scatter) * light.color_radius.rgb * falloff * lit;
+        color += hair_light(ts, v, pl, base, rough, glint, sheen, body, depth, scatter) * light.color_radius.rgb * falloff * lit;
     }
     let sky_vis = sky_visibility(rel, nc);
     let fill = frame.ambient.rgb;
@@ -313,8 +362,8 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     let sky_tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(min(0.6 * tau_sky, 3.0)));
     color += base * sky * ao * sky_tint * (0.4 + 0.5 * scatter);
     // The sky's sheen along the fibres.
-    let env = sample_env_rough(reflect(-v, nc), 0.35) * sky_vis + fill;
-    color += env * 0.04 * ao * (1.0 + WET_MIRRORS * wet);
+    let env = hair_mirror(ts, v) * sky_vis + fill * HAIR_F0;
+    color += env * sheen.rgb * (glint.z * ao * (1.0 + WET_MIRRORS * wet));
     return apply_fog(pre_expose(color), rel);
 }
 
@@ -854,7 +903,14 @@ fn cs_raster(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
                 if (z < scene_z) {
                     continue;
                 }
-                let c = mix(seg_ca[i], seg_cb[i], t);
+                var c = mix(seg_ca[i], seg_cb[i], t);
+                // A fibre is round: seen wider than a pixel, it is brightest along its middle
+                // and falls off to its edges, which is what tells one strand from the next in
+                // a lock of them (lit flat across, strands lying side by side merge into one
+                // smooth sheet). The mean across it stays what the point's light was; a strand
+                // under a pixel wide has no across to show.
+                let across = min(d / max(w, 1e-3), 1.0);
+                c = vec4<f32>(c.rgb * mix(1.0, ROUND_EDGE + ROUND_MIDDLE * sqrt(1.0 - across * across), saturate((w - 0.3) / 0.4)), c.a);
                 let alpha = min(cov, 1.0) * c.a;
                 if (alpha < 0.002) {
                     continue;

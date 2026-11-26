@@ -107,13 +107,19 @@ const BURIED_DARK: f32 = 0.55;
 const SCALP_ROUGHNESS: f32 = 0.33;
 const FACE_ROUGHNESS: f32 = 0.42;
 
-/// Absorption of a hair fibre per unit length (relative) from its pigments, as measured for
-/// real hair (d'Eon et al. 2011): eumelanin browns and blacks, pheomelanin reds. As the
-/// character shaders' `hair_absorption`.
+/// Absorption of a hair fibre per unit length (relative) from its pigments: eumelanin browns
+/// and blacks, pheomelanin reds (pheomelanin's as measured for real hair, d'Eon et al. 2011).
+///
+/// Eumelanin's is flatter across the spectrum than the measured (0.419, 0.697, 1.37), as in
+/// Tobias's gta-hair-sim: the color below is what one pass through the fibre leaves, and with
+/// the measured figures dark brown hair came out three times as red as green, auburn in the
+/// sun and rust in the shade, where a real head of it, lit by light that took many paths of
+/// many lengths, is a deep neutral brown. (The character shaders' `hair_absorption`, which
+/// tints the scalp under the hair, keeps the measured figures.)
 fn absorption(eumelanin: f32, red: f32) -> Vec3 {
     let eu = 7.0 * eumelanin.max(0.0).powf(2.2) + 0.4 * eumelanin;
     let pheo = red * (0.3 + 1.2 * (1.0 - eumelanin));
-    Vec3::new(0.419, 0.697, 1.37) * eu + Vec3::new(0.187, 0.4, 1.05) * pheo
+    Vec3::new(0.53, 0.72, 1.16) * eu + Vec3::new(0.187, 0.4, 1.05) * pheo
 }
 
 /// The color of hair under white light (as the character shaders' `hair_color`): pigment, or

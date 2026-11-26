@@ -38,8 +38,25 @@ const HAIR_WIDTH: f32 = 1.0;
 /// wider. A real head's hundred thousand hairs drawn one by one at their own width let the
 /// light and the shirt through between them and read thin; drawn as bunches it holds
 /// together as a mass of hair, at fewer strands to draw.
-const BUNCHED_DENSITY: f32 = 0.6;
-const BUNCHED_RADIUS: f32 = 0.00016;
+///
+/// (As Tobias's gta-hair-sim draws them: 36,000 strands over a head of long hair, each wide
+/// at the root and tapering to a fine end. Drawn as 58,000 strands under a pixel wide and
+/// one width nearly to their ends, at a portrait's distance no single strand showed: the
+/// hair was a smooth painted surface, and its ends a blunt hem.)
+const BUNCHED_DENSITY: f32 = 0.42;
+const BUNCHED_RADIUS: f32 = 0.00032;
+/// A bunched strand's radius at its tip against its root's, and how the taper runs between
+/// them: the strand's hairs end at different lengths, so it thins all the way down, slowly
+/// at first, and its last sixth feathers out to half of that again.
+const BUNCHED_TIP: f32 = 0.26;
+const BUNCHED_TAPER: f32 = 1.32;
+/// No two strands are as wide: each this share either side of the mean.
+const BUNCHED_VARIES: f32 = 0.22;
+/// The share of hanging hairs that stray from their lock: they gather into it a fifth as
+/// much, wave further on their own and are finer. Against the light they are the loose
+/// hairs about the edge of the hair; within it they cross the locks and break up their
+/// edges.
+const STRAYS: f32 = 0.075;
 
 /// Hanging hair: hairs per simulated guide (each guide is one lock and one rope in the hair
 /// sim; 125 cost 4.7 ms a step for one long-haired person on an RTX 5080).
@@ -200,6 +217,25 @@ impl StrandSet {
 
     fn push(&mut self, pts: &[Vec3], root_radius: f32, tip_radius: f32, random: f32) {
         self.push_cut(pts, root_radius, tip_radius, random, 0.0);
+    }
+
+    /// A strand that stands for a few hairs lying together ([`BUNCHED_RADIUS`]): it thins
+    /// all the way down as its hairs end, and feathers out over its last sixth.
+    fn push_bunched(&mut self, pts: &[Vec3], root_radius: f32, random: f32) {
+        debug_assert_eq!(pts.len(), self.points_per as usize);
+        let n = pts.len().max(2) - 1;
+        for (i, p) in pts.iter().enumerate() {
+            let t = i as f32 / n as f32;
+            // (It comes out of the scalp as single hairs that gather: thin over its first
+            // centimetres. As wide there as below, the strands along a part and over the
+            // crown lay like the teeth of a comb.)
+            let r = root_radius
+                * (0.4 + 0.6 * smoothstep(0.0, 0.1, t))
+                * (1.0 + (BUNCHED_TIP - 1.0) * t.powf(BUNCHED_TAPER))
+                * (1.0 - 0.52 * smoothstep(0.84, 1.0, t));
+            self.points.push([p.x, p.y, p.z, r]);
+            self.attrs.push([1.0, random, t, 0.0]);
+        }
     }
 
     /// A hair that keeps its width to `from` (0 root .. 1 tip) and tapers after: a cut hair,
@@ -865,13 +901,21 @@ fn grow_scalp(
             // (No shorter than eight points to a wave: fewer draws a zigzag.)
             let last = pts.len() - 1;
             let segment = g.length / last as f32;
-            let wavelength = (0.2 - 0.36 * curl).max(0.05).max(8.0 * segment) * gr.range(0.9, 1.1);
+            // (Wavy hair waves long and deep, as the cascade of gta-hair-sim does: 2 to 3 cm
+            // either way about every 13 cm. At 7 cm long and under a centimetre deep the waves
+            // of hair a third curly were a ripple that hung straight as a curtain from behind.)
+            let wavelength = (0.2 - 0.2 * curl.min(0.5) - 0.52 * (curl - 0.5).max(0.0))
+                .max(0.05)
+                .max(8.0 * segment)
+                * gr.range(0.9, 1.1);
             let waves = g.length / wavelength;
             // As steep as the curl (a wave's slope: 0.25 nearly straight, 1 a deep S), no
             // sharper than half a radian from one point to the next. The smoothing every
             // drawn hair gets flattens short waves, so the lock waves that much deeper.
             let turn = std::f32::consts::TAU / wavelength;
-            let slope = (0.25 + 1.4 * curl) * gr.range(0.005, 0.011) / 0.008;
+            let slope = (0.25 + 2.6 * curl.min(0.5) + 0.2 * (curl - 0.5).max(0.0))
+                * gr.range(0.005, 0.011)
+                / 0.008;
             let flattened = (0.5 + 0.5 * (turn * segment).cos()).powi(SMOOTH_PASSES as i32);
             let amp = (slope / turn).min(0.5 / (turn * turn * segment)) / flattened.max(0.4);
             // Toward and away from the head (which turns the lock's highlight) and sideways,
@@ -1049,6 +1093,8 @@ fn grow_scalp(
             },
         );
         let mut lock_tone = None;
+        // Whether the hair strays from its lock ([`STRAYS`]).
+        let mut loose = false;
         // How far out in its lock the hair is (0 on the guide .. 1 at the lock's edge).
         let mut lock_edge = 0.0;
         // Follow the nearest guide if it is close (a lone hair far from any guide stays free).
@@ -1095,14 +1141,18 @@ fn grow_scalp(
         if !flyaway && let Some(gi) = lock {
             let (gsp, gpts) = &guides[gi];
             let off = sp.p - gsp.p;
-            let c = g.clump * r.range(if g.gravity > 0.5 { 0.8 } else { 0.6 }, 1.0);
+            // (Not at the front, where a hair out of its lock hangs over the face.)
+            loose = g.gravity > 0.5 && fine >= 1.0 && d.z < 0.03 && r.f32() < STRAYS;
+            let c = g.clump
+                * r.range(if g.gravity > 0.5 { 0.8 } else { 0.6 }, 1.0)
+                * if loose { 0.2 } else { 1.0 };
             // Within its lock, a hair gathers with the hairs rooted a few millimetres around it
             // into a strand of its own (MetaHuman's secondary clumps): one clump level makes
             // each lock a smooth sheet, and the strands give it the breakup of real hair. Some
             // hairs stay out of any strand, and strands gather more or less tightly.
             let to_strand = strand - sp.rest;
             let to_strand = to_strand - sp.n * to_strand.dot(sp.n);
-            let tight = if r.f32() < 0.08 {
+            let tight = if r.f32() < 0.08 || loose {
                 0.0
             } else {
                 // (Short hair's strands gather more loosely, 0.3-0.5 at the tip in groomers'
@@ -1187,8 +1237,14 @@ fn grow_scalp(
                 // (As long as the hair is: a hair a few centimetres long, broken or growing
                 // back, with the waves of a full-length one was a zigzag of wire.)
                 let own = len_of(&pts);
-                let amp = CHILD_WAVE * r.range(0.6, 1.4) * (own / 0.15).min(1.0);
+                let (further, oftener) = if loose {
+                    (r.range(1.35, 2.25), r.range(1.05, 1.55))
+                } else {
+                    (1.0, 1.0)
+                };
+                let amp = CHILD_WAVE * further * r.range(0.6, 1.4) * (own / 0.15).min(1.0);
                 let waves = 2.35
+                    * oftener
                     * r.range(0.85, 1.2)
                     * (g.length / 0.45).max(0.5)
                     * (own / g.length).min(1.0);
@@ -1362,23 +1418,37 @@ fn grow_scalp(
         if g.gravity > 0.5 && !flyaway && !lies && pts.iter().skip(3).any(hangs_low) {
             continue;
         }
-        // Scalp hair is cut, so it keeps its width almost to the end and tapers only over its
-        // last fifth (tapered all along, as a hair that grows to its end does, the lower half of
-        // long hair was half as wide as the top: thin, see-through ends). Fine hairs at the
-        // hairline and short hairs growing back still taper all along.
+        // Short scalp hair is cut, so it keeps its width almost to the end and tapers only
+        // over its last fifth. Fine hairs at the hairline and short hairs growing back taper
+        // all along, as a hair that grows to its end does.
         let cut = if broken { 0.0 } else { 0.8 * fine };
-        set.push_cut(
-            &pts,
-            g.root_radius * HAIR_WIDTH * thin,
-            g.root_radius * HAIR_WIDTH * thin * if cut > 0.0 { 0.4 } else { 0.25 },
-            // Hanging locks show their own tone; short or slicked hair mixes across its clumps,
-            // and tones shared by whole clumps read as stripes.
-            lock_tone.map_or(r.f32(), |l| {
-                let w = if g.gravity > 0.5 { 0.6 } else { 0.25 };
-                w * l + (1.0 - w) * r.f32()
-            }),
-            cut,
-        );
+        // Hanging locks show their own tone; short or slicked hair mixes across its clumps,
+        // and tones shared by whole clumps read as stripes.
+        let tone = lock_tone.map_or(r.f32(), |l| {
+            let w = if g.gravity > 0.5 { 0.6 } else { 0.25 };
+            w * l + (1.0 - w) * r.f32()
+        });
+        if g.gravity > 0.5 {
+            // Hanging hair is drawn as bunched strands, which thin all the way down. (Single
+            // hairs of one width that thinned all the way down left the lower half of long
+            // hair see-through; the strands start wide enough to thin and still cover.)
+            // Loose hairs and short ones growing back are finer.
+            let wide = if loose || flyaway {
+                r.range(0.52, 0.78)
+            } else {
+                r.range(1.0 - BUNCHED_VARIES, 1.0 + BUNCHED_VARIES)
+            };
+            let short = if broken { 0.6 } else { 1.0 };
+            set.push_bunched(&pts, g.root_radius * HAIR_WIDTH * thin * wide * short, tone);
+        } else {
+            set.push_cut(
+                &pts,
+                g.root_radius * HAIR_WIDTH * thin,
+                g.root_radius * HAIR_WIDTH * thin * if cut > 0.0 { 0.4 } else { 0.25 },
+                tone,
+                cut,
+            );
+        }
         // Fine hairline hairs are short, so they don't sit in their own root shadow.
         let n = set.attrs.len();
         for attr in &mut set.attrs[n - g.points as usize..] {
