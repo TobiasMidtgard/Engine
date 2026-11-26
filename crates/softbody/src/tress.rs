@@ -94,6 +94,12 @@ const WET_CLINGS: f32 = 0.4;
 const STICKS: f32 = 0.8;
 const SLIDES: f32 = 0.55;
 const GRIPS_MOST: f32 = 0.0004;
+/// Of a point's slide along the body, the contact itself takes at most this times how far the
+/// point was pressed in.
+const RUBS: f32 = 0.3;
+/// Soaked hair lies on the body as if pressed in this far (m) more: the water between them
+/// holds it there.
+const WET_HOLDS: f32 = 0.0002;
 
 /// Seconds a piece of hair cut off is simulated and drawn for: it falls, lies where it fell,
 /// and is gone.
@@ -1568,15 +1574,26 @@ impl Step<'_> {
             && sd < margin
         {
             let fric = (self.cfg.friction + cling).clamp(0.0, 0.94);
-            p += n * (margin - sd);
+            let push = margin - sd;
+            p += n * push;
             *grip = Grip {
-                pressed: grip.pressed + (margin - sd),
+                pressed: grip.pressed + push,
                 n,
                 part,
             };
             let dp = p - prev;
             let dn = dp.dot(n);
-            prev = p - (dp - n * dn) * (1.0 - fric * 0.50) - n * dn.max(0.0) * 0.05;
+            // Friction takes of the point's slide no more than what presses it on gives
+            // (Coulomb's, in positions). Taking its share of any slide however lightly the
+            // hair lay there, a lock's end on a back stayed where it was like a rope's end on
+            // a table: the lock's slack went over to the other side as the head turned, and
+            // the end whipped out after it.
+            let slid = dp - n * dn;
+            let far = slid.length();
+            // (Wet hair clings to what it lies on without being pressed there.)
+            let lost = (far * fric * 0.50).min(RUBS * push + cling * (push + WET_HOLDS));
+            let kept = if far > 1e-9 { 1.0 - lost / far } else { 1.0 };
+            prev = p - slid * kept - n * dn.max(0.0) * 0.05;
         }
         (p, prev)
     }
@@ -1684,8 +1701,19 @@ impl Step<'_> {
                 p += n * (margin - sd);
             }
         }
-        if let Some((n, sd)) = surface(p) {
-            p += n * (on_body - sd);
+        // (Where straight out and back to its length never met, in a fold: out, and where
+        // that leaves the segment far off its length, along the surface back to it. Only far
+        // off: slid for the few percent a strand folded over a collar is off at rest, the
+        // lock below it never comes to rest.)
+        if close.surface - p.distance(close.at) <= on_body + 0.01
+            && let Some(at) = read(self.boxes, &close.views, close.at, p)
+        {
+            if at.distance < on_body {
+                p += at.out * (on_body - at.distance);
+            }
+            if ((p - parent).length() / len - 1.0).abs() > 0.08 {
+                p = slide(p, at.out, 0.0);
+            }
         }
         p
     }
