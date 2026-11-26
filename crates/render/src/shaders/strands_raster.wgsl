@@ -229,13 +229,15 @@ fn strand_capsule_light(rel: vec3<f32>, l: vec3<f32>, dist: f32) -> f32 {
 
 // Soaked hair: how much its color deepens (an exponent on it) and darkens, how much brighter
 // and narrower its highlight is, how much less light scatters among its fibres, and how much
-// more of the sky it mirrors.
-const WET_DEEPENS: f32 = 0.5;
-const WET_DARKENS: f32 = 0.3;
-const WET_SHINES: f32 = 1.2;
+// more of the sky it mirrors. (The darkening is in the scattered light: the color itself is
+// multiplied many times over among the fibres, and darkened by a third it turned brown hair
+// black, with only a grey shine left on it.)
+const WET_DEEPENS: f32 = 0.12;
+const WET_DARKENS: f32 = 0.0;
+const WET_SHINES: f32 = 0.4;
 const WET_SMOOTHS: f32 = 0.35;
-const WET_DULLS: f32 = 0.45;
-const WET_MIRRORS: f32 = 2.5;
+const WET_DULLS: f32 = 0.4;
+const WET_MIRRORS: f32 = 0.5;
 
 fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, base_in: vec3<f32>, random: f32, rough_in: f32, along: f32, bend: f32, wet: f32) -> vec3<f32> {
     let fur = inst.more.y == 1u;
@@ -244,7 +246,7 @@ fn strand_shade(inst: StrandInst, m: vec3<f32>, rel: vec3<f32>, t: vec3<f32>, ba
     // (Combed head hair shines; coarser beard and brow hair, rougher, much less.)
     // Wet hair: water fills the gaps between the fibres of a rope and smooths their scales.
     // Light that enters is absorbed over a longer way and less of it scatters back out (the
-    // color deepens: a pale hair darkens by half, a dark one more), and the film mirrors the
+    // hair darkens by almost half and its color deepens a little), and the film mirrors the
     // light in a narrow, bright highlight.
     let base = pow(base_in, vec3<f32>(1.0 + WET_DEEPENS * wet)) * (1.0 - WET_DARKENS * wet);
     let shine = mix(HUMAN_SHINE, 0.8, smoothstep(0.35, 0.42, rough_in)) * (1.0 + WET_SHINES * wet);
