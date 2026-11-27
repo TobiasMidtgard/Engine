@@ -138,18 +138,17 @@ pub fn hairline(theta: f32, recession: f32) -> f32 {
     let t = theta.abs();
     // Around the side: the temple point (where the line from the front hairline to the tragus
     // crosses the one from the nose tip over the pupil), the sideburn down the front of the ear
-    // to about the tragus (the ear, about 1.17..1.68 here, is left out by the scalp mask), half
-    // a centimetre over the ear's rim, and behind it close down along the ear to the lobe before
+    // (the ear, about 1.17..1.68 here, is left out by the scalp mask, but not its hollow beside
+    // the tragus: a lower sideburn grew hair in it), half a centimetre over the ear's rim, and behind it close down along the ear to the lobe before
     // it sweeps back to the nape (gathered styles lay all of it bare; hair loop round 26).
     let full = [
         (0.0, 0.054),
         (0.45, 0.048),
         (0.62, 0.046),
-        (0.78, 0.024),
-        (0.92, 0.004),
-        (1.02, -0.012),
-        (1.12, -0.017),
-        (1.2, -0.008),
+        (0.78, 0.026),
+        (0.95, 0.012),
+        (1.1, 0.0),
+        (1.18, -0.006),
         (1.3, 0.018),
         (1.45, 0.022),
         (1.62, 0.018),
