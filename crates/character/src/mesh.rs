@@ -138,22 +138,25 @@ pub fn hairline(theta: f32, recession: f32) -> f32 {
     let t = theta.abs();
     // Around the side: the temple point (where the line from the front hairline to the tragus
     // crosses the one from the nose tip over the pupil), the sideburn down the front of the ear
-    // (the ear, about 1.17..1.68 here, is left out by the scalp mask), half a centimetre over
-    // the ear's rim, and behind it down to about the earlobe before the nape.
+    // to about the tragus (the ear, about 1.17..1.68 here, is left out by the scalp mask), half
+    // a centimetre over the ear's rim, and behind it close down along the ear to the lobe before
+    // it sweeps back to the nape (gathered styles lay all of it bare; hair loop round 26).
     let full = [
         (0.0, 0.054),
         (0.45, 0.048),
         (0.62, 0.046),
-        (0.78, 0.026),
-        (0.95, 0.012),
-        (1.1, 0.0),
-        (1.18, -0.006),
+        (0.78, 0.024),
+        (0.92, 0.004),
+        (1.02, -0.012),
+        (1.12, -0.017),
+        (1.2, -0.008),
         (1.3, 0.018),
         (1.45, 0.022),
         (1.62, 0.018),
-        (1.8, -0.015),
-        (2.05, -0.045),
-        (2.4, -0.06),
+        (1.72, -0.02),
+        (1.82, -0.046),
+        (2.0, -0.058),
+        (2.4, -0.068),
         (std::f32::consts::PI, -0.082),
     ];
     let receded = [
@@ -165,9 +168,10 @@ pub fn hairline(theta: f32, recession: f32) -> f32 {
         (1.3, 0.022),
         (1.45, 0.024),
         (1.62, 0.02),
-        (1.8, -0.015),
-        (2.05, -0.045),
-        (2.4, -0.06),
+        (1.72, -0.02),
+        (1.82, -0.046),
+        (2.0, -0.058),
+        (2.4, -0.068),
         (std::f32::consts::PI, -0.082),
     ];
     let a = lerp_table(&full, t);
