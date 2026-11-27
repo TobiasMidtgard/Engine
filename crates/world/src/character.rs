@@ -252,7 +252,8 @@ impl Default for HairColor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hair {
-    /// Style id. Built-in: `bald`, `buzz`, `short` (default), `medium`, `long`, `bun`.
+    /// Style id. Built-in: `bald`, `buzz`, `short` (default), `medium`, `long`, `bun`, `halfup`,
+    /// `ponytail`.
     pub style: String,
     pub color: HairColor,
     /// Length multiplier for the style, 0.5..1.5.
