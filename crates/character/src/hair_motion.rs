@@ -98,6 +98,7 @@ pub fn hair_guides(
             points,
             normal: palette[a.0].transform_vector3(n).normalize_or(Vec3::Y),
             thickness: LOCK_THICKNESS,
+            tie: 0,
         });
     }
     Some(HairGuides {
@@ -256,6 +257,7 @@ mod tests {
                 points: vec![Vec3::new(0.0, 1.7, 0.05), Vec3::new(0.0, 1.6, 0.12)],
                 normal: Vec3::Y,
                 thickness: LOCK_THICKNESS,
+                tie: 0,
             }],
             grown_on: pose(Quat::IDENTITY).bones,
             stiffness: 0.2,

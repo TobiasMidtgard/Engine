@@ -619,6 +619,10 @@ pub struct HairGuide {
     pub normal: Vec3,
     /// The lock's thickness at the root, meters (for collisions).
     pub thickness: f32,
+    /// The tie the guide is gathered in with every other guide of the same number (the locks
+    /// of a ponytail leave its tie together), 0 for hair that grows free. The hair simulation
+    /// keeps the guides of one tie together.
+    pub tie: u16,
 }
 
 impl HairGuides {
@@ -970,6 +974,7 @@ mod tests {
                 .collect(),
             normal: Vec3::Y,
             thickness: 0.004,
+            tie: 0,
         };
         let guides = HairGuides {
             version: 3,

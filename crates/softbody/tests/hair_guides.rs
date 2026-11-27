@@ -66,6 +66,7 @@ fn guides(version: u32, n: usize) -> HairGuides {
                     .collect(),
                 normal: d,
                 thickness: 0.004,
+                tie: 0,
             }
         })
         .collect();
@@ -260,6 +261,7 @@ fn swept_back(version: u32) -> HairGuides {
                 points,
                 normal: (at(-1.05) - center).normalize(),
                 thickness: 0.004,
+                tie: 0,
             }
         })
         .collect();
@@ -355,6 +357,7 @@ fn hair_grown_lying_on_an_arm_slides_off_it_without_sinking_in_or_being_flung() 
                 points,
                 normal: Vec3::X,
                 thickness: 0.004,
+                tie: 0,
             }
         })
         .collect();
@@ -479,6 +482,7 @@ fn long_out(n: usize, len: usize) -> HairGuides {
                 points: (0..len).map(|i| root + out * (0.035 * i as f32)).collect(),
                 normal: d,
                 thickness: 0.004,
+                tie: 0,
             }
         })
         .collect();
